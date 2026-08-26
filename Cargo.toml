@@ -15,9 +15,13 @@ toml = "1"
 jiff = { version = "0.2", features = ["serde"] }
 # Exact pin on purpose: no semver discipline upstream (see README stack table).
 llama-cpp-2 = "=0.1.154"
+encoding_rs = "0.8"
+num_cpus = "1"
 regex = "1"
 serde_json = "1"
+sha2 = "0.10"
 strsim = "0.11"
+ureq = "3"
 x11rb = { version = "0.14", features = ["screensaver"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2"
@@ -33,3 +37,9 @@ chronicle-capture = { path = "crates/capture" }
 chronicle-server = { path = "crates/server" }
 chronicle-derive = { path = "crates/derive" }
 chronicle-mcp = { path = "crates/mcp" }
+
+# llama.cpp at -O0 is unusable for inference; keep the C/C++ side optimized
+# even in dev builds (the cmake crate maps opt-level 0 to a Debug build).
+[profile.dev.package.llama-cpp-sys-2]
+opt-level = 3
+debug = false

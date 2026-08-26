@@ -1,2 +1,7 @@
-//! Digest→prompt, llama runner, GBNF grammar, corrections retrieval. Lands in
-//! M4 (llama-cpp-2 dependency added then, deliberately not before).
+//! Digest→prompt, llama runner, GBNF grammar, model manager.
+//! Corrections retrieval lands in M5.
+
+pub mod model;
+pub mod runner;
+
+pub use runner::{TaskDraft, infer_tasks};

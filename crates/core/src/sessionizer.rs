@@ -30,6 +30,15 @@ impl SpanKind {
             SpanKind::Afk => "afk",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "focus" => Some(SpanKind::Focus),
+            "context-switching" => Some(SpanKind::ContextSwitching),
+            "afk" => Some(SpanKind::Afk),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

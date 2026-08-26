@@ -51,6 +51,16 @@ pub struct Task {
     pub confidence: f64,
 }
 
+/// A task to insert; `Task` is the stored row.
+#[derive(Debug, Clone)]
+pub struct NewTask {
+    pub label: String,
+    pub project: Option<String>,
+    pub start_ts: Timestamp,
+    pub end_ts: Timestamp,
+    pub confidence: f64,
+}
+
 /// Storage convention: UTC unix milliseconds, INTEGER. No tz in storage, ever.
 pub fn ts_to_ms(ts: Timestamp) -> i64 {
     ts.as_millisecond()

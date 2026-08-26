@@ -23,12 +23,13 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
             .with_inner_size([560.0, 760.0]),
         ..Default::default()
     };
+    let sock_path = crate::socket_path(data_dir);
     eframe::run_native(
         "chronicle",
         options,
         Box::new(move |cc| {
             spawn_stdin_listener(cc.egui_ctx.clone());
-            Ok(Box::new(TimelineApp::new(db_path)))
+            Ok(Box::new(TimelineApp::new(db_path, sock_path)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
@@ -54,26 +55,38 @@ struct SpanRow {
     kind: String,
 }
 
+struct TaskRow {
+    start: Zoned,
+    end: Zoned,
+    label: String,
+    project: Option<String>,
+    confidence: f64,
+}
+
 struct TimelineApp {
     db_path: PathBuf,
+    sock_path: PathBuf,
     conn: Option<Connection>,
     tz: TimeZone,
     day: civil::Date,
     spans: Vec<SpanRow>,
+    tasks: Vec<TaskRow>,
     loaded_at: Option<Instant>,
     error: Option<String>,
 }
 
 impl TimelineApp {
-    fn new(db_path: PathBuf) -> Self {
+    fn new(db_path: PathBuf, sock_path: PathBuf) -> Self {
         let tz = TimeZone::system();
         let day = Zoned::now().with_time_zone(tz.clone()).date();
         Self {
             db_path,
+            sock_path,
             conn: None,
             tz,
             day,
             spans: Vec::new(),
+            tasks: Vec::new(),
             loaded_at: None,
             error: None,
         }
@@ -91,30 +104,61 @@ impl TimelineApp {
             return;
         }
         self.loaded_at = Some(Instant::now());
-        match self.load_spans() {
-            Ok(spans) => {
+        match self.load_spans().and_then(|spans| {
+            let tasks = self.load_tasks()?;
+            Ok((spans, tasks))
+        }) {
+            Ok((spans, tasks)) => {
                 self.spans = spans;
+                self.tasks = tasks;
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
         }
     }
 
+    fn day_range_ms(&self) -> anyhow::Result<(i64, i64)> {
+        let start = self.day.to_zoned(self.tz.clone())?;
+        let end = start.checked_add(1.day())?;
+        Ok((
+            start.timestamp().as_millisecond(),
+            end.timestamp().as_millisecond(),
+        ))
+    }
+
+    fn load_tasks(&mut self) -> anyhow::Result<Vec<TaskRow>> {
+        let (lo, hi) = self.day_range_ms()?;
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        let mut stmt = conn.prepare(
+            "SELECT start_ts, end_ts, label, project, confidence FROM tasks
+             WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+        )?;
+        let mut rows = stmt.query([lo, hi])?;
+        let mut tasks = Vec::new();
+        while let Some(row) = rows.next()? {
+            let (start_ms, end_ms): (i64, i64) = (row.get(0)?, row.get(1)?);
+            tasks.push(TaskRow {
+                start: chronicle_core::types::ms_to_ts(start_ms).to_zoned(self.tz.clone()),
+                end: chronicle_core::types::ms_to_ts(end_ms).to_zoned(self.tz.clone()),
+                label: row.get(2)?,
+                project: row.get(3)?,
+                confidence: row.get(4)?,
+            });
+        }
+        Ok(tasks)
+    }
+
     fn load_spans(&mut self) -> anyhow::Result<Vec<SpanRow>> {
         if self.conn.is_none() {
             self.conn = Some(chronicle_core::storage::open(&self.db_path)?);
         }
+        let (lo, hi) = self.day_range_ms()?;
         let conn = self.conn.as_ref().expect("connection opened above");
-        let start = self.day.to_zoned(self.tz.clone())?;
-        let end = start.checked_add(1.day())?;
         let mut stmt = conn.prepare(
             "SELECT start_ts, end_ts, app, title, kind FROM spans
              WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
         )?;
-        let mut rows = stmt.query([
-            start.timestamp().as_millisecond(),
-            end.timestamp().as_millisecond(),
-        ])?;
+        let mut rows = stmt.query([lo, hi])?;
         let mut spans = Vec::new();
         while let Some(row) = rows.next()? {
             let (start_ms, end_ms): (i64, i64) = (row.get(0)?, row.get(1)?);
@@ -148,7 +192,16 @@ impl eframe::App for TimelineApp {
                 }
                 ui.strong(self.day.to_string());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(format!("{} spans", self.spans.len()));
+                    if ui.button("derive now").clicked()
+                        && !crate::send_ctrl(&self.sock_path, "derive")
+                    {
+                        self.error = Some("daemon not reachable".into());
+                    }
+                    ui.weak(format!(
+                        "{} tasks \u{b7} {} spans",
+                        self.tasks.len(),
+                        self.spans.len()
+                    ));
                 });
             });
         });
@@ -158,18 +211,36 @@ impl eframe::App for TimelineApp {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 return;
             }
-            if self.spans.is_empty() {
-                ui.weak("no spans for this day");
+            if self.spans.is_empty() && self.tasks.is_empty() {
+                ui.weak("no data for this day");
                 return;
             }
+            // Rows: tasks section (header + rows), then spans section.
+            let n_tasks = self.tasks.len();
+            let n_rows = 1 + n_tasks + 1 + self.spans.len();
             let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
             egui::ScrollArea::vertical().auto_shrink(false).show_rows(
                 ui,
                 row_height,
-                self.spans.len(),
+                n_rows,
                 |ui, range| {
-                    for span in &self.spans[range] {
-                        span_row(ui, span);
+                    for i in range {
+                        if i == 0 {
+                            if n_tasks == 0 {
+                                ui.horizontal(|ui| {
+                                    ui.strong("Tasks");
+                                    ui.weak("none derived yet");
+                                });
+                            } else {
+                                ui.strong("Tasks");
+                            }
+                        } else if i <= n_tasks {
+                            task_row(ui, &self.tasks[i - 1]);
+                        } else if i == n_tasks + 1 {
+                            ui.strong("Spans");
+                        } else {
+                            span_row(ui, &self.spans[i - n_tasks - 2]);
+                        }
                     }
                 },
             );
@@ -178,6 +249,25 @@ impl eframe::App for TimelineApp {
         // Only scheduled wake-up; no unconditional repaint.
         ui.ctx().request_repaint_after(WAKE_EVERY);
     }
+}
+
+fn task_row(ui: &mut egui::Ui, task: &TaskRow) {
+    let time = format!(
+        "{}\u{2013}{}",
+        task.start.strftime("%H:%M:%S"),
+        task.end.strftime("%H:%M:%S")
+    );
+    let dur =
+        fmt_dur(task.end.timestamp().as_millisecond() - task.start.timestamp().as_millisecond());
+    ui.horizontal(|ui| {
+        ui.monospace(time);
+        ui.weak(format!("{dur:>7}"));
+        ui.strong(&task.label);
+        if let Some(project) = &task.project {
+            ui.label(project);
+        }
+        ui.weak(format!("{:.0}%", task.confidence * 100.0));
+    });
 }
 
 fn span_row(ui: &mut egui::Ui, span: &SpanRow) {

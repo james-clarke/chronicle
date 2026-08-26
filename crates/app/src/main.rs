@@ -42,6 +42,22 @@ enum Cmd {
         #[arg(long, value_name = "YYYY-MM-DD")]
         day: Option<String>,
     },
+    /// Manage local LLM models.
+    Model {
+        #[command(subcommand)]
+        cmd: ModelCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelCmd {
+    /// Download a model preset (resumable, SHA-256 verified).
+    Pull {
+        /// Preset name; defaults to qwen3-1.7b.
+        preset: Option<String>,
+    },
+    /// List presets and their download state.
+    List,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -52,35 +68,155 @@ fn main() -> anyhow::Result<()> {
         Cmd::Dump { day } => dump(&data_dir, day.as_deref()),
         Cmd::Ui => ui::run(&data_dir),
         Cmd::Toggle => {
-            if send_toggle(&socket_path(&data_dir)) {
+            if send_ctrl(&socket_path(&data_dir), "toggle") {
                 Ok(())
             } else {
                 bail!("chronicle daemon is not running")
             }
         }
-        Cmd::Derive { .. } => bail!("derivation lands in M4"),
+        Cmd::Derive { batch } => derive_worker(&data_dir, batch),
+        Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::ChatWorker => bail!("chat lands in M7"),
     }
 }
 
-fn socket_path(data_dir: &Path) -> PathBuf {
+fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
+    use chronicle_derive::model;
+    match cmd {
+        ModelCmd::Pull { preset } => {
+            let name = preset.as_deref().unwrap_or(model::default_preset().name);
+            let Some(spec) = model::preset(name) else {
+                bail!(
+                    "unknown preset {name:?}; available: {}",
+                    model::PRESETS
+                        .iter()
+                        .map(|p| p.name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            };
+            println!("pulling {} ({}/{})", spec.name, spec.repo, spec.file);
+            let mut last_pct = u64::MAX;
+            let path = model::pull(data_dir, spec, &mut |done, total| {
+                let pct = done * 100 / total.max(1);
+                if pct != last_pct {
+                    last_pct = pct;
+                    print!("\r{pct:3}% of {} MiB", total >> 20);
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+            })?;
+            println!("\rverified {} ", path.display());
+            Ok(())
+        }
+        ModelCmd::List => {
+            let config = Config::load(&data_dir.join("config.toml"))?;
+            for spec in model::PRESETS {
+                let path = model::models_dir(data_dir).join(spec.file);
+                let state = if path.exists() {
+                    "downloaded"
+                } else {
+                    "not downloaded"
+                };
+                println!("{:12} {state}  {}", spec.name, path.display());
+            }
+            match model::resolve(config.model_path.as_deref(), data_dir) {
+                Some(p) => println!("active: {}", p.display()),
+                None => println!("active: none (run `chronicle model pull`)"),
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Ephemeral derivation worker: claim batch → digest → infer → write tasks →
+/// exit. Any failure marks the batch failed (retry-once via attempts cap).
+fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let _guard = init_logging(data_dir)?;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let Some(model_path) = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+    else {
+        bail!("no model available; run `chronicle model pull`")
+    };
+    let Some(batch) = storage::claim_batch(&conn, batch_id)? else {
+        bail!("batch {batch_id} is not eligible for derivation")
+    };
+    let result = (|| -> anyhow::Result<usize> {
+        let spans = storage::batch_spans(&conn, batch_id)?;
+        let recent = storage::recent_labels_before(&conn, batch.start_ts, 3)?;
+        let tz = TimeZone::system();
+        let digest = chronicle_core::digest::build_digest(&spans, &tz, &recent);
+        let drafts = chronicle_derive::infer_tasks(&model_path, &digest)?;
+        let tasks = clamp_tasks(drafts, batch.start_ts, batch.end_ts);
+        let n = tasks.len();
+        storage::store_tasks(&mut conn, batch_id, &tasks)?;
+        Ok(n)
+    })();
+    match result {
+        Ok(n) => {
+            tracing::info!(batch_id, tasks = n, "derivation done");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(batch_id, "derivation failed: {e:#}");
+            storage::fail_batch(&conn, batch_id)?;
+            Err(e)
+        }
+    }
+}
+
+/// Offsets are minutes from batch start, untrusted model output: clamp into
+/// the batch window, drop empty/inverted tasks.
+fn clamp_tasks(
+    drafts: Vec<chronicle_derive::TaskDraft>,
+    start_ms: i64,
+    end_ms: i64,
+) -> Vec<chronicle_core::types::NewTask> {
+    use chronicle_core::types::{NewTask, ms_to_ts};
+    drafts
+        .into_iter()
+        .filter_map(|d| {
+            let s = (start_ms + d.start_offset_min * 60_000).clamp(start_ms, end_ms);
+            let e = (start_ms + d.end_offset_min * 60_000).clamp(start_ms, end_ms);
+            let label = d.label.trim();
+            if label.is_empty() || e <= s {
+                return None;
+            }
+            Some(NewTask {
+                label: label.to_string(),
+                project: d.project.filter(|p| !p.trim().is_empty()),
+                start_ts: ms_to_ts(s),
+                end_ts: ms_to_ts(e),
+                confidence: d.confidence.clamp(0.0, 1.0),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn socket_path(data_dir: &Path) -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.to_path_buf())
         .join("chronicle.sock")
 }
 
-fn send_toggle(sock: &Path) -> bool {
+pub(crate) fn send_ctrl(sock: &Path, msg: &str) -> bool {
     use std::io::Write;
     match std::os::unix::net::UnixStream::connect(sock) {
-        Ok(mut stream) => stream.write_all(b"toggle\n").is_ok(),
+        Ok(mut stream) => stream.write_all(format!("{msg}\n").as_bytes()).is_ok(),
         Err(_) => false,
     }
 }
 
+enum CtrlMsg {
+    Toggle,
+    DeriveNow,
+}
+
 fn spawn_ctrl_listener(
     listener: std::os::unix::net::UnixListener,
-    tx: Sender<()>,
+    tx: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
     use std::io::BufRead;
     std::thread::Builder::new()
@@ -89,8 +225,18 @@ fn spawn_ctrl_listener(
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let mut line = String::new();
-                let ok = std::io::BufReader::new(stream).read_line(&mut line).is_ok();
-                if ok && line.trim() == "toggle" && tx.send(()).is_err() {
+                if std::io::BufReader::new(stream)
+                    .read_line(&mut line)
+                    .is_err()
+                {
+                    continue;
+                }
+                let msg = match line.trim() {
+                    "toggle" => CtrlMsg::Toggle,
+                    "derive" => CtrlMsg::DeriveNow,
+                    _ => continue,
+                };
+                if tx.send(msg).is_err() {
                     return;
                 }
             }
@@ -137,7 +283,7 @@ fn reap_ui(slot: &mut Option<Child>) {
 fn run(data_dir: &Path) -> anyhow::Result<()> {
     // Single instance: a second `chronicle` just toggles the running daemon.
     let sock = socket_path(data_dir);
-    if send_toggle(&sock) {
+    if send_ctrl(&sock, "toggle") {
         println!("chronicle daemon already running \u{2014} toggled UI");
         return Ok(());
     }
@@ -157,12 +303,17 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
         let ts = chronicle_core::types::ms_to_ts(last_ms + 1);
         chronicle_core::storage::insert_event(&conn, &CaptureEvent::Afk { idle: true, ts })?;
     }
+    // A `running` batch with no live worker (unclean daemon exit) burns its
+    // attempt and falls back to `failed` so the retry cap still holds.
+    chronicle_core::storage::reset_stale_running(&conn)?;
     let (tx, rx) = crossbeam_channel::unbounded();
     let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
     spawn_ctrl_listener(listener, ctrl_tx)?;
     spawn_capture(&config, tx)?;
     tracing::info!(?data_dir, "chronicle daemon running");
     let mut ui_child: Option<Child> = None;
+    let mut scheduler = Scheduler { worker: None };
+    let mut idle_since: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
     loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
@@ -172,13 +323,22 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                 if filters.excluded(&event) {
                     continue;
                 }
+                if let CaptureEvent::Afk { idle, ts } = &event {
+                    if *idle {
+                        idle_since.get_or_insert(ts.as_millisecond());
+                    } else {
+                        idle_since = None;
+                    }
+                }
                 if let Err(e) = chronicle_core::storage::insert_event(&conn, &event) {
                     tracing::error!("event insert failed: {e}");
                 }
             }
             recv(ctrl_rx) -> cmd => {
-                if cmd.is_ok() {
-                    toggle_ui(&mut ui_child);
+                match cmd {
+                    Ok(CtrlMsg::Toggle) => toggle_ui(&mut ui_child),
+                    Ok(CtrlMsg::DeriveNow) => scheduler.tick(&conn, &config, data_dir, idle_since, true),
+                    Err(_) => {}
                 }
             }
             default(timeout) => {
@@ -186,12 +346,141 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                 if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
+                scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 reap_ui(&mut ui_child);
                 next_refresh = Instant::now() + SESSIONIZE_EVERY;
             }
         }
     }
     bail!("capture threads exited")
+}
+
+const DERIVE_TIMEOUT: Duration = Duration::from_secs(300);
+/// "Low 1-min load" gate for deriving while the user is active.
+const LOW_LOAD: f64 = 1.0;
+const BATTERY_DEFER_PCT: u32 = 30;
+
+struct Scheduler {
+    /// At most one derive worker at a time: (child, started, batch id).
+    worker: Option<(Child, Instant, i64)>,
+}
+
+impl Scheduler {
+    fn tick(
+        &mut self,
+        conn: &rusqlite::Connection,
+        config: &Config,
+        data_dir: &Path,
+        idle_since: Option<i64>,
+        force: bool,
+    ) {
+        use chronicle_core::storage;
+        if let Some((child, started, batch_id)) = &mut self.worker {
+            let batch_id = *batch_id;
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // A worker that died before reporting leaves the batch
+                    // `running`; count that as the failed attempt it was.
+                    let stuck = matches!(
+                        storage::batch_status(conn, batch_id),
+                        Ok(Some(ref s)) if s == "running"
+                    );
+                    if stuck {
+                        let _ = storage::fail_batch(conn, batch_id);
+                    }
+                    if !status.success() {
+                        tracing::warn!(batch_id, %status, "derive worker failed");
+                    }
+                    self.worker = None;
+                }
+                Ok(None) => {
+                    if started.elapsed() >= DERIVE_TIMEOUT {
+                        tracing::warn!(batch_id, "derive worker timed out; killing");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = storage::fail_batch(conn, batch_id);
+                        self.worker = None;
+                    }
+                    return; // one worker at a time
+                }
+                Err(e) => {
+                    tracing::error!(batch_id, "derive worker wait failed: {e}");
+                    self.worker = None;
+                }
+            }
+        }
+        if !force && !derive_gates_open(config, idle_since) {
+            return;
+        }
+        if on_low_battery() {
+            tracing::debug!("derivation deferred: battery low");
+            return;
+        }
+        if chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_none() {
+            tracing::debug!("derivation skipped: no model downloaded");
+            return;
+        }
+        let batch_id = match storage::next_eligible_batch(conn) {
+            Ok(Some(id)) => id,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::error!("eligible-batch query failed: {e}");
+                return;
+            }
+        };
+        match spawn_derive_worker(batch_id) {
+            Ok(child) => {
+                tracing::info!(batch_id, "derive worker spawned");
+                self.worker = Some((child, Instant::now(), batch_id));
+            }
+            Err(e) => tracing::error!(batch_id, "failed to spawn derive worker: {e}"),
+        }
+    }
+}
+
+fn spawn_derive_worker(batch_id: i64) -> std::io::Result<Child> {
+    Command::new(std::env::current_exe()?)
+        .args(["derive", "--batch", &batch_id.to_string()])
+        .spawn()
+}
+
+/// Derive when AFK ≥ `derive_idle_secs`, or the 1-min load is low enough
+/// that inference won't be noticed.
+fn derive_gates_open(config: &Config, idle_since: Option<i64>) -> bool {
+    let idle_long_enough = idle_since.is_some_and(|since| {
+        Timestamp::now().as_millisecond() - since >= i64::from(config.derive_idle_secs) * 1000
+    });
+    idle_long_enough || load_1min().is_some_and(|l| l < LOW_LOAD)
+}
+
+fn load_1min() -> Option<f64> {
+    let s = std::fs::read_to_string("/proc/loadavg").ok()?;
+    s.split_whitespace().next()?.parse().ok()
+}
+
+/// Defer derivation below 30% on battery power. No battery = never defers.
+fn on_low_battery() -> bool {
+    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_battery =
+            std::fs::read_to_string(path.join("type")).is_ok_and(|t| t.trim() == "Battery");
+        if !is_battery {
+            continue;
+        }
+        let discharging =
+            std::fs::read_to_string(path.join("status")).is_ok_and(|s| s.trim() == "Discharging");
+        let low = std::fs::read_to_string(path.join("capacity"))
+            .ok()
+            .and_then(|c| c.trim().parse::<u32>().ok())
+            .is_some_and(|c| c < BATTERY_DEFER_PCT);
+        if discharging && low {
+            return true;
+        }
+    }
+    false
 }
 
 const SESSIONIZE_EVERY: Duration = Duration::from_secs(60);
@@ -389,6 +678,23 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
             "{} – {}  [{kind}]{label}",
             start.strftime("%H:%M:%S"),
             end.strftime("%H:%M:%S"),
+        );
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, end_ts, label, project, confidence FROM tasks
+         WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+    )?;
+    let mut rows = stmt.query([lo, hi])?;
+    while let Some(row) = rows.next()? {
+        let (start, end): (i64, i64) = (row.get(0)?, row.get(1)?);
+        let (label, project): (String, Option<String>) = (row.get(2)?, row.get(3)?);
+        let confidence: f64 = row.get(4)?;
+        let project = project.map(|p| format!(" [{p}]")).unwrap_or_default();
+        println!(
+            "{} – {}  [task] {label}{project} ({confidence:.2})",
+            local(start)?.strftime("%H:%M:%S"),
+            local(end)?.strftime("%H:%M:%S"),
         );
     }
     Ok(())

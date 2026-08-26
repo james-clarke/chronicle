@@ -5,8 +5,8 @@ use std::time::Duration;
 use rusqlite::{Connection, params};
 use rusqlite_migration::{M, Migrations};
 
-use crate::sessionizer::{BatchDraft, SpanDraft};
-use crate::types::{CaptureEvent, Event, FocusEvent, ms_to_ts, ts_to_ms};
+use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
+use crate::types::{CaptureEvent, Event, FocusEvent, NewTask, ms_to_ts, ts_to_ms};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -121,6 +121,132 @@ pub fn replace_tail(
             ],
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchRow {
+    pub id: i64,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub status: String,
+    pub attempts: i64,
+}
+
+/// Crash recovery: a `running` batch with no live worker (daemon restart)
+/// counts as a failed attempt.
+pub fn reset_stale_running(conn: &Connection) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "UPDATE batches SET status='failed' WHERE status='running'",
+        [],
+    )?)
+}
+
+const ELIGIBLE: &str = "status IN ('pending','failed') AND attempts < 2";
+
+/// Oldest batch still worth deriving: pending, or failed with a retry left.
+pub fn next_eligible_batch(conn: &Connection) -> Result<Option<i64>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM batches WHERE {ELIGIBLE} ORDER BY start_ts LIMIT 1"
+    ))?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+}
+
+/// Worker-side claim: flips the batch to `running` and burns an attempt.
+/// Returns None if the batch is not (or no longer) eligible.
+pub fn claim_batch(conn: &Connection, id: i64) -> Result<Option<BatchRow>, StorageError> {
+    let n = conn.execute(
+        &format!(
+            "UPDATE batches SET status='running', attempts=attempts+1 WHERE id=?1 AND {ELIGIBLE}"
+        ),
+        [id],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let row = conn.query_row(
+        "SELECT id, start_ts, end_ts, status, attempts FROM batches WHERE id=?1",
+        [id],
+        |r| {
+            Ok(BatchRow {
+                id: r.get(0)?,
+                start_ts: r.get(1)?,
+                end_ts: r.get(2)?,
+                status: r.get(3)?,
+                attempts: r.get(4)?,
+            })
+        },
+    )?;
+    Ok(Some(row))
+}
+
+pub fn batch_status(conn: &Connection, id: i64) -> Result<Option<String>, StorageError> {
+    let mut stmt = conn.prepare("SELECT status FROM batches WHERE id=?1")?;
+    let mut rows = stmt.query([id])?;
+    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+}
+
+pub fn fail_batch(conn: &Connection, id: i64) -> Result<(), StorageError> {
+    conn.execute("UPDATE batches SET status='failed' WHERE id=?1", [id])?;
+    Ok(())
+}
+
+pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, end_ts, app, title, kind FROM spans
+         WHERE batch_id = ?1 ORDER BY start_ts, id",
+    )?;
+    let rows = stmt.query_map([id], |r| {
+        Ok(SpanDraft {
+            start: ms_to_ts(r.get(0)?),
+            end: ms_to_ts(r.get(1)?),
+            app: r.get(2)?,
+            title: r.get(3)?,
+            kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Last `n` task labels ending at or before `before_ms`, newest first
+/// (digest continuity hint).
+pub fn recent_labels_before(
+    conn: &Connection,
+    before_ms: i64,
+    n: usize,
+) -> Result<Vec<String>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT label FROM tasks WHERE end_ts <= ?1 ORDER BY end_ts DESC LIMIT ?2")?;
+    let rows = stmt.query_map(params![before_ms, n as i64], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Replace the batch's tasks and mark it done. Replacing (not appending)
+/// keeps a retried batch idempotent.
+pub fn store_tasks(
+    conn: &mut Connection,
+    batch_id: i64,
+    tasks: &[NewTask],
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM tasks WHERE batch_id=?1", [batch_id])?;
+    for t in tasks {
+        tx.execute(
+            "INSERT INTO tasks (batch_id, label, project, start_ts, end_ts, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                batch_id,
+                t.label,
+                t.project,
+                ts_to_ms(t.start_ts),
+                ts_to_ms(t.end_ts),
+                t.confidence
+            ],
+        )?;
+    }
+    tx.execute("UPDATE batches SET status='done' WHERE id=?1", [batch_id])?;
     tx.commit()?;
     Ok(())
 }

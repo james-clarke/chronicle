@@ -4,11 +4,9 @@
 
 root ::= "{" ws "\"tasks\"" ws ":" ws "[" ws (task (ws "," ws task){0,7})? ws "]" ws "}"
 
-task ::= "{" ws "\"label\"" ws ":" ws string ws ","
-             ws "\"project\"" ws ":" ws (string | "null") ws ","
-             ws "\"start_offset_min\"" ws ":" ws int ws ","
-             ws "\"end_offset_min\"" ws ":" ws int ws ","
-             ws "\"confidence\"" ws ":" ws confidence ws "}"
+# One line on purpose: llama.cpp's GBNF parser ends a rule at newline
+# (continuations are only legal inside parentheses).
+task ::= "{" ws "\"label\"" ws ":" ws string ws "," ws "\"project\"" ws ":" ws (string | "null") ws "," ws "\"start_offset_min\"" ws ":" ws int ws "," ws "\"end_offset_min\"" ws ":" ws int ws "," ws "\"confidence\"" ws ":" ws confidence ws "}"
 
 string ::= "\"" char{0,120} "\""
 char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
