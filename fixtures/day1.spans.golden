@@ -1,0 +1,9 @@
+17:00:00–17:06:30 [focus] Terminator: vim src/main.rs
+17:06:30–17:08:00 [focus] firefox: Rust std docs — Mozilla Firefox
+17:08:00–17:15:00 [focus] firefox: std::sync::mpsc - Rust — Mozilla Firefox
+17:15:00–17:15:08 [context-switching]
+17:15:08–17:20:00 [focus] Terminator: vim src/main.rs
+17:20:00–17:28:00 [focus] Terminator: cargo test
+17:28:00–17:35:00 [afk]
+17:35:00–17:40:00 [focus] Terminator: cargo test: 42 passed
+17:40:00–17:50:00 [focus] firefox: Rust std docs — Mozilla Firefox

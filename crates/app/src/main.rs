@@ -1,11 +1,11 @@
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use chronicle_core::config::Config;
 use chronicle_core::types::CaptureEvent;
 use clap::{Parser, Subcommand};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{RecvTimeoutError, Sender};
 use jiff::{Timestamp, ToSpan, Zoned, civil, tz::TimeZone};
 use regex::Regex;
 
@@ -57,20 +57,44 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
     let config = Config::load(&data_dir.join("config.toml"))?;
     let filters = Filters::new(&config)?;
-    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let mut conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    // Daemon downtime must not read as focus time: mark a gap as AFK-from-the-
+    // last-event; the AFK poller's initial state announcement closes it.
+    if let Some(last_ms) = chronicle_core::storage::latest_event_ts(&conn)?
+        && Timestamp::now().as_millisecond() - last_ms > GAP_MARKER_SECS * 1000
+    {
+        let ts = chronicle_core::types::ms_to_ts(last_ms + 1);
+        chronicle_core::storage::insert_event(&conn, &CaptureEvent::Afk { idle: true, ts })?;
+    }
     let (tx, rx) = crossbeam_channel::unbounded();
     spawn_capture(&config, tx)?;
     tracing::info!(?data_dir, "chronicle daemon running");
-    for event in rx {
-        if filters.excluded(&event) {
-            continue;
-        }
-        if let Err(e) = chronicle_core::storage::insert_event(&conn, &event) {
-            tracing::error!("event insert failed: {e}");
+    let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
+    loop {
+        let timeout = next_refresh.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(timeout) {
+            Ok(event) => {
+                if filters.excluded(&event) {
+                    continue;
+                }
+                if let Err(e) = chronicle_core::storage::insert_event(&conn, &event) {
+                    tracing::error!("event insert failed: {e}");
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                let now = Timestamp::now();
+                if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
+                    tracing::error!("sessionize refresh failed: {e}");
+                }
+                next_refresh = Instant::now() + SESSIONIZE_EVERY;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     bail!("capture threads exited")
 }
+
+const SESSIONIZE_EVERY: Duration = Duration::from_secs(60);
 
 #[cfg(target_os = "linux")]
 fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
@@ -101,9 +125,24 @@ fn spawn_capture(_config: &Config, _tx: Sender<CaptureEvent>) -> anyhow::Result<
 }
 
 const AFK_POLL: Duration = Duration::from_secs(30);
+const GAP_MARKER_SECS: i64 = 60;
 
 fn afk_loop(afk: impl chronicle_capture::AfkProvider, tx: Sender<CaptureEvent>, threshold_ms: u64) {
-    let mut was_idle = false;
+    // Announce the starting state so a dangling AFK span (gap marker, or a
+    // restart while idle) gets closed.
+    let mut was_idle = match afk.idle_ms() {
+        Ok(ms) => {
+            let idle = ms >= threshold_ms;
+            if tx.send(afk_event(idle, ms)).is_err() {
+                return;
+            }
+            idle
+        }
+        Err(e) => {
+            tracing::warn!("afk poll failed: {e}");
+            false
+        }
+    };
     loop {
         std::thread::sleep(AFK_POLL);
         let ms = match afk.idle_ms() {
@@ -118,18 +157,22 @@ fn afk_loop(afk: impl chronicle_capture::AfkProvider, tx: Sender<CaptureEvent>, 
             continue;
         }
         was_idle = idle;
-        // Backdate the idle transition to when input actually stopped.
-        let ts = if idle {
-            Timestamp::now()
-                .checked_sub((ms as i64).milliseconds())
-                .unwrap_or_else(|_| Timestamp::now())
-        } else {
-            Timestamp::now()
-        };
-        if tx.send(CaptureEvent::Afk { idle, ts }).is_err() {
+        if tx.send(afk_event(idle, ms)).is_err() {
             return;
         }
     }
+}
+
+/// Idle transitions are backdated to when input actually stopped.
+fn afk_event(idle: bool, idle_ms: u64) -> CaptureEvent {
+    let now = Timestamp::now();
+    let ts = if idle {
+        now.checked_sub((idle_ms as i64).milliseconds())
+            .unwrap_or(now)
+    } else {
+        now
+    };
+    CaptureEvent::Afk { idle, ts }
 }
 
 struct Filters {
@@ -209,7 +252,7 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
 
     let mut stmt = conn.prepare(
         "SELECT ts, kind, app, title, idle FROM events
-         WHERE ts >= ?1 AND ts < ?2 ORDER BY ts",
+         WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
     )?;
     let mut rows = stmt.query([lo, hi])?;
     while let Some(row) = rows.next()? {
@@ -229,7 +272,7 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
 
     let mut stmt = conn.prepare(
         "SELECT start_ts, end_ts, app, title, kind FROM spans
-         WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts",
+         WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
     )?;
     let mut rows = stmt.query([lo, hi])?;
     while let Some(row) = rows.next()? {
@@ -237,8 +280,13 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
         let (app, title, kind): (String, String, String) = (row.get(2)?, row.get(3)?, row.get(4)?);
         let start = local(start)?;
         let end = local(end)?;
+        let label = if kind == "focus" {
+            format!(" {app}: {title}")
+        } else {
+            String::new()
+        };
         println!(
-            "{} – {}  [{kind}] {app}: {title}",
+            "{} – {}  [{kind}]{label}",
             start.strftime("%H:%M:%S"),
             end.strftime("%H:%M:%S"),
         );

@@ -15,6 +15,21 @@ pub enum CaptureEvent {
     Afk { idle: bool, ts: Timestamp },
 }
 
+/// A stored `events` row; also the fixture JSONL line format.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Event {
+    pub ts: Timestamp,
+    pub kind: String,
+    #[serde(default)]
+    pub app: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub idle: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Span {
     pub id: i64,

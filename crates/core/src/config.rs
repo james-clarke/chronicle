@@ -19,6 +19,9 @@ pub struct Config {
     pub afk_close_secs: u32,
     /// Derivation may start when idle at least this long.
     pub derive_idle_secs: u32,
+    /// Consecutive same-app events merge into one span when normalized title
+    /// similarity is at least this (absorbs jitter like unread-count prefixes).
+    pub title_similarity: f64,
     pub retention_days: u32,
     /// AW-compatible HTTP server port.
     pub port: u16,
@@ -35,6 +38,7 @@ impl Default for Config {
             batch_minutes: 30,
             afk_close_secs: 120,
             derive_idle_secs: 300,
+            title_similarity: 0.8,
             retention_days: 180,
             port: 5600,
             excluded_apps: Vec::new(),
