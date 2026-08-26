@@ -5,3 +5,4 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+llama-cpp-2.workspace = true
