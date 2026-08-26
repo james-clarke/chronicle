@@ -47,6 +47,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ModelCmd,
     },
+    /// Internal: benchmark downloaded models on fixtures and/or real batches.
+    #[command(hide = true)]
+    Bench {
+        /// Directory of fixture JSONL event streams.
+        #[arg(long, default_value = "fixtures")]
+        fixtures: PathBuf,
+        /// Real batch ids from the live DB (repeatable).
+        #[arg(long)]
+        batch: Vec<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +86,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
+        Cmd::Bench { fixtures, batch } => bench(&data_dir, &fixtures, &batch),
         Cmd::ChatWorker => bail!("chat lands in M7"),
     }
 }
@@ -126,6 +137,110 @@ fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// M4 benchmark gate: run every downloaded preset over fixture streams and
+/// real batches, print tasks + timing side by side. Judgment stays human.
+fn bench(data_dir: &Path, fixtures: &Path, batch_ids: &[i64]) -> anyhow::Result<()> {
+    use chronicle_core::{digest, sessionizer, storage, types::Event};
+
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let mut cases: Vec<(String, String)> = Vec::new(); // (name, digest)
+
+    if fixtures.is_dir() {
+        let mut paths: Vec<_> = std::fs::read_dir(fixtures)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let text = std::fs::read_to_string(&path)?;
+            let events = text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(serde_json::from_str::<Event>)
+                .collect::<Result<Vec<_>, _>>()
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let Some(end) = events.last().map(|e| e.ts) else {
+                continue;
+            };
+            let spans = sessionizer::sessionize(&events, end, &config);
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            cases.push((
+                format!("fixture:{name}"),
+                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &[]),
+            ));
+        }
+    }
+
+    if !batch_ids.is_empty() {
+        let conn = storage::open(&data_dir.join("chronicle.db"))?;
+        let tz = TimeZone::system();
+        for &id in batch_ids {
+            let spans = storage::batch_spans(&conn, id)?;
+            let Some(first) = spans.first() else {
+                println!("batch {id}: no spans, skipping");
+                continue;
+            };
+            let recent = storage::recent_labels_before(&conn, first.start.as_millisecond(), 3)?;
+            cases.push((
+                format!("batch:{id}"),
+                digest::build_digest(&spans, &tz, &recent),
+            ));
+        }
+    }
+    if cases.is_empty() {
+        bail!("nothing to bench: no fixtures found and no --batch given");
+    }
+
+    let models: Vec<_> = chronicle_derive::model::PRESETS
+        .iter()
+        .map(|p| {
+            (
+                p.name,
+                chronicle_derive::model::models_dir(data_dir).join(p.file),
+            )
+        })
+        .filter(|(_, path)| path.exists())
+        .collect();
+    if models.is_empty() {
+        bail!("no models downloaded; run `chronicle model pull`");
+    }
+
+    for (case, digest_text) in &cases {
+        println!(
+            "\n=== {case} (digest ~{} tokens)",
+            digest::approx_tokens(digest_text)
+        );
+        for (name, path) in &models {
+            let t0 = Instant::now();
+            match chronicle_derive::infer_tasks(path, digest_text) {
+                Ok(tasks) => {
+                    println!(
+                        "--- {name}: {} tasks in {:.1}s",
+                        tasks.len(),
+                        t0.elapsed().as_secs_f64()
+                    );
+                    for t in tasks {
+                        let project = t.project.as_deref().unwrap_or("-");
+                        println!(
+                            "  {:>4}–{:<4} {:.2}  {}  [{project}]",
+                            t.start_offset_min, t.end_offset_min, t.confidence, t.label
+                        );
+                    }
+                }
+                Err(e) => println!(
+                    "--- {name}: FAILED in {:.1}s: {e:#}",
+                    t0.elapsed().as_secs_f64()
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Ephemeral derivation worker: claim batch → digest → infer → write tasks →
@@ -265,8 +380,25 @@ fn toggle_ui(slot: &mut Option<Child>) {
     }
 }
 
+/// Own binary path for spawning children. When the binary is replaced while
+/// the daemon runs (dev rebuild, upgrade), /proc/self/exe reads
+/// "<path> (deleted)"; fall back to the current binary at the same path —
+/// mild version skew beats a spawn failure.
+fn own_exe() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if !exe.exists()
+        && let Some(stripped) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)"))
+    {
+        let replaced = PathBuf::from(stripped);
+        if replaced.exists() {
+            return Ok(replaced);
+        }
+    }
+    Ok(exe)
+}
+
 fn spawn_ui_child() -> std::io::Result<Child> {
-    Command::new(std::env::current_exe()?)
+    Command::new(own_exe()?)
         .arg("ui")
         .stdin(Stdio::piped())
         .spawn()
@@ -439,7 +571,7 @@ impl Scheduler {
 }
 
 fn spawn_derive_worker(batch_id: i64) -> std::io::Result<Child> {
-    Command::new(std::env::current_exe()?)
+    Command::new(own_exe()?)
         .args(["derive", "--batch", &batch_id.to_string()])
         .spawn()
 }

@@ -720,6 +720,7 @@ dependencies = [
  "jiff",
  "regex",
  "rusqlite",
+ "serde_json",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
