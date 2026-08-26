@@ -771,6 +771,7 @@ dependencies = [
  "jiff",
  "regex",
  "rusqlite",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-appender",

@@ -94,8 +94,137 @@ fn main() -> anyhow::Result<()> {
             batch,
             digest,
         } => bench(&data_dir, &fixtures, &batch, digest),
-        Cmd::ChatWorker => bail!("chat lands in M7"),
+        Cmd::ChatWorker => chat_worker(&data_dir),
     }
+}
+
+/// One JSON object per line, both directions, over the chat worker's stdio.
+pub(crate) mod chatproto {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    pub struct Ask {
+        pub ask: String,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    pub enum WorkerMsg {
+        /// Model loaded; worker accepts questions.
+        Ready,
+        Tok {
+            text: String,
+        },
+        Done,
+        Err {
+            message: String,
+        },
+    }
+}
+
+/// Warm chat worker, spawned by the UI when the chat panel opens and killed
+/// when it closes. The model stays resident between questions; retrieval is
+/// local-DB only (time-ref range or FTS, in chronicle_core::chat).
+fn chat_worker(data_dir: &Path) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+
+    use chatproto::{Ask, WorkerMsg};
+    use chronicle_core::storage;
+
+    let _guard = init_logging(data_dir)?;
+    let mut stdout = std::io::stdout();
+    let mut send = move |msg: &WorkerMsg| {
+        let mut line = serde_json::to_string(msg).expect("worker msg serializes");
+        line.push('\n');
+        // A dead pipe means the panel is gone; exiting quietly is correct.
+        if stdout
+            .write_all(line.as_bytes())
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            std::process::exit(0);
+        }
+    };
+
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let Some(model_path) = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+    else {
+        send(&WorkerMsg::Err {
+            message: "no model available; run `chronicle model pull`".into(),
+        });
+        bail!("no model available")
+    };
+    let model = match chronicle_derive::ChatModel::load(&model_path) {
+        Ok(m) => m,
+        Err(e) => {
+            send(&WorkerMsg::Err {
+                message: format!("model load failed: {e:#}"),
+            });
+            return Err(e);
+        }
+    };
+
+    // Prior session tail so follow-up questions keep working across reopens.
+    let mut history: Vec<(String, String)> = Vec::new();
+    if let Ok(messages) = storage::recent_chat_messages(&conn, 2 * 3) {
+        let mut pending_user: Option<String> = None;
+        for (role, content) in messages {
+            match role.as_str() {
+                "user" => pending_user = Some(content),
+                _ => {
+                    if let Some(q) = pending_user.take() {
+                        history.push((q, content));
+                    }
+                }
+            }
+        }
+    }
+    send(&WorkerMsg::Ready);
+    tracing::info!("chat worker ready");
+
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { break };
+        let Ok(Ask { ask }) = serde_json::from_str::<Ask>(&line) else {
+            continue;
+        };
+        let ask = ask.trim().to_owned();
+        if ask.is_empty() {
+            continue;
+        }
+        if let Err(e) = storage::insert_chat_message(&conn, Timestamp::now(), "user", &ask) {
+            tracing::error!("chat message insert failed: {e}");
+        }
+        let context = match chronicle_core::chat::build_context(&conn, &ask, &Zoned::now()) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                send(&WorkerMsg::Err {
+                    message: format!("retrieval failed: {e}"),
+                });
+                continue;
+            }
+        };
+        let t0 = Instant::now();
+        match model.answer(&history, &context, &ask, &mut |piece| {
+            send(&WorkerMsg::Tok { text: piece.into() });
+        }) {
+            Ok(answer) => {
+                send(&WorkerMsg::Done);
+                tracing::info!(secs = t0.elapsed().as_secs_f64(), "chat answer done");
+                if let Err(e) =
+                    storage::insert_chat_message(&conn, Timestamp::now(), "assistant", &answer)
+                {
+                    tracing::error!("chat message insert failed: {e}");
+                }
+                history.push((ask, answer));
+            }
+            Err(e) => {
+                tracing::error!("chat inference failed: {e:#}");
+                send(&WorkerMsg::Err {
+                    message: format!("inference failed: {e:#}"),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
@@ -472,6 +601,16 @@ fn spawn_ui_child() -> std::io::Result<Child> {
     Command::new(own_exe()?)
         .arg("ui")
         .stdin(Stdio::piped())
+        .spawn()
+}
+
+/// llama/ggml noise goes to the log file, not the UI's terminal.
+pub(crate) fn spawn_chat_worker() -> std::io::Result<Child> {
+    Command::new(own_exe()?)
+        .arg("chat-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
 }
 

@@ -6,7 +6,9 @@ use rusqlite::{Connection, params};
 use rusqlite_migration::{M, Migrations};
 
 use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
-use crate::types::{CaptureEvent, Correction, Event, FocusEvent, NewTask, ms_to_ts, ts_to_ms};
+use crate::types::{
+    CaptureEvent, Correction, Event, FocusEvent, NewTask, Task, ms_to_ts, ts_to_ms,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -405,26 +407,152 @@ fn fts_or_query(spans: &[SpanDraft]) -> String {
             continue;
         }
         for source in [span.app.as_str(), span.title.as_str()] {
-            for word in source.split(|c: char| !c.is_alphanumeric() && c != '_') {
-                if word.chars().count() < 2 {
-                    continue;
-                }
-                let word = word.to_lowercase();
-                if !terms.contains(&word) {
-                    terms.push(word);
-                }
-            }
+            push_fts_terms(source, &mut terms);
         }
         if terms.len() >= 32 {
             break;
         }
     }
+    join_fts_terms(terms)
+}
+
+/// OR-of-terms FTS5 query from free chat text (same term rules as above).
+pub fn fts_query_from_text(text: &str) -> String {
+    let mut terms = Vec::new();
+    push_fts_terms(text, &mut terms);
+    join_fts_terms(terms)
+}
+
+fn push_fts_terms(source: &str, terms: &mut Vec<String>) {
+    for word in source.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if word.chars().count() < 2 {
+            continue;
+        }
+        let word = word.to_lowercase();
+        if !terms.contains(&word) {
+            terms.push(word);
+        }
+    }
+}
+
+fn join_fts_terms(mut terms: Vec<String>) -> String {
     terms.truncate(32);
     terms
         .iter()
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: r.get(0)?,
+        batch_id: r.get(1)?,
+        label: r.get(2)?,
+        project: r.get(3)?,
+        start_ts: ms_to_ts(r.get(4)?),
+        end_ts: ms_to_ts(r.get(5)?),
+        confidence: r.get(6)?,
+    })
+}
+
+const TASK_COLS: &str = "id, batch_id, label, project, start_ts, end_ts, confidence";
+
+pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TASK_COLS} FROM tasks
+         WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id"
+    ))?;
+    let rows = stmt.query_map([lo, hi], task_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn spans_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SpanDraft>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
+         WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok(SpanDraft {
+            start: ms_to_ts(r.get(0)?),
+            end: ms_to_ts(r.get(1)?),
+            app: r.get(2)?,
+            title: r.get(3)?,
+            kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
+            url: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Top-k tasks whose label matches the FTS query, bm25-ranked.
+pub fn search_tasks(conn: &Connection, query: &str, k: usize) -> Result<Vec<Task>, StorageError> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TASK_COLS} FROM tasks
+         WHERE id IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?1
+                      ORDER BY rank LIMIT ?2)
+         ORDER BY start_ts, id"
+    ))?;
+    let rows = stmt.query_map(params![query, k as i64], task_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Top-k focus spans whose title matches the FTS query, bm25-ranked.
+pub fn search_spans(
+    conn: &Connection,
+    query: &str,
+    k: usize,
+) -> Result<Vec<SpanDraft>, StorageError> {
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
+         WHERE id IN (SELECT rowid FROM spans_fts WHERE spans_fts MATCH ?1
+                      ORDER BY rank LIMIT ?2)
+         ORDER BY start_ts, id",
+    )?;
+    let rows = stmt.query_map(params![query, k as i64], |r| {
+        Ok(SpanDraft {
+            start: ms_to_ts(r.get(0)?),
+            end: ms_to_ts(r.get(1)?),
+            app: r.get(2)?,
+            title: r.get(3)?,
+            kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
+            url: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn insert_chat_message(
+    conn: &Connection,
+    ts: jiff::Timestamp,
+    role: &str,
+    content: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO chat_messages (ts, role, content) VALUES (?1, ?2, ?3)",
+        params![ts_to_ms(ts), role, content],
+    )?;
+    Ok(())
+}
+
+/// Last `n` chat messages, oldest first.
+pub fn recent_chat_messages(
+    conn: &Connection,
+    n: usize,
+) -> Result<Vec<(String, String)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM (
+             SELECT id, role, content FROM chat_messages ORDER BY id DESC LIMIT ?1
+         ) ORDER BY id",
+    )?;
+    let rows = stmt.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 #[cfg(test)]
