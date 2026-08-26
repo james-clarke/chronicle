@@ -10,6 +10,7 @@ chronicle-capture.workspace = true
 chronicle-core.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true
+eframe.workspace = true
 jiff.workspace = true
 regex.workspace = true
 rusqlite.workspace = true

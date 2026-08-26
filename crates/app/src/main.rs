@@ -1,11 +1,14 @@
-use std::path::Path;
+mod ui;
+
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use chronicle_core::config::Config;
 use chronicle_core::types::CaptureEvent;
 use clap::{Parser, Subcommand};
-use crossbeam_channel::{RecvTimeoutError, Sender};
+use crossbeam_channel::Sender;
 use jiff::{Timestamp, ToSpan, Zoned, civil, tz::TimeZone};
 use regex::Regex;
 
@@ -47,13 +50,101 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd.unwrap_or(Cmd::Run) {
         Cmd::Run => run(&data_dir),
         Cmd::Dump { day } => dump(&data_dir, day.as_deref()),
-        Cmd::Ui | Cmd::Toggle => bail!("UI lands in M3"),
+        Cmd::Ui => ui::run(&data_dir),
+        Cmd::Toggle => {
+            if send_toggle(&socket_path(&data_dir)) {
+                Ok(())
+            } else {
+                bail!("chronicle daemon is not running")
+            }
+        }
         Cmd::Derive { .. } => bail!("derivation lands in M4"),
         Cmd::ChatWorker => bail!("chat lands in M7"),
     }
 }
 
+fn socket_path(data_dir: &Path) -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.to_path_buf())
+        .join("chronicle.sock")
+}
+
+fn send_toggle(sock: &Path) -> bool {
+    use std::io::Write;
+    match std::os::unix::net::UnixStream::connect(sock) {
+        Ok(mut stream) => stream.write_all(b"toggle\n").is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn spawn_ctrl_listener(
+    listener: std::os::unix::net::UnixListener,
+    tx: Sender<()>,
+) -> anyhow::Result<()> {
+    use std::io::BufRead;
+    std::thread::Builder::new()
+        .name("ctrl".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let mut line = String::new();
+                let ok = std::io::BufReader::new(stream).read_line(&mut line).is_ok();
+                if ok && line.trim() == "toggle" && tx.send(()).is_err() {
+                    return;
+                }
+            }
+        })?;
+    Ok(())
+}
+
+fn toggle_ui(slot: &mut Option<Child>) {
+    use std::io::Write;
+    if let Some(child) = slot {
+        let alive = matches!(child.try_wait(), Ok(None));
+        if alive
+            && let Some(stdin) = child.stdin.as_mut()
+            && stdin
+                .write_all(b"toggle\n")
+                .and_then(|()| stdin.flush())
+                .is_ok()
+        {
+            return;
+        }
+        *slot = None; // exited or pipe broken — respawn
+    }
+    match spawn_ui_child() {
+        Ok(child) => *slot = Some(child),
+        Err(e) => tracing::error!("failed to spawn ui child: {e}"),
+    }
+}
+
+fn spawn_ui_child() -> std::io::Result<Child> {
+    Command::new(std::env::current_exe()?)
+        .arg("ui")
+        .stdin(Stdio::piped())
+        .spawn()
+}
+
+fn reap_ui(slot: &mut Option<Child>) {
+    if let Some(child) = slot
+        && matches!(child.try_wait(), Ok(Some(_)))
+    {
+        *slot = None;
+    }
+}
+
 fn run(data_dir: &Path) -> anyhow::Result<()> {
+    // Single instance: a second `chronicle` just toggles the running daemon.
+    let sock = socket_path(data_dir);
+    if send_toggle(&sock) {
+        println!("chronicle daemon already running \u{2014} toggled UI");
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&sock); // stale socket from an unclean exit
+    let listener = std::os::unix::net::UnixListener::bind(&sock)
+        .with_context(|| format!("failed to bind {}", sock.display()))?;
+
     let _guard = init_logging(data_dir)?;
     let config = Config::load(&data_dir.join("config.toml"))?;
     let filters = Filters::new(&config)?;
@@ -67,13 +158,17 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
         chronicle_core::storage::insert_event(&conn, &CaptureEvent::Afk { idle: true, ts })?;
     }
     let (tx, rx) = crossbeam_channel::unbounded();
+    let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
+    spawn_ctrl_listener(listener, ctrl_tx)?;
     spawn_capture(&config, tx)?;
     tracing::info!(?data_dir, "chronicle daemon running");
+    let mut ui_child: Option<Child> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
     loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(timeout) {
-            Ok(event) => {
+        crossbeam_channel::select! {
+            recv(rx) -> event => {
+                let Ok(event) = event else { break };
                 if filters.excluded(&event) {
                     continue;
                 }
@@ -81,14 +176,19 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                     tracing::error!("event insert failed: {e}");
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {
+            recv(ctrl_rx) -> cmd => {
+                if cmd.is_ok() {
+                    toggle_ui(&mut ui_child);
+                }
+            }
+            default(timeout) => {
                 let now = Timestamp::now();
                 if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
+                reap_ui(&mut ui_child);
                 next_refresh = Instant::now() + SESSIONIZE_EVERY;
             }
-            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
     bail!("capture threads exited")
