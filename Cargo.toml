@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+jiff = "0.2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+directories = "6"
+chronicle-core = { path = "crates/core" }
+chronicle-capture = { path = "crates/capture" }
+chronicle-server = { path = "crates/server" }
+chronicle-derive = { path = "crates/derive" }
+chronicle-mcp = { path = "crates/mcp" }

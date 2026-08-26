@@ -1,0 +1,10 @@
+pub mod config;
+pub mod storage;
+pub mod types;
+
+use std::path::PathBuf;
+
+/// Per-platform data dir: XDG / `%APPDATA%` / `~/Library/Application Support`.
+pub fn data_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "chronicle").map(|d| d.data_dir().to_path_buf())
+}
