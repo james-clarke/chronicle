@@ -1,5 +1,5 @@
 //! Batch spans → deterministic digest text for the derivation prompt.
-//! URL domains land in M6, MCP context in M8.
+//! MCP context lands in M8.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
@@ -96,6 +96,27 @@ fn render(
         let _ = writeln!(out, "- {app}: {}", fmt_dur(*ms));
     }
 
+    // Domain + first path segment groups browser time per site regardless of
+    // page-title churn. Omitted entirely when no spans carry URLs, so
+    // pre-M6 fixtures and their goldens are unchanged.
+    let mut site_ms: HashMap<String, i64> = HashMap::new();
+    for span in spans {
+        if span.kind == SpanKind::Focus
+            && let Some(url) = &span.url
+        {
+            *site_ms.entry(site_key(url)).or_default() += span.duration_ms();
+        }
+    }
+    if !site_ms.is_empty() {
+        let mut sites: Vec<(String, i64)> = site_ms.into_iter().collect();
+        sites.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        sites.truncate(apps_cap);
+        let _ = writeln!(out, "\n## Sites by time");
+        for (site, ms) in &sites {
+            let _ = writeln!(out, "- {site}: {}", fmt_dur(*ms));
+        }
+    }
+
     // Chronological view: without it the model has only aggregates and must
     // guess task offsets. Dominant activity per minute, run-length encoded —
     // smooths sub-minute interleaving into readable stretches while every
@@ -181,6 +202,17 @@ fn render(
         }
     }
     out
+}
+
+/// `https://docs.rs/axum/latest/` → `docs.rs/axum`.
+fn site_key(url: &str) -> String {
+    let host = crate::sessionizer::domain(url);
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let path = rest.split_once('/').map_or("", |(_, p)| p);
+    match path.split(['/', '?', '#']).next().filter(|s| !s.is_empty()) {
+        Some(seg) => format!("{host}/{seg}"),
+        None => host.to_owned(),
+    }
 }
 
 fn clip(s: &str, max_chars: usize) -> String {

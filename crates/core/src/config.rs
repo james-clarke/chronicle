@@ -25,6 +25,12 @@ pub struct Config {
     pub retention_days: u32,
     /// AW-compatible HTTP server port.
     pub port: u16,
+    /// Extra CORS origin regexes for sideloaded browser extensions
+    /// (full-match; stock aw-watcher-web origins are built in).
+    pub cors_allow: Vec<String>,
+    /// Apps whose focus spans are split per site by browser URL heartbeats
+    /// (case-insensitive substring match on the window app name).
+    pub browser_apps: Vec<String>,
     /// Regexes; matching apps/titles are never stored at all.
     pub excluded_apps: Vec<String>,
     pub excluded_titles: Vec<String>,
@@ -41,6 +47,22 @@ impl Default for Config {
             title_similarity: 0.8,
             retention_days: 180,
             port: 5600,
+            cors_allow: Vec::new(),
+            browser_apps: [
+                "firefox",
+                "librewolf",
+                "zen",
+                "navigator",
+                "chrome",
+                "chromium",
+                "brave",
+                "vivaldi",
+                "opera",
+                "edge",
+                "safari",
+            ]
+            .map(String::from)
+            .to_vec(),
             excluded_apps: Vec::new(),
             excluded_titles: Vec::new(),
             model_path: None,

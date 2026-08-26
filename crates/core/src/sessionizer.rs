@@ -48,6 +48,8 @@ pub struct SpanDraft {
     pub app: String,
     pub title: String,
     pub kind: SpanKind,
+    /// Last page URL seen while this browser span was open (M6).
+    pub url: Option<String>,
 }
 
 impl SpanDraft {
@@ -88,16 +90,48 @@ pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> V
                 if afk_since.is_some() {
                     continue;
                 }
+                // A URL-carrying browser span merges any same-app title churn:
+                // the heartbeat stream owns tab identity there, and window
+                // titles ("page — Mozilla Firefox") won't match page titles.
                 let same_activity = open.as_ref().is_some_and(|span| {
                     span.app == ev.app
-                        && strsim::normalized_levenshtein(&span.title, &ev.title)
-                            >= config.title_similarity
+                        && (span.url.is_some()
+                            || strsim::normalized_levenshtein(&span.title, &ev.title)
+                                >= config.title_similarity)
                 });
                 if !same_activity {
                     if let Some(span) = open.take() {
                         close(span, ev.ts, &mut spans);
                     }
                     open = Some(focus_span(ev.ts, ev.app.clone(), ev.title.clone()));
+                }
+            }
+            // Browser heartbeats refine the open span only while a browser is
+            // focused — extensions report the active tab even when the browser
+            // window isn't (audible tabs), so URL events never open spans.
+            "url" => {
+                if afk_since.is_some() {
+                    continue;
+                }
+                let Some(url) = ev.url.as_deref().filter(|u| !u.is_empty()) else {
+                    continue;
+                };
+                if let Some(span) = open.as_mut()
+                    && is_browser(&span.app, config)
+                {
+                    let same_site =
+                        span.url.is_none() || span.url.as_deref().map(domain) == Some(domain(url));
+                    if !same_site {
+                        let app = span.app.clone();
+                        close(open.take().expect("span checked above"), ev.ts, &mut spans);
+                        open = Some(focus_span(ev.ts, app, String::new()));
+                    }
+                    let span = open.as_mut().expect("span open in both branches");
+                    span.url = Some(url.to_owned());
+                    // Page title beats the window title (no browser suffix).
+                    if !ev.title.is_empty() {
+                        span.title = ev.title.clone();
+                    }
                 }
             }
             "afk" => match ev.idle {
@@ -138,6 +172,7 @@ fn focus_span(start: Timestamp, app: String, title: String) -> SpanDraft {
         app,
         title,
         kind: SpanKind::Focus,
+        url: None,
     }
 }
 
@@ -148,7 +183,23 @@ fn afk_span(start: Timestamp) -> SpanDraft {
         app: String::new(),
         title: String::new(),
         kind: SpanKind::Afk,
+        url: None,
     }
+}
+
+fn is_browser(app: &str, config: &Config) -> bool {
+    let app = app.to_lowercase();
+    config
+        .browser_apps
+        .iter()
+        .any(|b| app.contains(&b.to_lowercase()))
+}
+
+/// Host part of a URL, `www.` stripped; good enough for site grouping.
+pub fn domain(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    host.strip_prefix("www.").unwrap_or(host)
 }
 
 fn collapse_short(spans: Vec<SpanDraft>) -> Vec<SpanDraft> {
@@ -167,6 +218,7 @@ fn collapse_short(spans: Vec<SpanDraft>) -> Vec<SpanDraft> {
                 app: String::new(),
                 title: String::new(),
                 kind: SpanKind::ContextSwitching,
+                url: None,
                 ..span
             }),
         }

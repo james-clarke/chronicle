@@ -50,6 +50,9 @@ fn render_spans(spans: &[SpanDraft]) -> String {
         );
         if span.kind == SpanKind::Focus {
             let _ = write!(out, " {}: {}", span.app, span.title);
+            if let Some(url) = &span.url {
+                let _ = write!(out, " <{url}>");
+            }
         }
         out.push('\n');
     }
@@ -90,6 +93,35 @@ fn day1_digest_golden() {
     check_golden("day1.digest.golden", &digest);
 }
 
+// M6: browser URL heartbeats split browser focus time per site and surface a
+// "Sites by time" digest section; window-title churn inside a URL-carrying
+// span no longer splits it.
+#[test]
+fn day2_web_per_site_spans() {
+    let config = Config::default();
+    let events = load_fixture("day2_web.jsonl");
+    let stream_end: Timestamp = "2026-08-27T17:50:00Z".parse().unwrap();
+    let spans = sessionize(&events, stream_end, &config);
+    check_golden("day2_web.spans.golden", &render_spans(&spans));
+
+    let sites: Vec<&str> = spans
+        .iter()
+        .filter(|s| s.app == "firefox")
+        .map(|s| chronicle_core::sessionizer::domain(s.url.as_deref().unwrap()))
+        .collect();
+    assert_eq!(
+        sites,
+        ["github.com", "docs.rs", "github.com"],
+        "browser time must split per site"
+    );
+
+    let batches = assign_batches(&spans, &config);
+    let digest = build_digest(&spans[batches[0].spans.clone()], &TimeZone::UTC, &[], &[]);
+    assert!(approx_tokens(&digest) <= MAX_TOKENS);
+    assert!(digest.contains("## Sites by time"), "digest: {digest}");
+    check_golden("day2_web.digest.golden", &digest);
+}
+
 // M5 acceptance: a correction on an earlier, similar batch changes the next
 // batch's digest (the deterministic half of "changes the output"); an
 // unrelated correction does not surface.
@@ -120,6 +152,7 @@ fn correction_changes_next_digest() {
                 app: s.app.clone(),
                 title: s.title.clone(),
                 kind: s.kind,
+                url: s.url.clone(),
             })
             .collect()
     };
@@ -129,6 +162,7 @@ fn correction_changes_next_digest() {
         app: "blender".into(),
         title: "Sculpting Donut Tutorial".into(),
         kind: SpanKind::Focus,
+        url: None,
     }];
     for (prior, label, new_label, new_project) in [
         (

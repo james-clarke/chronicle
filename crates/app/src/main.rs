@@ -512,7 +512,16 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
     spawn_ctrl_listener(listener, ctrl_tx)?;
-    spawn_capture(&config, tx)?;
+    spawn_capture(&config, tx.clone())?;
+    // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
+    let server_error = match chronicle_server::spawn(&config, tx) {
+        Ok(()) => None,
+        Err(e) => {
+            tracing::error!("AW endpoint failed on 127.0.0.1:{}: {e}", config.port);
+            Some(format!("AW endpoint failed on port {}: {e}", config.port))
+        }
+    };
+    chronicle_core::storage::set_meta(&conn, "server_error", server_error.as_deref())?;
     tracing::info!(?data_dir, "chronicle daemon running");
     let mut ui_child: Option<Child> = None;
     let mut scheduler = Scheduler { worker: None };
@@ -791,11 +800,16 @@ impl Filters {
 
     /// Excluded events are dropped before storage — never written at all.
     fn excluded(&self, event: &CaptureEvent) -> bool {
-        let (app, title) = match event {
-            CaptureEvent::Focus(e) | CaptureEvent::TitleChanged(e) => (&e.app, &e.title),
+        let (app, title, url) = match event {
+            CaptureEvent::Focus(e) | CaptureEvent::TitleChanged(e) => (&e.app, &e.title, None),
+            CaptureEvent::Url(e) => (&e.app, &e.title, Some(&e.url)),
             CaptureEvent::Afk { .. } => return false,
         };
-        self.apps.iter().any(|r| r.is_match(app)) || self.titles.iter().any(|r| r.is_match(title))
+        self.apps.iter().any(|r| r.is_match(app))
+            || self
+                .titles
+                .iter()
+                .any(|r| r.is_match(title) || url.is_some_and(|u| r.is_match(u)))
     }
 }
 
@@ -846,7 +860,7 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
     println!("events: {events}  spans: {spans}  batches: {batches}  tasks: {tasks}");
 
     let mut stmt = conn.prepare(
-        "SELECT ts, kind, app, title, idle FROM events
+        "SELECT ts, kind, app, title, idle, url FROM events
          WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id",
     )?;
     let mut rows = stmt.query([lo, hi])?;
@@ -854,6 +868,7 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
         let ts: i64 = row.get(0)?;
         let (kind, app, title): (String, String, String) = (row.get(1)?, row.get(2)?, row.get(3)?);
         let idle: Option<i64> = row.get(4)?;
+        let url: Option<String> = row.get(5)?;
         let t = local(ts)?;
         match kind.as_str() {
             "afk" => println!(
@@ -861,24 +876,35 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
                 t.strftime("%H:%M:%S"),
                 idle.unwrap_or(0) == 1
             ),
+            "url" => println!(
+                "{}  [url] {app}: {title} <{}>",
+                t.strftime("%H:%M:%S"),
+                url.as_deref().unwrap_or("")
+            ),
             _ => println!("{}  [{kind}] {app}: {title}", t.strftime("%H:%M:%S")),
         }
     }
 
     let mut stmt = conn.prepare(
-        "SELECT start_ts, end_ts, app, title, kind FROM spans
+        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
          WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
     )?;
     let mut rows = stmt.query([lo, hi])?;
     while let Some(row) = rows.next()? {
         let (start, end): (i64, i64) = (row.get(0)?, row.get(1)?);
         let (app, title, kind): (String, String, String) = (row.get(2)?, row.get(3)?, row.get(4)?);
+        let url: Option<String> = row.get(5)?;
         let start = local(start)?;
         let end = local(end)?;
-        let label = if kind == "focus" {
-            format!(" {app}: {title}")
-        } else {
-            String::new()
+        let label = match (kind.as_str(), url) {
+            ("focus", Some(url)) => {
+                format!(
+                    " {app}: {title} <{}>",
+                    chronicle_core::sessionizer::domain(&url)
+                )
+            }
+            ("focus", None) => format!(" {app}: {title}"),
+            _ => String::new(),
         };
         println!(
             "{} – {}  [{kind}]{label}",

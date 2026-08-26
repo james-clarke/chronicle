@@ -83,6 +83,8 @@ struct TimelineApp {
     edit: Option<EditState>,
     loaded_at: Option<Instant>,
     error: Option<String>,
+    /// Daemon status flag from `meta` (e.g. AW endpoint port conflict).
+    warning: Option<String>,
 }
 
 impl TimelineApp {
@@ -100,6 +102,7 @@ impl TimelineApp {
             edit: None,
             loaded_at: None,
             error: None,
+            warning: None,
         }
     }
 
@@ -125,6 +128,11 @@ impl TimelineApp {
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+        if let Some(conn) = self.conn.as_ref() {
+            self.warning = chronicle_core::storage::get_meta(conn, "server_error")
+                .ok()
+                .flatten();
         }
     }
 
@@ -250,6 +258,9 @@ impl eframe::App for TimelineApp {
 
         let mut pending: Option<EditState> = None;
         egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(warning) = &self.warning {
+                ui.colored_label(ui.visuals().warn_fg_color, warning);
+            }
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 return;

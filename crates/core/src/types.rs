@@ -8,10 +8,22 @@ pub struct FocusEvent {
     pub pid: Option<u32>,
 }
 
+/// A browser heartbeat mapped to a page-change event (AW endpoint, M6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UrlEvent {
+    pub ts: Timestamp,
+    /// `browser:<name>`, derived from the AW bucket id.
+    pub app: String,
+    /// Page title as reported by the extension.
+    pub title: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureEvent {
     Focus(FocusEvent),
     TitleChanged(FocusEvent),
+    Url(UrlEvent),
     Afk { idle: bool, ts: Timestamp },
 }
 

@@ -22,6 +22,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(include_str!("../migrations/001_schema.sql")),
         M::up(include_str!("../migrations/002_corrections_fts.sql")),
+        M::up(include_str!("../migrations/003_spans_url_meta.sql")),
     ])
 });
 
@@ -44,6 +45,13 @@ pub fn insert_event(conn: &Connection, event: &CaptureEvent) -> Result<(), Stora
     match event {
         CaptureEvent::Focus(e) => insert_focus(conn, "focus", e),
         CaptureEvent::TitleChanged(e) => insert_focus(conn, "title", e),
+        CaptureEvent::Url(e) => {
+            conn.execute(
+                "INSERT INTO events (ts, kind, app, title, url) VALUES (?1, 'url', ?2, ?3, ?4)",
+                params![ts_to_ms(e.ts), e.app, e.title, e.url],
+            )?;
+            Ok(())
+        }
         CaptureEvent::Afk { idle, ts } => {
             conn.execute(
                 "INSERT INTO events (ts, kind, app, idle) VALUES (?1, 'afk', '', ?2)",
@@ -113,14 +121,15 @@ pub fn replace_tail(
     }
     for (span, batch_id) in spans.iter().zip(batch_ids) {
         tx.execute(
-            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, url, batch_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 ts_to_ms(span.start),
                 ts_to_ms(span.end),
                 span.app,
                 span.title,
                 span.kind.as_str(),
+                span.url,
                 batch_id
             ],
         )?;
@@ -199,7 +208,7 @@ pub fn fail_batch(conn: &Connection, id: i64) -> Result<(), StorageError> {
 
 pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT start_ts, end_ts, app, title, kind FROM spans
+        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
          WHERE batch_id = ?1 ORDER BY start_ts, id",
     )?;
     let rows = stmt.query_map([id], |r| {
@@ -209,9 +218,38 @@ pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, Storage
             app: r.get(2)?,
             title: r.get(3)?,
             kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
+            url: r.get(5)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// `None` deletes the key. Daemon status flags the UI surfaces (e.g.
+/// `server_error` when the AW endpoint port is taken).
+pub fn set_meta(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), StorageError> {
+    match value {
+        Some(v) => {
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, v],
+            )?;
+        }
+        None => {
+            conn.execute("DELETE FROM meta WHERE key=?1", [key])?;
+        }
+    }
+    Ok(())
+}
+
+pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageError> {
+    Ok(conn
+        .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?)
 }
 
 /// Last `n` task labels ending at or before `before_ms`, newest first
