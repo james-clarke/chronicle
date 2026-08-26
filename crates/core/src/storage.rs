@@ -6,7 +6,7 @@ use rusqlite::{Connection, params};
 use rusqlite_migration::{M, Migrations};
 
 use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
-use crate::types::{CaptureEvent, Event, FocusEvent, NewTask, ms_to_ts, ts_to_ms};
+use crate::types::{CaptureEvent, Correction, Event, FocusEvent, NewTask, ms_to_ts, ts_to_ms};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -18,8 +18,12 @@ pub enum StorageError {
     Migration(#[from] rusqlite_migration::Error),
 }
 
-static MIGRATIONS: LazyLock<Migrations<'static>> =
-    LazyLock::new(|| Migrations::new(vec![M::up(include_str!("../migrations/001_schema.sql"))]));
+static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
+    Migrations::new(vec![
+        M::up(include_str!("../migrations/001_schema.sql")),
+        M::up(include_str!("../migrations/002_corrections_fts.sql")),
+    ])
+});
 
 pub fn open(path: &Path) -> Result<Connection, StorageError> {
     if let Some(dir) = path.parent() {
@@ -249,6 +253,140 @@ pub fn store_tasks(
     tx.execute("UPDATE batches SET status='done' WHERE id=?1", [batch_id])?;
     tx.commit()?;
     Ok(())
+}
+
+/// Record a user edit of a task's label/project and apply it to the task row.
+/// The correction stores an FTS-searchable snapshot of the span context the
+/// task covered, so future batches with similar activity can retrieve it.
+pub fn insert_correction(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    task_id: i64,
+    new_label: &str,
+    new_project: Option<&str>,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    let (old_label, old_project, batch_id, start_ts, end_ts): (
+        String,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+    ) = tx.query_row(
+        "SELECT label, project, batch_id, start_ts, end_ts FROM tasks WHERE id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    let mut ctx = String::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT app, title FROM spans
+             WHERE batch_id=?1 AND kind='focus' AND start_ts < ?2 AND end_ts > ?3
+             ORDER BY app, title",
+        )?;
+        let mut rows = stmt.query(params![batch_id, end_ts, start_ts])?;
+        while let Some(row) = rows.next()? {
+            let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
+            if ctx.len() + app.len() + title.len() + 2 > 2000 {
+                break;
+            }
+            ctx.push_str(&app);
+            ctx.push(' ');
+            ctx.push_str(&title);
+            ctx.push('\n');
+        }
+    }
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            ts_to_ms(ts),
+            task_id,
+            old_label,
+            new_label,
+            old_project,
+            new_project,
+            ctx
+        ],
+    )?;
+    tx.execute(
+        "UPDATE tasks SET label=?1, project=?2 WHERE id=?3",
+        params![new_label, new_project, task_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Top-k past corrections whose stored span context matches the given batch
+/// spans (FTS over titles + apps, bm25-ranked, deduped by resulting label).
+pub fn similar_corrections(
+    conn: &Connection,
+    spans: &[SpanDraft],
+    k: usize,
+) -> Result<Vec<Correction>, StorageError> {
+    let query = fts_or_query(spans);
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT c.old_label, c.new_label, c.old_project, c.new_project
+         FROM corrections_fts f JOIN corrections c ON c.id = f.rowid
+         WHERE corrections_fts MATCH ?1 ORDER BY f.rank LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![query, (k * 4) as i64], |r| {
+        Ok(Correction {
+            old_label: r.get(0)?,
+            new_label: r.get(1)?,
+            old_project: r.get(2)?,
+            new_project: r.get(3)?,
+        })
+    })?;
+    let mut out: Vec<Correction> = Vec::new();
+    for c in rows {
+        let c = c?;
+        if out
+            .iter()
+            .any(|o| o.new_label == c.new_label && o.new_project == c.new_project)
+        {
+            continue;
+        }
+        out.push(c);
+        if out.len() >= k {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// OR-of-terms FTS5 query from span titles + apps: alphanumeric words only
+/// (safe to embed quoted), deduped, count-capped to keep the query bounded.
+fn fts_or_query(spans: &[SpanDraft]) -> String {
+    let mut terms: Vec<String> = Vec::new();
+    for span in spans {
+        if span.kind != SpanKind::Focus {
+            continue;
+        }
+        for source in [span.app.as_str(), span.title.as_str()] {
+            for word in source.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                if word.chars().count() < 2 {
+                    continue;
+                }
+                let word = word.to_lowercase();
+                if !terms.contains(&word) {
+                    terms.push(word);
+                }
+            }
+        }
+        if terms.len() >= 32 {
+            break;
+        }
+    }
+    terms.truncate(32);
+    terms
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 #[cfg(test)]

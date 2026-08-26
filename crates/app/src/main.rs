@@ -184,7 +184,7 @@ fn bench(
                 .into_owned();
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &[]),
+                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &[], &[]),
             ));
         }
     }
@@ -199,9 +199,10 @@ fn bench(
                 continue;
             };
             let recent = storage::recent_labels_before(&conn, first.start.as_millisecond(), 3)?;
+            let corrections = storage::similar_corrections(&conn, &spans, 4)?;
             cases.push((
                 format!("batch:{id}"),
-                digest::build_digest(&spans, &tz, &recent),
+                digest::build_digest(&spans, &tz, &recent, &corrections),
             ));
         }
     }
@@ -281,8 +282,9 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<usize> {
         let spans = storage::batch_spans(&conn, batch_id)?;
         let recent = storage::recent_labels_before(&conn, batch.start_ts, 3)?;
+        let corrections = storage::similar_corrections(&conn, &spans, 4)?;
         let tz = TimeZone::system();
-        let digest = chronicle_core::digest::build_digest(&spans, &tz, &recent);
+        let digest = chronicle_core::digest::build_digest(&spans, &tz, &recent, &corrections);
         let drafts = chronicle_derive::infer_tasks(&model_path, &digest)?;
         let tasks = clamp_tasks(drafts, &spans, batch.start_ts, batch.end_ts);
         let n = tasks.len();

@@ -85,7 +85,117 @@ fn day1_batches() {
 fn day1_digest_golden() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
-    let digest = build_digest(&spans[batches[0].spans.clone()], &TimeZone::UTC, &[]);
+    let digest = build_digest(&spans[batches[0].spans.clone()], &TimeZone::UTC, &[], &[]);
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     check_golden("day1.digest.golden", &digest);
+}
+
+// M5 acceptance: a correction on an earlier, similar batch changes the next
+// batch's digest (the deterministic half of "changes the output"); an
+// unrelated correction does not surface.
+#[test]
+fn correction_changes_next_digest() {
+    use chronicle_core::sessionizer::BatchDraft;
+    use chronicle_core::storage;
+    use chronicle_core::types::{NewTask, ms_to_ts, ts_to_ms};
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m5_corrections.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+
+    let (spans, config) = day1();
+    let batches = assign_batches(&spans, &config);
+    let current = &spans[batches[0].spans.clone()];
+
+    // Prior batch = the same activity two hours earlier, plus an unrelated
+    // one four hours earlier; each gets a task, each task a correction.
+    let shift = |spans: &[SpanDraft], hours: i64| -> Vec<SpanDraft> {
+        spans
+            .iter()
+            .map(|s| SpanDraft {
+                start: ms_to_ts(ts_to_ms(s.start) - hours * 3_600_000),
+                end: ms_to_ts(ts_to_ms(s.end) - hours * 3_600_000),
+                app: s.app.clone(),
+                title: s.title.clone(),
+                kind: s.kind,
+            })
+            .collect()
+    };
+    let alien = vec![SpanDraft {
+        start: ms_to_ts(ts_to_ms(current[0].start) - 4 * 3_600_000),
+        end: ms_to_ts(ts_to_ms(current[0].end) - 4 * 3_600_000 + 600_000),
+        app: "blender".into(),
+        title: "Sculpting Donut Tutorial".into(),
+        kind: SpanKind::Focus,
+    }];
+    for (prior, label, new_label, new_project) in [
+        (
+            shift(current, 2),
+            "working in terminal",
+            "hacking on chronicle capture",
+            Some("chronicle"),
+        ),
+        (
+            alien,
+            "watching videos",
+            "3d modeling practice",
+            Some("blender-course"),
+        ),
+    ] {
+        let batch = BatchDraft {
+            start: prior.first().unwrap().start,
+            end: prior.last().unwrap().end,
+            spans: 0..prior.len(),
+        };
+        storage::replace_tail(
+            &mut conn,
+            ts_to_ms(batch.start),
+            &prior,
+            std::slice::from_ref(&batch),
+        )
+        .unwrap();
+        let batch_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM batches", [], |r| r.get(0))
+            .unwrap();
+        storage::store_tasks(
+            &mut conn,
+            batch_id,
+            &[NewTask {
+                label: label.into(),
+                project: None,
+                start_ts: batch.start,
+                end_ts: batch.end,
+                confidence: 0.5,
+            }],
+        )
+        .unwrap();
+        let task_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE batch_id=?1", [batch_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        storage::insert_correction(&mut conn, batch.end, task_id, new_label, new_project).unwrap();
+        // The correction also applies to the task row itself.
+        let stored: String = conn
+            .query_row("SELECT label FROM tasks WHERE id=?1", [task_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, new_label);
+    }
+
+    let corrections = storage::similar_corrections(&conn, current, 4).unwrap();
+    assert_eq!(
+        corrections.len(),
+        1,
+        "only the similar correction should match, got {corrections:?}"
+    );
+    assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
+
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[]);
+    let with = build_digest(current, &TimeZone::UTC, &[], &corrections);
+    assert_ne!(plain, with, "correction must change the digest");
+    check_golden("day1.corrections.digest.golden", &with);
 }

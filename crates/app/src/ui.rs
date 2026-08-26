@@ -56,11 +56,20 @@ struct SpanRow {
 }
 
 struct TaskRow {
+    id: i64,
     start: Zoned,
     end: Zoned,
     label: String,
     project: Option<String>,
     confidence: f64,
+}
+
+/// In-flight label/project edit of one task row; committing writes a
+/// `corrections` row (M5 few-shot source) and updates the task.
+struct EditState {
+    task_id: i64,
+    label: String,
+    project: String,
 }
 
 struct TimelineApp {
@@ -71,6 +80,7 @@ struct TimelineApp {
     day: civil::Date,
     spans: Vec<SpanRow>,
     tasks: Vec<TaskRow>,
+    edit: Option<EditState>,
     loaded_at: Option<Instant>,
     error: Option<String>,
 }
@@ -87,6 +97,7 @@ impl TimelineApp {
             day,
             spans: Vec::new(),
             tasks: Vec::new(),
+            edit: None,
             loaded_at: None,
             error: None,
         }
@@ -130,22 +141,53 @@ impl TimelineApp {
         let (lo, hi) = self.day_range_ms()?;
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let mut stmt = conn.prepare(
-            "SELECT start_ts, end_ts, label, project, confidence FROM tasks
+            "SELECT id, start_ts, end_ts, label, project, confidence FROM tasks
              WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
         )?;
         let mut rows = stmt.query([lo, hi])?;
         let mut tasks = Vec::new();
         while let Some(row) = rows.next()? {
-            let (start_ms, end_ms): (i64, i64) = (row.get(0)?, row.get(1)?);
+            let (start_ms, end_ms): (i64, i64) = (row.get(1)?, row.get(2)?);
             tasks.push(TaskRow {
+                id: row.get(0)?,
                 start: chronicle_core::types::ms_to_ts(start_ms).to_zoned(self.tz.clone()),
                 end: chronicle_core::types::ms_to_ts(end_ms).to_zoned(self.tz.clone()),
-                label: row.get(2)?,
-                project: row.get(3)?,
-                confidence: row.get(4)?,
+                label: row.get(3)?,
+                project: row.get(4)?,
+                confidence: row.get(5)?,
             });
         }
         Ok(tasks)
+    }
+
+    /// Commit an edited task row: no-op if nothing changed, else write the
+    /// correction (which also updates the task) and force a reload.
+    fn apply_correction(&mut self, edit: EditState) {
+        let label = edit.label.trim().to_owned();
+        if label.is_empty() {
+            return;
+        }
+        let project = edit.project.trim();
+        let project = (!project.is_empty()).then_some(project);
+        if let Some(t) = self.tasks.iter().find(|t| t.id == edit.task_id)
+            && t.label == label
+            && t.project.as_deref() == project
+        {
+            return;
+        }
+        let Some(conn) = self.conn.as_mut() else {
+            return;
+        };
+        match chronicle_core::storage::insert_correction(
+            conn,
+            jiff::Timestamp::now(),
+            edit.task_id,
+            &label,
+            project,
+        ) {
+            Ok(()) => self.loaded_at = None,
+            Err(e) => self.error = Some(e.to_string()),
+        }
     }
 
     fn load_spans(&mut self) -> anyhow::Result<Vec<SpanRow>> {
@@ -206,6 +248,7 @@ impl eframe::App for TimelineApp {
             });
         });
 
+        let mut pending: Option<EditState> = None;
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -235,7 +278,7 @@ impl eframe::App for TimelineApp {
                                 ui.strong("Tasks");
                             }
                         } else if i <= n_tasks {
-                            task_row(ui, &self.tasks[i - 1]);
+                            task_row(ui, &self.tasks[i - 1], &mut self.edit, &mut pending);
                         } else if i == n_tasks + 1 {
                             ui.strong("Spans");
                         } else {
@@ -245,13 +288,21 @@ impl eframe::App for TimelineApp {
                 },
             );
         });
+        if let Some(edit) = pending {
+            self.apply_correction(edit);
+        }
 
         // Only scheduled wake-up; no unconditional repaint.
         ui.ctx().request_repaint_after(WAKE_EVERY);
     }
 }
 
-fn task_row(ui: &mut egui::Ui, task: &TaskRow) {
+fn task_row(
+    ui: &mut egui::Ui,
+    task: &TaskRow,
+    edit: &mut Option<EditState>,
+    pending: &mut Option<EditState>,
+) {
     let time = format!(
         "{}\u{2013}{}",
         task.start.strftime("%H:%M:%S"),
@@ -262,11 +313,34 @@ fn task_row(ui: &mut egui::Ui, task: &TaskRow) {
     ui.horizontal(|ui| {
         ui.monospace(time);
         ui.weak(format!("{dur:>7}"));
-        ui.strong(&task.label);
-        if let Some(project) = &task.project {
-            ui.label(project);
+        if edit.as_ref().is_some_and(|e| e.task_id == task.id) {
+            let e = edit.as_mut().expect("checked above");
+            ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut e.project)
+                    .desired_width(110.0)
+                    .hint_text("project"),
+            );
+            if ui.button("\u{2713}").clicked() {
+                *pending = edit.take();
+            }
+            if ui.button("\u{2715}").clicked() {
+                *edit = None;
+            }
+        } else {
+            ui.strong(&task.label);
+            if let Some(project) = &task.project {
+                ui.label(project);
+            }
+            ui.weak(format!("{:.0}%", task.confidence * 100.0));
+            if ui.small_button("\u{270e}").clicked() {
+                *edit = Some(EditState {
+                    task_id: task.id,
+                    label: task.label.clone(),
+                    project: task.project.clone().unwrap_or_default(),
+                });
+            }
         }
-        ui.weak(format!("{:.0}%", task.confidence * 100.0));
     });
 }
 

@@ -51,6 +51,15 @@ pub struct Task {
     pub confidence: f64,
 }
 
+/// A past user correction surfaced into the digest as few-shot guidance.
+#[derive(Debug, Clone)]
+pub struct Correction {
+    pub old_label: String,
+    pub new_label: String,
+    pub old_project: Option<String>,
+    pub new_project: Option<String>,
+}
+
 /// A task to insert; `Task` is the stored row.
 #[derive(Debug, Clone)]
 pub struct NewTask {

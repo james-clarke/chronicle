@@ -1,5 +1,5 @@
 //! Batch spans → deterministic digest text for the derivation prompt.
-//! Corrections few-shot lands in M5, URL domains in M6, MCP context in M8.
+//! URL domains land in M6, MCP context in M8.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
@@ -7,6 +7,7 @@ use std::fmt::Write;
 use jiff::tz::TimeZone;
 
 use crate::sessionizer::{SpanDraft, SpanKind};
+use crate::types::Correction;
 
 pub const MAX_TOKENS: usize = 3000;
 
@@ -15,14 +16,19 @@ pub fn approx_tokens(s: &str) -> usize {
     s.chars().count() / 4
 }
 
-pub fn build_digest(spans: &[SpanDraft], tz: &TimeZone, recent_labels: &[String]) -> String {
+pub fn build_digest(
+    spans: &[SpanDraft],
+    tz: &TimeZone,
+    recent_labels: &[String],
+    corrections: &[Correction],
+) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
-        let out = render(spans, tz, recent_labels, apps_cap, title_chars);
+        let out = render(spans, tz, recent_labels, corrections, apps_cap, title_chars);
         if approx_tokens(&out) <= MAX_TOKENS {
             return out;
         }
     }
-    let mut out = render(spans, tz, recent_labels, 3, 24);
+    let mut out = render(spans, tz, recent_labels, corrections, 3, 24);
     let mut cut = (MAX_TOKENS * 4).min(out.len());
     while !out.is_char_boundary(cut) {
         cut -= 1;
@@ -35,6 +41,7 @@ fn render(
     spans: &[SpanDraft],
     tz: &TimeZone,
     recent_labels: &[String],
+    corrections: &[Correction],
     apps_cap: usize,
     title_chars: usize,
 ) -> String {
@@ -154,6 +161,24 @@ fn render(
     }
     for label in recent_labels.iter().take(3) {
         let _ = writeln!(out, "- {label}");
+    }
+
+    // Omitted entirely when empty so correction-free digests (and their
+    // goldens) are unchanged.
+    if !corrections.is_empty() {
+        let _ = writeln!(out, "\n## Past corrections (user renamed similar work)");
+        for c in corrections {
+            let _ = write!(out, "- \"{}\" \u{2192} \"{}\"", c.old_label, c.new_label);
+            if c.old_project != c.new_project {
+                let _ = write!(
+                    out,
+                    " (project: {} \u{2192} {})",
+                    c.old_project.as_deref().unwrap_or("none"),
+                    c.new_project.as_deref().unwrap_or("none"),
+                );
+            }
+            out.push('\n');
+        }
     }
     out
 }
