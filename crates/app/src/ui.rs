@@ -321,10 +321,10 @@ fn task_row(
                     .desired_width(110.0)
                     .hint_text("project"),
             );
-            if ui.button("\u{2713}").clicked() {
+            if ui.button("save").clicked() {
                 *pending = edit.take();
             }
-            if ui.button("\u{2715}").clicked() {
+            if ui.button("cancel").clicked() {
                 *edit = None;
             }
         } else {
@@ -333,7 +333,7 @@ fn task_row(
                 ui.label(project);
             }
             ui.weak(format!("{:.0}%", task.confidence * 100.0));
-            if ui.small_button("\u{270e}").clicked() {
+            if ui.small_button("edit").clicked() {
                 *edit = Some(EditState {
                     task_id: task.id,
                     label: task.label.clone(),
