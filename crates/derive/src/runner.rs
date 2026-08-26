@@ -14,7 +14,7 @@ use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 const GRAMMAR: &str = include_str!("../../../grammars/task_output.gbnf");
-const PROMPT: &str = include_str!("../../../prompts/derive_v1.txt");
+const PROMPT: &str = include_str!("../../../prompts/derive_v2.txt");
 
 const N_CTX: u32 = 4096;
 const N_BATCH: u32 = 512;
@@ -36,6 +36,10 @@ pub struct TaskDraft {
 }
 
 pub fn infer_tasks(model_path: &Path, digest: &str) -> anyhow::Result<Vec<TaskDraft>> {
+    // llama.cpp/ggml log via a C callback straight to stderr unless redirected;
+    // send_logs_to_tracing must only ever run once per process (bench loops).
+    static LLAMA_LOGS: std::sync::Once = std::sync::Once::new();
+    LLAMA_LOGS.call_once(|| llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default()));
     let backend = LlamaBackend::init()?;
     let model_params = LlamaModelParams::default(); // mmap on by default
     let model = LlamaModel::load_from_file(&backend, model_path, &model_params)

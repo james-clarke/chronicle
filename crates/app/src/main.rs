@@ -56,6 +56,9 @@ enum Cmd {
         /// Real batch ids from the live DB (repeatable).
         #[arg(long)]
         batch: Vec<i64>,
+        /// Print each case's digest instead of running inference.
+        #[arg(long)]
+        digest: bool,
     },
 }
 
@@ -63,7 +66,7 @@ enum Cmd {
 enum ModelCmd {
     /// Download a model preset (resumable, SHA-256 verified).
     Pull {
-        /// Preset name; defaults to qwen3-1.7b.
+        /// Preset name; defaults to qwen3-4b.
         preset: Option<String>,
     },
     /// List presets and their download state.
@@ -86,7 +89,11 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
-        Cmd::Bench { fixtures, batch } => bench(&data_dir, &fixtures, &batch),
+        Cmd::Bench {
+            fixtures,
+            batch,
+            digest,
+        } => bench(&data_dir, &fixtures, &batch, digest),
         Cmd::ChatWorker => bail!("chat lands in M7"),
     }
 }
@@ -141,7 +148,12 @@ fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
 
 /// M4 benchmark gate: run every downloaded preset over fixture streams and
 /// real batches, print tasks + timing side by side. Judgment stays human.
-fn bench(data_dir: &Path, fixtures: &Path, batch_ids: &[i64]) -> anyhow::Result<()> {
+fn bench(
+    data_dir: &Path,
+    fixtures: &Path,
+    batch_ids: &[i64],
+    digest_only: bool,
+) -> anyhow::Result<()> {
     use chronicle_core::{digest, sessionizer, storage, types::Event};
 
     let config = Config::load(&data_dir.join("config.toml"))?;
@@ -195,6 +207,15 @@ fn bench(data_dir: &Path, fixtures: &Path, batch_ids: &[i64]) -> anyhow::Result<
     }
     if cases.is_empty() {
         bail!("nothing to bench: no fixtures found and no --batch given");
+    }
+    if digest_only {
+        for (case, digest_text) in &cases {
+            println!(
+                "\n=== {case} (digest ~{} tokens)\n{digest_text}",
+                digest::approx_tokens(digest_text)
+            );
+        }
+        return Ok(());
     }
 
     let models: Vec<_> = chronicle_derive::model::PRESETS
@@ -263,7 +284,7 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let tz = TimeZone::system();
         let digest = chronicle_core::digest::build_digest(&spans, &tz, &recent);
         let drafts = chronicle_derive::infer_tasks(&model_path, &digest)?;
-        let tasks = clamp_tasks(drafts, batch.start_ts, batch.end_ts);
+        let tasks = clamp_tasks(drafts, &spans, batch.start_ts, batch.end_ts);
         let n = tasks.len();
         storage::store_tasks(&mut conn, batch_id, &tasks)?;
         Ok(n)
@@ -282,31 +303,79 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
 }
 
 /// Offsets are minutes from batch start, untrusted model output: clamp into
-/// the batch window, drop empty/inverted tasks.
+/// the batch window, drop empty/inverted tasks, and split any task the model
+/// stretched across a long AFK gap (small models ignore the prompt rule).
 fn clamp_tasks(
     drafts: Vec<chronicle_derive::TaskDraft>,
+    spans: &[chronicle_core::sessionizer::SpanDraft],
     start_ms: i64,
     end_ms: i64,
 ) -> Vec<chronicle_core::types::NewTask> {
+    use chronicle_core::sessionizer::SpanKind;
     use chronicle_core::types::{NewTask, ms_to_ts};
-    drafts
-        .into_iter()
-        .filter_map(|d| {
-            let s = (start_ms + d.start_offset_min * 60_000).clamp(start_ms, end_ms);
-            let e = (start_ms + d.end_offset_min * 60_000).clamp(start_ms, end_ms);
-            let label = d.label.trim();
-            if label.is_empty() || e <= s {
-                return None;
+    const AFK_SPLIT_MS: i64 = 5 * 60_000;
+    const MIN_PIECE_MS: i64 = 60_000;
+    let gaps: Vec<(i64, i64)> = spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Afk && s.duration_ms() >= AFK_SPLIT_MS)
+        .map(|s| (s.start.as_millisecond(), s.end.as_millisecond()))
+        .collect();
+    let mut out = Vec::new();
+    for d in drafts {
+        let s = (start_ms + d.start_offset_min * 60_000).clamp(start_ms, end_ms);
+        let e = (start_ms + d.end_offset_min * 60_000).clamp(start_ms, end_ms);
+        let label = d.label.trim();
+        if label.is_empty() || e <= s {
+            continue;
+        }
+        let mut pieces = Vec::new();
+        let mut cur = s;
+        for &(gap_start, gap_end) in &gaps {
+            if gap_end <= cur || gap_start >= e {
+                continue;
             }
-            Some(NewTask {
+            if gap_start > cur {
+                pieces.push((cur, gap_start));
+            }
+            cur = gap_end.max(cur);
+        }
+        if cur < e {
+            pieces.push((cur, e));
+        }
+        for (piece_start, piece_end) in pieces {
+            if piece_end - piece_start < MIN_PIECE_MS {
+                continue;
+            }
+            out.push(NewTask {
                 label: label.to_string(),
-                project: d.project.filter(|p| !p.trim().is_empty()),
-                start_ts: ms_to_ts(s),
-                end_ts: ms_to_ts(e),
+                project: d.project.clone().filter(|p| !p.trim().is_empty()),
+                start_ts: ms_to_ts(piece_start),
+                end_ts: ms_to_ts(piece_end),
                 confidence: d.confidence.clamp(0.0, 1.0),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    // Tasks must not overlap; when the model overlaps anyway, the earlier
+    // start (higher confidence on ties) wins and the later task is trimmed.
+    out.sort_by(|a, b| {
+        a.start_ts
+            .cmp(&b.start_ts)
+            .then(b.confidence.total_cmp(&a.confidence))
+    });
+    let mut last_end = None;
+    out.retain_mut(|t| {
+        if let Some(le) = last_end
+            && t.start_ts < le
+        {
+            if t.end_ts <= le {
+                return false;
+            }
+            t.start_ts = le;
+        }
+        last_end = Some(t.end_ts);
+        true
+    });
+    out
 }
 
 pub(crate) fn socket_path(data_dir: &Path) -> PathBuf {
@@ -571,8 +640,11 @@ impl Scheduler {
 }
 
 fn spawn_derive_worker(batch_id: i64) -> std::io::Result<Child> {
+    // Worker logging goes to the log file; keep the daemon terminal clean.
     Command::new(own_exe()?)
         .args(["derive", "--batch", &batch_id.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
 }
 

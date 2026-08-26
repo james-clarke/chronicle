@@ -16,16 +16,17 @@ pub struct ModelSpec {
 }
 
 /// Official Qwen GGUF repos ship no Q4_K_M for these sizes; unsloth's do.
+/// First entry is the default; qwen3-1.7b stays as the low-RAM fallback.
 pub const PRESETS: &[ModelSpec] = &[
-    ModelSpec {
-        name: "qwen3-1.7b",
-        repo: "unsloth/Qwen3-1.7B-GGUF",
-        file: "Qwen3-1.7B-Q4_K_M.gguf",
-    },
     ModelSpec {
         name: "qwen3-4b",
         repo: "unsloth/Qwen3-4B-Instruct-2507-GGUF",
         file: "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    },
+    ModelSpec {
+        name: "qwen3-1.7b",
+        repo: "unsloth/Qwen3-1.7B-GGUF",
+        file: "Qwen3-1.7B-Q4_K_M.gguf",
     },
 ];
 

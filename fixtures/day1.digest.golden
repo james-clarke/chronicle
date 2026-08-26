@@ -5,14 +5,14 @@ active 33m00s · afk 7m00s · 7 switches
 - Terminator: 24m22s
 - firefox: 8m30s
 
-## Top titles
-### Terminator (24m22s)
-- vim src/main.rs — 11m22s
-- cargo test — 8m00s
-- cargo test: 42 passed — 5m00s
-### firefox (8m30s)
-- std::sync::mpsc - Rust — Mozilla Firefox — 7m00s
-- Rust std docs — Mozilla Firefox — 1m30s
+## Timeline (minute offsets from window start)
+- 0–6m Terminator: vim src/main.rs
+- 6–8m firefox: Rust std docs — Mozilla Firefox
+- 8–15m firefox: std::sync::mpsc - Rust — Mozilla Firefox
+- 15–20m Terminator: vim src/main.rs
+- 20–28m Terminator: cargo test
+- 28–35m afk
+- 35–40m Terminator: cargo test: 42 passed
 
 ## Recent task labels
 (none)
