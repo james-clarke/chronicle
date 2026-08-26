@@ -2,8 +2,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use rusqlite_migration::{M, Migrations};
+
+use crate::types::{CaptureEvent, FocusEvent, ts_to_ms};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -31,6 +33,28 @@ pub fn open(path: &Path) -> Result<Connection, StorageError> {
     conn.busy_timeout(Duration::from_secs(5))?;
     MIGRATIONS.to_latest(&mut conn)?;
     Ok(conn)
+}
+
+pub fn insert_event(conn: &Connection, event: &CaptureEvent) -> Result<(), StorageError> {
+    match event {
+        CaptureEvent::Focus(e) => insert_focus(conn, "focus", e),
+        CaptureEvent::TitleChanged(e) => insert_focus(conn, "title", e),
+        CaptureEvent::Afk { idle, ts } => {
+            conn.execute(
+                "INSERT INTO events (ts, kind, app, idle) VALUES (?1, 'afk', '', ?2)",
+                params![ts_to_ms(*ts), *idle as i64],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn insert_focus(conn: &Connection, kind: &str, e: &FocusEvent) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO events (ts, kind, app, title, pid) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![ts_to_ms(e.ts), kind, e.app, e.title, e.pid],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

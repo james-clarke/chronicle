@@ -6,9 +6,12 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chronicle-capture.workspace = true
 chronicle-core.workspace = true
 clap.workspace = true
+crossbeam-channel.workspace = true
 jiff.workspace = true
+regex.workspace = true
 rusqlite.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true

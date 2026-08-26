@@ -2,6 +2,9 @@
 //! consumes `CaptureEvent` only. Platform impls land in M1 (X11), M9 (macOS),
 //! M10 (Windows).
 
+#[cfg(target_os = "linux")]
+pub mod x11;
+
 use chronicle_core::types::CaptureEvent;
 use crossbeam_channel::Sender;
 

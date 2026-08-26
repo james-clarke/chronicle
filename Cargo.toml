@@ -13,6 +13,8 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 jiff = "0.2"
+regex = "1"
+x11rb = { version = "0.14", features = ["screensaver"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2"
 tracing = "0.1"
