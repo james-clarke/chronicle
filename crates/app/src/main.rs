@@ -61,6 +61,12 @@ enum Cmd {
         /// Print each case's digest instead of running inference.
         #[arg(long)]
         digest: bool,
+        /// Only run cases whose name contains this substring.
+        #[arg(long)]
+        only: Option<String>,
+        /// Only run models whose preset name contains this substring.
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 
@@ -96,7 +102,16 @@ fn main() -> anyhow::Result<()> {
             fixtures,
             batch,
             digest,
-        } => bench(&data_dir, &fixtures, &batch, digest),
+            only,
+            model,
+        } => bench(
+            &data_dir,
+            &fixtures,
+            &batch,
+            digest,
+            only.as_deref(),
+            model.as_deref(),
+        ),
         Cmd::ChatWorker => chat_worker(&data_dir),
     }
 }
@@ -279,17 +294,23 @@ fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
 }
 
 /// M4 benchmark gate: run every downloaded preset over fixture streams and
-/// real batches, print tasks + timing side by side. Judgment stays human.
+/// real batches, print tasks + timing side by side. Fixtures with a
+/// `<name>.expect.json` are scored deterministically (post-merge output);
+/// judgment on the rest stays human.
 fn bench(
     data_dir: &Path,
     fixtures: &Path,
     batch_ids: &[i64],
     digest_only: bool,
+    only: Option<&str>,
+    model_filter: Option<&str>,
 ) -> anyhow::Result<()> {
-    use chronicle_core::{digest, sessionizer, storage, types::Event};
+    use chronicle_core::eval::Expectations;
+    use chronicle_core::types::{Event, OpenTask};
+    use chronicle_core::{digest, sessionizer, storage};
 
     let config = Config::load(&data_dir.join("config.toml"))?;
-    let mut cases: Vec<(String, String)> = Vec::new(); // (name, digest)
+    let mut cases: Vec<(String, String, Vec<OpenTask>, Option<Expectations>)> = Vec::new();
 
     if fixtures.is_dir() {
         let mut paths: Vec<_> = std::fs::read_dir(fixtures)?
@@ -314,9 +335,23 @@ fn bench(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
+            let expect_path = path.with_extension("expect.json");
+            let expect: Option<Expectations> = match std::fs::read_to_string(&expect_path) {
+                Ok(text) => Some(
+                    serde_json::from_str(&text)
+                        .with_context(|| format!("parsing {}", expect_path.display()))?,
+                ),
+                Err(_) => None,
+            };
+            let open = expect
+                .as_ref()
+                .map(|e| e.open_task_list())
+                .unwrap_or_default();
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &[], &[], None),
+                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], None),
+                open,
+                expect,
             ));
         }
     }
@@ -326,23 +361,28 @@ fn bench(
         let tz = TimeZone::system();
         for &id in batch_ids {
             let spans = storage::batch_spans(&conn, id)?;
-            let Some(first) = spans.first() else {
+            if spans.is_empty() {
                 println!("batch {id}: no spans, skipping");
                 continue;
-            };
-            let recent = storage::recent_labels_before(&conn, first.start.as_millisecond(), 3)?;
+            }
+            let open = storage::open_tasks(&conn, 8)?;
             let corrections = storage::similar_corrections(&conn, &spans, 4)?;
             cases.push((
                 format!("batch:{id}"),
-                digest::build_digest(&spans, &tz, &recent, &corrections, None),
+                digest::build_digest(&spans, &tz, &open, &corrections, None),
+                open,
+                None,
             ));
         }
     }
+    if let Some(filter) = only {
+        cases.retain(|(name, ..)| name.contains(filter));
+    }
     if cases.is_empty() {
-        bail!("nothing to bench: no fixtures found and no --batch given");
+        bail!("nothing to bench: no matching fixtures and no --batch given");
     }
     if digest_only {
-        for (case, digest_text) in &cases {
+        for (case, digest_text, ..) in &cases {
             println!(
                 "\n=== {case} (digest ~{} tokens)\n{digest_text}",
                 digest::approx_tokens(digest_text)
@@ -359,32 +399,44 @@ fn bench(
                 chronicle_derive::model::models_dir(data_dir).join(p.file),
             )
         })
-        .filter(|(_, path)| path.exists())
+        .filter(|(name, path)| path.exists() && model_filter.is_none_or(|f| name.contains(f)))
         .collect();
     if models.is_empty() {
-        bail!("no models downloaded; run `chronicle model pull`");
+        bail!("no matching models downloaded; run `chronicle model pull`");
     }
 
-    for (case, digest_text) in &cases {
+    for (case, digest_text, open, expect) in &cases {
         println!(
             "\n=== {case} (digest ~{} tokens)",
             digest::approx_tokens(digest_text)
         );
         for (name, path) in &models {
             let t0 = Instant::now();
-            match chronicle_derive::infer_tasks(path, digest_text) {
-                Ok(tasks) => {
+            match chronicle_derive::infer_intervals(path, digest_text) {
+                Ok(raw) => {
+                    let drafts = chronicle_core::merge::sanitize_intervals(raw, open.len());
+                    let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, open);
+                    let resolved = chronicle_core::eval::resolve(&slots, &linked, open);
                     println!(
-                        "--- {name}: {} tasks in {:.1}s",
-                        tasks.len(),
+                        "--- {name}: {} intervals over {} tasks in {:.1}s (linked)",
+                        resolved.len(),
+                        slots.len(),
                         t0.elapsed().as_secs_f64()
                     );
-                    for t in tasks {
+                    for t in &resolved {
                         let project = t.project.as_deref().unwrap_or("-");
                         println!(
                             "  {:>4}–{:<4} {:.2}  {}  [{project}]",
                             t.start_offset_min, t.end_offset_min, t.confidence, t.label
                         );
+                    }
+                    if let Some(exp) = expect {
+                        let report = chronicle_core::eval::score(&resolved, exp);
+                        for c in &report.checks {
+                            let verdict = if c.pass { "PASS" } else { "FAIL" };
+                            println!("  [{verdict}] {}: {}", c.name, c.detail);
+                        }
+                        println!("  score: {}", report.summary());
                     }
                 }
                 Err(e) => println!(
@@ -413,7 +465,7 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
     };
     let result = (|| -> anyhow::Result<usize> {
         let spans = storage::batch_spans(&conn, batch_id)?;
-        let recent = storage::recent_labels_before(&conn, batch.start_ts, 3)?;
+        let open = storage::open_tasks(&conn, 8)?;
         let corrections = storage::similar_corrections(&conn, &spans, 4)?;
         let tz = TimeZone::system();
         let mcp_path = config
@@ -424,14 +476,16 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let digest = chronicle_core::digest::build_digest(
             &spans,
             &tz,
-            &recent,
+            &open,
             &corrections,
             mcp_context.as_deref(),
         );
-        let drafts = chronicle_derive::infer_tasks(&model_path, &digest)?;
-        let tasks = clamp_tasks(drafts, &spans, batch.start_ts, batch.end_ts);
-        let n = tasks.len();
-        storage::store_tasks(&mut conn, batch_id, &tasks)?;
+        let raw = chronicle_derive::infer_intervals(&model_path, &digest)?;
+        let drafts = chronicle_core::merge::sanitize_intervals(raw, open.len());
+        let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, &open);
+        let intervals = clamp_intervals(linked, &spans, batch.start_ts, batch.end_ts);
+        let n = intervals.len();
+        storage::store_derivation(&mut conn, batch_id, &slots, &intervals)?;
         Ok(n)
     })();
     match result {
@@ -448,16 +502,18 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
 }
 
 /// Offsets are minutes from batch start, untrusted model output: clamp into
-/// the batch window, drop empty/inverted tasks, and split any task the model
-/// stretched across a long AFK gap (small models ignore the prompt rule).
-fn clamp_tasks(
-    drafts: Vec<chronicle_derive::TaskDraft>,
+/// the batch window, drop empty/inverted intervals, and split any interval
+/// the model stretched across a long AFK gap (small models ignore the prompt
+/// rule). Pieces keep their task slot, so an AFK split no longer fragments
+/// the task's identity.
+fn clamp_intervals(
+    drafts: Vec<chronicle_core::merge::LinkedInterval>,
     spans: &[chronicle_core::sessionizer::SpanDraft],
     start_ms: i64,
     end_ms: i64,
-) -> Vec<chronicle_core::types::NewTask> {
+) -> Vec<chronicle_core::types::NewInterval> {
     use chronicle_core::sessionizer::SpanKind;
-    use chronicle_core::types::{NewTask, ms_to_ts};
+    use chronicle_core::types::{NewInterval, ms_to_ts};
     const AFK_SPLIT_MS: i64 = 5 * 60_000;
     const MIN_PIECE_MS: i64 = 60_000;
     let gaps: Vec<(i64, i64)> = spans
@@ -469,8 +525,7 @@ fn clamp_tasks(
     for d in drafts {
         let s = (start_ms + d.start_offset_min * 60_000).clamp(start_ms, end_ms);
         let e = (start_ms + d.end_offset_min * 60_000).clamp(start_ms, end_ms);
-        let label = d.label.trim();
-        if label.is_empty() || e <= s {
+        if e <= s {
             continue;
         }
         let mut pieces = Vec::new();
@@ -491,17 +546,16 @@ fn clamp_tasks(
             if piece_end - piece_start < MIN_PIECE_MS {
                 continue;
             }
-            out.push(NewTask {
-                label: label.to_string(),
-                project: d.project.clone().filter(|p| !p.trim().is_empty()),
+            out.push(NewInterval {
+                slot: d.slot,
                 start_ts: ms_to_ts(piece_start),
                 end_ts: ms_to_ts(piece_end),
                 confidence: d.confidence.clamp(0.0, 1.0),
             });
         }
     }
-    // Tasks must not overlap; when the model overlaps anyway, the earlier
-    // start (higher confidence on ties) wins and the later task is trimmed.
+    // Intervals must not overlap; when the model overlaps anyway, the earlier
+    // start (higher confidence on ties) wins and the later one is trimmed.
     out.sort_by(|a, b| {
         a.start_ts
             .cmp(&b.start_ts)
@@ -1065,8 +1119,13 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
     let events = count("SELECT COUNT(*) FROM events WHERE ts >= ?1 AND ts < ?2")?;
     let spans = count("SELECT COUNT(*) FROM spans WHERE start_ts >= ?1 AND start_ts < ?2")?;
     let batches = count("SELECT COUNT(*) FROM batches WHERE start_ts >= ?1 AND start_ts < ?2")?;
-    let tasks = count("SELECT COUNT(*) FROM tasks WHERE start_ts >= ?1 AND start_ts < ?2")?;
-    println!("events: {events}  spans: {spans}  batches: {batches}  tasks: {tasks}");
+    let intervals = count("SELECT COUNT(*) FROM intervals WHERE start_ts >= ?1 AND start_ts < ?2")?;
+    let tasks = count(
+        "SELECT COUNT(DISTINCT task_id) FROM intervals WHERE start_ts >= ?1 AND start_ts < ?2",
+    )?;
+    println!(
+        "events: {events}  spans: {spans}  batches: {batches}  tasks: {tasks}  intervals: {intervals}"
+    );
 
     let mut stmt = conn.prepare(
         "SELECT ts, kind, app, title, idle, url FROM events
@@ -1123,17 +1182,21 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT start_ts, end_ts, label, project, confidence FROM tasks
-         WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
+        "SELECT i.start_ts, i.end_ts, t.id, t.label, t.project, i.confidence, t.source
+         FROM intervals i JOIN tasks t ON t.id = i.task_id
+         WHERE i.start_ts >= ?1 AND i.start_ts < ?2 ORDER BY i.start_ts, i.id",
     )?;
     let mut rows = stmt.query([lo, hi])?;
     while let Some(row) = rows.next()? {
         let (start, end): (i64, i64) = (row.get(0)?, row.get(1)?);
-        let (label, project): (String, Option<String>) = (row.get(2)?, row.get(3)?);
-        let confidence: f64 = row.get(4)?;
+        let task_id: i64 = row.get(2)?;
+        let (label, project): (String, Option<String>) = (row.get(3)?, row.get(4)?);
+        let confidence: f64 = row.get(5)?;
+        let source: String = row.get(6)?;
         let project = project.map(|p| format!(" [{p}]")).unwrap_or_default();
+        let declared = if source == "user" { " (declared)" } else { "" };
         println!(
-            "{} – {}  [task] {label}{project} ({confidence:.2})",
+            "{} – {}  [task #{task_id}] {label}{project}{declared} ({confidence:.2})",
             local(start)?.strftime("%H:%M:%S"),
             local(end)?.strftime("%H:%M:%S"),
         );

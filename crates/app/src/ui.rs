@@ -58,21 +58,46 @@ struct SpanRow {
     kind: String,
 }
 
-struct TaskRow {
-    id: i64,
-    start: Zoned,
-    end: Zoned,
+/// One task identity with its intervals for the shown day (grouped timeline).
+struct TaskGroup {
+    task_id: i64,
     label: String,
     project: Option<String>,
+    declared: bool,
+    intervals: Vec<IntervalRow>,
+    total_ms: i64,
+}
+
+struct IntervalRow {
+    interval_id: i64,
+    start: Zoned,
+    end: Zoned,
     confidence: f64,
 }
 
-/// In-flight label/project edit of one task row; committing writes a
+/// An open task in the "working on" list.
+struct OpenRow {
+    task_id: i64,
+    label: String,
+    project: Option<String>,
+    declared: bool,
+}
+
+/// In-flight label/project edit of one task identity; committing writes a
 /// `corrections` row (M5 few-shot source) and updates the task.
 struct EditState {
     task_id: i64,
     label: String,
     project: String,
+}
+
+/// Deferred mutation collected during rendering, applied after the frame's
+/// borrows end.
+enum Action {
+    Rename(EditState),
+    Declare,
+    Close(i64),
+    Reassign { interval_id: i64, to_task: i64 },
 }
 
 struct TimelineApp {
@@ -82,7 +107,10 @@ struct TimelineApp {
     tz: TimeZone,
     day: civil::Date,
     spans: Vec<SpanRow>,
-    tasks: Vec<TaskRow>,
+    groups: Vec<TaskGroup>,
+    open_tasks: Vec<OpenRow>,
+    new_label: String,
+    new_project: String,
     edit: Option<EditState>,
     loaded_at: Option<Instant>,
     error: Option<String>,
@@ -322,7 +350,10 @@ impl TimelineApp {
             tz,
             day,
             spans: Vec::new(),
-            tasks: Vec::new(),
+            groups: Vec::new(),
+            open_tasks: Vec::new(),
+            new_label: String::new(),
+            new_project: String::new(),
             edit: None,
             loaded_at: None,
             error: None,
@@ -501,12 +532,14 @@ impl TimelineApp {
         }
         self.loaded_at = Some(Instant::now());
         match self.load_spans().and_then(|spans| {
-            let tasks = self.load_tasks()?;
-            Ok((spans, tasks))
+            let groups = self.load_groups()?;
+            let open = self.load_open()?;
+            Ok((spans, groups, open))
         }) {
-            Ok((spans, tasks)) => {
+            Ok((spans, groups, open)) => {
                 self.spans = spans;
-                self.tasks = tasks;
+                self.groups = groups;
+                self.open_tasks = open;
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -527,54 +560,102 @@ impl TimelineApp {
         ))
     }
 
-    fn load_tasks(&mut self) -> anyhow::Result<Vec<TaskRow>> {
+    /// Day's intervals grouped under their task identity, in order of each
+    /// task's first interval.
+    fn load_groups(&mut self) -> anyhow::Result<Vec<TaskGroup>> {
         let (lo, hi) = self.day_range_ms()?;
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
-        let mut stmt = conn.prepare(
-            "SELECT id, start_ts, end_ts, label, project, confidence FROM tasks
-             WHERE start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
-        )?;
-        let mut rows = stmt.query([lo, hi])?;
-        let mut tasks = Vec::new();
-        while let Some(row) = rows.next()? {
-            let (start_ms, end_ms): (i64, i64) = (row.get(1)?, row.get(2)?);
-            tasks.push(TaskRow {
-                id: row.get(0)?,
-                start: chronicle_core::types::ms_to_ts(start_ms).to_zoned(self.tz.clone()),
-                end: chronicle_core::types::ms_to_ts(end_ms).to_zoned(self.tz.clone()),
-                label: row.get(3)?,
-                project: row.get(4)?,
-                confidence: row.get(5)?,
+        let rows = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
+        let mut groups: Vec<TaskGroup> = Vec::new();
+        for t in rows {
+            let start = t.start_ts.to_zoned(self.tz.clone());
+            let end = t.end_ts.to_zoned(self.tz.clone());
+            let dur = t.end_ts.as_millisecond() - t.start_ts.as_millisecond();
+            let group = match groups.iter_mut().find(|g| g.task_id == t.id) {
+                Some(g) => g,
+                None => {
+                    groups.push(TaskGroup {
+                        task_id: t.id,
+                        label: t.label.clone(),
+                        project: t.project.clone(),
+                        declared: t.declared,
+                        intervals: Vec::new(),
+                        total_ms: 0,
+                    });
+                    groups.last_mut().expect("just pushed")
+                }
+            };
+            group.total_ms += dur;
+            group.intervals.push(IntervalRow {
+                interval_id: t.interval_id,
+                start,
+                end,
+                confidence: t.confidence,
             });
         }
-        Ok(tasks)
+        Ok(groups)
     }
 
-    /// Commit an edited task row: no-op if nothing changed, else write the
-    /// correction (which also updates the task) and force a reload.
-    fn apply_correction(&mut self, edit: EditState) {
-        let label = edit.label.trim().to_owned();
-        if label.is_empty() {
-            return;
-        }
-        let project = edit.project.trim();
-        let project = (!project.is_empty()).then_some(project);
-        if let Some(t) = self.tasks.iter().find(|t| t.id == edit.task_id)
-            && t.label == label
-            && t.project.as_deref() == project
-        {
-            return;
-        }
+    fn load_open(&mut self) -> anyhow::Result<Vec<OpenRow>> {
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        let open = chronicle_core::storage::open_tasks(conn, 8)?;
+        Ok(open
+            .into_iter()
+            .map(|t| OpenRow {
+                task_id: t.id,
+                label: t.label,
+                project: t.project,
+                declared: t.declared,
+            })
+            .collect())
+    }
+
+    fn apply_action(&mut self, action: Action) {
         let Some(conn) = self.conn.as_mut() else {
             return;
         };
-        match chronicle_core::storage::insert_correction(
-            conn,
-            jiff::Timestamp::now(),
-            edit.task_id,
-            &label,
-            project,
-        ) {
+        let now = jiff::Timestamp::now();
+        let result = match action {
+            Action::Rename(edit) => {
+                let label = edit.label.trim().to_owned();
+                if label.is_empty() {
+                    return;
+                }
+                let project = edit.project.trim();
+                let project = (!project.is_empty()).then_some(project);
+                // No-op if nothing changed.
+                if self
+                    .groups
+                    .iter()
+                    .find(|g| g.task_id == edit.task_id)
+                    .is_some_and(|g| g.label == label && g.project.as_deref() == project)
+                {
+                    return;
+                }
+                chronicle_core::storage::insert_correction(conn, now, edit.task_id, &label, project)
+            }
+            Action::Declare => {
+                let label = self.new_label.trim().to_owned();
+                if label.is_empty() {
+                    return;
+                }
+                let project = self.new_project.trim();
+                let project = (!project.is_empty()).then_some(project);
+                let result = chronicle_core::storage::insert_user_task(conn, now, &label, project)
+                    .map(|_| ());
+                if result.is_ok() {
+                    self.new_label.clear();
+                    self.new_project.clear();
+                }
+                result
+            }
+            Action::Close(task_id) => chronicle_core::storage::close_task(conn, now, task_id),
+            Action::Reassign {
+                interval_id,
+                to_task,
+            } => chronicle_core::storage::reassign_interval(conn, now, interval_id, to_task),
+        };
+        match result {
             Ok(()) => self.loaded_at = None,
             Err(e) => self.error = Some(e.to_string()),
         }
@@ -637,7 +718,7 @@ impl eframe::App for TimelineApp {
                     }
                     ui.weak(format!(
                         "{} tasks \u{b7} {} spans",
-                        self.tasks.len(),
+                        self.groups.len(),
                         self.spans.len()
                     ));
                 });
@@ -647,7 +728,40 @@ impl eframe::App for TimelineApp {
         self.chat_panel_ui(ui);
         self.settings_window(ui.ctx());
 
-        let mut pending: Option<EditState> = None;
+        // Flat row list for the virtual scroller: working-on section, then
+        // the day's tasks grouped with their intervals, then raw spans.
+        enum RowKind {
+            WorkingHeader,
+            DeclareForm,
+            Open(usize),
+            TasksHeader,
+            TaskHeader(usize),
+            Interval(usize, usize),
+            SpansHeader,
+            Span(usize),
+        }
+        let mut rows: Vec<RowKind> = vec![RowKind::WorkingHeader, RowKind::DeclareForm];
+        rows.extend((0..self.open_tasks.len()).map(RowKind::Open));
+        rows.push(RowKind::TasksHeader);
+        for (g, group) in self.groups.iter().enumerate() {
+            rows.push(RowKind::TaskHeader(g));
+            rows.extend((0..group.intervals.len()).map(|i| RowKind::Interval(g, i)));
+        }
+        rows.push(RowKind::SpansHeader);
+        rows.extend((0..self.spans.len()).map(RowKind::Span));
+
+        // Reassignment targets: every task in sight (open + today's).
+        let mut candidates: Vec<(i64, String)> = Vec::new();
+        for t in &self.open_tasks {
+            candidates.push((t.task_id, t.label.clone()));
+        }
+        for g in &self.groups {
+            if !candidates.iter().any(|(id, _)| *id == g.task_id) {
+                candidates.push((g.task_id, g.label.clone()));
+            }
+        }
+
+        let mut pending: Option<Action> = None;
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
@@ -656,42 +770,72 @@ impl eframe::App for TimelineApp {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 return;
             }
-            if self.spans.is_empty() && self.tasks.is_empty() {
-                ui.weak("no data for this day");
-                return;
-            }
-            // Rows: tasks section (header + rows), then spans section.
-            let n_tasks = self.tasks.len();
-            let n_rows = 1 + n_tasks + 1 + self.spans.len();
             let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+            let groups = &self.groups;
+            let open_tasks = &self.open_tasks;
+            let spans = &self.spans;
+            let edit = &mut self.edit;
+            let new_label = &mut self.new_label;
+            let new_project = &mut self.new_project;
             egui::ScrollArea::vertical().auto_shrink(false).show_rows(
                 ui,
                 row_height,
-                n_rows,
+                rows.len(),
                 |ui, range| {
                     for i in range {
-                        if i == 0 {
-                            if n_tasks == 0 {
-                                ui.horizontal(|ui| {
-                                    ui.strong("Tasks");
-                                    ui.weak("none derived yet");
-                                });
-                            } else {
-                                ui.strong("Tasks");
+                        match rows[i] {
+                            RowKind::WorkingHeader => {
+                                ui.strong("Working on");
                             }
-                        } else if i <= n_tasks {
-                            task_row(ui, &self.tasks[i - 1], &mut self.edit, &mut pending);
-                        } else if i == n_tasks + 1 {
-                            ui.strong("Spans");
-                        } else {
-                            span_row(ui, &self.spans[i - n_tasks - 2]);
+                            RowKind::DeclareForm => {
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(new_label)
+                                            .desired_width(240.0)
+                                            .hint_text("declare a task\u{2026}"),
+                                    );
+                                    ui.add(
+                                        egui::TextEdit::singleline(new_project)
+                                            .desired_width(110.0)
+                                            .hint_text("project"),
+                                    );
+                                    if ui.button("add").clicked() {
+                                        pending = Some(Action::Declare);
+                                    }
+                                });
+                            }
+                            RowKind::Open(o) => open_row(ui, &open_tasks[o], &mut pending),
+                            RowKind::TasksHeader => {
+                                if groups.is_empty() {
+                                    ui.horizontal(|ui| {
+                                        ui.strong("Tasks");
+                                        ui.weak("none derived yet");
+                                    });
+                                } else {
+                                    ui.strong("Tasks");
+                                }
+                            }
+                            RowKind::TaskHeader(g) => {
+                                task_header_row(ui, &groups[g], edit, &mut pending)
+                            }
+                            RowKind::Interval(g, iv) => interval_row(
+                                ui,
+                                &groups[g],
+                                &groups[g].intervals[iv],
+                                &candidates,
+                                &mut pending,
+                            ),
+                            RowKind::SpansHeader => {
+                                ui.strong("Spans");
+                            }
+                            RowKind::Span(s) => span_row(ui, &spans[s]),
                         }
                     }
                 },
             );
         });
-        if let Some(edit) = pending {
-            self.apply_correction(edit);
+        if let Some(action) = pending {
+            self.apply_action(action);
         }
 
         // Only scheduled wake-up; no unconditional repaint.
@@ -699,23 +843,32 @@ impl eframe::App for TimelineApp {
     }
 }
 
-fn task_row(
-    ui: &mut egui::Ui,
-    task: &TaskRow,
-    edit: &mut Option<EditState>,
-    pending: &mut Option<EditState>,
-) {
-    let time = format!(
-        "{}\u{2013}{}",
-        task.start.strftime("%H:%M:%S"),
-        task.end.strftime("%H:%M:%S")
-    );
-    let dur =
-        fmt_dur(task.end.timestamp().as_millisecond() - task.start.timestamp().as_millisecond());
+fn open_row(ui: &mut egui::Ui, task: &OpenRow, pending: &mut Option<Action>) {
     ui.horizontal(|ui| {
-        ui.monospace(time);
-        ui.weak(format!("{dur:>7}"));
-        if edit.as_ref().is_some_and(|e| e.task_id == task.id) {
+        ui.add_space(12.0);
+        ui.strong(&task.label);
+        if let Some(project) = &task.project {
+            ui.label(project);
+        }
+        if task.declared {
+            ui.weak("(declared)");
+        }
+        if ui.small_button("close").clicked() {
+            *pending = Some(Action::Close(task.task_id));
+        }
+    });
+}
+
+/// Group header: identity, total time, rename edit (writes a correction).
+fn task_header_row(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    edit: &mut Option<EditState>,
+    pending: &mut Option<Action>,
+) {
+    ui.horizontal(|ui| {
+        ui.weak(format!("{:>7}", fmt_dur(group.total_ms)));
+        if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
             let e = edit.as_mut().expect("checked above");
             ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
             ui.add(
@@ -723,26 +876,69 @@ fn task_row(
                     .desired_width(110.0)
                     .hint_text("project"),
             );
-            if ui.button("save").clicked() {
-                *pending = edit.take();
+            if ui.button("save").clicked()
+                && let Some(e) = edit.take()
+            {
+                *pending = Some(Action::Rename(e));
             }
             if ui.button("cancel").clicked() {
                 *edit = None;
             }
         } else {
-            ui.strong(&task.label);
-            if let Some(project) = &task.project {
+            ui.strong(&group.label);
+            if let Some(project) = &group.project {
                 ui.label(project);
             }
-            ui.weak(format!("{:.0}%", task.confidence * 100.0));
+            if group.declared {
+                ui.weak("(declared)");
+            }
             if ui.small_button("edit").clicked() {
                 *edit = Some(EditState {
-                    task_id: task.id,
-                    label: task.label.clone(),
-                    project: task.project.clone().unwrap_or_default(),
+                    task_id: group.task_id,
+                    label: group.label.clone(),
+                    project: group.project.clone().unwrap_or_default(),
                 });
             }
         }
+    });
+}
+
+/// One interval under its task header; "move" reassigns it to another task
+/// (a 'reassign' correction).
+fn interval_row(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    interval: &IntervalRow,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
+    let time = format!(
+        "{}\u{2013}{}",
+        interval.start.strftime("%H:%M:%S"),
+        interval.end.strftime("%H:%M:%S")
+    );
+    let dur = fmt_dur(
+        interval.end.timestamp().as_millisecond() - interval.start.timestamp().as_millisecond(),
+    );
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.monospace(time);
+        ui.weak(format!("{dur:>7}"));
+        ui.weak(format!("{:.0}%", interval.confidence * 100.0));
+        ui.menu_button("move", |ui| {
+            for (task_id, label) in candidates {
+                if *task_id == group.task_id {
+                    continue;
+                }
+                if ui.button(label).clicked() {
+                    *pending = Some(Action::Reassign {
+                        interval_id: interval.interval_id,
+                        to_task: *task_id,
+                    });
+                    ui.close();
+                }
+            }
+        });
     });
 }
 

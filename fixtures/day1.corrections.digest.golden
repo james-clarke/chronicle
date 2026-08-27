@@ -7,15 +7,13 @@ active 33m00s · afk 7m00s · 7 switches
 
 ## Timeline (minute offsets from window start)
 - 0–6m Terminator: vim src/main.rs
-- 6–8m firefox: Rust std docs — Mozilla Firefox
+- 6–7m firefox: Rust std docs — Mozilla Firefox + Terminator: vim src/main.rs
+- 7–8m firefox: Rust std docs — Mozilla Firefox
 - 8–15m firefox: std::sync::mpsc - Rust — Mozilla Firefox
 - 15–20m Terminator: vim src/main.rs
 - 20–28m Terminator: cargo test
 - 28–35m afk
 - 35–40m Terminator: cargo test: 42 passed
-
-## Recent task labels
-(none)
 
 ## Past corrections (user renamed similar work)
 - "working in terminal" → "hacking on chronicle capture" (project: none → chronicle)

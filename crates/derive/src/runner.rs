@@ -13,29 +13,17 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
-const GRAMMAR: &str = include_str!("../../../grammars/task_output.gbnf");
-const PROMPT: &str = include_str!("../../../prompts/derive_v2.txt");
+const GRAMMAR: &str = include_str!("../../../grammars/task_output_v3.gbnf");
+const PROMPT: &str = include_str!("../../../prompts/derive_v3.txt");
 
 const N_CTX: u32 = 4096;
 const N_BATCH: u32 = 512;
 const MAX_GEN: usize = 900;
 
-#[derive(Debug, serde::Deserialize)]
-pub struct DeriveOutput {
-    pub tasks: Vec<TaskDraft>,
-}
+pub use chronicle_core::types::{DeriveOutput, IntervalDraft};
 
-/// Offsets are minutes from the start of the digest window.
-#[derive(Debug, serde::Deserialize)]
-pub struct TaskDraft {
-    pub label: String,
-    pub project: Option<String>,
-    pub start_offset_min: i64,
-    pub end_offset_min: i64,
-    pub confidence: f64,
-}
-
-pub fn infer_tasks(model_path: &Path, digest: &str) -> anyhow::Result<Vec<TaskDraft>> {
+/// Raw model intervals; callers sanitize + link (chronicle_core::merge).
+pub fn infer_intervals(model_path: &Path, digest: &str) -> anyhow::Result<Vec<IntervalDraft>> {
     // llama.cpp/ggml log via a C callback straight to stderr unless redirected;
     // send_logs_to_tracing must only ever run once per process (bench loops).
     static LLAMA_LOGS: std::sync::Once = std::sync::Once::new();
@@ -106,8 +94,8 @@ pub fn infer_tasks(model_path: &Path, digest: &str) -> anyhow::Result<Vec<TaskDr
     }
 
     let parsed: DeriveOutput = serde_json::from_str(&out)
-        .with_context(|| format!("model output is not valid task JSON: {out}"))?;
-    Ok(parsed.tasks)
+        .with_context(|| format!("model output is not valid interval JSON: {out}"))?;
+    Ok(parsed.intervals)
 }
 
 fn tokenize_prompt(

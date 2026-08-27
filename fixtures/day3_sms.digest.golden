@@ -1,0 +1,38 @@
+# Activity 2026-08-27 13:15–13:40 (UTC)
+active 25m04s · afk 0s · 83 switches
+
+## Apps by time
+- Terminator: 13m13s
+- Google-chrome: 9m11s
+- chronicle: 44s
+
+## Sites by time
+- us-east-1.console.aws.amazon.com/rds: 3m08s
+- dashboard.heroku.com/apps: 1m30s
+- staging-mailer.acmeapi.example/control_panel: 1m22s
+- northwind-memberships.acmeapi.example/control_panel: 21s
+- chromewebstore.google.com/detail: 9s
+
+## Timeline (minute offsets from window start)
+- 0–1m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+- 1–2m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome + Google-chrome: Contoso Control Panel - Google Chrome
+- 2–3m chronicle: Chronicle + Terminator: ✳ M7 human-verified progress
+- 3–4m Terminator: ✳ M7 human-verified progress
+- 4–5m Terminator: ◐ M7 human-verified progress + Google-chrome: northwind-memberships | Contoso Dashboard
+- 5–6m Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM + Terminator: [No Name] - - VIM
+- 6–8m Terminator: ✳ Claude Code
+- 8–9m Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM + Terminator: [No Name] - - VIM
+- 9–10m Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM + Google-chrome: Contoso Control Panel
+- 10–11m Terminator: ✳ Campaign SMS sending failure
+- 11–12m Terminator: sam@workstation:~/dev/contoso + Terminator: ✳ Campaign SMS sending failure
+- 12–13m (rapid app switching)
+- 13–14m Terminator: local.sh (~/dev/mailer) - VIM + Google-chrome: Contoso Control Panel
+- 14–17m Google-chrome: Aurora and RDS | us-east-1
+- 17–19m Terminator: ✳ Campaign SMS sending failure
+- 19–20m Terminator: ./local.sh shell_plus + Terminator: local.sh (~/dev/mailer) - VIM
+- 20–21m Terminator: ./local.sh shell_plus
+- 21–22m Google-chrome: northwind-qa · Activity | Heroku - Google Chrome + Google-chrome: northwind-memberships · Settings | Heroku
+- 22–23m Terminator: [No Name] - - VIM
+- 23–24m Google-chrome: Contoso Control Panel
+- 24–25m Google-chrome: northwind-memberships · Settings | Heroku
+- 25–26m (rapid app switching)

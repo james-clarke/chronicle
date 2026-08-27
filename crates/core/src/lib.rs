@@ -1,6 +1,8 @@
 pub mod chat;
 pub mod config;
 pub mod digest;
+pub mod eval;
+pub mod merge;
 pub mod sessionizer;
 pub mod storage;
 pub mod timeref;

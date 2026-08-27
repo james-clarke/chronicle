@@ -1,0 +1,28 @@
+{
+  "open_tasks": [
+    {
+      "label": "fixing SMS campaign sending failures",
+      "project": "mailer",
+      "declared": true
+    },
+    {
+      "label": "reviewing and refining chronicle task grouping",
+      "project": "chronicle"
+    }
+  ],
+  "groups": [
+    {
+      "name": "sms",
+      "ranges": [[6, 13], [19, 23], [23, 26]],
+      "project": "mailer",
+      "label_any": ["sms"]
+    },
+    {
+      "name": "chronicle",
+      "ranges": [[3, 5]],
+      "project": "chronicle"
+    }
+  ],
+  "forbid_label_tokens": ["M7", "northwind"],
+  "max_tasks": 4
+}

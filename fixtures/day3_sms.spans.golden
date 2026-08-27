@@ -1,0 +1,83 @@
+13:15:01–13:15:02 [context-switching]
+13:15:02–13:16:12 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+13:16:12–13:16:14 [context-switching]
+13:16:14–13:16:33 [focus] Google-chrome: Contoso Control Panel - Google Chrome
+13:16:33–13:16:48 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+13:16:48–13:16:57 [focus] Terminator: ✳ M7 human-verified progress
+13:16:57–13:16:59 [context-switching]
+13:16:59–13:17:31 [focus] chronicle: Chronicle
+13:17:31–13:17:34 [context-switching]
+13:17:34–13:18:00 [focus] Terminator: ✳ M7 human-verified progress
+13:18:00–13:18:01 [context-switching]
+13:18:01–13:18:13 [focus] chronicle: Chronicle
+13:18:13–13:18:15 [context-switching]
+13:18:15–13:18:34 [focus] Terminator: ✳ M7 human-verified progress
+13:18:34–13:18:41 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+13:18:41–13:18:47 [focus] Google-chrome: Extensions - Google Chrome
+13:18:47–13:18:52 [context-switching]
+13:18:52–13:19:02 [focus] Google-chrome: ActivityWatch Web Watcher - Chrome Web Store <https://chromewebstore.google.com/detail/activitywatch-web-watcher/nglaklhklhcoonedhgnpgddginnjdadi?hl=en-US&utm_source=ext_sidebar>
+13:19:02–13:19:03 [context-switching]
+13:19:03–13:19:37 [focus] Terminator: ◐ M7 human-verified progress
+13:19:37–13:19:59 [focus] Google-chrome: northwind-memberships | Contoso Dashboard <https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/>
+13:19:59–13:20:10 [context-switching]
+13:20:10–13:20:33 [focus] Terminator: [No Name] - - VIM
+13:20:33–13:21:09 [focus] Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM
+13:21:09–13:21:14 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+13:21:14–13:21:17 [context-switching]
+13:21:17–13:22:10 [focus] Terminator: ✳ Claude Code
+13:22:10–13:22:11 [context-switching]
+13:22:11–13:22:29 [focus] Terminator: ✳ Claude Code
+13:22:29–13:22:42 [focus] Terminator: ◑ Campaign SMS sending failure
+13:22:42–13:22:56 [focus] Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM
+13:22:56–13:23:18 [focus] Terminator: [No Name] - - VIM
+13:23:18–13:23:26 [focus] Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM
+13:23:26–13:23:31 [focus] Terminator: sam@workstation:~/dev/contoso
+13:23:31–13:23:47 [focus] Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM
+13:23:47–13:23:52 [context-switching]
+13:23:52–13:23:58 [focus] Terminator: models.md (~/dev/mailer/docs/state) - VIM
+13:23:58–13:24:25 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
+13:24:25–13:24:28 [context-switching]
+13:24:28–13:25:08 [focus] Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM
+13:25:08–13:26:21 [focus] Terminator: ✳ Campaign SMS sending failure
+13:26:21–13:26:26 [context-switching]
+13:26:26–13:27:09 [focus] Terminator: sam@workstation:~/dev/contoso
+13:27:09–13:27:16 [focus] Terminator: ✳ Campaign SMS sending failure
+13:27:16–13:27:46 [context-switching]
+13:27:46–13:27:53 [focus] Terminator: models.md (~/dev/mailer/docs/state) - VIM
+13:27:53–13:27:54 [context-switching]
+13:27:54–13:28:04 [focus] Terminator: sam@workstation:~/dev/mailer
+13:28:04–13:28:26 [focus] Terminator: local.sh (~/dev/mailer) - VIM
+13:28:26–13:28:33 [context-switching]
+13:28:33–13:28:38 [focus] Google-chrome: Dashboard | Aurora and RDS | us-east-1 - Google Chrome
+13:28:38–13:28:54 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
+13:28:54–13:32:03 [focus] Google-chrome: Aurora and RDS | us-east-1 <https://us-east-1.console.aws.amazon.com/rds/home?region=us-east-1#database:id=mailerdb-staging;is-cluster=false;tab=connectivity>
+13:32:03–13:32:05 [context-switching]
+13:32:05–13:33:26 [focus] Terminator: ✳ Campaign SMS sending failure
+13:33:26–13:33:41 [focus] Terminator: local.sh (~/dev/mailer) - VIM
+13:33:41–13:33:46 [focus] Terminator: sam@workstation:~/dev/mailer
+13:33:46–13:34:06 [focus] Terminator: local.sh.template (~/dev/mailer) - VIM
+13:34:06–13:34:08 [context-switching]
+13:34:08–13:34:30 [focus] Terminator: local.sh (~/dev/mailer) - VIM
+13:34:30–13:34:36 [focus] Terminator: sam@workstation:~/dev/mailer
+13:34:36–13:35:09 [focus] Terminator: ./local.sh shell_plus
+13:35:09–13:35:11 [context-switching]
+13:35:11–13:35:55 [focus] Terminator: ./local.sh shell_plus
+13:35:55–13:36:02 [context-switching]
+13:36:02–13:36:09 [focus] Google-chrome: northwind-qa · Activity | Heroku - Google Chrome
+13:36:09–13:36:11 [context-switching]
+13:36:11–13:36:36 [focus] Google-chrome: northwind-qa · Activity | Heroku - Google Chrome
+13:36:36–13:36:58 [focus] Google-chrome: northwind-memberships · Settings | Heroku <https://dashboard.heroku.com/apps/northwind-memberships/settings>
+13:36:58–13:37:07 [context-switching]
+13:37:07–13:37:14 [focus] Terminator: [No Name] - - VIM
+13:37:14–13:37:19 [context-switching]
+13:37:19–13:37:26 [focus] Terminator: [No Name] - - VIM
+13:37:26–13:37:27 [context-switching]
+13:37:27–13:37:37 [focus] Terminator: [No Name] - - VIM
+13:37:37–13:37:45 [focus] Terminator: sam@workstation:~/dev/contoso
+13:37:45–13:37:52 [focus] Terminator: contoso.py (~/dev/contoso/contoso/settings) - VIM
+13:37:52–13:38:31 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
+13:38:31–13:38:37 [focus] Terminator: contoso.py + (~/dev/contoso/contoso/settings) - VIM
+13:38:37–13:38:45 [focus] Terminator: sam@workstation:~/dev/contoso
+13:38:45–13:38:55 [focus] Terminator: acme-memberships.py (~/dev/contoso/contoso/settings) - VIM
+13:38:55–13:40:03 [focus] Google-chrome: northwind-memberships · Settings | Heroku <https://dashboard.heroku.com/apps/northwind-memberships/settings>
+13:40:03–13:40:06 [context-switching]

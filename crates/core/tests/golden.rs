@@ -134,6 +134,34 @@ fn day2_web_per_site_spans() {
     check_golden("day2_web.digest.golden", &digest);
 }
 
+// Derive v3 eval corpus: two real captured windows (live batches 8 and 9,
+// 2026-08-27 morning) whose v2 derivations produced the failures the
+// task-identity layer must fix — duplicate labels, cross-tab token bleed,
+// identity fragmentation. Digest mirrors the bench fixture path exactly:
+// whole stream, stream end = last event, no batch assignment.
+fn eval_digest(fixture: &str) -> String {
+    let config = Config::default();
+    let events = load_fixture(&format!("{fixture}.jsonl"));
+    let stream_end = events.last().expect("fixture has events").ts;
+    let spans = sessionize(&events, stream_end, &config);
+    check_golden(&format!("{fixture}.spans.golden"), &render_spans(&spans));
+    build_digest(&spans, &TimeZone::UTC, &[], &[], None)
+}
+
+#[test]
+fn day3_sms_goldens() {
+    let digest = eval_digest("day3_sms");
+    assert!(approx_tokens(&digest) <= MAX_TOKENS);
+    check_golden("day3_sms.digest.golden", &digest);
+}
+
+#[test]
+fn day4_heroku_goldens() {
+    let digest = eval_digest("day4_heroku");
+    assert!(approx_tokens(&digest) <= MAX_TOKENS);
+    check_golden("day4_heroku.digest.golden", &digest);
+}
+
 // M5 acceptance: a correction on an earlier, similar batch changes the next
 // batch's digest (the deterministic half of "changes the output"); an
 // unrelated correction does not surface.
@@ -141,7 +169,7 @@ fn day2_web_per_site_spans() {
 fn correction_changes_next_digest() {
     use chronicle_core::sessionizer::BatchDraft;
     use chronicle_core::storage;
-    use chronicle_core::types::{NewTask, ms_to_ts, ts_to_ms};
+    use chronicle_core::types::{NewInterval, TaskSlot, ms_to_ts, ts_to_ms};
 
     let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m5_corrections.db");
     for suffix in ["", "-wal", "-shm"] {
@@ -205,12 +233,15 @@ fn correction_changes_next_digest() {
         let batch_id: i64 = conn
             .query_row("SELECT MAX(id) FROM batches", [], |r| r.get(0))
             .unwrap();
-        storage::store_tasks(
+        storage::store_derivation(
             &mut conn,
             batch_id,
-            &[NewTask {
+            &[TaskSlot::New {
                 label: label.into(),
                 project: None,
+            }],
+            &[NewInterval {
+                slot: 0,
                 start_ts: batch.start,
                 end_ts: batch.end,
                 confidence: 0.5,
@@ -218,9 +249,11 @@ fn correction_changes_next_digest() {
         )
         .unwrap();
         let task_id: i64 = conn
-            .query_row("SELECT id FROM tasks WHERE batch_id=?1", [batch_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT task_id FROM intervals WHERE batch_id=?1",
+                [batch_id],
+                |r| r.get(0),
+            )
             .unwrap();
         storage::insert_correction(&mut conn, batch.end, task_id, new_label, new_project).unwrap();
         // The correction also applies to the task row itself.
@@ -275,7 +308,7 @@ fn retention_prune() {
     )
     .unwrap();
 
-    // Batch 1: old, uncorrected — span, task, and the batch itself all go.
+    // Batch 1: old, uncorrected — span, interval, task, and batch all go.
     // Batch 2: old, but its task is corrected — task and batch survive.
     // Batch 3: fresh — untouched.
     for (id, start, end) in [
@@ -295,16 +328,21 @@ fn retention_prune() {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO tasks (batch_id, label, start_ts, end_ts, confidence)
-             VALUES (?1, 'ancienttask', ?2, ?3, 0.5)",
+            "INSERT INTO tasks (id, label, status, source, created_ts)
+             VALUES (?1, 'ancienttask', 'open', 'derived', ?2)",
+            [id, start],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (?1, ?1, ?2, ?3, 0.5)",
             [id, start, end],
         )
         .unwrap();
     }
-    let task2: i64 = conn
-        .query_row("SELECT id FROM tasks WHERE batch_id=2", [], |r| r.get(0))
-        .unwrap();
-    storage::insert_correction(&mut conn, ms_to_ts(old), task2, "kept task", Some("proj")).unwrap();
+    // An old user-declared task with no intervals is never pruned.
+    storage::insert_user_task(&conn, ms_to_ts(old), "declared goal", None).unwrap();
+    storage::insert_correction(&mut conn, ms_to_ts(old), 2, "kept task", Some("proj")).unwrap();
 
     conn.execute(
         "INSERT INTO chat_messages (ts, role, content) VALUES (?1, 'user', 'old'), (?2, 'user', 'new')",
@@ -323,16 +361,25 @@ fn retention_prune() {
         "only the fresh span survives"
     );
     assert_eq!(
-        count("SELECT count(*) FROM tasks"),
-        2,
-        "corrected old task + fresh task"
+        count("SELECT count(*) FROM intervals"),
+        1,
+        "only the fresh interval survives"
     );
     assert_eq!(
-        count("SELECT count(*) FROM batches WHERE id=1"),
-        0,
-        "unreferenced old batch pruned"
+        count("SELECT count(*) FROM tasks"),
+        3,
+        "corrected old task + fresh task + declared task"
     );
-    assert_eq!(count("SELECT count(*) FROM batches"), 2);
+    assert_eq!(
+        count("SELECT count(*) FROM tasks WHERE source='user'"),
+        1,
+        "user-declared tasks are never pruned"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM batches"),
+        1,
+        "only the fresh, still-referenced batch survives"
+    );
     assert_eq!(
         count("SELECT count(*) FROM corrections"),
         1,

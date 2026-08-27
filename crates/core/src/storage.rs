@@ -7,7 +7,8 @@ use rusqlite_migration::{M, Migrations};
 
 use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
 use crate::types::{
-    CaptureEvent, Correction, Event, FocusEvent, NewTask, Task, ms_to_ts, ts_to_ms,
+    CaptureEvent, Correction, Event, FocusEvent, NewInterval, OpenTask, Task, TaskSlot, ms_to_ts,
+    ts_to_ms,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +26,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/001_schema.sql")),
         M::up(include_str!("../migrations/002_corrections_fts.sql")),
         M::up(include_str!("../migrations/003_spans_url_meta.sql")),
+        M::up(include_str!("../migrations/004_task_identity.sql")),
     ])
 });
 
@@ -37,9 +39,13 @@ pub fn open(path: &Path) -> Result<Connection, StorageError> {
     // an already-populated db (flipping it later requires a full VACUUM).
     conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
     conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(Duration::from_secs(5))?;
+    // Foreign keys OFF during migrations (bundled sqlite defaults them ON):
+    // 004 rebuilds `tasks` under live children, which enforcement would
+    // reject mid-transaction.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
     MIGRATIONS.to_latest(&mut conn)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
 }
 
@@ -257,18 +263,24 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
 /// Retention: delete rows fully older than `cutoff_ms`, at most `batch` rows
 /// per statement (one implicit transaction each) so a large backlog never
 /// holds a long write lock. FTS indexes stay in sync via the AFTER DELETE
-/// triggers. Corrections are user teaching data and are never pruned; a task
-/// referenced by one is kept as its context (and the FK requires it), as is
-/// a batch still referenced by surviving spans or tasks.
+/// triggers. Corrections are user teaching data and are never pruned; an
+/// interval or task referenced by one is kept as its context (and the FK
+/// requires it), user-declared tasks are never pruned, and a batch survives
+/// while spans or intervals still reference it.
 pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
-    const STMTS: [&str; 5] = [
+    const STMTS: [&str; 6] = [
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
-        "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE end_ts < ?1 \
+        "DELETE FROM intervals WHERE id IN (SELECT id FROM intervals WHERE end_ts < ?1 \
+         AND id NOT IN (SELECT interval_id FROM corrections WHERE interval_id IS NOT NULL) \
+         LIMIT ?2)",
+        "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE created_ts < ?1 \
+         AND source='derived' \
+         AND id NOT IN (SELECT task_id FROM intervals) \
          AND id NOT IN (SELECT task_id FROM corrections) LIMIT ?2)",
         "DELETE FROM batches WHERE id IN (SELECT id FROM batches WHERE end_ts < ?1 \
          AND id NOT IN (SELECT batch_id FROM spans WHERE batch_id IS NOT NULL) \
-         AND id NOT IN (SELECT batch_id FROM tasks) LIMIT ?2)",
+         AND id NOT IN (SELECT batch_id FROM intervals) LIMIT ?2)",
         "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE ts < ?1 LIMIT ?2)",
     ];
     let mut total = 0u64;
@@ -292,50 +304,164 @@ pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, Sto
     Ok(total)
 }
 
-/// Last `n` task labels ending at or before `before_ms`, newest first
-/// (digest continuity hint).
-pub fn recent_labels_before(
-    conn: &Connection,
-    before_ms: i64,
-    n: usize,
-) -> Result<Vec<String>, StorageError> {
-    let mut stmt =
-        conn.prepare("SELECT label FROM tasks WHERE end_ts <= ?1 ORDER BY end_ts DESC LIMIT ?2")?;
-    let rows = stmt.query_map(params![before_ms, n as i64], |r| r.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+/// Open tasks offered to the model for linking: user-declared first (stable
+/// declaration order), then derived-open by most recent interval, `cap` total.
+pub fn open_tasks(conn: &Connection, cap: usize) -> Result<Vec<OpenTask>, StorageError> {
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT id, label, project FROM tasks
+         WHERE status='open' AND source='user' ORDER BY created_ts, id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    for row in rows {
+        let (id, label, project) = row?;
+        out.push(OpenTask {
+            id,
+            label,
+            project,
+            declared: true,
+        });
+    }
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.label, t.project FROM tasks t
+         JOIN intervals i ON i.task_id = t.id
+         WHERE t.status='open' AND t.source='derived'
+         GROUP BY t.id ORDER BY MAX(i.end_ts) DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([cap as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    for row in rows {
+        if out.len() >= cap {
+            break;
+        }
+        let (id, label, project) = row?;
+        out.push(OpenTask {
+            id,
+            label,
+            project,
+            declared: false,
+        });
+    }
+    Ok(out)
 }
 
-/// Replace the batch's tasks and mark it done. Replacing (not appending)
-/// keeps a retried batch idempotent.
-pub fn store_tasks(
+/// Declare a task the user is working on. Returns its id.
+pub fn insert_user_task(
+    conn: &Connection,
+    ts: jiff::Timestamp,
+    label: &str,
+    project: Option<&str>,
+) -> Result<i64, StorageError> {
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, source, created_ts)
+         VALUES (?1, ?2, 'open', 'user', ?3)",
+        params![label, project, ts_to_ms(ts)],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn close_task(
+    conn: &Connection,
+    ts: jiff::Timestamp,
+    task_id: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE tasks SET status='closed', closed_ts=?1 WHERE id=?2",
+        params![ts_to_ms(ts), task_id],
+    )?;
+    Ok(())
+}
+
+/// Guard shared by re-derive and reassign: a derived task that lost its last
+/// interval and has no corrections has no reason to exist.
+const DELETE_ORPHAN_TASKS: &str = "DELETE FROM tasks WHERE source='derived' \
+     AND id NOT IN (SELECT task_id FROM intervals) \
+     AND id NOT IN (SELECT task_id FROM corrections)";
+
+/// Replace the batch's derived intervals and mark it done. `New` slots become
+/// task identity rows (created_ts = their earliest interval); derived tasks
+/// orphaned by the replace are removed. Replacing keeps a retried batch
+/// idempotent.
+pub fn store_derivation(
     conn: &mut Connection,
     batch_id: i64,
-    tasks: &[NewTask],
+    slots: &[TaskSlot],
+    intervals: &[NewInterval],
 ) -> Result<(), StorageError> {
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM tasks WHERE batch_id=?1", [batch_id])?;
-    for t in tasks {
+    tx.execute("DELETE FROM intervals WHERE batch_id=?1", [batch_id])?;
+    let mut ids: Vec<Option<i64>> = Vec::with_capacity(slots.len());
+    for (i, slot) in slots.iter().enumerate() {
+        match slot {
+            TaskSlot::Existing(id) => ids.push(Some(*id)),
+            TaskSlot::New { label, project } => {
+                let created = intervals
+                    .iter()
+                    .filter(|iv| iv.slot == i)
+                    .map(|iv| ts_to_ms(iv.start_ts))
+                    .min();
+                // A slot no interval survived (clamp dropped them) creates nothing.
+                let Some(created) = created else {
+                    ids.push(None);
+                    continue;
+                };
+                tx.execute(
+                    "INSERT INTO tasks (label, project, status, source, created_ts)
+                     VALUES (?1, ?2, 'open', 'derived', ?3)",
+                    params![label, project, created],
+                )?;
+                ids.push(Some(tx.last_insert_rowid()));
+            }
+        }
+    }
+    for iv in intervals {
+        let Some(Some(task_id)) = ids.get(iv.slot) else {
+            continue;
+        };
         tx.execute(
-            "INSERT INTO tasks (batch_id, label, project, start_ts, end_ts, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
+                task_id,
                 batch_id,
-                t.label,
-                t.project,
-                ts_to_ms(t.start_ts),
-                ts_to_ms(t.end_ts),
-                t.confidence
+                ts_to_ms(iv.start_ts),
+                ts_to_ms(iv.end_ts),
+                iv.confidence
             ],
         )?;
     }
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.execute("UPDATE batches SET status='done' WHERE id=?1", [batch_id])?;
     tx.commit()?;
     Ok(())
 }
 
-/// Record a user edit of a task's label/project and apply it to the task row.
-/// The correction stores an FTS-searchable snapshot of the span context the
-/// task covered, so future batches with similar activity can retrieve it.
+/// Focus spans overlapping any of the task's intervals, as "app title" lines
+/// (FTS-searchable snapshot of what the corrected work looked like).
+fn task_span_ctx(tx: &rusqlite::Transaction, task_id: i64) -> Result<String, StorageError> {
+    let mut ctx = String::new();
+    let mut stmt = tx.prepare(
+        "SELECT DISTINCT s.app, s.title FROM spans s
+         JOIN intervals i ON i.task_id=?1 AND s.start_ts < i.end_ts AND s.end_ts > i.start_ts
+         WHERE s.kind='focus' ORDER BY s.app, s.title",
+    )?;
+    let mut rows = stmt.query([task_id])?;
+    while let Some(row) = rows.next()? {
+        let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
+        if ctx.len() + app.len() + title.len() + 2 > 2000 {
+            break;
+        }
+        ctx.push_str(&app);
+        ctx.push(' ');
+        ctx.push_str(&title);
+        ctx.push('\n');
+    }
+    Ok(ctx)
+}
+
+/// Record a user edit of a task's label/project ('rename') and apply it to
+/// the identity row. The correction stores an FTS-searchable snapshot of the
+/// span context the task's intervals covered, so future batches with similar
+/// activity can retrieve it.
 pub fn insert_correction(
     conn: &mut Connection,
     ts: jiff::Timestamp,
@@ -344,39 +470,15 @@ pub fn insert_correction(
     new_project: Option<&str>,
 ) -> Result<(), StorageError> {
     let tx = conn.transaction()?;
-    let (old_label, old_project, batch_id, start_ts, end_ts): (
-        String,
-        Option<String>,
-        i64,
-        i64,
-        i64,
-    ) = tx.query_row(
-        "SELECT label, project, batch_id, start_ts, end_ts FROM tasks WHERE id=?1",
+    let (old_label, old_project): (String, Option<String>) = tx.query_row(
+        "SELECT label, project FROM tasks WHERE id=?1",
         [task_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let mut ctx = String::new();
-    {
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT app, title FROM spans
-             WHERE batch_id=?1 AND kind='focus' AND start_ts < ?2 AND end_ts > ?3
-             ORDER BY app, title",
-        )?;
-        let mut rows = stmt.query(params![batch_id, end_ts, start_ts])?;
-        while let Some(row) = rows.next()? {
-            let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
-            if ctx.len() + app.len() + title.len() + 2 > 2000 {
-                break;
-            }
-            ctx.push_str(&app);
-            ctx.push(' ');
-            ctx.push_str(&title);
-            ctx.push('\n');
-        }
-    }
+    let ctx = task_span_ctx(&tx, task_id)?;
     tx.execute(
-        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename')",
         params![
             ts_to_ms(ts),
             task_id,
@@ -391,6 +493,72 @@ pub fn insert_correction(
         "UPDATE tasks SET label=?1, project=?2 WHERE id=?3",
         params![new_label, new_project, task_id],
     )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Move one interval to another task ('reassign' correction). The old task's
+/// label → new task's label pair plus the interval's span context become
+/// teaching data; an orphaned derived source task is removed.
+pub fn reassign_interval(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    interval_id: i64,
+    to_task: i64,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    let (from_task, start_ts, end_ts): (i64, i64, i64) = tx.query_row(
+        "SELECT task_id, start_ts, end_ts FROM intervals WHERE id=?1",
+        [interval_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if from_task == to_task {
+        return Ok(());
+    }
+    let ident = |id: i64| -> Result<(String, Option<String>), rusqlite::Error> {
+        tx.query_row("SELECT label, project FROM tasks WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+    };
+    let (old_label, old_project) = ident(from_task)?;
+    let (new_label, new_project) = ident(to_task)?;
+    let mut ctx = String::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT DISTINCT app, title FROM spans
+             WHERE kind='focus' AND start_ts < ?1 AND end_ts > ?2 ORDER BY app, title",
+        )?;
+        let mut rows = stmt.query([end_ts, start_ts])?;
+        while let Some(row) = rows.next()? {
+            let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
+            if ctx.len() + app.len() + title.len() + 2 > 2000 {
+                break;
+            }
+            ctx.push_str(&app);
+            ctx.push(' ');
+            ctx.push_str(&title);
+            ctx.push('\n');
+        }
+    }
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reassign', ?8)",
+        params![
+            ts_to_ms(ts),
+            to_task,
+            old_label,
+            new_label,
+            old_project,
+            new_project,
+            ctx,
+            interval_id
+        ],
+    )?;
+    tx.execute(
+        "UPDATE intervals SET task_id=?1 WHERE id=?2",
+        params![to_task, interval_id],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
     Ok(())
 }
@@ -485,21 +653,23 @@ fn join_fts_terms(mut terms: Vec<String>) -> String {
 fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
-        batch_id: r.get(1)?,
+        interval_id: r.get(1)?,
         label: r.get(2)?,
         project: r.get(3)?,
         start_ts: ms_to_ts(r.get(4)?),
         end_ts: ms_to_ts(r.get(5)?),
         confidence: r.get(6)?,
+        declared: r.get(7)?,
     })
 }
 
-const TASK_COLS: &str = "id, batch_id, label, project, start_ts, end_ts, confidence";
+const TASK_COLS: &str = "t.id, i.id, t.label, t.project, i.start_ts, i.end_ts, i.confidence, \
+     t.source='user'";
 
 pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {TASK_COLS} FROM tasks
-         WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id"
+        "SELECT {TASK_COLS} FROM intervals i JOIN tasks t ON t.id = i.task_id
+         WHERE i.end_ts > ?1 AND i.start_ts < ?2 ORDER BY i.start_ts, i.id"
     ))?;
     let rows = stmt.query_map([lo, hi], task_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -523,16 +693,17 @@ pub fn spans_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SpanDra
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Top-k tasks whose label matches the FTS query, bm25-ranked.
+/// Intervals of the top-k tasks whose label matches the FTS query,
+/// bm25-ranked.
 pub fn search_tasks(conn: &Connection, query: &str, k: usize) -> Result<Vec<Task>, StorageError> {
     if query.is_empty() {
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT {TASK_COLS} FROM tasks
-         WHERE id IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?1
-                      ORDER BY rank LIMIT ?2)
-         ORDER BY start_ts, id"
+        "SELECT {TASK_COLS} FROM intervals i JOIN tasks t ON t.id = i.task_id
+         WHERE t.id IN (SELECT rowid FROM tasks_fts WHERE tasks_fts MATCH ?1
+                        ORDER BY rank LIMIT ?2)
+         ORDER BY i.start_ts, i.id"
     ))?;
     let rows = stmt.query_map(params![query, k as i64], task_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -595,8 +766,71 @@ pub fn recent_chat_messages(
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     #[test]
     fn migrations_are_valid() {
         assert!(super::MIGRATIONS.validate().is_ok());
+    }
+
+    // 004 rebuilds `tasks` under live children: existing rows must migrate
+    // 1:1 (identity + one interval), corrections stay valid, FTS rebuilt.
+    #[test]
+    fn migration_004_preserves_task_data() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Mirror open(): bundled sqlite defaults foreign_keys ON.
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        let pre = rusqlite_migration::Migrations::new(vec![
+            rusqlite_migration::M::up(include_str!("../migrations/001_schema.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/002_corrections_fts.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/003_spans_url_meta.sql")),
+        ]);
+        pre.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (7, 100, 200, 'done');
+             INSERT INTO tasks (id, batch_id, label, project, start_ts, end_ts, confidence)
+                 VALUES (42, 7, 'old label', 'proj', 110, 190, 0.8);
+             INSERT INTO corrections (ts, task_id, old_label, new_label, ctx)
+                 VALUES (150, 42, 'old label', 'better label', 'term ctx');",
+        )
+        .unwrap();
+
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute_batch("PRAGMA foreign_key_check").unwrap();
+
+        let (label, status, source, created): (String, String, String, i64) = conn
+            .query_row(
+                "SELECT label, status, source, created_ts FROM tasks WHERE id=42",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (label.as_str(), status.as_str(), source.as_str(), created),
+            ("old label", "open", "derived", 110)
+        );
+        let (task_id, batch_id, start, end): (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT task_id, batch_id, start_ts, end_ts FROM intervals",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((task_id, batch_id, start, end), (42, 7, 110, 190));
+        let kind: String = conn
+            .query_row("SELECT kind FROM corrections WHERE task_id=42", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kind, "rename");
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM tasks_fts WHERE tasks_fts MATCH 'label'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "FTS rebuilt over migrated identity labels");
     }
 }

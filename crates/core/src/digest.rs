@@ -6,7 +6,7 @@ use std::fmt::Write;
 use jiff::tz::TimeZone;
 
 use crate::sessionizer::{SpanDraft, SpanKind};
-use crate::types::Correction;
+use crate::types::{Correction, OpenTask};
 
 pub const MAX_TOKENS: usize = 3000;
 
@@ -18,7 +18,7 @@ pub fn approx_tokens(s: &str) -> usize {
 pub fn build_digest(
     spans: &[SpanDraft],
     tz: &TimeZone,
-    recent_labels: &[String],
+    open_tasks: &[OpenTask],
     corrections: &[Correction],
     mcp_context: Option<&str>,
 ) -> String {
@@ -26,7 +26,7 @@ pub fn build_digest(
         let out = render(
             spans,
             tz,
-            recent_labels,
+            open_tasks,
             corrections,
             mcp_context,
             apps_cap,
@@ -36,7 +36,7 @@ pub fn build_digest(
             return out;
         }
     }
-    let mut out = render(spans, tz, recent_labels, corrections, mcp_context, 3, 24);
+    let mut out = render(spans, tz, open_tasks, corrections, mcp_context, 3, 24);
     let mut cut = (MAX_TOKENS * 4).min(out.len());
     while !out.is_char_boundary(cut) {
         cut -= 1;
@@ -48,7 +48,7 @@ pub fn build_digest(
 fn render(
     spans: &[SpanDraft],
     tz: &TimeZone,
-    recent_labels: &[String],
+    open_tasks: &[OpenTask],
     corrections: &[Correction],
     mcp_context: Option<&str>,
     apps_cap: usize,
@@ -151,29 +151,48 @@ fn render(
             m += 1;
         }
     }
-    let dominant: Vec<Option<(u8, &str, &str)>> = buckets
+    // Dual-entry minutes: a focus runner-up holding ≥ ~25% of a minute renders
+    // alongside the dominant activity, so interleaved work stays visible
+    // instead of being hidden by dominant-minute RLE.
+    const RUNNER_UP_MS: i64 = 15_000;
+    type MinuteKey<'a> = (u8, &'a str, &'a str);
+    let minute: Vec<Option<(MinuteKey, Option<MinuteKey>)>> = buckets
         .iter()
-        .map(|b| b.iter().max_by_key(|(_, ms)| *ms).map(|(k, _)| *k))
+        .map(|b| {
+            let dom = b.iter().max_by_key(|(_, ms)| *ms).map(|(k, _)| *k)?;
+            let runner = b
+                .iter()
+                .filter(|(k, ms)| **k != dom && k.0 == 0 && **ms >= RUNNER_UP_MS)
+                .max_by_key(|(_, ms)| *ms)
+                .map(|(k, _)| *k)
+                .filter(|_| dom.0 == 0);
+            Some((dom, runner))
+        })
         .collect();
     let _ = writeln!(out, "\n## Timeline (minute offsets from window start)");
     let mut m = 0usize;
     while m < mins {
-        let Some(key) = dominant[m] else {
+        let Some((dom, runner)) = minute[m] else {
             m += 1;
             continue;
         };
         let mut end = m + 1;
-        while end < mins && dominant[end] == Some(key) {
+        while end < mins && minute[end] == Some((dom, runner)) {
             end += 1;
         }
-        match key.0 {
+        match dom.0 {
             0 => {
-                let _ = writeln!(
+                let _ = write!(
                     out,
                     "- {m}\u{2013}{end}m {}: {}",
-                    key.1,
-                    clip(key.2, title_chars)
+                    dom.1,
+                    clip(dom.2, title_chars)
                 );
+                // " + " on purpose: real window titles contain " | ".
+                if let Some(r) = runner {
+                    let _ = write!(out, " + {}: {}", r.1, clip(r.2, title_chars));
+                }
+                out.push('\n');
             }
             1 => {
                 let _ = writeln!(out, "- {m}\u{2013}{end}m (rapid app switching)");
@@ -185,12 +204,20 @@ fn render(
         m = end;
     }
 
-    let _ = writeln!(out, "\n## Recent task labels");
-    if recent_labels.is_empty() {
-        let _ = writeln!(out, "(none)");
-    }
-    for label in recent_labels.iter().take(3) {
-        let _ = writeln!(out, "- {label}");
+    // Numbered so interval output can link by index ("ref"). Omitted when
+    // empty, so open-task-free digests (and their goldens) are unchanged.
+    if !open_tasks.is_empty() {
+        let _ = writeln!(out, "\n## Open tasks");
+        for (i, t) in open_tasks.iter().enumerate() {
+            let _ = write!(out, "{}. {}", i + 1, t.label);
+            if let Some(p) = &t.project {
+                let _ = write!(out, " [{p}]");
+            }
+            if t.declared {
+                let _ = write!(out, " (declared)");
+            }
+            out.push('\n');
+        }
     }
 
     // Omitted entirely when empty so correction-free digests (and their

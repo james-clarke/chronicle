@@ -6,4 +6,4 @@ pub mod model;
 pub mod runner;
 
 pub use chat::ChatModel;
-pub use runner::{TaskDraft, infer_tasks};
+pub use runner::{IntervalDraft, infer_intervals};

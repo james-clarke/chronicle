@@ -1,0 +1,22 @@
+{
+  "open_tasks": [
+    {
+      "label": "verifying M7 human-verified progress in email system",
+      "project": "mailer"
+    },
+    {
+      "label": "debugging and testing local SMS send script",
+      "project": "mailer"
+    }
+  ],
+  "groups": [
+    {
+      "name": "sms",
+      "ranges": [[25, 35]],
+      "project": "mailer",
+      "label_any": ["sms"]
+    }
+  ],
+  "forbid_label_tokens": ["M7"],
+  "max_tasks": 5
+}

@@ -52,15 +52,19 @@ pub struct Span {
     pub kind: String,
 }
 
+/// Read model: one stored interval joined with its task identity.
+/// `id` is the identity (what corrections and reassignment target);
+/// `interval_id` is the time block.
 #[derive(Debug, Clone)]
 pub struct Task {
     pub id: i64,
-    pub batch_id: i64,
+    pub interval_id: i64,
     pub label: String,
     pub project: Option<String>,
     pub start_ts: Timestamp,
     pub end_ts: Timestamp,
     pub confidence: f64,
+    pub declared: bool,
 }
 
 /// A past user correction surfaced into the digest as few-shot guidance.
@@ -72,11 +76,65 @@ pub struct Correction {
     pub new_project: Option<String>,
 }
 
-/// A task to insert; `Task` is the stored row.
+/// The model's interval JSON (derive v3), parsed. Lives in core (not the
+/// llama crate) so linking, post-merge, and eval scoring stay testable
+/// without llama.
+#[derive(Debug, serde::Deserialize)]
+pub struct DeriveOutput {
+    pub intervals: Vec<IntervalDraft>,
+}
+
+/// One model-proposed interval. `task_ref` is a 1-based index into the
+/// digest's numbered "## Open tasks" list (deterministic linking, no string
+/// matching); None proposes a new task via `label`. Offsets are minutes from
+/// the start of the digest window.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct IntervalDraft {
+    #[serde(rename = "ref")]
+    pub task_ref: Option<i64>,
+    pub label: Option<String>,
+    pub project: Option<String>,
+    pub start_offset_min: i64,
+    pub end_offset_min: i64,
+    pub confidence: f64,
+}
+
+/// An open task offered to the model in the digest's numbered list.
 #[derive(Debug, Clone)]
-pub struct NewTask {
+pub struct OpenTask {
+    pub id: i64,
     pub label: String,
     pub project: Option<String>,
+    /// true = user-declared (source 'user'), listed first and marked in the digest.
+    pub declared: bool,
+}
+
+/// A resolved interval identity used for bench scoring: what a stored
+/// interval's task would look like after linking.
+#[derive(Debug, Clone)]
+pub struct TaskDraft {
+    pub label: String,
+    pub project: Option<String>,
+    pub start_offset_min: i64,
+    pub end_offset_min: i64,
+    pub confidence: f64,
+}
+
+/// A task identity to write: an existing row or a new one to create.
+#[derive(Debug, Clone)]
+pub enum TaskSlot {
+    Existing(i64),
+    New {
+        label: String,
+        project: Option<String>,
+    },
+}
+
+/// An interval to insert; `slot` indexes the `TaskSlot` list of the same
+/// derivation.
+#[derive(Debug, Clone)]
+pub struct NewInterval {
+    pub slot: usize,
     pub start_ts: Timestamp,
     pub end_ts: Timestamp,
     pub confidence: f64,
