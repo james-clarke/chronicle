@@ -3,7 +3,9 @@
 
 use eframe::egui;
 
-use super::{Action, EditState, IntervalRow, OpenRow, SpanRow, TaskGroup, TimelineApp, fmt_dur};
+use super::{
+    Action, EditState, IntervalRow, OpenRow, SpanRow, TaskGroup, TimelineApp, fmt_dur, theme,
+};
 
 impl TimelineApp {
     pub(super) fn timeline_ui(&mut self, ui: &mut egui::Ui) {
@@ -300,7 +302,13 @@ fn interval_row(
         ui.add_space(24.0);
         ui.monospace(time);
         ui.weak(format!("{dur:>7}"));
-        ui.weak(format!("{:.0}%", interval.confidence * 100.0));
+        let pct = format!("{:.0}%", interval.confidence * 100.0);
+        match theme::confidence_color(theme::confidence_band(interval.confidence)) {
+            Some(color) => theme::badge(ui, &pct, color),
+            None => {
+                ui.weak(pct);
+            }
+        }
         ui.menu_button("move", |ui| {
             for (task_id, label) in candidates {
                 if *task_id == group.task_id {

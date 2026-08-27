@@ -4,6 +4,7 @@
 mod chat;
 mod reports;
 mod settings;
+mod theme;
 mod timeline;
 
 use std::io::BufRead;
@@ -29,7 +30,8 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Chronicle")
-            .with_inner_size([560.0, 760.0]),
+            .with_inner_size([720.0, 800.0])
+            .with_min_inner_size([560.0, 600.0]),
         ..Default::default()
     };
     let sock_path = crate::socket_path(data_dir);
@@ -37,6 +39,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         "chronicle",
         options,
         Box::new(move |cc| {
+            theme::apply(&cc.egui_ctx);
             spawn_stdin_listener(cc.egui_ctx.clone());
             Ok(Box::new(TimelineApp::new(db_path, sock_path, config_path)))
         }),
