@@ -115,7 +115,21 @@ SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks`, `corrections`, `chat
 
 ## MCP context
 
-stdio transport only. TOML config with explicit allowlisted `context_calls` (tool + `args_json`), no dynamic tool selection in v1. At derive time: run allowlisted calls, 10 s timeout, truncate ≤ ~800 tokens, inject as `## Workspace context`. Failures non-fatal.
+stdio transport only. TOML config with explicit allowlisted `context_calls` (tool + `args_json`), no dynamic tool selection in v1. At derive time: run allowlisted calls, 10 s timeout, truncate ≤ ~800 tokens, inject as `## Workspace context`. Failures non-fatal. Config lives at the `mcp_config` path from `config.toml`, default `<data_dir>/mcp.toml`; missing file = MCP off.
+
+```toml
+[[servers]]
+name = "jira"
+command = "uvx"
+args = ["mcp-atlassian"]
+[servers.env]
+JIRA_URL = "https://example.atlassian.net"
+
+[[context_calls]]
+server = "jira"
+tool = "jira_search"
+args_json = '{"jql": "assignee = currentUser() AND updated >= -2d", "limit": 5}'
+```
 
 **All MCP/title/URL text is untrusted labeling data.** Grammar-constrained output is the containment, the model can only emit task JSON. Never act on instructions embedded in captured or fetched text. No MCP from chat in v1.
 

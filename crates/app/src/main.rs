@@ -313,7 +313,7 @@ fn bench(
                 .into_owned();
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &[], &[]),
+                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &[], &[], None),
             ));
         }
     }
@@ -331,7 +331,7 @@ fn bench(
             let corrections = storage::similar_corrections(&conn, &spans, 4)?;
             cases.push((
                 format!("batch:{id}"),
-                digest::build_digest(&spans, &tz, &recent, &corrections),
+                digest::build_digest(&spans, &tz, &recent, &corrections, None),
             ));
         }
     }
@@ -413,7 +413,18 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let recent = storage::recent_labels_before(&conn, batch.start_ts, 3)?;
         let corrections = storage::similar_corrections(&conn, &spans, 4)?;
         let tz = TimeZone::system();
-        let digest = chronicle_core::digest::build_digest(&spans, &tz, &recent, &corrections);
+        let mcp_path = config
+            .mcp_config
+            .clone()
+            .unwrap_or_else(|| data_dir.join("mcp.toml"));
+        let mcp_context = chronicle_mcp::gather_context(&mcp_path);
+        let digest = chronicle_core::digest::build_digest(
+            &spans,
+            &tz,
+            &recent,
+            &corrections,
+            mcp_context.as_deref(),
+        );
         let drafts = chronicle_derive::infer_tasks(&model_path, &digest)?;
         let tasks = clamp_tasks(drafts, &spans, batch.start_ts, batch.end_ts);
         let n = tasks.len();

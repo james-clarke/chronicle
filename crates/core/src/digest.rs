@@ -1,5 +1,4 @@
 //! Batch spans → deterministic digest text for the derivation prompt.
-//! MCP context lands in M8.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
@@ -21,14 +20,23 @@ pub fn build_digest(
     tz: &TimeZone,
     recent_labels: &[String],
     corrections: &[Correction],
+    mcp_context: Option<&str>,
 ) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
-        let out = render(spans, tz, recent_labels, corrections, apps_cap, title_chars);
+        let out = render(
+            spans,
+            tz,
+            recent_labels,
+            corrections,
+            mcp_context,
+            apps_cap,
+            title_chars,
+        );
         if approx_tokens(&out) <= MAX_TOKENS {
             return out;
         }
     }
-    let mut out = render(spans, tz, recent_labels, corrections, 3, 24);
+    let mut out = render(spans, tz, recent_labels, corrections, mcp_context, 3, 24);
     let mut cut = (MAX_TOKENS * 4).min(out.len());
     while !out.is_char_boundary(cut) {
         cut -= 1;
@@ -42,6 +50,7 @@ fn render(
     tz: &TimeZone,
     recent_labels: &[String],
     corrections: &[Correction],
+    mcp_context: Option<&str>,
     apps_cap: usize,
     title_chars: usize,
 ) -> String {
@@ -200,6 +209,14 @@ fn render(
             }
             out.push('\n');
         }
+    }
+
+    // Pre-truncated (≤ ~800 tokens) by the MCP gatherer; untrusted text, the
+    // GBNF grammar is the containment. Omitted when absent so MCP-less
+    // digests (and their goldens) are unchanged.
+    if let Some(mcp) = mcp_context.map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "\n## Workspace context");
+        let _ = writeln!(out, "{mcp}");
     }
     out
 }

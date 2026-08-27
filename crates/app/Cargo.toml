@@ -9,6 +9,7 @@ anyhow.workspace = true
 chronicle-capture.workspace = true
 chronicle-core.workspace = true
 chronicle-derive.workspace = true
+chronicle-mcp.workspace = true
 chronicle-server.workspace = true
 clap.workspace = true
 crossbeam-channel.workspace = true

@@ -88,7 +88,13 @@ fn day1_batches() {
 fn day1_digest_golden() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
-    let digest = build_digest(&spans[batches[0].spans.clone()], &TimeZone::UTC, &[], &[]);
+    let digest = build_digest(
+        &spans[batches[0].spans.clone()],
+        &TimeZone::UTC,
+        &[],
+        &[],
+        None,
+    );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     check_golden("day1.digest.golden", &digest);
 }
@@ -116,7 +122,13 @@ fn day2_web_per_site_spans() {
     );
 
     let batches = assign_batches(&spans, &config);
-    let digest = build_digest(&spans[batches[0].spans.clone()], &TimeZone::UTC, &[], &[]);
+    let digest = build_digest(
+        &spans[batches[0].spans.clone()],
+        &TimeZone::UTC,
+        &[],
+        &[],
+        None,
+    );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     assert!(digest.contains("## Sites by time"), "digest: {digest}");
     check_golden("day2_web.digest.golden", &digest);
@@ -228,8 +240,24 @@ fn correction_changes_next_digest() {
     );
     assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
 
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[]);
-    let with = build_digest(current, &TimeZone::UTC, &[], &corrections);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, None);
     assert_ne!(plain, with, "correction must change the digest");
     check_golden("day1.corrections.digest.golden", &with);
+}
+
+#[test]
+fn digest_workspace_context_section() {
+    let (spans, config) = day1();
+    let batches = assign_batches(&spans, &config);
+    let current = &spans[batches[0].spans.clone()];
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], None);
+    let ctx = "### jira.search\nCHR-42 fix AFK split";
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], Some(ctx));
+    assert_eq!(with, format!("{plain}\n## Workspace context\n{ctx}\n"));
+    // Blank context must not add the section (goldens stay MCP-free).
+    assert_eq!(
+        build_digest(current, &TimeZone::UTC, &[], &[], Some("  \n")),
+        plain
+    );
 }
