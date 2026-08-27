@@ -173,7 +173,7 @@ Verify with `systemctl --user status chronicle` and `chronicle status` (exit 0 +
 
 Order: **Linux polish first, then macOS → Windows.** Ports wait until the product shape is nailed down on Linux — porting an unfinished shape multiplies rework by three platforms. Polish bar before porting: trustworthy data, appliance feel, visible product.
 
-**M0–M9 complete on Linux (2026-08-27).**
+**M0–M11 complete on Linux (2026-08-27; m11 reboot acceptance passed — daemon systemd-managed).**
 
 | M | Deliverable | Acceptance |
 |---|---|---|
