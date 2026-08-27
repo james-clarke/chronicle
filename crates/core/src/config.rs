@@ -27,6 +27,9 @@ pub struct Config {
     /// Rows older than this are pruned daily (0 = keep forever).
     /// Corrections are always kept.
     pub retention_days: u32,
+    /// Open derived tasks with no interval this many days are auto-closed
+    /// daily (0 = never; declared tasks only close by hand).
+    pub task_autoclose_days: u32,
     /// AW-compatible HTTP server port.
     pub port: u16,
     /// Extra CORS origin regexes for sideloaded browser extensions
@@ -52,6 +55,7 @@ impl Default for Config {
             derive_idle_secs: 300,
             title_similarity: 0.8,
             retention_days: 180,
+            task_autoclose_days: 3,
             port: 5600,
             cors_allow: Vec::new(),
             browser_apps: [

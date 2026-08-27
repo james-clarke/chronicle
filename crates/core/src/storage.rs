@@ -344,6 +344,32 @@ pub fn open_tasks(conn: &Connection, cap: usize) -> Result<Vec<OpenTask>, Storag
     Ok(out)
 }
 
+/// Last-n closed tasks, newest close first (the UI's "recently closed"
+/// reopen list — covers accidental closes and autoclosed work resuming).
+pub fn recently_closed(conn: &Connection, n: usize) -> Result<Vec<OpenTask>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, project, source='user' FROM tasks
+         WHERE status='closed' ORDER BY closed_ts DESC, id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([n as i64], |r| {
+        Ok(OpenTask {
+            id: r.get(0)?,
+            label: r.get(1)?,
+            project: r.get(2)?,
+            declared: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn reopen_task(conn: &Connection, task_id: i64) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE tasks SET status='open', closed_ts=NULL WHERE id=?1",
+        [task_id],
+    )?;
+    Ok(())
+}
+
 /// Declare a task the user is working on. Returns its id.
 pub fn insert_user_task(
     conn: &Connection,
@@ -369,6 +395,24 @@ pub fn close_task(
         params![ts_to_ms(ts), task_id],
     )?;
     Ok(())
+}
+
+/// Close open derived tasks whose last interval ended over `days` days ago
+/// (candidate-list hygiene; declared tasks only close by hand). Closed is
+/// not deleted — history stays, retention prune owns deletion.
+pub fn autoclose_stale_tasks(
+    conn: &Connection,
+    now: jiff::Timestamp,
+    days: u32,
+) -> Result<usize, StorageError> {
+    let now_ms = ts_to_ms(now);
+    let cutoff = now_ms - i64::from(days) * 86_400_000;
+    Ok(conn.execute(
+        "UPDATE tasks SET status='closed', closed_ts=?1
+         WHERE status='open' AND source='derived'
+           AND id NOT IN (SELECT task_id FROM intervals WHERE end_ts > ?2)",
+        params![now_ms, cutoff],
+    )?)
 }
 
 /// Guard shared by re-derive and reassign: a derived task that lost its last
@@ -557,6 +601,55 @@ pub fn reassign_interval(
     tx.execute(
         "UPDATE intervals SET task_id=?1 WHERE id=?2",
         params![to_task, interval_id],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Fold one task into another ('merge' correction): every interval moves to
+/// the target, the source closes (a derived source nothing else references is
+/// removed). The source's span context plus its label → target label pair
+/// become task-grain teaching data for future linking.
+pub fn merge_task(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    from_task: i64,
+    to_task: i64,
+) -> Result<(), StorageError> {
+    if from_task == to_task {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    let ident = |id: i64| -> Result<(String, Option<String>), rusqlite::Error> {
+        tx.query_row("SELECT label, project FROM tasks WHERE id=?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+    };
+    let (old_label, old_project) = ident(from_task)?;
+    let (new_label, new_project) = ident(to_task)?;
+    // Snapshot before the intervals move — afterwards the source has none.
+    let ctx = task_span_ctx(&tx, from_task)?;
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'merge')",
+        params![
+            ts_to_ms(ts),
+            to_task,
+            old_label,
+            new_label,
+            old_project,
+            new_project,
+            ctx
+        ],
+    )?;
+    tx.execute(
+        "UPDATE intervals SET task_id=?1 WHERE task_id=?2",
+        params![to_task, from_task],
+    )?;
+    tx.execute(
+        "UPDATE tasks SET status='closed', closed_ts=?1 WHERE id=?2",
+        params![ts_to_ms(ts), from_task],
     )?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;

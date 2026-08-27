@@ -868,13 +868,13 @@ impl Scheduler {
 const PRUNE_EVERY_MS: i64 = 24 * 3_600_000;
 const PRUNE_BATCH: usize = 1000;
 
-/// Daily retention prune, piggybacking on the idle gate the caller already
-/// checked. The stamp is written even when nothing was deleted (or the prune
-/// failed) so a busy DB isn't retried every tick.
+/// Daily retention prune + stale-task autoclose, piggybacking on the idle
+/// gate the caller already checked. The stamp is written even when nothing
+/// was deleted (or the prune failed) so a busy DB isn't retried every tick.
 fn prune_if_due(conn: &rusqlite::Connection, config: &Config) {
     use chronicle_core::storage;
-    if config.retention_days == 0 {
-        return; // 0 = keep forever
+    if config.retention_days == 0 && config.task_autoclose_days == 0 {
+        return; // 0 = keep forever / never autoclose
     }
     let now = Timestamp::now().as_millisecond();
     let last = storage::get_meta(conn, "last_prune_ts")
@@ -885,11 +885,20 @@ fn prune_if_due(conn: &rusqlite::Connection, config: &Config) {
     if now - last < PRUNE_EVERY_MS {
         return;
     }
-    let cutoff = now - i64::from(config.retention_days) * 86_400_000;
-    match storage::prune(conn, cutoff, PRUNE_BATCH) {
-        Ok(0) => {}
-        Ok(rows) => tracing::info!(rows, "retention prune"),
-        Err(e) => tracing::error!("retention prune failed: {e}"),
+    if config.retention_days != 0 {
+        let cutoff = now - i64::from(config.retention_days) * 86_400_000;
+        match storage::prune(conn, cutoff, PRUNE_BATCH) {
+            Ok(0) => {}
+            Ok(rows) => tracing::info!(rows, "retention prune"),
+            Err(e) => tracing::error!("retention prune failed: {e}"),
+        }
+    }
+    if config.task_autoclose_days != 0 {
+        match storage::autoclose_stale_tasks(conn, Timestamp::now(), config.task_autoclose_days) {
+            Ok(0) => {}
+            Ok(rows) => tracing::info!(rows, "stale derived tasks closed"),
+            Err(e) => tracing::error!("task autoclose failed: {e}"),
+        }
     }
     let _ = storage::set_meta(conn, "last_prune_ts", Some(&now.to_string()));
 }

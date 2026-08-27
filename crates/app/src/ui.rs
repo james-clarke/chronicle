@@ -98,6 +98,8 @@ enum Action {
     Declare,
     Close(i64),
     Reassign { interval_id: i64, to_task: i64 },
+    Merge { from_task: i64, to_task: i64 },
+    Reopen(i64),
 }
 
 struct TimelineApp {
@@ -109,6 +111,9 @@ struct TimelineApp {
     spans: Vec<SpanRow>,
     groups: Vec<TaskGroup>,
     open_tasks: Vec<OpenRow>,
+    closed_tasks: Vec<OpenRow>,
+    /// "recently closed" expander state.
+    show_closed: bool,
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
@@ -132,6 +137,7 @@ struct SettingsPanel {
     afk_close_secs: u32,
     derive_idle_secs: u32,
     retention_days: u32,
+    task_autoclose_days: u32,
     port: u16,
     model_path: String,
     mcp_config: String,
@@ -151,6 +157,7 @@ impl SettingsPanel {
             afk_close_secs: config.afk_close_secs,
             derive_idle_secs: config.derive_idle_secs,
             retention_days: config.retention_days,
+            task_autoclose_days: config.task_autoclose_days,
             port: config.port,
             model_path: path_str(&config.model_path),
             mcp_config: path_str(&config.mcp_config),
@@ -167,6 +174,7 @@ impl SettingsPanel {
         config.afk_close_secs = self.afk_close_secs;
         config.derive_idle_secs = self.derive_idle_secs;
         config.retention_days = self.retention_days;
+        config.task_autoclose_days = self.task_autoclose_days;
         config.port = self.port;
         config.model_path = opt_path(&self.model_path);
         config.mcp_config = opt_path(&self.mcp_config);
@@ -352,6 +360,8 @@ impl TimelineApp {
             spans: Vec::new(),
             groups: Vec::new(),
             open_tasks: Vec::new(),
+            closed_tasks: Vec::new(),
+            show_closed: false,
             new_label: String::new(),
             new_project: String::new(),
             edit: None,
@@ -400,6 +410,9 @@ impl TimelineApp {
                         ui.end_row();
                         ui.label("retention days (0 = keep forever)");
                         ui.add(egui::DragValue::new(&mut panel.retention_days).range(0..=3650));
+                        ui.end_row();
+                        ui.label("task autoclose days (0 = never)");
+                        ui.add(egui::DragValue::new(&mut panel.task_autoclose_days).range(0..=365));
                         ui.end_row();
                         ui.label("aw endpoint port");
                         ui.add(egui::DragValue::new(&mut panel.port).range(1024..=65535));
@@ -534,12 +547,14 @@ impl TimelineApp {
         match self.load_spans().and_then(|spans| {
             let groups = self.load_groups()?;
             let open = self.load_open()?;
-            Ok((spans, groups, open))
+            let closed = self.load_closed()?;
+            Ok((spans, groups, open, closed))
         }) {
-            Ok((spans, groups, open)) => {
+            Ok((spans, groups, open, closed)) => {
                 self.spans = spans;
                 self.groups = groups;
                 self.open_tasks = open;
+                self.closed_tasks = closed;
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -610,6 +625,20 @@ impl TimelineApp {
             .collect())
     }
 
+    fn load_closed(&mut self) -> anyhow::Result<Vec<OpenRow>> {
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        let closed = chronicle_core::storage::recently_closed(conn, 10)?;
+        Ok(closed
+            .into_iter()
+            .map(|t| OpenRow {
+                task_id: t.id,
+                label: t.label,
+                project: t.project,
+                declared: t.declared,
+            })
+            .collect())
+    }
+
     fn apply_action(&mut self, action: Action) {
         let Some(conn) = self.conn.as_mut() else {
             return;
@@ -654,6 +683,10 @@ impl TimelineApp {
                 interval_id,
                 to_task,
             } => chronicle_core::storage::reassign_interval(conn, now, interval_id, to_task),
+            Action::Merge { from_task, to_task } => {
+                chronicle_core::storage::merge_task(conn, now, from_task, to_task)
+            }
+            Action::Reopen(task_id) => chronicle_core::storage::reopen_task(conn, task_id),
         };
         match result {
             Ok(()) => self.loaded_at = None,
@@ -734,6 +767,10 @@ impl eframe::App for TimelineApp {
             WorkingHeader,
             DeclareForm,
             Open(usize),
+            ClosedToggle,
+            Closed(usize),
+            ProjectsHeader,
+            Project(usize),
             TasksHeader,
             TaskHeader(usize),
             Interval(usize, usize),
@@ -742,6 +779,27 @@ impl eframe::App for TimelineApp {
         }
         let mut rows: Vec<RowKind> = vec![RowKind::WorkingHeader, RowKind::DeclareForm];
         rows.extend((0..self.open_tasks.len()).map(RowKind::Open));
+        if !self.closed_tasks.is_empty() {
+            rows.push(RowKind::ClosedToggle);
+            if self.show_closed {
+                rows.extend((0..self.closed_tasks.len()).map(RowKind::Closed));
+            }
+        }
+        // Per-project totals for the shown day, biggest first ("(none)" =
+        // untagged); sums the same group totals the Tasks section shows.
+        let mut projects: Vec<(String, i64)> = Vec::new();
+        for g in &self.groups {
+            let name = g.project.clone().unwrap_or_else(|| "(none)".into());
+            match projects.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, ms)) => *ms += g.total_ms,
+                None => projects.push((name, g.total_ms)),
+            }
+        }
+        projects.sort_by_key(|&(_, ms)| std::cmp::Reverse(ms));
+        if !projects.is_empty() {
+            rows.push(RowKind::ProjectsHeader);
+            rows.extend((0..projects.len()).map(RowKind::Project));
+        }
         rows.push(RowKind::TasksHeader);
         for (g, group) in self.groups.iter().enumerate() {
             rows.push(RowKind::TaskHeader(g));
@@ -773,6 +831,8 @@ impl eframe::App for TimelineApp {
             let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
             let groups = &self.groups;
             let open_tasks = &self.open_tasks;
+            let closed_tasks = &self.closed_tasks;
+            let show_closed = &mut self.show_closed;
             let spans = &self.spans;
             let edit = &mut self.edit;
             let new_label = &mut self.new_label;
@@ -804,7 +864,32 @@ impl eframe::App for TimelineApp {
                                     }
                                 });
                             }
-                            RowKind::Open(o) => open_row(ui, &open_tasks[o], &mut pending),
+                            RowKind::Open(o) => {
+                                open_row(ui, &open_tasks[o], &candidates, &mut pending)
+                            }
+                            RowKind::ClosedToggle => {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(12.0);
+                                    let arrow = if *show_closed { "\u{25be}" } else { "\u{25b8}" };
+                                    if ui
+                                        .small_button(format!("{arrow} recently closed"))
+                                        .clicked()
+                                    {
+                                        *show_closed = !*show_closed;
+                                    }
+                                });
+                            }
+                            RowKind::Closed(c) => closed_row(ui, &closed_tasks[c], &mut pending),
+                            RowKind::ProjectsHeader => {
+                                ui.strong("Projects");
+                            }
+                            RowKind::Project(p) => {
+                                let (name, ms) = &projects[p];
+                                ui.horizontal(|ui| {
+                                    ui.weak(format!("{:>7}", fmt_dur(*ms)));
+                                    ui.label(name);
+                                });
+                            }
                             RowKind::TasksHeader => {
                                 if groups.is_empty() {
                                     ui.horizontal(|ui| {
@@ -816,7 +901,7 @@ impl eframe::App for TimelineApp {
                                 }
                             }
                             RowKind::TaskHeader(g) => {
-                                task_header_row(ui, &groups[g], edit, &mut pending)
+                                task_header_row(ui, &groups[g], edit, &candidates, &mut pending)
                             }
                             RowKind::Interval(g, iv) => interval_row(
                                 ui,
@@ -843,7 +928,12 @@ impl eframe::App for TimelineApp {
     }
 }
 
-fn open_row(ui: &mut egui::Ui, task: &OpenRow, pending: &mut Option<Action>) {
+fn open_row(
+    ui: &mut egui::Ui,
+    task: &OpenRow,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
     ui.horizontal(|ui| {
         ui.add_space(12.0);
         ui.strong(&task.label);
@@ -856,6 +946,47 @@ fn open_row(ui: &mut egui::Ui, task: &OpenRow, pending: &mut Option<Action>) {
         if ui.small_button("close").clicked() {
             *pending = Some(Action::Close(task.task_id));
         }
+        merge_menu(ui, task.task_id, candidates, pending);
+    });
+}
+
+fn closed_row(ui: &mut egui::Ui, task: &OpenRow, pending: &mut Option<Action>) {
+    ui.horizontal(|ui| {
+        ui.add_space(24.0);
+        ui.label(&task.label);
+        if let Some(project) = &task.project {
+            ui.weak(project);
+        }
+        if task.declared {
+            ui.weak("(declared)");
+        }
+        if ui.small_button("reopen").clicked() {
+            *pending = Some(Action::Reopen(task.task_id));
+        }
+    });
+}
+
+/// "merge into" target picker: folds this task into the chosen one
+/// (a 'merge' correction — see storage::merge_task).
+fn merge_menu(
+    ui: &mut egui::Ui,
+    self_task: i64,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
+    ui.menu_button("merge into", |ui| {
+        for (task_id, label) in candidates {
+            if *task_id == self_task {
+                continue;
+            }
+            if ui.button(label).clicked() {
+                *pending = Some(Action::Merge {
+                    from_task: self_task,
+                    to_task: *task_id,
+                });
+                ui.close();
+            }
+        }
     });
 }
 
@@ -864,6 +995,7 @@ fn task_header_row(
     ui: &mut egui::Ui,
     group: &TaskGroup,
     edit: &mut Option<EditState>,
+    candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) {
     ui.horizontal(|ui| {
@@ -899,6 +1031,7 @@ fn task_header_row(
                     project: group.project.clone().unwrap_or_default(),
                 });
             }
+            merge_menu(ui, group.task_id, candidates, pending);
         }
     });
 }

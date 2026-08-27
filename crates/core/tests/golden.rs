@@ -396,6 +396,177 @@ fn retention_prune() {
 }
 
 #[test]
+fn merge_task_folds_source_into_target() {
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+    use rusqlite::params;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("merge.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+
+    let t0: i64 = 1_000_000_000_000;
+    conn.execute(
+        "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, ?1, ?2, 'done')",
+        [t0, t0 + 3_600_000],
+    )
+    .unwrap();
+    // Focus span overlapping the stray's intervals — the merge ctx snapshot.
+    conn.execute(
+        "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id)
+         VALUES (?1, ?2, 'term', 'mergectxspan work', 'focus', 1)",
+        [t0, t0 + 600_000],
+    )
+    .unwrap();
+    // 10 = derived stray (uncorrected), 30 = derived with a prior correction.
+    for (id, label) in [(10_i64, "stray browsing"), (30, "misc video")] {
+        conn.execute(
+            "INSERT INTO tasks (id, label, status, source, created_ts)
+             VALUES (?1, ?2, 'open', 'derived', ?3)",
+            params![id, label, t0],
+        )
+        .unwrap();
+    }
+    for (task_id, start, end) in [
+        (10_i64, t0, t0 + 300_000),
+        (10, t0 + 300_000, t0 + 600_000),
+        (30, t0 + 600_000, t0 + 900_000),
+    ] {
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (?1, 1, ?2, ?3, 0.5)",
+            [task_id, start, end],
+        )
+        .unwrap();
+    }
+    let target = storage::insert_user_task(&conn, ms_to_ts(t0), "real work", Some("proj")).unwrap();
+    storage::insert_correction(&mut conn, ms_to_ts(t0), 30, "watching talks", None).unwrap();
+
+    let count = |conn: &rusqlite::Connection, sql: &str| -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    };
+
+    // Self-merge is a no-op.
+    storage::merge_task(&mut conn, ms_to_ts(t0 + 1), target, target).unwrap();
+    assert_eq!(count(&conn, "SELECT count(*) FROM corrections"), 1);
+
+    storage::merge_task(&mut conn, ms_to_ts(t0 + 1_000_000), 10, target).unwrap();
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM intervals WHERE task_id=10"),
+        0,
+        "all intervals moved off the source"
+    );
+    let moved: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM intervals WHERE task_id=?1",
+            [target],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(moved, 2);
+    // One merge correction on the target, ctx snapshotted before the move.
+    let (task_id, old_label, new_label, ctx, interval_id): (i64, String, String, String, Option<i64>) = conn
+        .query_row(
+            "SELECT task_id, old_label, new_label, ctx, interval_id FROM corrections WHERE kind='merge'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(task_id, target);
+    assert_eq!(old_label, "stray browsing");
+    assert_eq!(new_label, "real work");
+    assert!(ctx.contains("mergectxspan"), "ctx = {ctx:?}");
+    assert_eq!(interval_id, None);
+    // FTS trigger indexed it — the pair is retrievable as teaching data.
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM corrections_fts WHERE corrections_fts MATCH 'mergectxspan'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM tasks WHERE id=10"),
+        0,
+        "unreferenced derived source is deleted"
+    );
+
+    // A corrected source survives the merge closed, not deleted.
+    storage::merge_task(&mut conn, ms_to_ts(t0 + 2_000_000), 30, target).unwrap();
+    let (status, closed_ts): (String, Option<i64>) = conn
+        .query_row("SELECT status, closed_ts FROM tasks WHERE id=30", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(status, "closed");
+    assert_eq!(closed_ts, Some(t0 + 2_000_000));
+}
+
+#[test]
+fn autoclose_stale_derived_tasks() {
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+    use rusqlite::params;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("autoclose.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let conn = storage::open(&db).unwrap();
+
+    let now: i64 = 1_000_000_000_000;
+    let day = 86_400_000_i64;
+    conn.execute(
+        "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, ?1, ?2, 'done')",
+        [now - 5 * day, now],
+    )
+    .unwrap();
+    // 1 = derived idle 4d (closes), 2 = derived fresh (stays open).
+    for (id, last_end) in [(1_i64, now - 4 * day), (2, now - day)] {
+        conn.execute(
+            "INSERT INTO tasks (id, label, status, source, created_ts)
+             VALUES (?1, 'derived task', 'open', 'derived', ?2)",
+            params![id, last_end - 600_000],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (?1, 1, ?2, ?3, 0.5)",
+            [id, last_end - 600_000, last_end],
+        )
+        .unwrap();
+    }
+    // Declared task idle forever stays open.
+    let declared =
+        storage::insert_user_task(&conn, ms_to_ts(now - 30 * day), "goal", None).unwrap();
+
+    let closed = storage::autoclose_stale_tasks(&conn, ms_to_ts(now), 3).unwrap();
+    assert_eq!(closed, 1);
+    let status = |id: i64| -> String {
+        conn.query_row("SELECT status FROM tasks WHERE id=?1", [id], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(status(1), "closed");
+    assert_eq!(status(2), "open");
+    assert_eq!(
+        status(declared),
+        "open",
+        "declared tasks only close by hand"
+    );
+    let closed_ts: i64 = conn
+        .query_row("SELECT closed_ts FROM tasks WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(closed_ts, now);
+    // Idempotent.
+    assert_eq!(
+        storage::autoclose_stale_tasks(&conn, ms_to_ts(now), 3).unwrap(),
+        0
+    );
+}
+
+#[test]
 fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
