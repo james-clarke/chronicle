@@ -25,18 +25,46 @@ impl TimelineApp {
             SpansHeader,
             Span(usize),
         }
+        // Filtered index sets; empty query keeps everything.
+        let q = self.filter.trim().to_lowercase();
+        let open_vis: Vec<usize> = (0..self.open_tasks.len())
+            .filter(|&o| {
+                let t = &self.open_tasks[o];
+                matches_filter(&q, &t.label, t.project.as_deref())
+            })
+            .collect();
+        let closed_vis: Vec<usize> = (0..self.closed_tasks.len())
+            .filter(|&c| {
+                let t = &self.closed_tasks[c];
+                matches_filter(&q, &t.label, t.project.as_deref())
+            })
+            .collect();
+        let group_vis: Vec<usize> = (0..self.groups.len())
+            .filter(|&g| {
+                let t = &self.groups[g];
+                matches_filter(&q, &t.label, t.project.as_deref())
+            })
+            .collect();
+        let span_vis: Vec<usize> = (0..self.spans.len())
+            .filter(|&s| {
+                let sp = &self.spans[s];
+                matches_filter(&q, &sp.title, Some(&sp.app))
+            })
+            .collect();
+
         let mut rows: Vec<RowKind> = vec![RowKind::WorkingHeader, RowKind::DeclareForm];
-        rows.extend((0..self.open_tasks.len()).map(RowKind::Open));
-        if !self.closed_tasks.is_empty() {
+        rows.extend(open_vis.iter().copied().map(RowKind::Open));
+        if !closed_vis.is_empty() {
             rows.push(RowKind::ClosedToggle);
             if self.show_closed {
-                rows.extend((0..self.closed_tasks.len()).map(RowKind::Closed));
+                rows.extend(closed_vis.iter().copied().map(RowKind::Closed));
             }
         }
         // Per-project totals for the shown day, biggest first ("(none)" =
         // untagged); sums the same group totals the Tasks section shows.
         let mut projects: Vec<(String, i64)> = Vec::new();
-        for g in &self.groups {
+        for &g in &group_vis {
+            let g = &self.groups[g];
             let name = g.project.clone().unwrap_or_else(|| "(none)".into());
             match projects.iter_mut().find(|(n, _)| *n == name) {
                 Some((_, ms)) => *ms += g.total_ms,
@@ -49,14 +77,16 @@ impl TimelineApp {
             rows.extend((0..projects.len()).map(RowKind::Project));
         }
         rows.push(RowKind::TasksHeader);
-        for (g, group) in self.groups.iter().enumerate() {
+        for &g in &group_vis {
             rows.push(RowKind::TaskHeader(g));
-            rows.extend((0..group.intervals.len()).map(|i| RowKind::Interval(g, i)));
+            rows.extend((0..self.groups[g].intervals.len()).map(|i| RowKind::Interval(g, i)));
         }
         rows.push(RowKind::SpansHeader);
         if self.show_spans {
-            rows.extend((0..self.spans.len()).map(RowKind::Span));
+            rows.extend(span_vis.iter().copied().map(RowKind::Span));
         }
+        let tasks_shown = group_vis.len();
+        let spans_shown = span_vis.len();
 
         // Reassignment targets: every task in sight (open + today's).
         let mut candidates: Vec<(i64, String)> = Vec::new();
@@ -151,7 +181,7 @@ impl TimelineApp {
                                         ui.weak("none derived yet");
                                     });
                                 } else {
-                                    section_header(ui, "Tasks", Some(groups.len()));
+                                    section_header(ui, "Tasks", Some(tasks_shown));
                                 }
                             }
                             RowKind::TaskHeader(g) => {
@@ -168,10 +198,7 @@ impl TimelineApp {
                                 ui.horizontal(|ui| {
                                     let arrow = if *show_spans { "\u{25be}" } else { "\u{25b8}" };
                                     if ui
-                                        .small_button(format!(
-                                            "{arrow} Spans \u{b7} {}",
-                                            spans.len()
-                                        ))
+                                        .small_button(format!("{arrow} Spans \u{b7} {spans_shown}"))
                                         .clicked()
                                     {
                                         *show_spans = !*show_spans;
@@ -188,6 +215,14 @@ impl TimelineApp {
             self.apply_action(action);
         }
     }
+}
+
+/// Case-insensitive substring match against a label and optional project.
+/// `q` must already be trimmed and lowercased; empty matches everything.
+fn matches_filter(q: &str, label: &str, project: Option<&str>) -> bool {
+    q.is_empty()
+        || label.to_lowercase().contains(q)
+        || project.is_some_and(|p| p.to_lowercase().contains(q))
 }
 
 /// Section header: heading text, optional weak count, hairline underneath.
@@ -399,4 +434,23 @@ fn span_row(ui: &mut egui::Ui, span: &SpanRow) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_filter;
+
+    #[test]
+    fn empty_query_matches_everything() {
+        assert!(matches_filter("", "anything", None));
+        assert!(matches_filter("", "", Some("proj")));
+    }
+
+    #[test]
+    fn matches_label_and_project_case_insensitive() {
+        assert!(matches_filter("chron", "Chronicle m13", None));
+        assert!(matches_filter("play", "review PR", Some("Contoso")));
+        assert!(!matches_filter("jira", "review PR", Some("Contoso")));
+        assert!(!matches_filter("jira", "review PR", None));
+    }
 }

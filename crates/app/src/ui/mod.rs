@@ -142,6 +142,8 @@ struct TimelineApp {
     show_closed: bool,
     /// Raw spans section expander state (collapsed by default; debug-grade).
     show_spans: bool,
+    /// Case-insensitive substring filter over the day's rows.
+    filter: String,
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
@@ -176,6 +178,7 @@ impl TimelineApp {
             closed_tasks: Vec::new(),
             show_closed: false,
             show_spans: false,
+            filter: String::new(),
             new_label: String::new(),
             new_project: String::new(),
             edit: None,
@@ -497,6 +500,19 @@ impl eframe::App for TimelineApp {
                             && !crate::send_ctrl(&self.sock_path, "derive")
                         {
                             self.error = Some("daemon not reachable".into());
+                        }
+                        if self.view == View::Timeline {
+                            if !self.filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                                self.filter.clear();
+                            }
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut self.filter)
+                                    .desired_width(150.0)
+                                    .hint_text("filter\u{2026}"),
+                            );
+                            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                self.filter.clear();
+                            }
                         }
                     });
                 });
