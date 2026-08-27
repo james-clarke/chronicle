@@ -47,6 +47,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ModelCmd,
     },
+    /// Run the allowlisted MCP context calls and print what derivation would inject.
+    McpCheck,
     /// Internal: benchmark downloaded models on fixtures and/or real batches.
     #[command(hide = true)]
     Bench {
@@ -88,6 +90,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
+        Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Bench {
             fixtures,
@@ -975,6 +978,23 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<tracing_appender::non_blockin
         .with(fmt::layer().with_ansi(false).with_writer(file_writer))
         .init();
     Ok(guard)
+}
+
+fn mcp_check(data_dir: &Path) -> anyhow::Result<()> {
+    let _guard = init_logging(data_dir)?;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let path = config
+        .mcp_config
+        .clone()
+        .unwrap_or_else(|| data_dir.join("mcp.toml"));
+    println!("mcp config: {}", path.display());
+    match chronicle_mcp::gather_context(&path) {
+        Some(ctx) => println!("\n## Workspace context\n{ctx}"),
+        None => println!(
+            "no context gathered (missing/empty config, or every call failed — see warnings above)"
+        ),
+    }
+    Ok(())
 }
 
 fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
