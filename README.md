@@ -34,12 +34,13 @@ Everything below is the current plan, not hard rules.
 | Screen lock | logind D-Bus `LockedHint` | `com.apple.screenIsLocked` notification | WTS session notifications |
 | Tray | **none** | yes | yes |
 | Open UI | app icon / `chronicle toggle` | tray click | tray click |
-| Autostart | `~/.config/autostart` `.desktop` | LaunchAgent plist | HKCU `Run` key |
+| Autostart | `systemd --user` unit | LaunchAgent plist | HKCU `Run` key |
 | LLM accel | CPU (Vulkan opt) | Metal | CPU (Vulkan opt) |
 | Battery guard | `/sys/class/power_supply` | IOKit (or skip v1) | `GetSystemPowerStatus` |
 
 Platform notes:
 - **Linux launch UX:** daemon holds a unix socket. Any second invocation (`chronicle` or `chronicle toggle`) sends toggle and exits; daemon spawns the UI child, or forwards a raise if it's already alive. No tray.
+- **Linux autostart (m11):** `systemd --user` unit (`packaging/chronicle.service`) is the sole Linux autostart mechanism — a supervised lifecycle (SIGTERM on `stop`, `Restart=on-failure`) is what makes the clean-shutdown path exercisable; a bare XDG `.desktop` entry has no stop contract. `WantedBy=graphical-session.target`, not `default.target`, since capture needs `DISPLAY`.
 - **X11:** windows die racily, all property reads must tolerate `BadWindow`/`BadDrawable` as non-fatal. Subscribe `PropertyChangeMask` on each new active window (catches tab-title changes), unsubscribe previous. Debounce title changes 1 s.
 - **macOS:** AX permission is a hard gate. Detect via `AXIsProcessTrustedWithOptions`, onboarding screen with deep link to System Settings, degrade to app-only tracking until granted. Message clearly: titles via AX, **no screen recording**. Daemon owns the main-thread run loop (required for NSWorkspace + AXObserver anyway) and hosts the tray; tray-icon must be created on the main thread after the event loop starts (`StartCause::Init`). UI stays a child process.
 - **Windows:** dedicated capture thread with `GetMessage` pump, `WINEVENT_OUTOFCONTEXT`; tray shares the daemon's message pump. UI stays a child process.
@@ -66,10 +67,11 @@ chronicle/
 │   └── app/        # binary: clap, shell integration, egui UI
 ├── grammars/       # task_output_v3.gbnf (older versions kept for history)
 ├── prompts/        # derive_v3.txt, chat_v1.txt
+├── packaging/      # systemd user unit
 └── fixtures/       # recorded JSONL event streams + goldens + *.expect.json evals
 ```
 
-Subcommands: `run` (daemon, default) · `ui` (internal: egui window process, spawned by daemon) · `derive --batch <id>` (ephemeral worker) · `chat-worker` · `toggle` (spawn-or-raise UI via socket) · `dump [--day YYYY-MM-DD]`.
+Subcommands: `run` (daemon, default) · `ui` (internal: egui window process, spawned by daemon) · `derive --batch <id>` (ephemeral worker) · `chat-worker` · `toggle` (spawn-or-raise UI via socket) · `status [--json]` (daemon health + recent activity) · `dump [--day YYYY-MM-DD]`.
 
 ## Capture core
 
@@ -146,6 +148,22 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 - **Chat panel:** dockable right.
 - **Onboarding:** model download progress, autostart opt-in, macOS AX flow.
 - **Settings:** batch length, idle threshold, exclusions, model path/choice, MCP config path, port.
+
+## Running as a service (Linux)
+
+```sh
+cargo install --path crates/app
+mkdir -p ~/.config/systemd/user
+cp packaging/chronicle.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now chronicle
+```
+
+Verify with `systemctl --user status chronicle` and `chronicle status` (exit 0 + "healthy"). `systemctl --user stop chronicle` sends SIGTERM — the daemon kills its UI/derive children and exits cleanly.
+
+- `ExecStart` assumes `~/.cargo/bin/chronicle` (plain `cargo install`); if `command -v chronicle` says otherwise, edit the path in the unit.
+- Some X11 session setups don't import `DISPLAY`/`XAUTHORITY` into `systemd --user`; check `systemctl --user show-environment | grep DISPLAY` if the unit fails at boot (modern display managers wire this via PAM).
+- Logs: `{data_dir}/logs/chronicle.log` (5 MB size-rotated, one `.log.1` backup); under systemd, stderr also lands in `journalctl --user -u chronicle -f`.
 
 ## Conventions
 

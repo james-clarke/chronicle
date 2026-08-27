@@ -1,3 +1,4 @@
+mod rotate;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -37,6 +38,12 @@ enum Cmd {
     ChatWorker,
     /// Show or hide the UI of the running daemon.
     Toggle,
+    /// Report daemon health and recent activity.
+    Status {
+        /// Machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print stored data, optionally for one local civil day.
     Dump {
         #[arg(long, value_name = "YYYY-MM-DD")]
@@ -95,6 +102,7 @@ fn main() -> anyhow::Result<()> {
                 bail!("chronicle daemon is not running")
             }
         }
+        Cmd::Status { json } => status(&data_dir, json),
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
@@ -595,32 +603,91 @@ pub(crate) fn send_ctrl(sock: &Path, msg: &str) -> bool {
 enum CtrlMsg {
     Toggle,
     DeriveNow,
+    /// One-shot reply channel; the listener writes the JSON back to the client.
+    Status(Sender<String>),
+    /// Only the in-process signal thread sends this — not part of the socket
+    /// protocol, so a stray client can't stop the daemon.
+    Shutdown,
+}
+
+#[derive(Debug, PartialEq)]
+enum CtrlCmd {
+    Toggle,
+    DeriveNow,
+    Status,
+}
+
+fn parse_ctrl_cmd(line: &str) -> Option<CtrlCmd> {
+    match line.trim() {
+        "toggle" => Some(CtrlCmd::Toggle),
+        "derive" => Some(CtrlCmd::DeriveNow),
+        "status" => Some(CtrlCmd::Status),
+        _ => None,
+    }
 }
 
 fn spawn_ctrl_listener(
     listener: std::os::unix::net::UnixListener,
     tx: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
-    use std::io::BufRead;
+    use std::io::{BufRead, Write};
     std::thread::Builder::new()
         .name("ctrl".into())
         .spawn(move || {
             for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
+                let Ok(mut stream) = stream else { continue };
                 let mut line = String::new();
-                if std::io::BufReader::new(stream)
+                if std::io::BufReader::new(&stream)
                     .read_line(&mut line)
                     .is_err()
                 {
                     continue;
                 }
-                let msg = match line.trim() {
-                    "toggle" => CtrlMsg::Toggle,
-                    "derive" => CtrlMsg::DeriveNow,
-                    _ => continue,
-                };
-                if tx.send(msg).is_err() {
-                    return;
+                match parse_ctrl_cmd(&line) {
+                    Some(CtrlCmd::Toggle) => {
+                        if tx.send(CtrlMsg::Toggle).is_err() {
+                            return;
+                        }
+                    }
+                    Some(CtrlCmd::DeriveNow) => {
+                        if tx.send(CtrlMsg::DeriveNow).is_err() {
+                            return;
+                        }
+                    }
+                    Some(CtrlCmd::Status) => {
+                        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+                        if tx.send(CtrlMsg::Status(reply_tx)).is_err() {
+                            return;
+                        }
+                        // Bounded wait: a wedged main loop must not hang the
+                        // listener; no reply reads as "unresponsive" client-side.
+                        if let Ok(json) = reply_rx.recv_timeout(Duration::from_secs(1)) {
+                            let _ = writeln!(stream, "{json}");
+                        }
+                    }
+                    None => continue,
+                }
+            }
+        })?;
+    Ok(())
+}
+
+fn spawn_signal_handler(ctrl_tx: Sender<CtrlMsg>) -> anyhow::Result<()> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGTERM, SIGINT])?;
+    std::thread::Builder::new()
+        .name("signal".into())
+        .spawn(move || {
+            let mut requested = false;
+            for _ in signals.forever() {
+                if requested {
+                    tracing::warn!("second shutdown signal; forcing exit");
+                    std::process::exit(1);
+                }
+                requested = true;
+                tracing::info!("shutdown signal received");
+                if ctrl_tx.send(CtrlMsg::Shutdown).is_err() {
+                    std::process::exit(1); // main loop already gone
                 }
             }
         })?;
@@ -716,8 +783,10 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     // A `running` batch with no live worker (unclean daemon exit) burns its
     // attempt and falls back to `failed` so the retry cap still holds.
     chronicle_core::storage::reset_stale_running(&conn)?;
+    let started = Instant::now();
     let (tx, rx) = crossbeam_channel::unbounded();
     let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
+    spawn_signal_handler(ctrl_tx.clone())?;
     spawn_ctrl_listener(listener, ctrl_tx)?;
     spawn_capture(&config, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
@@ -734,11 +803,11 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     let mut scheduler = Scheduler { worker: None };
     let mut idle_since: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
-    loop {
+    let exit_reason = 'daemon: loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
         crossbeam_channel::select! {
             recv(rx) -> event => {
-                let Ok(event) = event else { break };
+                let Ok(event) = event else { break 'daemon ExitReason::CaptureDied };
                 if filters.excluded(&event) {
                     continue;
                 }
@@ -764,6 +833,10 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                         toggle_ui(&mut ui_child);
                     }
                     Ok(CtrlMsg::DeriveNow) => scheduler.tick(&conn, &config, data_dir, idle_since, true),
+                    Ok(CtrlMsg::Status(reply)) => {
+                        let _ = reply.send(status_json(&scheduler, idle_since, &mut ui_child, started));
+                    }
+                    Ok(CtrlMsg::Shutdown) => break 'daemon ExitReason::Signal,
                     Err(_) => {}
                 }
             }
@@ -777,8 +850,29 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                 next_refresh = Instant::now() + SESSIONIZE_EVERY;
             }
         }
+    };
+    tracing::info!("shutting down");
+    // Child drop leaks the OS process — kills must be explicit. SIGKILL on the
+    // derive worker is safe: `store_derivation` commits in one transaction, and
+    // `fail_batch` records the burned attempt immediately.
+    if let Some((mut child, _, batch_id)) = scheduler.worker.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = chronicle_core::storage::fail_batch(&conn, batch_id);
     }
-    bail!("capture threads exited")
+    if let Some(mut child) = ui_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    match exit_reason {
+        ExitReason::Signal => Ok(()),
+        ExitReason::CaptureDied => bail!("capture threads exited"),
+    }
+}
+
+enum ExitReason {
+    Signal,
+    CaptureDied,
 }
 
 const DERIVE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -789,6 +883,32 @@ const BATTERY_DEFER_PCT: u32 = 30;
 struct Scheduler {
     /// At most one derive worker at a time: (child, started, batch id).
     worker: Option<(Child, Instant, i64)>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DaemonStatus {
+    uptime_secs: u64,
+    derive_active: bool,
+    idle_secs: Option<u64>,
+    ui_open: bool,
+}
+
+fn status_json(
+    scheduler: &Scheduler,
+    idle_since: Option<i64>,
+    ui_child: &mut Option<Child>,
+    started: Instant,
+) -> String {
+    let status = DaemonStatus {
+        uptime_secs: started.elapsed().as_secs(),
+        derive_active: scheduler.worker.is_some(),
+        idle_secs: idle_since
+            .map(|since| ((Timestamp::now().as_millisecond() - since) / 1000).max(0) as u64),
+        ui_open: ui_child
+            .as_mut()
+            .is_some_and(|c| matches!(c.try_wait(), Ok(None))),
+    };
+    serde_json::to_string(&status).unwrap_or_default()
 }
 
 impl Scheduler {
@@ -1070,7 +1190,9 @@ impl Filters {
 
 fn init_logging(data_dir: &Path) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
-    let file = tracing_appender::rolling::daily(data_dir.join("logs"), "chronicle.log");
+    let dir = data_dir.join("logs");
+    let file = rotate::SizeRotatingWriter::open(&dir, "chronicle.log")
+        .with_context(|| format!("failed to open log file in {}", dir.display()))?;
     let (file_writer, guard) = tracing_appender::non_blocking(file);
     tracing_subscriber::registry()
         .with(
@@ -1095,6 +1217,157 @@ fn mcp_check(data_dir: &Path) -> anyhow::Result<()> {
         None => println!(
             "no context gathered (missing/empty config, or every call failed — see warnings above)"
         ),
+    }
+    Ok(())
+}
+
+enum Liveness {
+    Stopped,
+    Unresponsive,
+    Running(DaemonStatus),
+}
+
+fn query_daemon(sock: &Path) -> Liveness {
+    use std::io::{BufRead, Write};
+    let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
+        return Liveness::Stopped;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    if stream.write_all(b"status\n").is_err() {
+        return Liveness::Unresponsive;
+    }
+    let mut line = String::new();
+    if std::io::BufReader::new(&stream)
+        .read_line(&mut line)
+        .is_err()
+        || line.trim().is_empty()
+    {
+        return Liveness::Unresponsive;
+    }
+    match serde_json::from_str(line.trim()) {
+        Ok(status) => Liveness::Running(status),
+        Err(_) => Liveness::Unresponsive,
+    }
+}
+
+fn fmt_secs(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h {}m", secs / 3600, (secs % 3600) / 60),
+        _ => format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600),
+    }
+}
+
+fn format_status(
+    liveness: &Liveness,
+    last_event_age_secs: Option<u64>,
+    last_batch_end_ms: Option<i64>,
+    model_present: bool,
+    server_error: Option<&str>,
+    last_prune_age_secs: Option<u64>,
+) -> String {
+    let mut out = String::new();
+    match liveness {
+        Liveness::Running(s) => {
+            out.push_str(&format!(
+                "chronicle: healthy — daemon running (uptime {})\n",
+                fmt_secs(s.uptime_secs)
+            ));
+            out.push_str(&format!(
+                "  derive worker: {}\n",
+                if s.derive_active { "running" } else { "idle" }
+            ));
+            out.push_str(&format!(
+                "  ui: {}\n",
+                if s.ui_open { "open" } else { "closed" }
+            ));
+            if let Some(idle) = s.idle_secs {
+                out.push_str(&format!("  user idle: {}\n", fmt_secs(idle)));
+            }
+        }
+        Liveness::Stopped => out.push_str("chronicle: stopped — daemon not running\n"),
+        Liveness::Unresponsive => {
+            out.push_str("chronicle: running but not responding — socket up, no status reply\n");
+        }
+    }
+    match last_event_age_secs {
+        Some(age) => out.push_str(&format!("  last event: {} ago\n", fmt_secs(age))),
+        None => out.push_str("  last event: none recorded yet\n"),
+    }
+    if let Some(end_ms) = last_batch_end_ms
+        && let Ok(t) = local(end_ms)
+    {
+        out.push_str(&format!(
+            "  last derived batch ended: {}\n",
+            t.strftime("%Y-%m-%d %H:%M")
+        ));
+    }
+    out.push_str(&format!(
+        "  model: {}\n",
+        if model_present {
+            "present"
+        } else {
+            "not downloaded"
+        }
+    ));
+    if let Some(err) = server_error {
+        out.push_str(&format!("  warning: {err}\n"));
+    }
+    if let Some(age) = last_prune_age_secs {
+        out.push_str(&format!("  last prune: {} ago\n", fmt_secs(age)));
+    }
+    out
+}
+
+fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
+    let liveness = query_daemon(&socket_path(data_dir));
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let now_ms = Timestamp::now().as_millisecond();
+    let age = |ms: i64| ((now_ms - ms) / 1000).max(0) as u64;
+    let last_event_age_secs = chronicle_core::storage::latest_event_ts(&conn)?.map(age);
+    let last_batch_end_ms = chronicle_core::storage::latest_batch_end(&conn)?;
+    let model_present =
+        chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_some();
+    let server_error = chronicle_core::storage::get_meta(&conn, "server_error")?;
+    let last_prune_age_secs = chronicle_core::storage::get_meta(&conn, "last_prune_ts")?
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(age);
+
+    if json {
+        let (liveness_str, daemon) = match &liveness {
+            Liveness::Running(s) => ("healthy", Some(s)),
+            Liveness::Stopped => ("stopped", None),
+            Liveness::Unresponsive => ("unresponsive", None),
+        };
+        let doc = serde_json::json!({
+            "liveness": liveness_str,
+            "daemon": daemon,
+            "last_event_age_secs": last_event_age_secs,
+            "last_batch_end_ms": last_batch_end_ms,
+            "model_present": model_present,
+            "server_error": server_error,
+            "last_prune_age_secs": last_prune_age_secs,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        print!(
+            "{}",
+            format_status(
+                &liveness,
+                last_event_age_secs,
+                last_batch_end_ms,
+                model_present,
+                server_error.as_deref(),
+                last_prune_age_secs,
+            )
+        );
+    }
+    if !matches!(liveness, Liveness::Running(_)) {
+        // Scriptable failure code without anyhow's "Error:" noise on top of
+        // the report we just printed.
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -1215,4 +1488,67 @@ fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
 
 fn local(ms: i64) -> anyhow::Result<Zoned> {
     Ok(chronicle_core::types::ms_to_ts(ms).to_zoned(TimeZone::system()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_cmd_parses_protocol_strings() {
+        // Guards the literals `send_ctrl` writes against parser drift.
+        assert_eq!(parse_ctrl_cmd("toggle"), Some(CtrlCmd::Toggle));
+        assert_eq!(parse_ctrl_cmd("toggle\n"), Some(CtrlCmd::Toggle));
+        assert_eq!(parse_ctrl_cmd("derive"), Some(CtrlCmd::DeriveNow));
+        assert_eq!(parse_ctrl_cmd("status"), Some(CtrlCmd::Status));
+        assert_eq!(parse_ctrl_cmd("shutdown"), None);
+        assert_eq!(parse_ctrl_cmd("bogus"), None);
+    }
+
+    #[test]
+    fn format_status_healthy() {
+        let s = format_status(
+            &Liveness::Running(DaemonStatus {
+                uptime_secs: 8000,
+                derive_active: true,
+                idle_secs: Some(90),
+                ui_open: true,
+            }),
+            Some(12),
+            None,
+            true,
+            None,
+            Some(3600),
+        );
+        assert!(s.contains("healthy"));
+        assert!(s.contains("uptime 2h 13m"));
+        assert!(s.contains("derive worker: running"));
+        assert!(s.contains("user idle: 1m"));
+        assert!(s.contains("last event: 12s ago"));
+        assert!(s.contains("model: present"));
+        assert!(s.contains("last prune: 1h 0m ago"));
+    }
+
+    #[test]
+    fn format_status_stopped_still_reports_db_state() {
+        let s = format_status(&Liveness::Stopped, None, None, false, None, None);
+        assert!(s.contains("stopped"));
+        assert!(!s.contains("healthy"));
+        assert!(s.contains("last event: none recorded yet"));
+        assert!(s.contains("model: not downloaded"));
+    }
+
+    #[test]
+    fn format_status_unresponsive_and_server_error() {
+        let s = format_status(
+            &Liveness::Unresponsive,
+            Some(400),
+            None,
+            true,
+            Some("AW endpoint failed on port 5600: in use"),
+            None,
+        );
+        assert!(s.contains("running but not responding"));
+        assert!(s.contains("warning: AW endpoint failed on port 5600: in use"));
+    }
 }

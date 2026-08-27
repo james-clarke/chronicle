@@ -1,0 +1,12 @@
+[Unit]
+Description=Chronicle activity tracker daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/chronicle run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

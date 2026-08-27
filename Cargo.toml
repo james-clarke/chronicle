@@ -36,6 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
+signal-hook = "0.4"
 directories = "6"
 eframe = "0.36"
 chronicle-core = { path = "crates/core" }
