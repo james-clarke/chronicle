@@ -64,9 +64,9 @@ chronicle/
 │   ├── derive/     # digest→prompt, llama runner, GBNF, corrections
 │   ├── mcp/        # rmcp client wrapper
 │   └── app/        # binary: clap, shell integration, egui UI
-├── grammars/task_output.gbnf
-├── prompts/derive_v1.txt
-└── fixtures/       # recorded JSONL event streams for tests
+├── grammars/       # task_output_v3.gbnf (older versions kept for history)
+├── prompts/        # derive_v3.txt, chat_v1.txt
+└── fixtures/       # recorded JSONL event streams + goldens + *.expect.json evals
 ```
 
 Subcommands: `run` (daemon, default) · `ui` (internal: egui window process, spawned by daemon) · `derive --batch <id>` (ephemeral worker) · `chat-worker` · `toggle` (spawn-or-raise UI via socket) · `dump [--day YYYY-MM-DD]`.
@@ -82,7 +82,7 @@ pub trait AfkProvider:  Send { fn idle_ms(&self) -> Result<u64>; }              
 
 ## Storage
 
-SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks`, `corrections`, `chat_messages`; FTS5 over `spans.title` + `tasks.label`. Data dir: XDG / `%APPDATA%` / `~/Library/Application Support`.
+SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks` (identity: label, project, open/closed, user/derived), `intervals` (time blocks, FK task+batch), `corrections` (kind: rename/reassign/merge), `chat_messages`, `meta`; FTS5 over `spans.title` + `tasks.label`. Data dir: XDG / `%APPDATA%` / `~/Library/Application Support`.
 
 - **Time:** all stored timestamps are UTC unix milliseconds (INTEGER); no tz in storage, ever. Day windows (picker, `dump --day`, digest) = local civil day via jiff at query time: DST days are 23/25 h and that's correct. Timestamp once at capture, never re-stamp downstream.
 - **Retention:** configurable window (default 180 days). `PRAGMA auto_vacuum=INCREMENTAL` at DB creation, **before the first table** (can't be flipped later without a full VACUUM rebuild). Prune job runs in the scheduler's idle gate: batched deletes (~1000 rows/tx), FTS index fed the deletes, then `incremental_vacuum(N)` with small N per tick + occasional `wal_checkpoint(TRUNCATE)`.
@@ -92,15 +92,16 @@ SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks`, `corrections`, `chat
 ## Sessionizer + digest (deterministic, no LLM)
 
 - Merge consecutive events (same app, title-similarity ≥ threshold) → spans. Collapse spans < 5 s into a `context-switching` span. Close spans on AFK ≥ 120 s (configurable).
-- Batch = 30 min of non-AFK activity (configurable). Digest ≤ 3 K tokens: top apps by duration, top titles per app, URL domains + first path segment, switch count, AFK total, last 3 task labels (continuity), top-k similar past corrections via FTS (keyed on title **and** app/domain, count-capped), MCP context.
+- Batch = 30 min of non-AFK activity (configurable). Digest ≤ 3 K tokens: top apps by duration, dominant-per-minute timeline (RLE, dual-entry when a runner-up holds ≥25% of a minute), sites by time, numbered **open tasks** (user-declared first, then recent derived-open, cap 8 — the model links intervals to these by index), top-k similar past corrections via FTS (keyed on title **and** app/domain, count-capped), MCP context.
 
 ## Derivation
 
 - Ephemeral worker: mmap model → infer → write tasks → mark batch done → exit. Hard timeout 5 min → mark failed, retry once at next idle.
-- GBNF-constrained JSON: `{ "tasks": [ { label, project|null, start_offset_min, end_offset_min, confidence } ] }`. Use bounded repetition `x{0,N}` in the grammar, never chained `x? x?` (pathologically slow).
+- GBNF-constrained JSON (v3): `{ "intervals": [ { ref|null, label|null, project|null, start_offset_min, end_offset_min, confidence } ] }` — `ref` = index into the digest's open-task list (deterministic linking); `ref null` proposes a new task via `label`. Post-inference: sanitize (bad refs → null, label-less proposals dropped) → link (near-identical proposals snap to open tasks or collapse together) → clamp (offsets into batch window, AFK ≥ 5 min splits time but keeps identity). Use bounded repetition `x{0,N}` in the grammar, never chained `x? x?` (pathologically slow).
 - Threads = physical cores − 1, cap 8. Features: `metal` / `vulkan` / CPU fallback, wire the feature gating at M4 so ports are just `#[cfg]`.
 - Model manager: download to data dir, SHA-256 verify, resume; first-run progress UI. Never bundled in installer.
-- **M4 gate:** benchmark Qwen3-1.7B vs Qwen3-4B-Instruct-2507 on fixture evals before pinning the default.
+- **M4 gate:** benchmark Qwen3-1.7B vs Qwen3-4B-Instruct-2507 on fixture evals before pinning the default. (Settled: 4B default, 1.7B low-RAM fallback.)
+- **Eval harness (m9):** `chronicle bench [--only case] [--model preset]` scores model output against `fixtures/<name>.expect.json` (grouping, project, label hygiene, dup, fragmentation, distinctness checks). Every real-world derivation failure becomes a fixture + expectations before it gets fixed; prompt/model changes are gated on these scores.
 - Scheduler: derive when AFK ≥ 5 min OR screen locked OR low 1-min load. Defer on battery < 30 %. Queue drains oldest-first, one worker at a time. Manual "derive now" button.
 
 ## Browser URLs, ActivityWatch-compatible endpoint
@@ -139,19 +140,22 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 
 ## UI
 
-- **Timeline:** day picker, task blocks (label, project, confidence tint), raw-spans toggle, virtual scrolling.
-- **Task card:** edit label/project → writes `corrections`. Split/merge deferred.
+- **Timeline:** day picker, tasks grouped as identity headers with their intervals underneath, raw spans below, virtual scrolling.
+- **Working on:** open-task list = the model's linking candidates. Declare (label+project), close; declared tasks listed first and marked.
+- **Task actions:** rename (header edit) → `rename` correction; per-interval "move" → `reassign` correction; task-level "merge into" (m10) → `merge` correction folding all intervals into the target. Corrections are teaching data: their span context is FTS-retrieved into future digests. Split deferred.
 - **Chat panel:** dockable right.
 - **Onboarding:** model download progress, autostart opt-in, macOS AX flow.
 - **Settings:** batch length, idle threshold, exclusions, model path/choice, MCP config path, port.
 
 ## Conventions
 
-`anyhow` in binaries, `thiserror` in libs · `tracing` + rotating file log (5 MB) · `rust-toolchain.toml` pins stable · CI: fmt + clippy + tests on Linux (3-OS matrix from M9) · `cargo clippy -- -D warnings` + `cargo fmt` clean at every milestone · fixture-driven tests: mock `FocusProvider` replays JSONL; sessionizer/digest have golden-output tests · every milestone ends with tests passing, `chronicle dump` demonstrating the capability, and a short `docs/mNN-notes.md`.
+`anyhow` in binaries, `thiserror` in libs · `tracing` + rotating file log (5 MB) · `rust-toolchain.toml` pins stable · CI: fmt + clippy + tests on Linux (3-OS matrix from M14) · `cargo clippy -- -D warnings` + `cargo fmt` clean at every milestone · fixture-driven tests: mock `FocusProvider` replays JSONL; sessionizer/digest have golden-output tests · every milestone ends with tests passing, `chronicle dump` demonstrating the capability, and a short `docs/mNN-notes.md`.
 
 ## Milestones
 
-Order: **Linux (X11) → macOS → Windows.**
+Order: **Linux polish first, then macOS → Windows.** Ports wait until the product shape is nailed down on Linux — porting an unfinished shape multiplies rework by three platforms. Polish bar before porting: trustworthy data, appliance feel, visible product.
+
+**M0–M9 complete on Linux (2026-08-27).**
 
 | M | Deliverable | Acceptance |
 |---|---|---|
@@ -164,18 +168,25 @@ Order: **Linux (X11) → macOS → Windows.**
 | 6 | AW endpoint + Host/CORS hardening | stock AW extension → per-site spans, not just "firefox" |
 | 7 | Chat | "what did I do this morning?" answers grounded in DB |
 | 8 | MCP | with a jira MCP server, derived labels reference ticket keys |
-| 9 | **macOS port:** capture, AX onboarding + degraded app-only mode, tray, LaunchAgent, `metal`; ad-hoc sign + documented right-click-open | M1–M8 acceptance re-run on macOS |
-| 10 | **Windows port:** capture thread, tray, HKCU autostart, power guard, WTS lock | same re-run on Windows |
-| 11 | Packaging: Linux `.desktop` + tarball/AppImage; macOS `.app`; Windows installer | clean install on all three |
+| 9 | **Derive v3 task identity:** tasks=identity + intervals schema, open-task ref linking, declared tasks, eval harness, grouped UI | eval fixtures score (day3 9/9); live: declared task accumulates intervals across batches, strays get own tasks |
+| 10 | **Task lifecycle + project layer:** task-level merge (all intervals + `merge` correction), derived-open auto-close (default 3 days idle), reopen, per-project rollup/totals | merge folds a task in one action and teaches the next digest; stale derived tasks leave the open list unaided; "chronicle: 4h today" visible |
+| 11 | **Daily-driver ops:** systemd user unit + autostart, SIGTERM clean shutdown, `chronicle status`, size-based log rotation | reboot → daemon up without a terminal; `chronicle status` reports healthy |
+| 12 | **Reports:** week/day summary view, timesheet export (CSV/md), chat aggregate queries | "how long on chronicle this week?" answered both in UI and chat; export opens in a spreadsheet |
+| 13 | **UI + onboarding polish:** settings visual pass, confidence tints, search, chat panel visuals, in-UI model download | fresh install to first derived task without touching a terminal |
+| 14 | **macOS port:** capture, AX onboarding + degraded app-only mode, tray, LaunchAgent, `metal`; ad-hoc sign + documented right-click-open | M1–M13 acceptance re-run on macOS |
+| 15 | **Windows port:** capture thread, tray, HKCU autostart, power guard, WTS lock | same re-run on Windows |
+| 16 | Packaging: Linux `.desktop` + tarball/AppImage; macOS `.app`; Windows installer | clean install on all three |
 
-Get the $99 Apple Developer account **before M9** so notarization is a v1.1 config flip, not a scramble.
+Intelligence iteration (prompt/model quality, fixture corpus growth) is **continuous and bench-gated**, not a milestone: every real failure becomes a fixture before it gets fixed.
+
+Get the $99 Apple Developer account **before M14** so notarization is a v1.1 config flip, not a scramble.
 
 ## Deferred (v1.1+)
 
 - **Wayland**: awatcher-style provider matrix: `wlr-foreign-toplevel-management` (Sway/Hyprland/wlroots), KWin script (KDE), Focused-Window-D-Bus GNOME extension, `ext-idle-notify-v1` AFK; runtime provider selection on Linux.
 - Global hotkey (X11 grab; GlobalShortcuts portal where sane).
 - Linux tray (`ksni`, best-effort, never load-bearing).
-- Task split/merge UX.
+- Task split UX (merge lands in M10).
 - SQLCipher at-rest encryption.
 - Signing: Apple notarization; Windows OV/EV cert (SmartScreen).
 - MCP from chat; dynamic tool selection.
