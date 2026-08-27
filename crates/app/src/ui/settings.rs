@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use super::TimelineApp;
+use super::{TimelineApp, theme};
 
 /// Editable view of config.toml. Numbers bind directly; list/path fields are
 /// edited as text and parsed on save. Saving rewrites the whole file (hand
@@ -63,6 +63,19 @@ impl SettingsPanel {
     }
 }
 
+/// Section heading inside the settings window.
+fn section(ui: &mut egui::Ui, title: &str, first: bool) {
+    if !first {
+        ui.add_space(12.0);
+    }
+    ui.label(
+        egui::RichText::new(title)
+            .text_style(egui::TextStyle::Heading)
+            .color(theme::palette::TEXT),
+    );
+    ui.add_space(2.0);
+}
+
 fn path_str(p: &Option<PathBuf>) -> String {
     p.as_deref()
         .map_or_else(String::new, |p| p.display().to_string())
@@ -98,6 +111,7 @@ impl TimelineApp {
 
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let config_path = self.config_path.clone();
+        let data_dir = self.data_dir.clone();
         let Some(panel) = &mut self.settings else {
             return;
         };
@@ -105,42 +119,87 @@ impl TimelineApp {
         egui::Window::new("settings")
             .open(&mut open)
             .resizable(true)
-            .default_width(360.0)
+            .default_width(420.0)
             .show(ctx, |ui| {
-                egui::Grid::new("settings_nums")
-                    .num_columns(2)
+                section(ui, "Capture", true);
+                egui::Grid::new("settings_capture")
+                    .num_columns(3)
                     .show(ui, |ui| {
-                        ui.label("batch minutes");
-                        ui.add(egui::DragValue::new(&mut panel.batch_minutes).range(5..=240));
-                        ui.end_row();
-                        ui.label("afk close secs");
+                        ui.label("afk close");
                         ui.add(egui::DragValue::new(&mut panel.afk_close_secs).range(30..=3600));
+                        ui.weak("secs");
                         ui.end_row();
-                        ui.label("derive idle secs");
+                    });
+                ui.label("excluded apps (one regex per line, never stored)");
+                ui.add(
+                    egui::TextEdit::multiline(&mut panel.excluded_apps)
+                        .desired_rows(2)
+                        .font(egui::TextStyle::Monospace),
+                );
+                ui.label("excluded titles (one regex per line)");
+                ui.add(
+                    egui::TextEdit::multiline(&mut panel.excluded_titles)
+                        .desired_rows(2)
+                        .font(egui::TextStyle::Monospace),
+                );
+
+                section(ui, "Derivation", false);
+                egui::Grid::new("settings_derive")
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        ui.label("batch every");
+                        ui.add(egui::DragValue::new(&mut panel.batch_minutes).range(5..=240));
+                        ui.weak("minutes");
+                        ui.end_row();
+                        ui.label("derive after idle");
                         ui.add(egui::DragValue::new(&mut panel.derive_idle_secs).range(60..=3600));
+                        ui.weak("secs");
                         ui.end_row();
-                        ui.label("retention days (0 = keep forever)");
-                        ui.add(egui::DragValue::new(&mut panel.retention_days).range(0..=3650));
-                        ui.end_row();
-                        ui.label("task autoclose days (0 = never)");
+                        ui.label("task autoclose");
                         ui.add(egui::DragValue::new(&mut panel.task_autoclose_days).range(0..=365));
+                        ui.weak("days (0 = never)");
+                        ui.end_row();
+                    });
+
+                section(ui, "Model", false);
+                ui.label("model path (empty = default preset)");
+                ui.text_edit_singleline(&mut panel.model_path);
+                match chronicle_derive::model::resolve(
+                    opt_path(&panel.model_path).as_deref(),
+                    &data_dir,
+                ) {
+                    Some(p) => {
+                        ui.weak(format!("using {}", p.display()));
+                    }
+                    None => {
+                        ui.colored_label(theme::palette::AMBER, "no model downloaded");
+                    }
+                }
+
+                section(ui, "Storage & server", false);
+                egui::Grid::new("settings_storage")
+                    .num_columns(3)
+                    .show(ui, |ui| {
+                        ui.label("retention");
+                        ui.add(egui::DragValue::new(&mut panel.retention_days).range(0..=3650));
+                        ui.weak("days (0 = keep forever)");
                         ui.end_row();
                         ui.label("aw endpoint port");
                         ui.add(egui::DragValue::new(&mut panel.port).range(1024..=65535));
+                        ui.label("");
                         ui.end_row();
                     });
-                ui.separator();
-                ui.label("model path (empty = default preset)");
-                ui.text_edit_singleline(&mut panel.model_path);
+
+                section(ui, "Integrations", false);
                 ui.label("mcp config path (empty = mcp.toml in data dir)");
                 ui.text_edit_singleline(&mut panel.mcp_config);
-                ui.label("excluded apps (one regex per line, never stored)");
-                ui.add(egui::TextEdit::multiline(&mut panel.excluded_apps).desired_rows(2));
-                ui.label("excluded titles (one regex per line)");
-                ui.add(egui::TextEdit::multiline(&mut panel.excluded_titles).desired_rows(2));
-                ui.separator();
+
+                ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    if ui.button("save").clicked() {
+                    let save =
+                        egui::Button::new(egui::RichText::new("save").color(theme::palette::BG))
+                            .fill(theme::palette::ACCENT);
+                    if ui.add(save).clicked() {
                         panel.status = Some(match panel.save(&config_path) {
                             Ok(()) => Ok("saved \u{2014} restart daemon to apply".into()),
                             Err(e) => Err(e),
@@ -151,7 +210,13 @@ impl TimelineApp {
                             ui.weak(msg.as_str());
                         }
                         Some(Err(msg)) => {
-                            ui.colored_label(ui.visuals().error_fg_color, msg);
+                            egui::Frame::new()
+                                .fill(theme::palette::RED.gamma_multiply(0.15))
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .inner_margin(egui::Margin::same(6))
+                                .show(ui, |ui| {
+                                    ui.colored_label(theme::palette::RED, msg);
+                                });
                         }
                         None => {}
                     }

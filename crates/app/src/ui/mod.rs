@@ -35,13 +35,19 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         ..Default::default()
     };
     let sock_path = crate::socket_path(data_dir);
+    let data_dir = data_dir.to_path_buf();
     eframe::run_native(
         "chronicle",
         options,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
             spawn_stdin_listener(cc.egui_ctx.clone());
-            Ok(Box::new(TimelineApp::new(db_path, sock_path, config_path)))
+            Ok(Box::new(TimelineApp::new(
+                data_dir,
+                db_path,
+                sock_path,
+                config_path,
+            )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
@@ -118,6 +124,7 @@ enum View {
 }
 
 struct TimelineApp {
+    data_dir: PathBuf,
     db_path: PathBuf,
     sock_path: PathBuf,
     conn: Option<Connection>,
@@ -150,10 +157,11 @@ struct TimelineApp {
 }
 
 impl TimelineApp {
-    fn new(db_path: PathBuf, sock_path: PathBuf, config_path: PathBuf) -> Self {
+    fn new(data_dir: PathBuf, db_path: PathBuf, sock_path: PathBuf, config_path: PathBuf) -> Self {
         let tz = TimeZone::system();
         let day = Zoned::now().with_time_zone(tz.clone()).date();
         Self {
+            data_dir,
             db_path,
             sock_path,
             conn: None,
