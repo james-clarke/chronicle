@@ -402,70 +402,94 @@ impl eframe::App for TimelineApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
 
-        egui::Panel::top("day_picker").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (view, label) in [(View::Timeline, "timeline"), (View::Reports, "reports")] {
-                    if ui.selectable_label(self.view == view, label).clicked() && self.view != view
-                    {
-                        self.view = view;
-                        self.loaded_at = None;
-                    }
-                }
-                ui.separator();
-                match self.view {
-                    View::Timeline => {
-                        if ui.button("\u{25c0}").clicked() {
-                            self.shift_day(-1);
-                        }
-                        if ui.button("\u{25b6}").clicked() {
-                            self.shift_day(1);
-                        }
-                        if ui.button("today").clicked() {
-                            self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
-                            self.loaded_at = None;
-                        }
-                        ui.strong(self.day.to_string());
-                    }
-                    View::Reports => {
-                        if ui.button("\u{25c0}").clicked() {
-                            self.shift_week(-1);
-                        }
-                        if ui.button("\u{25b6}").clicked() {
-                            self.shift_week(1);
-                        }
-                        if ui.button("this week").clicked() {
-                            let today = Zoned::now().with_time_zone(self.tz.clone()).date();
-                            self.week_anchor =
-                                chronicle_core::timeref::week_start(today).unwrap_or(today);
-                            self.loaded_at = None;
-                        }
-                        let sunday = self.week_anchor.checked_add(6.days()).ok();
-                        ui.strong(match sunday {
-                            Some(sun) => format!("{} \u{2013} {sun}", self.week_anchor),
-                            None => self.week_anchor.to_string(),
+        let top_frame = egui::Frame::new()
+            .fill(theme::palette::SURFACE)
+            .inner_margin(egui::Margin::symmetric(12, 8));
+        egui::Panel::top("day_picker")
+            .frame(top_frame)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Segmented view switcher.
+                    egui::Frame::new()
+                        .fill(theme::palette::INPUT_BG)
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::same(3))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for (view, label) in
+                                [(View::Timeline, "timeline"), (View::Reports, "reports")]
+                            {
+                                if ui.selectable_label(self.view == view, label).clicked()
+                                    && self.view != view
+                                {
+                                    self.view = view;
+                                    self.loaded_at = None;
+                                }
+                            }
                         });
+                    ui.add_space(6.0);
+                    match self.view {
+                        View::Timeline => {
+                            if ui.button("\u{25c0}").clicked() {
+                                self.shift_day(-1);
+                            }
+                            if ui.button("\u{25b6}").clicked() {
+                                self.shift_day(1);
+                            }
+                            if ui.button("today").clicked() {
+                                self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
+                                self.loaded_at = None;
+                            }
+                            ui.label(
+                                egui::RichText::new(self.day.strftime("%a %-d %b %Y").to_string())
+                                    .text_style(egui::TextStyle::Heading)
+                                    .color(theme::palette::TEXT),
+                            );
+                        }
+                        View::Reports => {
+                            if ui.button("\u{25c0}").clicked() {
+                                self.shift_week(-1);
+                            }
+                            if ui.button("\u{25b6}").clicked() {
+                                self.shift_week(1);
+                            }
+                            if ui.button("this week").clicked() {
+                                let today = Zoned::now().with_time_zone(self.tz.clone()).date();
+                                self.week_anchor =
+                                    chronicle_core::timeref::week_start(today).unwrap_or(today);
+                                self.loaded_at = None;
+                            }
+                            let sunday = self.week_anchor.checked_add(6.days()).ok();
+                            let range = match sunday {
+                                Some(sun) => format!(
+                                    "{} \u{2013} {}",
+                                    self.week_anchor.strftime("%-d %b"),
+                                    sun.strftime("%-d %b %Y")
+                                ),
+                                None => self.week_anchor.to_string(),
+                            };
+                            ui.label(
+                                egui::RichText::new(range)
+                                    .text_style(egui::TextStyle::Heading)
+                                    .color(theme::palette::TEXT),
+                            );
+                        }
                     }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("settings").clicked() {
-                        self.toggle_settings();
-                    }
-                    if ui.button("chat").clicked() {
-                        self.toggle_chat(ui.ctx());
-                    }
-                    if ui.button("derive now").clicked()
-                        && !crate::send_ctrl(&self.sock_path, "derive")
-                    {
-                        self.error = Some("daemon not reachable".into());
-                    }
-                    ui.weak(format!(
-                        "{} tasks \u{b7} {} spans",
-                        self.groups.len(),
-                        self.spans.len()
-                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("settings").clicked() {
+                            self.toggle_settings();
+                        }
+                        if ui.button("chat").clicked() {
+                            self.toggle_chat(ui.ctx());
+                        }
+                        if ui.button("derive now").clicked()
+                            && !crate::send_ctrl(&self.sock_path, "derive")
+                        {
+                            self.error = Some("daemon not reachable".into());
+                        }
+                    });
                 });
             });
-        });
 
         self.chat_panel_ui(ui);
         self.settings_window(ui.ctx());
