@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use chronicle_core::config::Config;
 use chronicle_core::types::CaptureEvent;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crossbeam_channel::Sender;
 use jiff::{Timestamp, ToSpan, Zoned, civil, tz::TimeZone};
 use regex::Regex;
@@ -49,6 +49,17 @@ enum Cmd {
         #[arg(long, value_name = "YYYY-MM-DD")]
         day: Option<String>,
     },
+    /// Print a timesheet report (CSV or markdown) to stdout.
+    Report {
+        /// One local civil day.
+        #[arg(long, value_name = "YYYY-MM-DD", conflicts_with = "week")]
+        day: Option<String>,
+        /// The Mon–Sun week containing this date; default: current week.
+        #[arg(long, value_name = "YYYY-MM-DD", conflicts_with = "day")]
+        week: Option<String>,
+        #[arg(long, value_enum, default_value_t = ReportFormat::Csv)]
+        format: ReportFormat,
+    },
     /// Manage local LLM models.
     Model {
         #[command(subcommand)]
@@ -77,6 +88,12 @@ enum Cmd {
     },
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum ReportFormat {
+    Csv,
+    Md,
+}
+
 #[derive(Subcommand)]
 enum ModelCmd {
     /// Download a model preset (resumable, SHA-256 verified).
@@ -103,6 +120,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Status { json } => status(&data_dir, json),
+        Cmd::Report { day, week, format } => {
+            report(&data_dir, day.as_deref(), week.as_deref(), format)
+        }
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
@@ -1368,6 +1388,47 @@ fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
         // Scriptable failure code without anyhow's "Error:" noise on top of
         // the report we just printed.
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn report(
+    data_dir: &Path,
+    day: Option<&str>,
+    week: Option<&str>,
+    format: ReportFormat,
+) -> anyhow::Result<()> {
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let tz = TimeZone::system();
+    let parse = |s: &str| -> anyhow::Result<civil::Date> {
+        s.parse().with_context(|| format!("bad date {s:?}"))
+    };
+    let days: Vec<civil::Date> = match (day, week) {
+        (Some(d), None) => vec![parse(d)?],
+        (None, given) => {
+            let anchor = match given {
+                Some(w) => parse(w)?,
+                None => Zoned::now().date(),
+            };
+            let monday =
+                chronicle_core::timeref::week_start(anchor).context("week start out of range")?;
+            (0..7)
+                .map(|i| Ok(monday.checked_add(i.days())?))
+                .collect::<anyhow::Result<_>>()?
+        }
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
+    };
+    let lo = days[0].to_zoned(tz.clone())?.timestamp().as_millisecond();
+    let hi = (days[days.len() - 1]
+        .to_zoned(tz.clone())?
+        .checked_add(1.day())?)
+    .timestamp()
+    .as_millisecond();
+    let tasks = chronicle_core::storage::tasks_in_range(&conn, lo, hi)?;
+    let r = chronicle_core::report::build(&tasks, days, &tz)?;
+    match format {
+        ReportFormat::Csv => print!("{}", chronicle_core::report::to_csv(&r)),
+        ReportFormat::Md => print!("{}", chronicle_core::report::to_md(&r)),
     }
     Ok(())
 }

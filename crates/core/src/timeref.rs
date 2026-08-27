@@ -206,7 +206,7 @@ fn day_range_between(start: Date, end: Date, tz: &TimeZone) -> Option<(i64, i64)
     Some((at_ms(start, 0, tz)?, at_ms(end, 0, tz)?))
 }
 
-fn week_start(today: Date) -> Option<Date> {
+pub fn week_start(today: Date) -> Option<Date> {
     today
         .checked_sub(i64::from(today.weekday().to_monday_zero_offset()).days())
         .ok()

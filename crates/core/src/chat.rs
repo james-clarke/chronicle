@@ -76,6 +76,16 @@ fn range_context(
         tz.iana_name().unwrap_or("local"),
     );
 
+    // Ahead of ## Tasks so totals survive the MAX_CHARS truncation, and
+    // over the full vec, not the take(60) display cap below.
+    let totals = crate::report::project_totals(&tasks, lo, hi);
+    if !totals.is_empty() {
+        let _ = writeln!(out, "\n## Totals by project");
+        for p in &totals {
+            let _ = writeln!(out, "- {}: {}", p.project, fmt_dur(p.total_ms));
+        }
+    }
+
     let _ = writeln!(out, "\n## Tasks (derived, may lag recent activity)");
     if tasks.is_empty() {
         let _ = writeln!(out, "(none derived for this range)");

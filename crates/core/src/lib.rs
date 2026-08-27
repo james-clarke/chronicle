@@ -3,6 +3,7 @@ pub mod config;
 pub mod digest;
 pub mod eval;
 pub mod merge;
+pub mod report;
 pub mod sessionizer;
 pub mod storage;
 pub mod timeref;

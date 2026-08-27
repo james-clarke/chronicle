@@ -102,12 +102,22 @@ enum Action {
     Reopen(i64),
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum View {
+    Timeline,
+    Reports,
+}
+
 struct TimelineApp {
     db_path: PathBuf,
     sock_path: PathBuf,
     conn: Option<Connection>,
     tz: TimeZone,
     day: civil::Date,
+    view: View,
+    /// Monday of the week the Reports view shows.
+    week_anchor: civil::Date,
+    report: Option<chronicle_core::report::RangeReport>,
     spans: Vec<SpanRow>,
     groups: Vec<TaskGroup>,
     open_tasks: Vec<OpenRow>,
@@ -357,6 +367,9 @@ impl TimelineApp {
             conn: None,
             tz,
             day,
+            view: View::Timeline,
+            week_anchor: chronicle_core::timeref::week_start(day).unwrap_or(day),
+            report: None,
             spans: Vec::new(),
             groups: Vec::new(),
             open_tasks: Vec::new(),
@@ -539,6 +552,13 @@ impl TimelineApp {
         }
     }
 
+    fn shift_week(&mut self, weeks: i64) {
+        if let Ok(anchor) = self.week_anchor.checked_add((weeks * 7).days()) {
+            self.week_anchor = anchor;
+            self.loaded_at = None;
+        }
+    }
+
     fn reload_if_stale(&mut self) {
         if self.loaded_at.is_some_and(|t| t.elapsed() < RELOAD_EVERY) {
             return;
@@ -559,6 +579,12 @@ impl TimelineApp {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+        if self.view == View::Reports {
+            match self.load_report() {
+                Ok(r) => self.report = Some(r),
+                Err(e) => self.error = Some(e.to_string()),
+            }
+        }
         if let Some(conn) = self.conn.as_ref() {
             self.warning = chronicle_core::storage::get_meta(conn, "server_error")
                 .ok()
@@ -573,6 +599,82 @@ impl TimelineApp {
             start.timestamp().as_millisecond(),
             end.timestamp().as_millisecond(),
         ))
+    }
+
+    /// Week report for the Reports view: `week_anchor`'s Mon–Sun bucketed
+    /// per task per day.
+    fn load_report(&mut self) -> anyhow::Result<chronicle_core::report::RangeReport> {
+        let days: Vec<civil::Date> = (0..7)
+            .map(|i| Ok(self.week_anchor.checked_add(i.days())?))
+            .collect::<anyhow::Result<_>>()?;
+        let lo = days[0]
+            .to_zoned(self.tz.clone())?
+            .timestamp()
+            .as_millisecond();
+        let hi = days[6]
+            .to_zoned(self.tz.clone())?
+            .checked_add(1.day())?
+            .timestamp()
+            .as_millisecond();
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        let tasks = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
+        Ok(chronicle_core::report::build(&tasks, days, &self.tz)?)
+    }
+
+    fn reports_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(warning) = &self.warning {
+                ui.colored_label(ui.visuals().warn_fg_color, warning);
+            }
+            if let Some(error) = &self.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+                return;
+            }
+            let Some(r) = &self.report else {
+                ui.weak("loading\u{2026}");
+                return;
+            };
+            let cell =
+                |ms: i64| format!("{:>7}", if ms == 0 { String::new() } else { fmt_dur(ms) });
+            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                ui.strong("Tasks");
+                let mut header = String::new();
+                for d in &r.days {
+                    header.push_str(&format!("{:>7}", d.strftime("%a")));
+                }
+                header.push_str(&format!("{:>9}", "total"));
+                ui.monospace(header);
+                for t in &r.tasks {
+                    ui.horizontal(|ui| {
+                        let mut cells = String::new();
+                        for ms in &t.by_day {
+                            cells.push_str(&cell(*ms));
+                        }
+                        cells.push_str(&format!("{:>9}", fmt_dur(t.total_ms)));
+                        ui.monospace(cells);
+                        ui.label(&t.label);
+                        if t.project != chronicle_core::report::UNTAGGED {
+                            ui.weak(&t.project);
+                        }
+                    });
+                }
+                if r.tasks.is_empty() {
+                    ui.weak("no tasks this week");
+                }
+                ui.add_space(8.0);
+                ui.strong("Projects");
+                for p in &r.projects {
+                    ui.horizontal(|ui| {
+                        ui.monospace(format!("{:>7}", fmt_dur(p.total_ms)));
+                        ui.label(&p.project);
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{:>7}", fmt_dur(r.grand_total_ms)));
+                    ui.strong("total");
+                });
+            });
+        });
     }
 
     /// Day's intervals grouped under their task identity, in order of each
@@ -726,17 +828,48 @@ impl eframe::App for TimelineApp {
 
         egui::Panel::top("day_picker").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("\u{25c0}").clicked() {
-                    self.shift_day(-1);
+                for (view, label) in [(View::Timeline, "timeline"), (View::Reports, "reports")] {
+                    if ui.selectable_label(self.view == view, label).clicked() && self.view != view
+                    {
+                        self.view = view;
+                        self.loaded_at = None;
+                    }
                 }
-                if ui.button("\u{25b6}").clicked() {
-                    self.shift_day(1);
+                ui.separator();
+                match self.view {
+                    View::Timeline => {
+                        if ui.button("\u{25c0}").clicked() {
+                            self.shift_day(-1);
+                        }
+                        if ui.button("\u{25b6}").clicked() {
+                            self.shift_day(1);
+                        }
+                        if ui.button("today").clicked() {
+                            self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
+                            self.loaded_at = None;
+                        }
+                        ui.strong(self.day.to_string());
+                    }
+                    View::Reports => {
+                        if ui.button("\u{25c0}").clicked() {
+                            self.shift_week(-1);
+                        }
+                        if ui.button("\u{25b6}").clicked() {
+                            self.shift_week(1);
+                        }
+                        if ui.button("this week").clicked() {
+                            let today = Zoned::now().with_time_zone(self.tz.clone()).date();
+                            self.week_anchor =
+                                chronicle_core::timeref::week_start(today).unwrap_or(today);
+                            self.loaded_at = None;
+                        }
+                        let sunday = self.week_anchor.checked_add(6.days()).ok();
+                        ui.strong(match sunday {
+                            Some(sun) => format!("{} \u{2013} {sun}", self.week_anchor),
+                            None => self.week_anchor.to_string(),
+                        });
+                    }
                 }
-                if ui.button("today").clicked() {
-                    self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
-                    self.loaded_at = None;
-                }
-                ui.strong(self.day.to_string());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("settings").clicked() {
                         self.toggle_settings();
@@ -760,6 +893,11 @@ impl eframe::App for TimelineApp {
 
         self.chat_panel_ui(ui);
         self.settings_window(ui.ctx());
+
+        if self.view == View::Reports {
+            self.reports_ui(ui);
+            return;
+        }
 
         // Flat row list for the virtual scroller: working-on section, then
         // the day's tasks grouped with their intervals, then raw spans.

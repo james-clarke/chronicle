@@ -269,7 +269,7 @@ fn clip(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn fmt_dur(ms: i64) -> String {
+pub(crate) fn fmt_dur(ms: i64) -> String {
     let s = ms / 1000;
     let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
     if h > 0 {

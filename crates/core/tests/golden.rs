@@ -581,3 +581,51 @@ fn digest_workspace_context_section() {
         plain
     );
 }
+
+#[test]
+fn chat_context_includes_project_totals() {
+    use chronicle_core::{chat, storage};
+    use jiff::civil;
+    use rusqlite::params;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("chat_totals.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let conn = storage::open(&db).unwrap();
+
+    // Wed 2026-08-26 14:30 UTC — "this week" resolves to Mon 2026-08-24.
+    let now = civil::date(2026, 8, 26)
+        .at(14, 30, 0, 0)
+        .to_zoned(TimeZone::UTC)
+        .unwrap();
+    let t0 = civil::date(2026, 8, 24)
+        .at(9, 0, 0, 0)
+        .to_zoned(TimeZone::UTC)
+        .unwrap()
+        .timestamp()
+        .as_millisecond();
+    conn.execute(
+        "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, ?1, ?2, 'done')",
+        [t0, t0 + 3_600_000],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tasks (id, label, project, status, source, created_ts)
+         VALUES (1, 'm12 reports', 'chronicle', 'open', 'derived', ?1)",
+        params![t0],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+         VALUES (1, 1, ?1, ?2, 0.9)",
+        [t0, t0 + 90 * 60_000],
+    )
+    .unwrap();
+
+    let ctx = chat::build_context(&conn, "how long on chronicle this week?", &now).unwrap();
+    assert!(
+        ctx.contains("## Totals by project") && ctx.contains("- chronicle: 1h30m"),
+        "missing totals section:\n{ctx}"
+    );
+}
