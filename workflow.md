@@ -9,6 +9,12 @@ The daemon runs under `systemctl --user` from the installed release binary
 `cargo build` / `test` / `check` / `clippy` are safe anytime — they don't touch
 `~/.cargo/bin`.
 
+## Visual UI iteration
+
+`./target/debug/chronicle ui` runs the window standalone against the live DB —
+no daemon needed, no systemd stop/start. Daemon-only actions ("derive now")
+just report "daemon not reachable" if the unit is stopped.
+
 ## Test a debug daemon live
 
 ```sh
