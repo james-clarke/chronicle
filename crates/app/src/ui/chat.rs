@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use eframe::egui;
 use rusqlite::Connection;
 
-use super::TimelineApp;
+use super::{TimelineApp, theme};
 
 enum ChatEvent {
     Ready,
@@ -167,10 +167,15 @@ impl TimelineApp {
         chat.drain_events();
         let mut close = false;
         egui::Panel::right("chat_panel")
-            .default_size(300.0)
+            .default_size(320.0)
+            .resizable(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("Chat");
+                    ui.label(
+                        egui::RichText::new("Chat")
+                            .text_style(egui::TextStyle::Heading)
+                            .color(theme::palette::TEXT),
+                    );
                     if chat.warming {
                         ui.weak("loading model\u{2026}");
                     }
@@ -182,7 +187,13 @@ impl TimelineApp {
                 });
                 egui::Panel::bottom("chat_input").show(ui, |ui| {
                     if let Some(error) = &chat.error {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        egui::Frame::new()
+                            .fill(theme::palette::RED.gamma_multiply(0.15))
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .inner_margin(egui::Margin::same(6))
+                            .show(ui, |ui| {
+                                ui.colored_label(theme::palette::RED, error);
+                            });
                     }
                     ui.horizontal(|ui| {
                         let can_send = !chat.busy && !chat.warming;
@@ -214,14 +225,34 @@ impl TimelineApp {
                         .auto_shrink(false)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
+                            let max_w = ui.available_width() * 0.85;
                             for msg in &chat.transcript {
-                                if msg.user {
-                                    ui.strong(format!("you: {}", msg.text));
-                                } else if msg.text.is_empty() && chat.busy {
-                                    ui.weak("thinking\u{2026}");
-                                } else {
-                                    ui.label(&msg.text);
+                                if !msg.user && msg.text.is_empty() && chat.busy {
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::Spinner::new().size(14.0));
+                                        ui.weak("thinking\u{2026}");
+                                    });
+                                    ui.add_space(6.0);
+                                    continue;
                                 }
+                                let (fill, align) = if msg.user {
+                                    (
+                                        theme::palette::ACCENT.gamma_multiply(0.20),
+                                        egui::Align::Max,
+                                    )
+                                } else {
+                                    (theme::palette::SURFACE, egui::Align::Min)
+                                };
+                                ui.with_layout(egui::Layout::top_down(align), |ui| {
+                                    egui::Frame::new()
+                                        .fill(fill)
+                                        .corner_radius(egui::CornerRadius::same(10))
+                                        .inner_margin(egui::Margin::symmetric(10, 6))
+                                        .show(ui, |ui| {
+                                            ui.set_max_width(max_w);
+                                            ui.label(&msg.text);
+                                        });
+                                });
                                 ui.add_space(6.0);
                             }
                         });
