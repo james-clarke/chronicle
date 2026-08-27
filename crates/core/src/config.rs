@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -10,7 +10,9 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// Serialize: the UI settings panel writes the whole struct back to
+// config.toml (TOML has no null — skip the Nones).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Batch = this many minutes of non-AFK activity.
@@ -22,6 +24,8 @@ pub struct Config {
     /// Consecutive same-app events merge into one span when normalized title
     /// similarity is at least this (absorbs jitter like unread-count prefixes).
     pub title_similarity: f64,
+    /// Rows older than this are pruned daily (0 = keep forever).
+    /// Corrections are always kept.
     pub retention_days: u32,
     /// AW-compatible HTTP server port.
     pub port: u16,
@@ -34,7 +38,9 @@ pub struct Config {
     /// Regexes; matching apps/titles are never stored at all.
     pub excluded_apps: Vec<String>,
     pub excluded_titles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<PathBuf>,
 }
 

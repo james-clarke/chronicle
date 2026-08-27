@@ -701,7 +701,14 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
             }
             recv(ctrl_rx) -> cmd => {
                 match cmd {
-                    Ok(CtrlMsg::Toggle) => toggle_ui(&mut ui_child),
+                    Ok(CtrlMsg::Toggle) => {
+                        // Fresh spans the moment the window appears, not up to
+                        // a tick later.
+                        if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, Timestamp::now()) {
+                            tracing::error!("sessionize refresh failed: {e}");
+                        }
+                        toggle_ui(&mut ui_child);
+                    }
                     Ok(CtrlMsg::DeriveNow) => scheduler.tick(&conn, &config, data_dir, idle_since, true),
                     Err(_) => {}
                 }
@@ -781,6 +788,7 @@ impl Scheduler {
             tracing::debug!("derivation deferred: battery low");
             return;
         }
+        prune_if_due(conn, config);
         if chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_none() {
             tracing::debug!("derivation skipped: no model downloaded");
             return;
@@ -801,6 +809,35 @@ impl Scheduler {
             Err(e) => tracing::error!(batch_id, "failed to spawn derive worker: {e}"),
         }
     }
+}
+
+const PRUNE_EVERY_MS: i64 = 24 * 3_600_000;
+const PRUNE_BATCH: usize = 1000;
+
+/// Daily retention prune, piggybacking on the idle gate the caller already
+/// checked. The stamp is written even when nothing was deleted (or the prune
+/// failed) so a busy DB isn't retried every tick.
+fn prune_if_due(conn: &rusqlite::Connection, config: &Config) {
+    use chronicle_core::storage;
+    if config.retention_days == 0 {
+        return; // 0 = keep forever
+    }
+    let now = Timestamp::now().as_millisecond();
+    let last = storage::get_meta(conn, "last_prune_ts")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if now - last < PRUNE_EVERY_MS {
+        return;
+    }
+    let cutoff = now - i64::from(config.retention_days) * 86_400_000;
+    match storage::prune(conn, cutoff, PRUNE_BATCH) {
+        Ok(0) => {}
+        Ok(rows) => tracing::info!(rows, "retention prune"),
+        Err(e) => tracing::error!("retention prune failed: {e}"),
+    }
+    let _ = storage::set_meta(conn, "last_prune_ts", Some(&now.to_string()));
 }
 
 fn spawn_derive_worker(batch_id: i64) -> std::io::Result<Child> {
@@ -851,7 +888,9 @@ fn on_low_battery() -> bool {
     false
 }
 
-const SESSIONIZE_EVERY: Duration = Duration::from_secs(60);
+// 15 s tick + 10 s UI wake bounds timeline staleness at ~25 s worst case
+// (was 60+30 ≈ 90 s); the tail rewrite is a handful of rows, cost negligible.
+const SESSIONIZE_EVERY: Duration = Duration::from_secs(15);
 
 #[cfg(target_os = "linux")]
 fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {

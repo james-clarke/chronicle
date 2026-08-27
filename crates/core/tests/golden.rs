@@ -247,6 +247,108 @@ fn correction_changes_next_digest() {
 }
 
 #[test]
+fn retention_prune() {
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("prune.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+
+    let cutoff: i64 = 1_000_000_000_000;
+    let old = cutoff - 3_600_000;
+    let fresh = cutoff + 3_600_000;
+
+    // Three old events with batch size 2 exercises the delete loop.
+    for i in 0..3 {
+        conn.execute(
+            "INSERT INTO events (ts, kind, app, title) VALUES (?1, 'focus', 'term', 'old-ev')",
+            [old + i],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO events (ts, kind, app, title) VALUES (?1, 'focus', 'term', 'new-ev')",
+        [fresh],
+    )
+    .unwrap();
+
+    // Batch 1: old, uncorrected — span, task, and the batch itself all go.
+    // Batch 2: old, but its task is corrected — task and batch survive.
+    // Batch 3: fresh — untouched.
+    for (id, start, end) in [
+        (1, old - 10_000, old),
+        (2, old - 10_000, old),
+        (3, fresh, fresh + 10_000),
+    ] {
+        conn.execute(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (?1, ?2, ?3, 'done')",
+            [id, start, end],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id)
+             VALUES (?2, ?3, 'term', 'ancientspan', 'focus', ?1)",
+            [id, start, end],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (batch_id, label, start_ts, end_ts, confidence)
+             VALUES (?1, 'ancienttask', ?2, ?3, 0.5)",
+            [id, start, end],
+        )
+        .unwrap();
+    }
+    let task2: i64 = conn
+        .query_row("SELECT id FROM tasks WHERE batch_id=2", [], |r| r.get(0))
+        .unwrap();
+    storage::insert_correction(&mut conn, ms_to_ts(old), task2, "kept task", Some("proj")).unwrap();
+
+    conn.execute(
+        "INSERT INTO chat_messages (ts, role, content) VALUES (?1, 'user', 'old'), (?2, 'user', 'new')",
+        [old, fresh],
+    )
+    .unwrap();
+
+    let pruned = storage::prune(&conn, cutoff, 2).unwrap();
+    assert!(pruned > 0);
+
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(count("SELECT count(*) FROM events"), 1);
+    assert_eq!(
+        count("SELECT count(*) FROM spans"),
+        1,
+        "only the fresh span survives"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM tasks"),
+        2,
+        "corrected old task + fresh task"
+    );
+    assert_eq!(
+        count("SELECT count(*) FROM batches WHERE id=1"),
+        0,
+        "unreferenced old batch pruned"
+    );
+    assert_eq!(count("SELECT count(*) FROM batches"), 2);
+    assert_eq!(
+        count("SELECT count(*) FROM corrections"),
+        1,
+        "corrections never pruned"
+    );
+    assert_eq!(count("SELECT count(*) FROM chat_messages"), 1);
+    // AFTER DELETE triggers kept the external-content FTS in sync.
+    assert_eq!(
+        count("SELECT count(*) FROM spans_fts WHERE spans_fts MATCH 'ancientspan'"),
+        1
+    );
+    // Idempotent: nothing left to prune.
+    assert_eq!(storage::prune(&conn, cutoff, 2).unwrap(), 0);
+}
+
+#[test]
 fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);

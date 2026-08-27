@@ -83,7 +83,8 @@ const WEEKDAYS: [(&str, Weekday); 7] = [
     ("sunday", Weekday::Sunday),
 ];
 
-/// "last/past hour", "last/past N hours/minutes", digit or small number word.
+/// "last/past hour", "last/past N hours/minutes"; N = digits or number words
+/// up to ninety-nine (hyphenated or two words).
 fn parse_last_n(words: &[String], now_ms: i64) -> Option<(i64, i64)> {
     let anchor = words.iter().position(|w| w == "last" || w == "past")?;
     let rest = &words[anchor + 1..];
@@ -91,6 +92,10 @@ fn parse_last_n(words: &[String], now_ms: i64) -> Option<(i64, i64)> {
         [unit, ..] if is_hour(unit) => (1, 60),
         [n, unit, ..] if is_hour(unit) => (parse_count(n)?, 60),
         [n, unit, ..] if is_minute(unit) => (parse_count(n)?, 1),
+        // Two-word compounds: "twenty five minutes" (hyphenated ones arrive
+        // as a single word and are handled by parse_count).
+        [a, b, unit, ..] if is_hour(unit) => (compound(a, b)?, 60),
+        [a, b, unit, ..] if is_minute(unit) => (compound(a, b)?, 1),
         _ => return None,
     };
     if n == 0 || n > 24 * 60 {
@@ -111,11 +116,55 @@ fn parse_count(w: &str) -> Option<i64> {
     if let Ok(n) = w.parse() {
         return Some(n);
     }
+    if let Some((tens, ones)) = w.split_once('-') {
+        return compound(tens, ones);
+    }
+    parse_small(w).or_else(|| parse_tens(w))
+}
+
+/// "forty" + "five" → 45. The ones part must be a true ones digit.
+fn compound(tens: &str, ones: &str) -> Option<i64> {
+    let ones = parse_small(ones).filter(|n| *n <= 9)?;
+    Some(parse_tens(tens)? + ones)
+}
+
+fn parse_small(w: &str) -> Option<i64> {
     let words = [
-        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
         "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
     ];
     words.iter().position(|&s| s == w).map(|i| i as i64 + 1)
+}
+
+fn parse_tens(w: &str) -> Option<i64> {
+    Some(match w {
+        "twenty" => 20,
+        "thirty" => 30,
+        "forty" => 40,
+        "fifty" => 50,
+        "sixty" => 60,
+        "seventy" => 70,
+        "eighty" => 80,
+        "ninety" => 90,
+        _ => return None,
+    })
 }
 
 /// Lowercased words; only alphanumerics and `-` survive (keeps ISO dates).
@@ -209,13 +258,27 @@ mod tests {
         assert_eq!(parse("past 2 hours", &now()), Some((n - 2 * 3_600_000, n)));
         assert_eq!(
             parse("last thirty minutes", &now()),
-            None // number word not in the small map
+            Some((n - 30 * 60_000, n))
         );
         assert_eq!(parse("last 30 minutes", &now()), Some((n - 30 * 60_000, n)));
         assert_eq!(
             parse("last two hours", &now()),
             Some((n - 2 * 3_600_000, n))
         );
+        assert_eq!(
+            parse("past fifteen minutes", &now()),
+            Some((n - 15 * 60_000, n))
+        );
+        assert_eq!(
+            parse("last forty-five minutes", &now()),
+            Some((n - 45 * 60_000, n))
+        );
+        assert_eq!(
+            parse("last twenty five minutes", &now()),
+            Some((n - 25 * 60_000, n))
+        );
+        // Not a ones digit after a tens word.
+        assert_eq!(parse("last twenty twelve minutes", &now()), None);
     }
 
     #[test]

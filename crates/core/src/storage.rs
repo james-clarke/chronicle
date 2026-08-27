@@ -254,6 +254,44 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
         })?)
 }
 
+/// Retention: delete rows fully older than `cutoff_ms`, at most `batch` rows
+/// per statement (one implicit transaction each) so a large backlog never
+/// holds a long write lock. FTS indexes stay in sync via the AFTER DELETE
+/// triggers. Corrections are user teaching data and are never pruned; a task
+/// referenced by one is kept as its context (and the FK requires it), as is
+/// a batch still referenced by surviving spans or tasks.
+pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
+    const STMTS: [&str; 5] = [
+        "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
+        "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
+        "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE end_ts < ?1 \
+         AND id NOT IN (SELECT task_id FROM corrections) LIMIT ?2)",
+        "DELETE FROM batches WHERE id IN (SELECT id FROM batches WHERE end_ts < ?1 \
+         AND id NOT IN (SELECT batch_id FROM spans WHERE batch_id IS NOT NULL) \
+         AND id NOT IN (SELECT batch_id FROM tasks) LIMIT ?2)",
+        "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE ts < ?1 LIMIT ?2)",
+    ];
+    let mut total = 0u64;
+    for sql in STMTS {
+        loop {
+            let n = conn.execute(sql, params![cutoff_ms, batch as i64])?;
+            total += n as u64;
+            if n < batch {
+                break;
+            }
+        }
+    }
+    if total > 0 {
+        // Hand freed pages back a few at a time (auto_vacuum=INCREMENTAL),
+        // then checkpoint so the WAL stops carrying the deleted pages. A
+        // concurrent reader (UI / chat worker) makes the checkpoint partial,
+        // not an error.
+        conn.execute_batch("PRAGMA incremental_vacuum(256)")?;
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    }
+    Ok(total)
+}
+
 /// Last `n` task labels ending at or before `before_ms`, newest first
 /// (digest continuity hint).
 pub fn recent_labels_before(
