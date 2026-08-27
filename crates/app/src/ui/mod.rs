@@ -164,6 +164,12 @@ struct TimelineApp {
     model_dl: Option<ModelDownload>,
     /// Selected PRESETS index in the onboarding card.
     preset_pick: usize,
+    /// "run at login" card eligible (systemctl present, no user unit yet).
+    service_card: bool,
+    /// Meta flag: user dismissed the service card.
+    service_dismissed: bool,
+    /// Result of the last in-UI service install attempt.
+    service_status: Option<Result<String, String>>,
 }
 
 impl TimelineApp {
@@ -199,6 +205,9 @@ impl TimelineApp {
             model_missing: false,
             model_dl: None,
             preset_pick: 0,
+            service_card: onboarding::systemd_available() && !onboarding::service_unit_exists(),
+            service_dismissed: false,
+            service_status: None,
         }
     }
 
@@ -252,6 +261,15 @@ impl TimelineApp {
             .and_then(|c| c.model_path);
         self.model_missing =
             chronicle_derive::model::resolve(model_path.as_deref(), &self.data_dir).is_none();
+        if let Some(conn) = self.conn.as_ref()
+            && !self.service_dismissed
+        {
+            self.service_dismissed =
+                chronicle_core::storage::get_meta(conn, "onboard_service_dismissed")
+                    .ok()
+                    .flatten()
+                    .is_some();
+        }
     }
 
     fn day_range_ms(&self) -> anyhow::Result<(i64, i64)> {

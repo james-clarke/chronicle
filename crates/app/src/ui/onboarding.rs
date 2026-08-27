@@ -102,7 +102,124 @@ pub(super) fn progress_ui(ui: &mut egui::Ui, dl: &ModelDownload) {
     ui.add(egui::ProgressBar::new(dl.fraction()).text(text));
 }
 
+pub(super) fn systemd_available() -> bool {
+    std::process::Command::new("systemctl")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn user_unit_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".config/systemd/user/chronicle.service"))
+}
+
+pub(super) fn service_unit_exists() -> bool {
+    user_unit_path().is_some_and(|p| p.exists())
+}
+
+/// Write the user unit (ExecStart pointed at this binary) and enable it.
+/// Deliberately `enable` without `--now`: the daemon is already running as
+/// this UI's parent and holds the single-instance socket; `--now` would start
+/// a second instance that just toggles and exits, leaving a confusing
+/// stopped unit.
+pub(super) fn install_service() -> Result<String, String> {
+    let exe = crate::own_exe().map_err(|e| e.to_string())?;
+    let unit_path = user_unit_path().ok_or("HOME not set")?;
+    let template = include_str!("../../../../packaging/chronicle.service");
+    let unit = template.replace(
+        "ExecStart=%h/.cargo/bin/chronicle run",
+        &format!("ExecStart={} run", exe.display()),
+    );
+    if let Some(dir) = unit_path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&unit_path, unit).map_err(|e| e.to_string())?;
+    for args in [["daemon-reload", ""], ["enable", "chronicle"]] {
+        let args: Vec<&str> = args.iter().filter(|a| !a.is_empty()).copied().collect();
+        let out = std::process::Command::new("systemctl")
+            .arg("--user")
+            .args(&args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!(
+                "systemctl --user {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+    Ok("installed \u{2014} Chronicle will start at your next login".into())
+}
+
 impl TimelineApp {
+    /// Dismissible "run at login" card, shown while no user unit exists.
+    pub(super) fn service_card_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.service_card || self.service_dismissed {
+            return;
+        }
+        egui::Frame::new()
+            .fill(theme::palette::SURFACE)
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                match &self.service_status {
+                    Some(Ok(msg)) => {
+                        ui.colored_label(theme::palette::GREEN, msg);
+                        return;
+                    }
+                    Some(Err(e)) => {
+                        ui.colored_label(theme::palette::RED, e);
+                    }
+                    None => {}
+                }
+                ui.label(
+                    egui::RichText::new("Start Chronicle at login")
+                        .text_style(egui::TextStyle::Heading)
+                        .color(theme::palette::TEXT),
+                );
+                ui.label(
+                    "Chronicle is running now; install the background service so it \
+                     starts automatically at your next login.",
+                );
+                if let Ok(exe) = crate::own_exe()
+                    && exe.components().any(|c| c.as_os_str() == "target")
+                {
+                    ui.colored_label(
+                        theme::palette::AMBER,
+                        format!(
+                            "running a dev build \u{2014} the service will point at {}",
+                            exe.display()
+                        ),
+                    );
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let install = egui::Button::new(
+                        egui::RichText::new("install service").color(theme::palette::BG),
+                    )
+                    .fill(theme::palette::ACCENT);
+                    if ui.add(install).clicked() {
+                        self.service_status = Some(install_service());
+                    }
+                    if ui.small_button("dismiss").clicked() {
+                        self.service_dismissed = true;
+                        if let Some(conn) = self.conn.as_ref() {
+                            let _ = chronicle_core::storage::set_meta(
+                                conn,
+                                "onboard_service_dismissed",
+                                Some("1"),
+                            );
+                        }
+                    }
+                });
+            });
+        ui.add_space(8.0);
+    }
+
     pub(super) fn start_model_download(&mut self, ctx: &egui::Context, spec: &'static ModelSpec) {
         if self
             .model_dl

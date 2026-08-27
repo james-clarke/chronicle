@@ -739,7 +739,7 @@ fn toggle_ui(slot: &mut Option<Child>) {
 /// the daemon runs (dev rebuild, upgrade), /proc/self/exe reads
 /// "<path> (deleted)"; fall back to the current binary at the same path —
 /// mild version skew beats a spawn failure.
-fn own_exe() -> std::io::Result<PathBuf> {
+pub(crate) fn own_exe() -> std::io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     if !exe.exists()
         && let Some(stripped) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)"))
@@ -820,6 +820,11 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     chronicle_core::storage::set_meta(&conn, "server_error", server_error.as_deref())?;
     tracing::info!(?data_dir, "chronicle daemon running");
     let mut ui_child: Option<Child> = None;
+    // First run without a model: derivation can't start, so surface the UI
+    // (and its onboarding card) instead of sitting silent in the background.
+    if chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_none() {
+        toggle_ui(&mut ui_child);
+    }
     let mut scheduler = Scheduler { worker: None };
     let mut idle_since: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
