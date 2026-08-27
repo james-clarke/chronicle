@@ -101,6 +101,7 @@ impl TimelineApp {
 
         let mut pending: Option<Action> = None;
         egui::CentralPanel::default().show(ui, |ui| {
+            self.model_card_ui(ui);
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }

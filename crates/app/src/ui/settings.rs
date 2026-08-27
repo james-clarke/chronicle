@@ -112,6 +112,8 @@ impl TimelineApp {
     pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
         let config_path = self.config_path.clone();
         let data_dir = self.data_dir.clone();
+        let model_dl = &self.model_dl;
+        let mut start_dl = false;
         let Some(panel) = &mut self.settings else {
             return;
         };
@@ -171,9 +173,19 @@ impl TimelineApp {
                     Some(p) => {
                         ui.weak(format!("using {}", p.display()));
                     }
-                    None => {
-                        ui.colored_label(theme::palette::AMBER, "no model downloaded");
-                    }
+                    None => match model_dl {
+                        Some(dl) if dl.finished.is_none() => {
+                            super::onboarding::progress_ui(ui, dl);
+                        }
+                        _ => {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(theme::palette::AMBER, "no model downloaded");
+                                if ui.small_button("download").clicked() {
+                                    start_dl = true;
+                                }
+                            });
+                        }
+                    },
                 }
 
                 section(ui, "Storage & server", false);
@@ -224,6 +236,9 @@ impl TimelineApp {
             });
         if !open {
             self.settings = None;
+        }
+        if start_dl {
+            self.start_model_download(ctx, chronicle_derive::model::default_preset());
         }
     }
 }

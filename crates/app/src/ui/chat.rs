@@ -166,6 +166,7 @@ impl TimelineApp {
         let Some(chat) = &mut self.chat else { return };
         chat.drain_events();
         let mut close = false;
+        let mut start_dl = false;
         egui::Panel::right("chat_panel")
             .default_size(320.0)
             .resizable(true)
@@ -193,6 +194,11 @@ impl TimelineApp {
                             .inner_margin(egui::Margin::same(6))
                             .show(ui, |ui| {
                                 ui.colored_label(theme::palette::RED, error);
+                                if error.contains("no model")
+                                    && ui.small_button("download model").clicked()
+                                {
+                                    start_dl = true;
+                                }
                             });
                     }
                     ui.horizontal(|ui| {
@@ -260,6 +266,10 @@ impl TimelineApp {
             });
         if close {
             self.chat = None;
+        }
+        if start_dl {
+            let ctx = ui.ctx().clone();
+            self.start_model_download(&ctx, chronicle_derive::model::default_preset());
         }
     }
 }

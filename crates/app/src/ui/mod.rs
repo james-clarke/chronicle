@@ -2,6 +2,7 @@
 //! "toggle\n" to our stdin to raise the window; closing it exits the process.
 
 mod chat;
+mod onboarding;
 mod reports;
 mod settings;
 mod theme;
@@ -18,6 +19,7 @@ use jiff::{ToSpan, Zoned};
 use rusqlite::Connection;
 
 use chat::ChatPanel;
+use onboarding::ModelDownload;
 use settings::SettingsPanel;
 
 const RELOAD_EVERY: Duration = Duration::from_secs(5);
@@ -156,6 +158,12 @@ struct TimelineApp {
     config_path: PathBuf,
     /// Some = settings window open.
     settings: Option<SettingsPanel>,
+    /// No usable model resolved (config override or default preset).
+    model_missing: bool,
+    /// Some = model download in flight or just finished.
+    model_dl: Option<ModelDownload>,
+    /// Selected PRESETS index in the onboarding card.
+    preset_pick: usize,
 }
 
 impl TimelineApp {
@@ -188,6 +196,9 @@ impl TimelineApp {
             chat: None,
             config_path,
             settings: None,
+            model_missing: false,
+            model_dl: None,
+            preset_pick: 0,
         }
     }
 
@@ -236,6 +247,11 @@ impl TimelineApp {
                 .ok()
                 .flatten();
         }
+        let model_path = chronicle_core::config::Config::load(&self.config_path)
+            .ok()
+            .and_then(|c| c.model_path);
+        self.model_missing =
+            chronicle_derive::model::resolve(model_path.as_deref(), &self.data_dir).is_none();
     }
 
     fn day_range_ms(&self) -> anyhow::Result<(i64, i64)> {

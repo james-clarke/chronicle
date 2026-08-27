@@ -17,6 +17,7 @@ pub(super) mod palette {
     pub const AMBER: Color32 = Color32::from_rgb(0xd9, 0xa4, 0x41);
     pub const ORANGE: Color32 = Color32::from_rgb(0xe0, 0x78, 0x4f);
     pub const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
+    pub const GREEN: Color32 = Color32::from_rgb(0x8f, 0xc7, 0x8f);
 }
 
 /// Proportional family with Inter Medium first; for headings and emphasis.
