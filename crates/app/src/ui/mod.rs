@@ -133,6 +133,8 @@ struct TimelineApp {
     closed_tasks: Vec<OpenRow>,
     /// "recently closed" expander state.
     show_closed: bool,
+    /// Raw spans section expander state (collapsed by default; debug-grade).
+    show_spans: bool,
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
@@ -165,6 +167,7 @@ impl TimelineApp {
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
             show_closed: false,
+            show_spans: false,
             new_label: String::new(),
             new_project: String::new(),
             edit: None,

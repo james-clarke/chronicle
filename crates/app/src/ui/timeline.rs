@@ -54,7 +54,9 @@ impl TimelineApp {
             rows.extend((0..group.intervals.len()).map(|i| RowKind::Interval(g, i)));
         }
         rows.push(RowKind::SpansHeader);
-        rows.extend((0..self.spans.len()).map(RowKind::Span));
+        if self.show_spans {
+            rows.extend((0..self.spans.len()).map(RowKind::Span));
+        }
 
         // Reassignment targets: every task in sight (open + today's).
         let mut candidates: Vec<(i64, String)> = Vec::new();
@@ -76,11 +78,12 @@ impl TimelineApp {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 return;
             }
-            let row_height = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+            let row_height = ui.text_style_height(&egui::TextStyle::Body) + 10.0;
             let groups = &self.groups;
             let open_tasks = &self.open_tasks;
             let closed_tasks = &self.closed_tasks;
             let show_closed = &mut self.show_closed;
+            let show_spans = &mut self.show_spans;
             let spans = &self.spans;
             let edit = &mut self.edit;
             let new_label = &mut self.new_label;
@@ -93,13 +96,15 @@ impl TimelineApp {
                     for i in range {
                         match rows[i] {
                             RowKind::WorkingHeader => {
-                                ui.strong("Working on");
+                                section_header(ui, "Working on", None);
                             }
                             RowKind::DeclareForm => {
                                 ui.horizontal(|ui| {
+                                    let label_w =
+                                        (ui.available_width() - 220.0).clamp(240.0, 420.0);
                                     ui.add(
                                         egui::TextEdit::singleline(new_label)
-                                            .desired_width(240.0)
+                                            .desired_width(label_w)
                                             .hint_text("declare a task\u{2026}"),
                                     );
                                     ui.add(
@@ -129,23 +134,24 @@ impl TimelineApp {
                             }
                             RowKind::Closed(c) => closed_row(ui, &closed_tasks[c], &mut pending),
                             RowKind::ProjectsHeader => {
-                                ui.strong("Projects");
+                                section_header(ui, "Projects", Some(projects.len()));
                             }
                             RowKind::Project(p) => {
                                 let (name, ms) = &projects[p];
                                 ui.horizontal(|ui| {
-                                    ui.weak(format!("{:>7}", fmt_dur(*ms)));
-                                    ui.label(name);
+                                    ui.add_space(18.0);
+                                    theme::badge(ui, name, theme::palette::ACCENT);
+                                    ui.weak(fmt_dur(*ms));
                                 });
                             }
                             RowKind::TasksHeader => {
                                 if groups.is_empty() {
                                     ui.horizontal(|ui| {
-                                        ui.strong("Tasks");
+                                        section_header(ui, "Tasks", None);
                                         ui.weak("none derived yet");
                                     });
                                 } else {
-                                    ui.strong("Tasks");
+                                    section_header(ui, "Tasks", Some(groups.len()));
                                 }
                             }
                             RowKind::TaskHeader(g) => {
@@ -159,7 +165,18 @@ impl TimelineApp {
                                 &mut pending,
                             ),
                             RowKind::SpansHeader => {
-                                ui.strong("Spans");
+                                ui.horizontal(|ui| {
+                                    let arrow = if *show_spans { "\u{25be}" } else { "\u{25b8}" };
+                                    if ui
+                                        .small_button(format!(
+                                            "{arrow} Spans \u{b7} {}",
+                                            spans.len()
+                                        ))
+                                        .clicked()
+                                    {
+                                        *show_spans = !*show_spans;
+                                    }
+                                });
                             }
                             RowKind::Span(s) => span_row(ui, &spans[s]),
                         }
@@ -173,6 +190,40 @@ impl TimelineApp {
     }
 }
 
+/// Section header: heading text, optional weak count, hairline underneath.
+fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .text_style(egui::TextStyle::Heading)
+                    .color(theme::palette::TEXT),
+            );
+            if let Some(n) = count {
+                ui.weak(format!("\u{b7} {n}"));
+            }
+        })
+        .response;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        resp.rect.bottom() + 2.0,
+        egui::Stroke::new(1.0, theme::palette::SURFACE_2),
+    );
+}
+
+/// Badge for a task's project tag, if any.
+fn project_badge(ui: &mut egui::Ui, project: &Option<String>) {
+    if let Some(project) = project {
+        theme::badge(ui, project, theme::palette::ACCENT);
+    }
+}
+
+fn declared_badge(ui: &mut egui::Ui, declared: bool) {
+    if declared {
+        theme::badge(ui, "declared", theme::palette::TEXT_DIM);
+    }
+}
+
 fn open_row(
     ui: &mut egui::Ui,
     task: &OpenRow,
@@ -180,14 +231,10 @@ fn open_row(
     pending: &mut Option<Action>,
 ) {
     ui.horizontal(|ui| {
-        ui.add_space(12.0);
+        ui.add_space(18.0);
         ui.strong(&task.label);
-        if let Some(project) = &task.project {
-            ui.label(project);
-        }
-        if task.declared {
-            ui.weak("(declared)");
-        }
+        project_badge(ui, &task.project);
+        declared_badge(ui, task.declared);
         if ui.small_button("close").clicked() {
             *pending = Some(Action::Close(task.task_id));
         }
@@ -197,14 +244,10 @@ fn open_row(
 
 fn closed_row(ui: &mut egui::Ui, task: &OpenRow, pending: &mut Option<Action>) {
     ui.horizontal(|ui| {
-        ui.add_space(24.0);
+        ui.add_space(30.0);
         ui.label(&task.label);
-        if let Some(project) = &task.project {
-            ui.weak(project);
-        }
-        if task.declared {
-            ui.weak("(declared)");
-        }
+        project_badge(ui, &task.project);
+        declared_badge(ui, task.declared);
         if ui.small_button("reopen").clicked() {
             *pending = Some(Action::Reopen(task.task_id));
         }
@@ -243,42 +286,51 @@ fn task_header_row(
     candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) {
-    ui.horizontal(|ui| {
-        ui.weak(format!("{:>7}", fmt_dur(group.total_ms)));
-        if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
-            let e = edit.as_mut().expect("checked above");
-            ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
-            ui.add(
-                egui::TextEdit::singleline(&mut e.project)
-                    .desired_width(110.0)
-                    .hint_text("project"),
-            );
-            if ui.button("save").clicked()
-                && let Some(e) = edit.take()
-            {
-                *pending = Some(Action::Rename(e));
-            }
-            if ui.button("cancel").clicked() {
-                *edit = None;
-            }
-        } else {
-            ui.strong(&group.label);
-            if let Some(project) = &group.project {
-                ui.label(project);
-            }
-            if group.declared {
-                ui.weak("(declared)");
-            }
-            if ui.small_button("edit").clicked() {
-                *edit = Some(EditState {
-                    task_id: group.task_id,
-                    label: group.label.clone(),
-                    project: group.project.clone().unwrap_or_default(),
+    // Card-look: full-width fill painted under the row content (pre-registered
+    // so it draws behind).
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let resp = ui
+        .horizontal(|ui| {
+            if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
+                let e = edit.as_mut().expect("checked above");
+                ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut e.project)
+                        .desired_width(110.0)
+                        .hint_text("project"),
+                );
+                if ui.button("save").clicked()
+                    && let Some(e) = edit.take()
+                {
+                    *pending = Some(Action::Rename(e));
+                }
+                if ui.button("cancel").clicked() {
+                    *edit = None;
+                }
+            } else {
+                ui.strong(&group.label);
+                project_badge(ui, &group.project);
+                declared_badge(ui, group.declared);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    merge_menu(ui, group.task_id, candidates, pending);
+                    if ui.small_button("edit").clicked() {
+                        *edit = Some(EditState {
+                            task_id: group.task_id,
+                            label: group.label.clone(),
+                            project: group.project.clone().unwrap_or_default(),
+                        });
+                    }
+                    ui.weak(fmt_dur(group.total_ms));
                 });
             }
-            merge_menu(ui, group.task_id, candidates, pending);
-        }
-    });
+        })
+        .response;
+    let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), resp.rect.y_range())
+        .expand2(egui::vec2(0.0, 2.0));
+    ui.painter().set(
+        bg,
+        egui::Shape::rect_filled(rect, egui::CornerRadius::same(4), theme::palette::SURFACE),
+    );
 }
 
 /// One interval under its task header; "move" reassigns it to another task
@@ -299,7 +351,7 @@ fn interval_row(
         interval.end.timestamp().as_millisecond() - interval.start.timestamp().as_millisecond(),
     );
     ui.horizontal(|ui| {
-        ui.add_space(24.0);
+        ui.add_space(18.0);
         ui.monospace(time);
         ui.weak(format!("{dur:>7}"));
         let pct = format!("{:.0}%", interval.confidence * 100.0);
