@@ -50,14 +50,31 @@ impl TimelineApp {
         let day_start = self.day.to_zoned(self.tz.clone()).ok();
 
         let mut pending: Option<Action> = None;
-        // Detail pane for the selected task (before the central panel so the
-        // remaining width goes to the card list).
+        // Detail pane for the selected task: side panel when wide, the whole
+        // central panel when the window is widget-narrow.
+        let narrow = ui.ctx().viewport_rect().width() < 700.0;
         if let Some(sel) = self.selected_task {
             match self.groups.iter().position(|g| g.task_id == sel) {
                 Some(gi) => {
                     let group = &self.groups[gi];
                     let edit = &mut self.edit;
                     let mut close_detail = false;
+                    let color = theme::series_color_for(group.task_id);
+                    if narrow {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                                close_detail =
+                                    detail_ui(ui, group, color, edit, &candidates, &mut pending);
+                            });
+                        });
+                        if close_detail {
+                            self.selected_task = None;
+                        }
+                        if let Some(action) = pending {
+                            self.apply_action(action);
+                        }
+                        return;
+                    }
                     let frame = egui::Frame::new()
                         .fill(theme::palette::SURFACE)
                         .inner_margin(egui::Margin::same(14));
@@ -66,14 +83,8 @@ impl TimelineApp {
                         .resizable(true)
                         .default_size(320.0)
                         .show(ui, |ui| {
-                            close_detail = detail_ui(
-                                ui,
-                                group,
-                                theme::series_color(gi),
-                                edit,
-                                &candidates,
-                                &mut pending,
-                            );
+                            close_detail =
+                                detail_ui(ui, group, color, edit, &candidates, &mut pending);
                         });
                     if close_detail {
                         self.selected_task = None;
@@ -118,7 +129,7 @@ impl TimelineApp {
                     task_card(
                         ui,
                         &groups[g],
-                        theme::series_color(g),
+                        theme::series_color_for(groups[g].task_id),
                         edit,
                         selected_task,
                         &candidates,
@@ -150,7 +161,7 @@ impl TimelineApp {
                 if !closed_vis.is_empty() {
                     ui.horizontal(|ui| {
                         ui.add_space(12.0);
-                        let arrow = if *show_closed { "\u{25be}" } else { "\u{25b8}" };
+                        let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };
                         if ui.small_button(format!("{arrow} recently closed")).clicked() {
                             *show_closed = !*show_closed;
                         }
@@ -164,7 +175,7 @@ impl TimelineApp {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let arrow = if *show_spans { "\u{25be}" } else { "\u{25b8}" };
+                    let arrow = if *show_spans { "\u{25bc}" } else { "\u{25b6}" };
                     if ui
                         .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
                         .clicked()
@@ -220,14 +231,17 @@ fn today_header(ui: &mut egui::Ui, groups: &[TaskGroup], spans: &[SpanRow]) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if away > 0 || switching > 0 {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "away {} \u{b7} switching {}",
-                        fmt_dur(away),
-                        fmt_dur(switching)
-                    ))
-                    .text_style(egui::TextStyle::Small)
-                    .color(theme::palette::TEXT_DIM),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "away {} \u{b7} switching {}",
+                            fmt_dur(away),
+                            fmt_dur(switching)
+                        ))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                    )
+                    .truncate(),
                 );
             }
         });
@@ -248,7 +262,7 @@ fn activity_band(
     let mut segments: Vec<(i64, i64, egui::Color32)> = Vec::new();
     let (mut act_lo, mut act_hi) = (i64::MAX, i64::MIN);
     for &g in vis {
-        let color = theme::series_color(g);
+        let color = theme::series_color_for(groups[g].task_id);
         for s in &groups[g].sessions {
             let s_lo = s.start.timestamp().as_millisecond().max(lo);
             let s_hi = s.end.timestamp().as_millisecond().min(hi);
@@ -352,14 +366,22 @@ fn task_card(
                 let (dot, _) =
                     ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 4.0, color);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&group.label)
-                            .size(13.0)
-                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
-                            .color(theme::palette::TEXT),
-                    )
-                    .truncate(),
+                // Leave room for the duration + confidence dot + menu.
+                let label_w = (ui.available_width() - 110.0).max(60.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(label_w, 18.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&group.label)
+                                    .size(13.0)
+                                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                                    .color(theme::palette::TEXT),
+                            )
+                            .truncate(),
+                        );
+                    },
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     card_menu(ui, group, edit, candidates, pending);
@@ -436,17 +458,24 @@ fn detail_ui(
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
         ui.painter().circle_filled(dot.center(), 4.0, color);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&group.label)
-                    .size(15.0)
-                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
-                    .color(theme::palette::TEXT),
-            )
-            .truncate(),
+        let label_w = (ui.available_width() - 36.0).max(60.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(label_w, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&group.label)
+                            .size(15.0)
+                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                            .color(theme::palette::TEXT),
+                    )
+                    .truncate(),
+                );
+            },
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("\u{2715}").clicked() {
+            if ui.small_button("\u{d7}").clicked() {
                 close = true;
             }
         });

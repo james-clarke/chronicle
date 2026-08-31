@@ -29,11 +29,18 @@ const WAKE_EVERY: Duration = Duration::from_secs(10);
 pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     let db_path = data_dir.join("chronicle.db");
     let config_path = data_dir.join("config.toml");
+    // Compact widget by default; the last window size (winit-logical units,
+    // see remember_size) is remembered in `meta`.
+    let (w, h) = chronicle_core::storage::open(&db_path)
+        .ok()
+        .and_then(|c| chronicle_core::storage::get_meta(&c, "ui_window_size").ok().flatten())
+        .and_then(|s| parse_size(&s))
+        .unwrap_or((360.0, 560.0));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Chronicle")
-            .with_inner_size([720.0, 800.0])
-            .with_min_inner_size([560.0, 600.0]),
+            .with_inner_size([w, h])
+            .with_min_inner_size([340.0, 480.0]),
         ..Default::default()
     };
     let sock_path = crate::socket_path(data_dir);
@@ -53,6 +60,13 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}
+
+/// "WxH" from `meta`, sanity-clamped.
+fn parse_size(s: &str) -> Option<(f32, f32)> {
+    let (w, h) = s.split_once('x')?;
+    let (w, h): (f32, f32) = (w.parse().ok()?, h.parse().ok()?);
+    (w >= 340.0 && h >= 480.0 && w <= 4000.0 && h <= 4000.0).then_some((w, h))
 }
 
 fn spawn_stdin_listener(ctx: egui::Context) {
@@ -201,6 +215,10 @@ struct TimelineApp {
     service_dismissed: bool,
     /// Result of the last in-UI service install attempt.
     service_status: Option<Result<String, String>>,
+    /// Last window size written to `meta` ("remember size").
+    win_size_saved: Option<(f32, f32)>,
+    /// Resize in flight: candidate size and when it was first seen (debounce).
+    win_size_pending: Option<((f32, f32), Instant)>,
 }
 
 impl TimelineApp {
@@ -240,6 +258,39 @@ impl TimelineApp {
             service_card: onboarding::systemd_available() && !onboarding::service_unit_exists(),
             service_dismissed: false,
             service_status: None,
+            win_size_saved: None,
+            win_size_pending: None,
+        }
+    }
+
+    /// Remember the window size in `meta` once a resize has settled for 1s.
+    /// Stored in winit-logical units so `with_inner_size` restores it exactly
+    /// (egui units and winit-logical diverge on scaled X11 displays).
+    fn remember_size(&mut self, ui: &egui::Ui) {
+        let ctx = ui.ctx();
+        let ppp = ctx.pixels_per_point();
+        let nppp = ctx
+            .input(|i| i.viewport().native_pixels_per_point)
+            .unwrap_or(ppp);
+        let s = ctx.viewport_rect().size() * (ppp / nppp);
+        let cur = (s.x, s.y);
+        let same = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() <= 1.0 && (a.1 - b.1).abs() <= 1.0;
+        if self.win_size_saved.is_some_and(|sv| same(sv, cur)) {
+            self.win_size_pending = None;
+            return;
+        }
+        match self.win_size_pending {
+            Some((p, t)) if same(p, cur) => {
+                if t.elapsed() >= Duration::from_secs(1)
+                    && let Some(conn) = self.conn.as_ref()
+                {
+                    let val = format!("{:.0}x{:.0}", cur.0, cur.1);
+                    let _ = chronicle_core::storage::set_meta(conn, "ui_window_size", Some(&val));
+                    self.win_size_saved = Some(cur);
+                    self.win_size_pending = None;
+                }
+            }
+            _ => self.win_size_pending = Some((cur, Instant::now())),
         }
     }
 
@@ -523,6 +574,7 @@ impl TimelineApp {
 impl eframe::App for TimelineApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
+        self.remember_size(ui);
 
         let top_frame = egui::Frame::new()
             .fill(theme::palette::SURFACE)
@@ -562,10 +614,15 @@ impl eframe::App for TimelineApp {
                                 self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
                                 self.loaded_at = None;
                             }
-                            ui.label(
-                                egui::RichText::new(self.day.strftime("%a %-d %b %Y").to_string())
-                                    .text_style(egui::TextStyle::Heading)
-                                    .color(theme::palette::TEXT),
+                            let narrow = ui.ctx().viewport_rect().width() < 700.0;
+                            let fmt = if narrow { "%a %-d %b" } else { "%a %-d %b %Y" };
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(self.day.strftime(fmt).to_string())
+                                        .text_style(egui::TextStyle::Heading)
+                                        .color(theme::palette::TEXT),
+                                )
+                                .truncate(),
                             );
                         }
                         View::Reports => {
@@ -598,6 +655,27 @@ impl eframe::App for TimelineApp {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let narrow = ui.ctx().viewport_rect().width() < 700.0;
+                        if narrow {
+                            // Widget width: fold the actions into one menu.
+                            ui.menu_button("\u{2026}", |ui| {
+                                if ui.button("settings").clicked() {
+                                    self.toggle_settings();
+                                    ui.close();
+                                }
+                                if ui.button("chat").clicked() {
+                                    self.toggle_chat(ui.ctx());
+                                    ui.close();
+                                }
+                                if ui.button("derive now").clicked() {
+                                    if !crate::send_ctrl(&self.sock_path, "derive") {
+                                        self.error = Some("daemon not reachable".into());
+                                    }
+                                    ui.close();
+                                }
+                            });
+                            return;
+                        }
                         if ui.button("settings").clicked() {
                             self.toggle_settings();
                         }
@@ -610,7 +688,7 @@ impl eframe::App for TimelineApp {
                             self.error = Some("daemon not reachable".into());
                         }
                         if self.view == View::Timeline {
-                            if !self.filter.is_empty() && ui.small_button("\u{2715}").clicked() {
+                            if !self.filter.is_empty() && ui.small_button("\u{d7}").clicked() {
                                 self.filter.clear();
                             }
                             let resp = ui.add(

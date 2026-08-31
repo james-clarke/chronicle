@@ -124,9 +124,9 @@ fn style(style: &mut egui::Style) {
     v.widgets.open.weak_bg_fill = palette::SURFACE_2;
 }
 
-/// Identity color for the day's `idx`-th task group.
-pub(super) fn series_color(idx: usize) -> Color32 {
-    palette::SERIES[idx % palette::SERIES.len()]
+/// Identity color for a task, stable across views (dot, band, report bars).
+pub(super) fn series_color_for(task_id: i64) -> Color32 {
+    palette::SERIES[task_id.rem_euclid(palette::SERIES.len() as i64) as usize]
 }
 
 /// Confidence bucket for an interval's task assignment.

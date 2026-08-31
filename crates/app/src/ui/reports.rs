@@ -32,6 +32,8 @@ impl TimelineApp {
                 });
             };
             egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                week_chart(ui, r, &today);
+                ui.add_space(14.0);
                 ui.label(
                     egui::RichText::new("Tasks")
                         .text_style(egui::TextStyle::Heading)
@@ -62,11 +64,17 @@ impl TimelineApp {
                         });
                         ui.end_row();
                         for t in &r.tasks {
+                            let color = theme::series_color_for(t.task_id);
                             ui.horizontal(|ui| {
                                 ui.set_max_width(220.0);
+                                let (dot, _) = ui.allocate_exact_size(
+                                    egui::vec2(8.0, 8.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(dot.center(), 4.0, color);
                                 ui.add(egui::Label::new(&t.label).truncate());
                                 if t.project != chronicle_core::report::UNTAGGED {
-                                    theme::badge(ui, &t.project, theme::palette::ACCENT);
+                                    theme::badge(ui, &t.project, color);
                                 }
                             });
                             for ms in &t.by_day {
@@ -105,5 +113,66 @@ impl TimelineApp {
                     });
             });
         });
+    }
+}
+
+/// Stacked per-day bars in task identity colors; today's label accented.
+fn week_chart(ui: &mut egui::Ui, r: &chronicle_core::report::RangeReport, today: &jiff::civil::Date) {
+    let day_totals: Vec<i64> = (0..r.days.len())
+        .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
+        .collect();
+    let max_ms = day_totals.iter().copied().max().unwrap_or(0);
+    if max_ms == 0 {
+        return;
+    }
+    const CHART_H: f32 = 110.0;
+    const LABEL_H: f32 = 16.0;
+    let width = ui.available_width().min(680.0);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(width, CHART_H + LABEL_H + 14.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let slot = rect.width() / r.days.len() as f32;
+    let bar_w = (slot * 0.55).min(48.0);
+    for (d, day) in r.days.iter().enumerate() {
+        let cx = rect.left() + slot * (d as f32 + 0.5);
+        let base = rect.top() + CHART_H;
+        // Stack biggest-task-first, bottom-up.
+        let mut y = base;
+        for t in &r.tasks {
+            let ms = t.by_day[d];
+            if ms == 0 {
+                continue;
+            }
+            let h = (ms as f32 / max_ms as f32 * (CHART_H - 16.0)).max(1.0);
+            let seg = egui::Rect::from_min_max(
+                egui::pos2(cx - bar_w / 2.0, y - h),
+                egui::pos2(cx + bar_w / 2.0, y - 1.0),
+            );
+            painter.rect_filled(seg, egui::CornerRadius::same(2), theme::series_color_for(t.task_id));
+            y -= h;
+        }
+        if day_totals[d] > 0 {
+            painter.text(
+                egui::pos2(cx, y - 4.0),
+                egui::Align2::CENTER_BOTTOM,
+                fmt_dur(day_totals[d]),
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                theme::palette::TEXT_DIM,
+            );
+        }
+        let label_color = if day == today {
+            theme::palette::ACCENT
+        } else {
+            theme::palette::TEXT_DIM
+        };
+        painter.text(
+            egui::pos2(cx, base + 4.0),
+            egui::Align2::CENTER_TOP,
+            day.strftime("%a").to_string(),
+            egui::FontId::new(11.0, egui::FontFamily::Proportional),
+            label_color,
+        );
     }
 }
