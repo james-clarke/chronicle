@@ -50,37 +50,64 @@ impl TimelineApp {
             let new_project = &mut self.new_project;
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 theme::section_header(ui, "Working on", None);
-                ui.horizontal(|ui| {
-                    let label_w = (ui.available_width() - 220.0).clamp(240.0, 420.0);
-                    ui.add(
-                        egui::TextEdit::singleline(new_label)
-                            .desired_width(label_w)
-                            .hint_text("declare a task\u{2026}"),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(new_project)
-                            .desired_width(110.0)
-                            .hint_text("project"),
-                    );
-                    if ui.button("add").clicked() {
-                        pending = Some(Action::Declare);
-                    }
-                });
-                for &o in &open_vis {
-                    open_row(ui, &open_tasks[o], &candidates, &mut pending);
-                }
-                if !closed_vis.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };
-                        if ui.small_button(format!("{arrow} recently closed")).clicked() {
-                            *show_closed = !*show_closed;
+                ui.add_space(6.0);
+                // One column plan shared by the declare row and every task row,
+                // so the whole section reads as a single aligned table.
+                let label_w = (ui.available_width() - 230.0).clamp(160.0, 460.0);
+                egui::Grid::new("working_on")
+                    .num_columns(4)
+                    .striped(true)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(new_label)
+                                .desired_width(label_w)
+                                .hint_text("declare a task\u{2026}"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(new_project)
+                                .desired_width(PROJECT_COL)
+                                .hint_text("project"),
+                        );
+                        ui.label("");
+                        if ui.button("add").clicked() {
+                            pending = Some(Action::Declare);
+                        }
+                        ui.end_row();
+                        for &o in &open_vis {
+                            let t = &open_tasks[o];
+                            task_cells(ui, t, label_w, true);
+                            ui.menu_button("\u{2026}", |ui| {
+                                if ui.button("close").clicked() {
+                                    pending = Some(Action::Close(t.task_id));
+                                    ui.close();
+                                }
+                                merge_menu(ui, t.task_id, &candidates, &mut pending);
+                            });
+                            ui.end_row();
                         }
                     });
+                if !closed_vis.is_empty() {
+                    ui.add_space(4.0);
+                    let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };
+                    if ui.small_button(format!("{arrow} recently closed")).clicked() {
+                        *show_closed = !*show_closed;
+                    }
                     if *show_closed {
-                        for &c in &closed_vis {
-                            closed_row(ui, &closed_tasks[c], &mut pending);
-                        }
+                        egui::Grid::new("recently_closed")
+                            .num_columns(4)
+                            .striped(true)
+                            .spacing([10.0, 6.0])
+                            .show(ui, |ui| {
+                                for &c in &closed_vis {
+                                    let t = &closed_tasks[c];
+                                    task_cells(ui, t, label_w, false);
+                                    if ui.small_button("reopen").clicked() {
+                                        pending = Some(Action::Reopen(t.task_id));
+                                    }
+                                    ui.end_row();
+                                }
+                            });
                     }
                 }
 
@@ -107,45 +134,39 @@ impl TimelineApp {
     }
 }
 
-/// Badge for a task's project tag, if any.
-fn project_badge(ui: &mut egui::Ui, project: &Option<String>) {
-    if let Some(project) = project {
-        theme::badge(ui, project, theme::palette::ACCENT);
-    }
+/// Fixed column widths shared by both task grids (and the declare row), so
+/// badges line up regardless of label length.
+const PROJECT_COL: f32 = 96.0;
+const STATUS_COL: f32 = 64.0;
+const ROW_H: f32 = 20.0;
+
+/// Left-aligned fixed-width cell; contents clip rather than widen the column.
+fn cell(ui: &mut egui::Ui, w: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(w, ROW_H),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_max_width(w);
+            add(ui);
+        },
+    );
 }
 
-fn declared_badge(ui: &mut egui::Ui, declared: bool) {
-    if declared {
-        theme::badge(ui, "declared", theme::palette::TEXT_DIM);
-    }
-}
-
-fn open_row(
-    ui: &mut egui::Ui,
-    task: &OpenRow,
-    candidates: &[(i64, String)],
-    pending: &mut Option<Action>,
-) {
-    ui.horizontal(|ui| {
-        ui.add_space(18.0);
-        ui.strong(&task.label);
-        project_badge(ui, &task.project);
-        declared_badge(ui, task.declared);
-        if ui.small_button("close").clicked() {
-            *pending = Some(Action::Close(task.task_id));
-        }
-        merge_menu(ui, task.task_id, candidates, pending);
+/// The three data cells of a task row: label, project badge, declared badge.
+fn task_cells(ui: &mut egui::Ui, task: &OpenRow, label_w: f32, strong: bool) {
+    cell(ui, label_w, |ui| {
+        let text = egui::RichText::new(&task.label);
+        let text = if strong { text.strong() } else { text };
+        ui.add(egui::Label::new(text).truncate());
     });
-}
-
-fn closed_row(ui: &mut egui::Ui, task: &OpenRow, pending: &mut Option<Action>) {
-    ui.horizontal(|ui| {
-        ui.add_space(30.0);
-        ui.label(&task.label);
-        project_badge(ui, &task.project);
-        declared_badge(ui, task.declared);
-        if ui.small_button("reopen").clicked() {
-            *pending = Some(Action::Reopen(task.task_id));
+    cell(ui, PROJECT_COL, |ui| {
+        if let Some(project) = &task.project {
+            theme::badge(ui, project, theme::palette::ACCENT);
+        }
+    });
+    cell(ui, STATUS_COL, |ui| {
+        if task.declared {
+            theme::badge(ui, "declared", theme::palette::TEXT_DIM);
         }
     });
 }
