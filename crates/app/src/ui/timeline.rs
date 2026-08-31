@@ -50,6 +50,39 @@ impl TimelineApp {
         let day_start = self.day.to_zoned(self.tz.clone()).ok();
 
         let mut pending: Option<Action> = None;
+        // Detail pane for the selected task (before the central panel so the
+        // remaining width goes to the card list).
+        if let Some(sel) = self.selected_task {
+            match self.groups.iter().position(|g| g.task_id == sel) {
+                Some(gi) => {
+                    let group = &self.groups[gi];
+                    let edit = &mut self.edit;
+                    let mut close_detail = false;
+                    let frame = egui::Frame::new()
+                        .fill(theme::palette::SURFACE)
+                        .inner_margin(egui::Margin::same(14));
+                    egui::Panel::right("task_detail")
+                        .frame(frame)
+                        .resizable(true)
+                        .default_size(320.0)
+                        .show(ui, |ui| {
+                            close_detail = detail_ui(
+                                ui,
+                                group,
+                                theme::series_color(gi),
+                                edit,
+                                &candidates,
+                                &mut pending,
+                            );
+                        });
+                    if close_detail {
+                        self.selected_task = None;
+                    }
+                }
+                // Task left the day (merged away / reassigned): drop selection.
+                None => self.selected_task = None,
+            }
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             self.model_card_ui(ui);
             self.service_card_ui(ui);
@@ -69,6 +102,7 @@ impl TimelineApp {
             let edit = &mut self.edit;
             let new_label = &mut self.new_label;
             let new_project = &mut self.new_project;
+            let selected_task = &mut self.selected_task;
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 today_header(ui, groups, spans);
                 if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
@@ -81,7 +115,15 @@ impl TimelineApp {
                     ui.weak("no tasks match the filter");
                 }
                 for &g in &group_vis {
-                    task_card(ui, &groups[g], theme::series_color(g), edit, &candidates, &mut pending);
+                    task_card(
+                        ui,
+                        &groups[g],
+                        theme::series_color(g),
+                        edit,
+                        selected_task,
+                        &candidates,
+                        &mut pending,
+                    );
                 }
                 ui.add_space(10.0);
 
@@ -266,18 +308,22 @@ fn activity_band(
 }
 
 /// One task card: identity dot + label + duration, then project pill, time
-/// range, and top evidence line. Actions live in the `⋯` menu.
+/// range, and top evidence line. Actions live in the `…` menu; clicking the
+/// card toggles its detail pane.
 fn task_card(
     ui: &mut egui::Ui,
     group: &TaskGroup,
     color: egui::Color32,
     edit: &mut Option<EditState>,
+    selected_task: &mut Option<i64>,
     candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) {
-    egui::Frame::new()
+    let selected = *selected_task == Some(group.task_id);
+    let stroke_color = if selected { color } else { theme::palette::SURFACE_2 };
+    let resp = egui::Frame::new()
         .fill(theme::palette::SURFACE)
-        .stroke(egui::Stroke::new(1.0, theme::palette::SURFACE_2))
+        .stroke(egui::Stroke::new(1.0, stroke_color))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::symmetric(12, 11))
         .show(ui, |ui| {
@@ -362,8 +408,180 @@ fn task_card(
                     );
                 }
             });
-        });
+        })
+        .response;
+    // Registered after the card's own widgets, so buttons/menus keep priority.
+    let resp = ui.interact(
+        resp.rect,
+        ui.id().with(("task_card", group.task_id)),
+        egui::Sense::click(),
+    );
+    if resp.clicked() {
+        *selected_task = if selected { None } else { Some(group.task_id) };
+    }
     ui.add_space(2.0);
+}
+
+/// Detail pane: identity, summary, session chips (with whole-session move),
+/// per-app evidence bars, and correction actions. Returns true to close.
+fn detail_ui(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    color: egui::Color32,
+    edit: &mut Option<EditState>,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+        ui.painter().circle_filled(dot.center(), 4.0, color);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&group.label)
+                    .size(15.0)
+                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .color(theme::palette::TEXT),
+            )
+            .truncate(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("\u{2715}").clicked() {
+                close = true;
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        if let Some(project) = &group.project {
+            theme::badge(ui, project, color);
+        }
+        if group.declared {
+            theme::badge(ui, "declared", theme::palette::TEXT_DIM);
+        }
+    });
+    let n = group.sessions.len();
+    ui.weak(format!(
+        "{} across {n} session{}",
+        fmt_dur(group.total_ms),
+        if n == 1 { "" } else { "s" }
+    ));
+    if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
+        ui.horizontal(|ui| {
+            let e = edit.as_mut().expect("checked above");
+            ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(160.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut e.project)
+                    .desired_width(80.0)
+                    .hint_text("project"),
+            );
+            if ui.button("save").clicked()
+                && let Some(e) = edit.take()
+            {
+                *pending = Some(Action::Rename(e));
+            }
+            if ui.button("cancel").clicked() {
+                *edit = None;
+            }
+        });
+    }
+
+    ui.add_space(8.0);
+    section_header(ui, "Sessions", None);
+    for s in &group.sessions {
+        let dur = s.end.timestamp().as_millisecond() - s.start.timestamp().as_millisecond();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{}\u{2013}{}",
+                    s.start.strftime("%H:%M"),
+                    s.end.strftime("%H:%M")
+                ))
+                .color(theme::palette::TEXT),
+            );
+            ui.weak(fmt_dur(dur));
+            if let Some(c) = theme::confidence_color(theme::confidence_band(s.confidence)) {
+                let (dot, resp) =
+                    ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.0, c);
+                resp.on_hover_text(format!("confidence {:.0}%", s.confidence * 100.0));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("move", |ui| {
+                    for (task_id, label) in candidates {
+                        if *task_id == group.task_id {
+                            continue;
+                        }
+                        if ui.button(label).clicked() {
+                            *pending = Some(Action::ReassignSession {
+                                interval_ids: s.interval_ids.clone(),
+                                to_task: *task_id,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    if !group.evidence.is_empty() {
+        ui.add_space(8.0);
+        section_header(ui, "Where the time went", None);
+        let max_ms = group.evidence.iter().map(|e| e.ms).max().unwrap_or(1).max(1);
+        for e in group.evidence.iter().take(6) {
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [110.0, 16.0],
+                    egui::Label::new(
+                        egui::RichText::new(&e.app)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT),
+                    )
+                    .truncate(),
+                );
+                let dur_text = fmt_dur(e.ms);
+                let bar_w = (ui.available_width() - 52.0).max(20.0);
+                let (rect, resp) = ui
+                    .allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
+                let painter = ui.painter();
+                painter.rect_filled(
+                    rect,
+                    egui::CornerRadius::same(4),
+                    theme::palette::SURFACE_2,
+                );
+                let frac = e.ms as f32 / max_ms as f32;
+                let fill = egui::Rect::from_min_size(
+                    rect.min,
+                    egui::vec2((rect.width() * frac).max(2.0), rect.height()),
+                );
+                painter.rect_filled(fill, egui::CornerRadius::same(4), color);
+                if !e.top_title.is_empty() {
+                    resp.on_hover_text(&e.top_title);
+                }
+                ui.label(
+                    egui::RichText::new(dur_text)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+            });
+        }
+    }
+
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        if ui.button("rename").clicked() {
+            *edit = Some(EditState {
+                task_id: group.task_id,
+                label: group.label.clone(),
+                project: group.project.clone().unwrap_or_default(),
+            });
+        }
+        merge_menu(ui, group.task_id, candidates, pending);
+        if ui.button("close task").clicked() {
+            *pending = Some(Action::Close(group.task_id));
+        }
+    });
+    close
 }
 
 /// Duration-weighted confidence; a small tinted dot appears only when the

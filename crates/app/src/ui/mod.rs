@@ -91,7 +91,6 @@ struct TaskGroup {
 }
 
 struct IntervalRow {
-    interval_id: i64,
     start: Zoned,
     end: Zoned,
     confidence: f64,
@@ -140,7 +139,11 @@ enum Action {
     Rename(EditState),
     Declare,
     Close(i64),
-    Reassign { interval_id: i64, to_task: i64 },
+    /// Reassign a display session (all its member intervals) to another task.
+    ReassignSession {
+        interval_ids: Vec<i64>,
+        to_task: i64,
+    },
     Merge { from_task: i64, to_task: i64 },
     Reopen(i64),
 }
@@ -175,6 +178,8 @@ struct TimelineApp {
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
+    /// Task whose detail pane is open (card click toggles).
+    selected_task: Option<i64>,
     loaded_at: Option<Instant>,
     error: Option<String>,
     /// Daemon status flag from `meta` (e.g. AW endpoint port conflict).
@@ -222,6 +227,7 @@ impl TimelineApp {
             new_label: String::new(),
             new_project: String::new(),
             edit: None,
+            selected_task: None,
             loaded_at: None,
             error: None,
             warning: None,
@@ -374,7 +380,6 @@ impl TimelineApp {
                 }),
             }
             group.intervals.push(IntervalRow {
-                interval_id: t.interval_id,
                 start,
                 end,
                 confidence: t.confidence,
@@ -472,10 +477,12 @@ impl TimelineApp {
                 result
             }
             Action::Close(task_id) => chronicle_core::storage::close_task(conn, now, task_id),
-            Action::Reassign {
-                interval_id,
+            Action::ReassignSession {
+                interval_ids,
                 to_task,
-            } => chronicle_core::storage::reassign_interval(conn, now, interval_id, to_task),
+            } => interval_ids.into_iter().try_for_each(|id| {
+                chronicle_core::storage::reassign_interval(conn, now, id, to_task)
+            }),
             Action::Merge { from_task, to_task } => {
                 chronicle_core::storage::merge_task(conn, now, from_task, to_task)
             }
