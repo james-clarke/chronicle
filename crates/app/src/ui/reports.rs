@@ -49,8 +49,8 @@ impl TimelineApp {
                     for t in &r.tasks {
                         let color = theme::series_color_for(t.task_id);
                         ui.horizontal(|ui| {
-                            let (dot, _) = ui
-                                .allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                             ui.painter().circle_filled(dot.center(), 4.0, color);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),

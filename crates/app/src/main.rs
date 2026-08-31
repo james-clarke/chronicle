@@ -654,8 +654,8 @@ enum CtrlMsg {
     DeriveNow,
     /// One-shot reply channel; the listener writes the JSON back to the client.
     Status(Sender<String>),
-    /// Only the in-process signal thread sends this — not part of the socket
-    /// protocol, so a stray client can't stop the daemon.
+    /// Only in-process senders (signal thread, tray "Quit") — not part of the
+    /// socket protocol, so a stray client can't stop the daemon.
     Shutdown,
 }
 
@@ -739,6 +739,108 @@ fn spawn_signal_handler(ctrl_tx: Sender<CtrlMsg>) -> anyhow::Result<()> {
                     std::process::exit(1); // main loop already gone
                 }
             }
+        })?;
+    Ok(())
+}
+
+/// StatusNotifierItem tray icon: left-click / "Show/Hide" toggles the UI
+/// child, "Quit" shuts the daemon down (same paths as socket + signals).
+struct ChronicleTray {
+    ctrl_tx: Sender<CtrlMsg>,
+}
+
+impl ksni::Tray for ChronicleTray {
+    fn id(&self) -> String {
+        "chronicle".into()
+    }
+
+    fn title(&self) -> String {
+        "Chronicle".into()
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.ctrl_tx.send(CtrlMsg::Toggle);
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        vec![tray_icon()]
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::StandardItem;
+        vec![
+            StandardItem {
+                label: "Show/Hide".into(),
+                enabled: true,
+                visible: true,
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.ctrl_tx.send(CtrlMsg::Toggle);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Quit".into(),
+                enabled: true,
+                visible: true,
+                activate: Box::new(|t: &mut Self| {
+                    let _ = t.ctrl_tx.send(CtrlMsg::Shutdown);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+/// Procedural icon (filled circle, UI accent blue) — no image asset/dep.
+fn tray_icon() -> ksni::Icon {
+    const SIZE: i32 = 22;
+    let (r, g, b) = (0x5e_u8, 0x87_u8, 0xea_u8);
+    let c = (SIZE - 1) as f32 / 2.0;
+    let radius = c - 1.0;
+    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
+            // 1px soft edge; ARGB32 in network byte order.
+            let a = ((radius + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
+            data.extend_from_slice(&[a, r, g, b]);
+        }
+    }
+    ksni::Icon {
+        width: SIZE,
+        height: SIZE,
+        data,
+    }
+}
+
+/// Host the tray's D-Bus service on a background thread. No tray host running
+/// is non-fatal: log and continue, like the AW endpoint port conflict.
+fn spawn_tray(ctrl_tx: Sender<CtrlMsg>) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("tray".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("tray runtime failed: {e}");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                use ksni::TrayMethods;
+                match (ChronicleTray { ctrl_tx }).spawn().await {
+                    // Keep the reactor (and the D-Bus service) alive for the
+                    // daemon's lifetime; dropping the handle removes the icon.
+                    Ok(_handle) => std::future::pending::<()>().await,
+                    Err(e) => tracing::warn!("tray unavailable: {e}"),
+                }
+            });
         })?;
     Ok(())
 }
@@ -840,6 +942,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     let (tx, rx) = crossbeam_channel::unbounded();
     let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
     spawn_signal_handler(ctrl_tx.clone())?;
+    spawn_tray(ctrl_tx.clone())?;
     spawn_ctrl_listener(listener, ctrl_tx)?;
     spawn_capture(&config, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
