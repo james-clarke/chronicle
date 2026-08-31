@@ -1,5 +1,6 @@
-//! Timeline window, run as a `chronicle ui` child process. The daemon writes
-//! "toggle\n" to our stdin to raise the window; closing it exits the process.
+//! Tray-popup widget window, run as a `chronicle ui` child process. The daemon
+//! writes "toggle\n" to our stdin to show/hide the window; losing focus or a
+//! close request hides it (the process stays alive for the next toggle).
 
 mod chat;
 mod home;
@@ -11,6 +12,8 @@ mod timeline;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -65,24 +68,32 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
             if let Some(z) = zoom {
                 cc.egui_ctx.set_zoom_factor(z);
             }
-            spawn_stdin_listener(cc.egui_ctx.clone());
+            // Shared visibility ground truth: flipped by the stdin toggle
+            // thread, cleared by the app when it hides itself.
+            let visible = Arc::new(AtomicBool::new(true));
+            spawn_stdin_listener(cc.egui_ctx.clone(), visible.clone());
             Ok(Box::new(TimelineApp::new(
                 data_dir,
                 db_path,
                 sock_path,
                 config_path,
+                visible,
             )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }
 
-fn spawn_stdin_listener(ctx: egui::Context) {
+fn spawn_stdin_listener(ctx: egui::Context, visible: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if line.trim() == "toggle" {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                let now_visible = !visible.fetch_xor(true, Ordering::SeqCst);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(now_visible));
+                if now_visible {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
                 ctx.request_repaint();
             }
         }
@@ -230,10 +241,20 @@ struct TimelineApp {
     service_dismissed: bool,
     /// Result of the last in-UI service install attempt.
     service_status: Option<Result<String, String>>,
+    /// Window visibility, shared with the stdin toggle thread.
+    visible: Arc<AtomicBool>,
+    /// Startup instant; focus-loss hiding waits out WM map-time focus flapping.
+    started: Instant,
 }
 
 impl TimelineApp {
-    fn new(data_dir: PathBuf, db_path: PathBuf, sock_path: PathBuf, config_path: PathBuf) -> Self {
+    fn new(
+        data_dir: PathBuf,
+        db_path: PathBuf,
+        sock_path: PathBuf,
+        config_path: PathBuf,
+        visible: Arc<AtomicBool>,
+    ) -> Self {
         let tz = TimeZone::system();
         let day = Zoned::now().with_time_zone(tz.clone()).date();
         Self {
@@ -270,6 +291,8 @@ impl TimelineApp {
             service_card: onboarding::systemd_available() && !onboarding::service_unit_exists(),
             service_dismissed: false,
             service_status: None,
+            visible,
+            started: Instant::now(),
         }
     }
 
@@ -569,6 +592,28 @@ impl TimelineApp {
 }
 
 impl eframe::App for TimelineApp {
+    // Runs even while the window is hidden (unlike `ui`), so the stdin toggle
+    // can bring the window back after a hide.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let hide = |app: &Self| {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            app.visible.store(false, Ordering::SeqCst);
+        };
+        // `unwrap_or(true)`: unknown focus state must not hide the window.
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        if self.visible.load(Ordering::SeqCst)
+            && !focused
+            && self.started.elapsed() > Duration::from_millis(300)
+        {
+            hide(self);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // CancelClose must be queued the same frame as the close event.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            hide(self);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
 
