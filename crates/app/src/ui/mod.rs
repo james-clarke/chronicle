@@ -26,30 +26,33 @@ use settings::SettingsPanel;
 const RELOAD_EVERY: Duration = Duration::from_secs(5);
 /// Idle wake-up cadence; the only repaint source besides user input.
 const WAKE_EVERY: Duration = Duration::from_secs(10);
+/// Fixed widget size (logical px); the window is not resizable.
+const WIDGET_W: f32 = 400.0;
+const WIDGET_H: f32 = 640.0;
 
 pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     let db_path = data_dir.join("chronicle.db");
     let config_path = data_dir.join("config.toml");
-    // Compact widget by default; the last window size (winit-logical units,
-    // see remember_size) and zoom factor are remembered in `meta`.
+    // Zoom factor is remembered in `meta`; window size is fixed.
     let boot_conn = chronicle_core::storage::open(&db_path).ok();
-    let meta = |key: &str| {
-        boot_conn
-            .as_ref()
-            .and_then(|c| chronicle_core::storage::get_meta(c, key).ok().flatten())
-    };
-    let (w, h) = meta("ui_window_size")
-        .and_then(|s| parse_size(&s))
-        .unwrap_or((360.0, 560.0));
-    let zoom = meta("ui_zoom_factor")
+    let zoom = boot_conn
+        .as_ref()
+        .and_then(|c| chronicle_core::storage::get_meta(c, "ui_zoom_factor").ok().flatten())
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|z| (0.5..=2.0).contains(z));
     drop(boot_conn);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Chronicle")
-            .with_inner_size([w, h])
-            .with_min_inner_size([340.0, 480.0]),
+            .with_inner_size([WIDGET_W, WIDGET_H])
+            // min == max == inner: some X11 WMs ignore resizable(false) but
+            // honor WM_SIZE_HINTS, so pin all three.
+            .with_min_inner_size([WIDGET_W, WIDGET_H])
+            .with_max_inner_size([WIDGET_W, WIDGET_H])
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_always_on_top()
+            .with_window_type(egui::X11WindowType::Utility),
         ..Default::default()
     };
     let sock_path = crate::socket_path(data_dir);
@@ -72,13 +75,6 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
-}
-
-/// "WxH" from `meta`, sanity-clamped.
-fn parse_size(s: &str) -> Option<(f32, f32)> {
-    let (w, h) = s.split_once('x')?;
-    let (w, h): (f32, f32) = (w.parse().ok()?, h.parse().ok()?);
-    (w >= 340.0 && h >= 480.0 && w <= 4000.0 && h <= 4000.0).then_some((w, h))
 }
 
 fn spawn_stdin_listener(ctx: egui::Context) {
@@ -234,10 +230,6 @@ struct TimelineApp {
     service_dismissed: bool,
     /// Result of the last in-UI service install attempt.
     service_status: Option<Result<String, String>>,
-    /// Last window size written to `meta` ("remember size").
-    win_size_saved: Option<(f32, f32)>,
-    /// Resize in flight: candidate size and when it was first seen (debounce).
-    win_size_pending: Option<((f32, f32), Instant)>,
 }
 
 impl TimelineApp {
@@ -278,40 +270,6 @@ impl TimelineApp {
             service_card: onboarding::systemd_available() && !onboarding::service_unit_exists(),
             service_dismissed: false,
             service_status: None,
-            win_size_saved: None,
-            win_size_pending: None,
-        }
-    }
-
-    /// Remember the window size in `meta` once a resize has settled for 1s.
-    /// Stored in winit-logical units so `with_inner_size` restores it exactly
-    /// (egui units and winit-logical diverge on scaled X11 displays).
-    fn remember_size(&mut self, ui: &egui::Ui) {
-        let ctx = ui.ctx();
-        let ppp = ctx.pixels_per_point();
-        let nppp = ctx
-            .input(|i| i.viewport().native_pixels_per_point)
-            .unwrap_or(ppp);
-        let s = ctx.viewport_rect().size() * (ppp / nppp);
-        let cur = (s.x, s.y);
-        let same =
-            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() <= 1.0 && (a.1 - b.1).abs() <= 1.0;
-        if self.win_size_saved.is_some_and(|sv| same(sv, cur)) {
-            self.win_size_pending = None;
-            return;
-        }
-        match self.win_size_pending {
-            Some((p, t)) if same(p, cur) => {
-                if t.elapsed() >= Duration::from_secs(1)
-                    && let Some(conn) = self.conn.as_ref()
-                {
-                    let val = format!("{:.0}x{:.0}", cur.0, cur.1);
-                    let _ = chronicle_core::storage::set_meta(conn, "ui_window_size", Some(&val));
-                    self.win_size_saved = Some(cur);
-                    self.win_size_pending = None;
-                }
-            }
-            _ => self.win_size_pending = Some((cur, Instant::now())),
         }
     }
 
@@ -613,7 +571,6 @@ impl TimelineApp {
 impl eframe::App for TimelineApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
-        self.remember_size(ui);
 
         // Settings takeover: replaces the whole window, top bar included.
         if self.settings.is_some() {
