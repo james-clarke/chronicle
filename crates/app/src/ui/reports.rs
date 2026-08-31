@@ -117,7 +117,11 @@ impl TimelineApp {
 }
 
 /// Stacked per-day bars in task identity colors; today's label accented.
-fn week_chart(ui: &mut egui::Ui, r: &chronicle_core::report::RangeReport, today: &jiff::civil::Date) {
+fn week_chart(
+    ui: &mut egui::Ui,
+    r: &chronicle_core::report::RangeReport,
+    today: &jiff::civil::Date,
+) {
     let day_totals: Vec<i64> = (0..r.days.len())
         .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
         .collect();
@@ -150,7 +154,11 @@ fn week_chart(ui: &mut egui::Ui, r: &chronicle_core::report::RangeReport, today:
                 egui::pos2(cx - bar_w / 2.0, y - h),
                 egui::pos2(cx + bar_w / 2.0, y - 1.0),
             );
-            painter.rect_filled(seg, egui::CornerRadius::same(2), theme::series_color_for(t.task_id));
+            painter.rect_filled(
+                seg,
+                egui::CornerRadius::same(2),
+                theme::series_color_for(t.task_id),
+            );
             y -= h;
         }
         if day_totals[d] > 0 {
