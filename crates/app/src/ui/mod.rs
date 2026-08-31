@@ -392,10 +392,12 @@ impl TimelineApp {
         let rows = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
         let mut groups: Vec<TaskGroup> = Vec::new();
         for t in rows {
-            let start_ms = t.start_ts.as_millisecond();
-            let end_ms = t.end_ts.as_millisecond();
-            let start = t.start_ts.to_zoned(self.tz.clone());
-            let end = t.end_ts.to_zoned(self.tz.clone());
+            // Clamp to the viewed day so totals, session rows, and card time
+            // ranges all agree for intervals crossing midnight.
+            let start_ms = t.start_ts.as_millisecond().max(lo);
+            let end_ms = t.end_ts.as_millisecond().min(hi);
+            let start = chronicle_core::types::ms_to_ts(start_ms).to_zoned(self.tz.clone());
+            let end = chronicle_core::types::ms_to_ts(end_ms).to_zoned(self.tz.clone());
             let group = match groups.iter_mut().find(|g| g.task_id == t.id) {
                 Some(g) => g,
                 None => {
@@ -412,7 +414,7 @@ impl TimelineApp {
                     groups.last_mut().expect("just pushed")
                 }
             };
-            group.total_ms += end_ms.min(hi) - start_ms.max(lo);
+            group.total_ms += end_ms - start_ms;
             match group.sessions.last_mut() {
                 Some(s)
                     if start_ms - s.end.timestamp().as_millisecond() <= SESSION_GAP_MS =>
@@ -531,9 +533,7 @@ impl TimelineApp {
             Action::ReassignSession {
                 interval_ids,
                 to_task,
-            } => interval_ids.into_iter().try_for_each(|id| {
-                chronicle_core::storage::reassign_interval(conn, now, id, to_task)
-            }),
+            } => chronicle_core::storage::reassign_intervals(conn, now, &interval_ids, to_task),
             Action::Merge { from_task, to_task } => {
                 chronicle_core::storage::merge_task(conn, now, from_task, to_task)
             }
@@ -561,7 +561,9 @@ impl TimelineApp {
             let (start_ms, end_ms): (i64, i64) = (row.get(0)?, row.get(1)?);
             spans.push(SpanRow {
                 start: chronicle_core::types::ms_to_ts(start_ms).to_zoned(self.tz.clone()),
-                end: chronicle_core::types::ms_to_ts(end_ms).to_zoned(self.tz.clone()),
+                // Clamp to the day so header away/switching totals can't count
+                // a span running past midnight.
+                end: chronicle_core::types::ms_to_ts(end_ms.min(hi)).to_zoned(self.tz.clone()),
                 app: row.get(2)?,
                 title: row.get(3)?,
                 kind: row.get(4)?,

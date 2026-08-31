@@ -541,67 +541,70 @@ pub fn insert_correction(
     Ok(())
 }
 
-/// Move one interval to another task ('reassign' correction). The old task's
-/// label → new task's label pair plus the interval's span context become
-/// teaching data; an orphaned derived source task is removed.
-pub fn reassign_interval(
+/// Move intervals to another task ('reassign' correction) in one transaction,
+/// so a mid-move failure can't leave a session split across two tasks. Each
+/// old task's label → new task's label pair plus the interval's span context
+/// become teaching data; orphaned derived source tasks are removed.
+pub fn reassign_intervals(
     conn: &mut Connection,
     ts: jiff::Timestamp,
-    interval_id: i64,
+    interval_ids: &[i64],
     to_task: i64,
 ) -> Result<(), StorageError> {
     let tx = conn.transaction()?;
-    let (from_task, start_ts, end_ts): (i64, i64, i64) = tx.query_row(
-        "SELECT task_id, start_ts, end_ts FROM intervals WHERE id=?1",
-        [interval_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    if from_task == to_task {
-        return Ok(());
-    }
-    let ident = |id: i64| -> Result<(String, Option<String>), rusqlite::Error> {
-        tx.query_row("SELECT label, project FROM tasks WHERE id=?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
-    };
-    let (old_label, old_project) = ident(from_task)?;
-    let (new_label, new_project) = ident(to_task)?;
-    let mut ctx = String::new();
-    {
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT app, title FROM spans
-             WHERE kind='focus' AND start_ts < ?1 AND end_ts > ?2 ORDER BY app, title",
+    for &interval_id in interval_ids {
+        let (from_task, start_ts, end_ts): (i64, i64, i64) = tx.query_row(
+            "SELECT task_id, start_ts, end_ts FROM intervals WHERE id=?1",
+            [interval_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let mut rows = stmt.query([end_ts, start_ts])?;
-        while let Some(row) = rows.next()? {
-            let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
-            if ctx.len() + app.len() + title.len() + 2 > 2000 {
-                break;
-            }
-            ctx.push_str(&app);
-            ctx.push(' ');
-            ctx.push_str(&title);
-            ctx.push('\n');
+        if from_task == to_task {
+            continue;
         }
+        let ident = |id: i64| -> Result<(String, Option<String>), rusqlite::Error> {
+            tx.query_row("SELECT label, project FROM tasks WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+        };
+        let (old_label, old_project) = ident(from_task)?;
+        let (new_label, new_project) = ident(to_task)?;
+        let mut ctx = String::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT app, title FROM spans
+                 WHERE kind='focus' AND start_ts < ?1 AND end_ts > ?2 ORDER BY app, title",
+            )?;
+            let mut rows = stmt.query([end_ts, start_ts])?;
+            while let Some(row) = rows.next()? {
+                let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
+                if ctx.len() + app.len() + title.len() + 2 > 2000 {
+                    break;
+                }
+                ctx.push_str(&app);
+                ctx.push(' ');
+                ctx.push_str(&title);
+                ctx.push('\n');
+            }
+        }
+        tx.execute(
+            "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reassign', ?8)",
+            params![
+                ts_to_ms(ts),
+                to_task,
+                old_label,
+                new_label,
+                old_project,
+                new_project,
+                ctx,
+                interval_id
+            ],
+        )?;
+        tx.execute(
+            "UPDATE intervals SET task_id=?1 WHERE id=?2",
+            params![to_task, interval_id],
+        )?;
     }
-    tx.execute(
-        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reassign', ?8)",
-        params![
-            ts_to_ms(ts),
-            to_task,
-            old_label,
-            new_label,
-            old_project,
-            new_project,
-            ctx,
-            interval_id
-        ],
-    )?;
-    tx.execute(
-        "UPDATE intervals SET task_id=?1 WHERE id=?2",
-        params![to_task, interval_id],
-    )?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
     Ok(())

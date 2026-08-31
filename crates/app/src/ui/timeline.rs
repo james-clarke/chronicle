@@ -302,6 +302,11 @@ fn activity_band(
     let (label_rect, _) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
     let painter = ui.painter();
     let first_hour = (band_lo - lo) / HOUR_MS;
+    // Too narrow for even one label: clamp below would panic (min > max).
+    let (label_min, label_max) = (label_rect.left() + 14.0, label_rect.right() - 14.0);
+    if label_min > label_max {
+        return;
+    }
     for k in (0..=hours).step_by(step as usize) {
         let ms = band_lo + k * HOUR_MS;
         let Ok(z) = day_start.checked_add((first_hour + k).hours()) else {
@@ -309,10 +314,7 @@ fn activity_band(
         };
         let x = label_rect.left() + (ms - band_lo) as f32 / span * label_rect.width();
         painter.text(
-            egui::pos2(
-                x.clamp(label_rect.left() + 14.0, label_rect.right() - 14.0),
-                label_rect.top(),
-            ),
+            egui::pos2(x.clamp(label_min, label_max), label_rect.top()),
             egui::Align2::CENTER_TOP,
             z.strftime("%H:%M").to_string(),
             egui::FontId::new(10.0, egui::FontFamily::Proportional),
