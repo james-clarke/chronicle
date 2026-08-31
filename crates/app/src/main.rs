@@ -35,7 +35,11 @@ enum Cmd {
     },
     /// Internal: warm chat inference worker.
     #[command(hide = true)]
-    ChatWorker,
+    ChatWorker {
+        /// Conversation whose history seeds the model context.
+        #[arg(long)]
+        conversation: i64,
+    },
     /// Show or hide the UI of the running daemon.
     Toggle,
     /// Report daemon health and recent activity.
@@ -140,15 +144,22 @@ fn main() -> anyhow::Result<()> {
             only.as_deref(),
             model.as_deref(),
         ),
-        Cmd::ChatWorker => chat_worker(&data_dir),
+        Cmd::ChatWorker { conversation } => chat_worker(&data_dir, conversation),
     }
 }
 
 /// One JSON object per line, both directions, over the chat worker's stdio.
 pub(crate) mod chatproto {
     #[derive(serde::Serialize, serde::Deserialize)]
-    pub struct Ask {
-        pub ask: String,
+    #[serde(tag = "t", rename_all = "snake_case")]
+    pub enum ClientMsg {
+        Ask {
+            ask: String,
+        },
+        /// Drop model history and re-seed from another conversation.
+        Switch {
+            conversation_id: i64,
+        },
     }
 
     #[derive(serde::Serialize, serde::Deserialize)]
@@ -169,10 +180,10 @@ pub(crate) mod chatproto {
 /// Warm chat worker, spawned by the UI when the chat panel opens and killed
 /// when it closes. The model stays resident between questions; retrieval is
 /// local-DB only (time-ref range or FTS, in chronicle_core::chat).
-fn chat_worker(data_dir: &Path) -> anyhow::Result<()> {
+fn chat_worker(data_dir: &Path, mut conversation_id: i64) -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
 
-    use chatproto::{Ask, WorkerMsg};
+    use chatproto::{ClientMsg, WorkerMsg};
     use chronicle_core::storage;
 
     let _guard = init_logging(data_dir)?;
@@ -209,34 +220,48 @@ fn chat_worker(data_dir: &Path) -> anyhow::Result<()> {
         }
     };
 
-    // Prior session tail so follow-up questions keep working across reopens.
-    let mut history: Vec<(String, String)> = Vec::new();
-    if let Ok(messages) = storage::recent_chat_messages(&conn, 2 * 3) {
-        let mut pending_user: Option<String> = None;
-        for (role, content) in messages {
-            match role.as_str() {
-                "user" => pending_user = Some(content),
-                _ => {
-                    if let Some(q) = pending_user.take() {
-                        history.push((q, content));
+    // Conversation tail so follow-up questions keep working across reopens.
+    let seed_history = |conversation_id: i64| -> Vec<(String, String)> {
+        let mut history = Vec::new();
+        if let Ok(messages) = storage::recent_chat_messages(&conn, conversation_id, 2 * 3) {
+            let mut pending_user: Option<String> = None;
+            for (role, content) in messages {
+                match role.as_str() {
+                    "user" => pending_user = Some(content),
+                    _ => {
+                        if let Some(q) = pending_user.take() {
+                            history.push((q, content));
+                        }
                     }
                 }
             }
         }
-    }
+        history
+    };
+    let mut history = seed_history(conversation_id);
     send(&WorkerMsg::Ready);
     tracing::info!("chat worker ready");
 
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        let Ok(Ask { ask }) = serde_json::from_str::<Ask>(&line) else {
-            continue;
+        let ask = match serde_json::from_str::<ClientMsg>(&line) {
+            Ok(ClientMsg::Ask { ask }) => ask,
+            Ok(ClientMsg::Switch {
+                conversation_id: id,
+            }) => {
+                conversation_id = id;
+                history = seed_history(id);
+                continue;
+            }
+            Err(_) => continue,
         };
         let ask = ask.trim().to_owned();
         if ask.is_empty() {
             continue;
         }
-        if let Err(e) = storage::insert_chat_message(&conn, Timestamp::now(), "user", &ask) {
+        if let Err(e) =
+            storage::insert_chat_message(&conn, Timestamp::now(), conversation_id, "user", &ask)
+        {
             tracing::error!("chat message insert failed: {e}");
         }
         let context = match chronicle_core::chat::build_context(&conn, &ask, &Zoned::now()) {
@@ -255,9 +280,13 @@ fn chat_worker(data_dir: &Path) -> anyhow::Result<()> {
             Ok(answer) => {
                 send(&WorkerMsg::Done);
                 tracing::info!(secs = t0.elapsed().as_secs_f64(), "chat answer done");
-                if let Err(e) =
-                    storage::insert_chat_message(&conn, Timestamp::now(), "assistant", &answer)
-                {
+                if let Err(e) = storage::insert_chat_message(
+                    &conn,
+                    Timestamp::now(),
+                    conversation_id,
+                    "assistant",
+                    &answer,
+                ) {
                     tracing::error!("chat message insert failed: {e}");
                 }
                 history.push((ask, answer));
@@ -760,9 +789,13 @@ fn spawn_ui_child() -> std::io::Result<Child> {
 }
 
 /// llama/ggml noise goes to the log file, not the UI's terminal.
-pub(crate) fn spawn_chat_worker() -> std::io::Result<Child> {
+pub(crate) fn spawn_chat_worker(conversation_id: i64) -> std::io::Result<Child> {
     Command::new(own_exe()?)
-        .arg("chat-worker")
+        .args([
+            "chat-worker",
+            "--conversation",
+            &conversation_id.to_string(),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

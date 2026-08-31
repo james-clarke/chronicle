@@ -175,6 +175,7 @@ enum View {
     Home,
     Timeline,
     Reports,
+    Chat,
 }
 
 struct TimelineApp {
@@ -624,10 +625,16 @@ impl eframe::App for TimelineApp {
                                 (View::Home, "home"),
                                 (View::Timeline, "timeline"),
                                 (View::Reports, "reports"),
+                                (View::Chat, "chat"),
                             ] {
                                 if ui.selectable_label(self.view == view, label).clicked()
                                     && self.view != view
                                 {
+                                    if self.view == View::Chat {
+                                        // Leaving chat kills the warm worker
+                                        // (model resident only while visible).
+                                        self.chat = None;
+                                    }
                                     self.view = view;
                                     self.loaded_at = None;
                                 }
@@ -637,6 +644,15 @@ impl eframe::App for TimelineApp {
                     match self.view {
                         // Home is day-independent: no nav controls.
                         View::Home => {}
+                        View::Chat => {
+                            if ui.button("new chat").clicked() {
+                                self.chat_new();
+                            }
+                            self.chat_history_menu(ui);
+                            if self.chat_warming() {
+                                ui.weak("loading model\u{2026}");
+                            }
+                        }
                         View::Timeline => {
                             if ui.button("\u{25c0}").clicked() {
                                 self.shift_day(-1);
@@ -697,10 +713,6 @@ impl eframe::App for TimelineApp {
                                     self.toggle_settings();
                                     ui.close();
                                 }
-                                if ui.button("chat").clicked() {
-                                    self.toggle_chat(ui.ctx());
-                                    ui.close();
-                                }
                                 if ui.button("derive now").clicked() {
                                     if !crate::send_ctrl(&self.sock_path, "derive") {
                                         self.error = Some("daemon not reachable".into());
@@ -712,9 +724,6 @@ impl eframe::App for TimelineApp {
                         }
                         if ui.button("settings").clicked() {
                             self.toggle_settings();
-                        }
-                        if ui.button("chat").clicked() {
-                            self.toggle_chat(ui.ctx());
                         }
                         if ui.button("derive now").clicked()
                             && !crate::send_ctrl(&self.sock_path, "derive")
@@ -738,11 +747,10 @@ impl eframe::App for TimelineApp {
                 });
             });
 
-        self.chat_panel_ui(ui);
-
         match self.view {
             View::Home => self.home_ui(ui),
             View::Timeline => self.timeline_ui(ui),
+            View::Chat => self.chat_ui(ui),
             View::Reports => {
                 self.reports_ui(ui);
                 return;

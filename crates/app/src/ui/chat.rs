@@ -1,10 +1,13 @@
-//! Chat panel: owns the warm `chat-worker` child and renders the transcript.
+//! Chat tab: owns the warm `chat-worker` child and renders the transcript.
+//! Conversations live in the DB; the UI creates/lists them and tells the
+//! worker which one to use.
 
 use std::io::{BufRead, Write};
 use std::process::Child;
 use std::sync::mpsc;
 
 use eframe::egui;
+use jiff::Timestamp;
 use rusqlite::Connection;
 
 use super::{TimelineApp, theme};
@@ -23,11 +26,12 @@ struct ChatMsg {
     text: String,
 }
 
-/// Chat panel state. Owns the warm `chat-worker` child; dropping the panel
-/// kills it (README: model resident only while the panel is open).
+/// Chat state. Owns the warm `chat-worker` child; dropping the panel kills it
+/// (README: model resident only while the chat tab is open).
 pub(super) struct ChatPanel {
     child: Child,
     rx: mpsc::Receiver<ChatEvent>,
+    conversation_id: i64,
     transcript: Vec<ChatMsg>,
     input: String,
     /// Model still loading; no questions accepted yet.
@@ -38,8 +42,12 @@ pub(super) struct ChatPanel {
 }
 
 impl ChatPanel {
-    fn spawn(ctx: &egui::Context, conn: Option<&Connection>) -> anyhow::Result<Self> {
-        let mut child = crate::spawn_chat_worker()?;
+    fn spawn(
+        ctx: &egui::Context,
+        conn: Option<&Connection>,
+        conversation_id: i64,
+    ) -> anyhow::Result<Self> {
+        let mut child = crate::spawn_chat_worker(conversation_id)?;
         let stdout = child.stdout.take().expect("chat worker stdout is piped");
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
@@ -65,19 +73,11 @@ impl ChatPanel {
                 let _ = tx.send(ChatEvent::Exited);
                 ctx.request_repaint();
             })?;
-        // Prior conversation tail; the worker preloads the same history.
-        let transcript = conn
-            .and_then(|c| chronicle_core::storage::recent_chat_messages(c, 20).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(role, text)| ChatMsg {
-                user: role == "user",
-                text,
-            })
-            .collect();
+        let transcript = load_transcript(conn, conversation_id);
         Ok(Self {
             child,
             rx,
+            conversation_id,
             transcript,
             input: String::new(),
             warming: true,
@@ -110,16 +110,11 @@ impl ChatPanel {
         }
     }
 
-    fn send_question(&mut self) {
-        let ask = self.input.trim().to_owned();
-        if ask.is_empty() || self.busy || self.warming {
-            return;
-        }
-        let line = serde_json::to_string(&crate::chatproto::Ask { ask: ask.clone() })
-            .expect("ask serializes");
+    fn send_line(&mut self, msg: &crate::chatproto::ClientMsg) -> bool {
+        let line = serde_json::to_string(msg).expect("client msg serializes");
         let Some(stdin) = self.child.stdin.as_mut() else {
             self.error = Some("chat worker not reachable".into());
-            return;
+            return false;
         };
         if stdin
             .write_all(format!("{line}\n").as_bytes())
@@ -127,6 +122,17 @@ impl ChatPanel {
             .is_err()
         {
             self.error = Some("chat worker not reachable".into());
+            return false;
+        }
+        true
+    }
+
+    fn send_question(&mut self) {
+        let ask = self.input.trim().to_owned();
+        if ask.is_empty() || self.busy || self.warming {
+            return;
+        }
+        if !self.send_line(&crate::chatproto::ClientMsg::Ask { ask: ask.clone() }) {
             return;
         }
         self.transcript.push(ChatMsg {
@@ -141,135 +147,211 @@ impl ChatPanel {
         self.busy = true;
         self.error = None;
     }
+
+    /// Point the panel (and worker) at another conversation. No-op while an
+    /// answer is streaming.
+    fn switch_conversation(&mut self, conn: Option<&Connection>, conversation_id: i64) {
+        if self.busy || conversation_id == self.conversation_id {
+            return;
+        }
+        if !self.send_line(&crate::chatproto::ClientMsg::Switch { conversation_id }) {
+            return;
+        }
+        self.conversation_id = conversation_id;
+        self.transcript = load_transcript(conn, conversation_id);
+        self.error = None;
+    }
+}
+
+fn load_transcript(conn: Option<&Connection>, conversation_id: i64) -> Vec<ChatMsg> {
+    conn.and_then(|c| chronicle_core::storage::recent_chat_messages(c, conversation_id, 20).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(role, text)| ChatMsg {
+            user: role == "user",
+            text,
+        })
+        .collect()
+}
+
+impl TimelineApp {
+    /// Ensure a live worker on the most recent conversation (or a fresh one).
+    fn chat_ensure(&mut self, ctx: &egui::Context) {
+        if self.chat.is_some() {
+            return;
+        }
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let latest = chronicle_core::storage::list_conversations(conn, 1)
+            .ok()
+            .and_then(|v| v.first().map(|(id, _, _)| *id));
+        let conversation_id = match latest {
+            Some(id) => id,
+            None => match chronicle_core::storage::create_conversation(conn, Timestamp::now()) {
+                Ok(id) => id,
+                Err(e) => {
+                    self.error = Some(format!("conversation create failed: {e}"));
+                    return;
+                }
+            },
+        };
+        match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id) {
+            Ok(panel) => self.chat = Some(panel),
+            Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
+        }
+    }
+
+    /// Top-bar action: start a fresh conversation.
+    pub(super) fn chat_new(&mut self) {
+        let (Some(conn), Some(chat)) = (self.conn.as_ref(), self.chat.as_mut()) else {
+            return;
+        };
+        if chat.busy {
+            return;
+        }
+        match chronicle_core::storage::create_conversation(conn, Timestamp::now()) {
+            Ok(id) => chat.switch_conversation(Some(conn), id),
+            Err(e) => self.error = Some(format!("conversation create failed: {e}")),
+        }
+    }
+
+    /// Top-bar menu listing past conversations by first question.
+    pub(super) fn chat_history_menu(&mut self, ui: &mut egui::Ui) {
+        let (Some(conn), Some(chat)) = (self.conn.as_ref(), self.chat.as_mut()) else {
+            return;
+        };
+        let items = chronicle_core::storage::list_conversations(conn, 12).unwrap_or_default();
+        let tz = self.tz.clone();
+        ui.menu_button("history", |ui| {
+            for (id, last_ts, snippet) in &items {
+                let head: String = if snippet.is_empty() {
+                    "(empty chat)".into()
+                } else {
+                    snippet.chars().take(40).collect()
+                };
+                let date = Timestamp::from_millisecond(*last_ts)
+                    .map(|t| t.to_zoned(tz.clone()).strftime("%-d %b").to_string())
+                    .unwrap_or_default();
+                let current = *id == chat.conversation_id;
+                if ui
+                    .selectable_label(current, format!("{date} \u{b7} {head}"))
+                    .clicked()
+                {
+                    chat.switch_conversation(Some(conn), *id);
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    /// True while the model is still loading (top-bar indicator).
+    pub(super) fn chat_warming(&self) -> bool {
+        self.chat.as_ref().is_some_and(|c| c.warming)
+    }
+
+    pub(super) fn chat_ui(&mut self, ui: &mut egui::Ui) {
+        self.chat_ensure(ui.ctx());
+        let Some(chat) = &mut self.chat else {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.weak("chat unavailable");
+                if let Some(error) = &self.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            });
+            return;
+        };
+        chat.drain_events();
+        let mut start_dl = false;
+        egui::Panel::bottom("chat_input").show(ui, |ui| {
+            if let Some(error) = &chat.error {
+                egui::Frame::new()
+                    .fill(theme::palette::RED.gamma_multiply(0.15))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.colored_label(theme::palette::RED, error);
+                        if error.contains("no model") && ui.small_button("download model").clicked()
+                        {
+                            start_dl = true;
+                        }
+                    });
+            }
+            ui.horizontal(|ui| {
+                let can_send = !chat.busy && !chat.warming;
+                let send_clicked = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let clicked = ui
+                            .add_enabled(can_send, egui::Button::new("send"))
+                            .clicked();
+                        let edit = ui.add_sized(
+                            ui.available_size(),
+                            egui::TextEdit::singleline(&mut chat.input)
+                                .hint_text("ask about your day"),
+                        );
+                        let entered =
+                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if clicked || entered {
+                            edit.request_focus();
+                        }
+                        clicked || entered
+                    })
+                    .inner;
+                if send_clicked && can_send {
+                    chat.send_question();
+                }
+            });
+        });
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let max_w = ui.available_width() * 0.85;
+                    if chat.transcript.is_empty() && !chat.warming {
+                        ui.weak("new chat \u{2014} ask about your day");
+                    }
+                    for msg in &chat.transcript {
+                        if !msg.user && msg.text.is_empty() && chat.busy {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(14.0));
+                                ui.weak("thinking\u{2026}");
+                            });
+                            ui.add_space(6.0);
+                            continue;
+                        }
+                        let (fill, align) = if msg.user {
+                            (
+                                theme::palette::ACCENT.gamma_multiply(0.20),
+                                egui::Align::Max,
+                            )
+                        } else {
+                            (theme::palette::SURFACE, egui::Align::Min)
+                        };
+                        ui.with_layout(egui::Layout::top_down(align), |ui| {
+                            egui::Frame::new()
+                                .fill(fill)
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .inner_margin(egui::Margin::symmetric(10, 6))
+                                .show(ui, |ui| {
+                                    ui.set_max_width(max_w);
+                                    ui.label(&msg.text);
+                                });
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+        });
+        if start_dl {
+            let ctx = ui.ctx().clone();
+            self.start_model_download(&ctx, chronicle_derive::model::default_preset());
+        }
+    }
 }
 
 impl Drop for ChatPanel {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-    }
-}
-
-impl TimelineApp {
-    pub(super) fn toggle_chat(&mut self, ctx: &egui::Context) {
-        if self.chat.is_some() {
-            self.chat = None; // Drop kills the worker
-            return;
-        }
-        match ChatPanel::spawn(ctx, self.conn.as_ref()) {
-            Ok(panel) => self.chat = Some(panel),
-            Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
-        }
-    }
-
-    pub(super) fn chat_panel_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(chat) = &mut self.chat else { return };
-        chat.drain_events();
-        let mut close = false;
-        let mut start_dl = false;
-        egui::Panel::right("chat_panel")
-            .default_size(320.0)
-            .resizable(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Chat")
-                            .text_style(egui::TextStyle::Heading)
-                            .color(theme::palette::TEXT),
-                    );
-                    if chat.warming {
-                        ui.weak("loading model\u{2026}");
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("close").clicked() {
-                            close = true;
-                        }
-                    });
-                });
-                egui::Panel::bottom("chat_input").show(ui, |ui| {
-                    if let Some(error) = &chat.error {
-                        egui::Frame::new()
-                            .fill(theme::palette::RED.gamma_multiply(0.15))
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::same(6))
-                            .show(ui, |ui| {
-                                ui.colored_label(theme::palette::RED, error);
-                                if error.contains("no model")
-                                    && ui.small_button("download model").clicked()
-                                {
-                                    start_dl = true;
-                                }
-                            });
-                    }
-                    ui.horizontal(|ui| {
-                        let can_send = !chat.busy && !chat.warming;
-                        let send_clicked = ui
-                            .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let clicked = ui
-                                    .add_enabled(can_send, egui::Button::new("send"))
-                                    .clicked();
-                                let edit = ui.add_sized(
-                                    ui.available_size(),
-                                    egui::TextEdit::singleline(&mut chat.input)
-                                        .hint_text("ask about your day"),
-                                );
-                                let entered = edit.lost_focus()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                if clicked || entered {
-                                    edit.request_focus();
-                                }
-                                clicked || entered
-                            })
-                            .inner;
-                        if send_clicked && can_send {
-                            chat.send_question();
-                        }
-                    });
-                });
-                egui::CentralPanel::default().show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink(false)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            let max_w = ui.available_width() * 0.85;
-                            for msg in &chat.transcript {
-                                if !msg.user && msg.text.is_empty() && chat.busy {
-                                    ui.horizontal(|ui| {
-                                        ui.add(egui::Spinner::new().size(14.0));
-                                        ui.weak("thinking\u{2026}");
-                                    });
-                                    ui.add_space(6.0);
-                                    continue;
-                                }
-                                let (fill, align) = if msg.user {
-                                    (
-                                        theme::palette::ACCENT.gamma_multiply(0.20),
-                                        egui::Align::Max,
-                                    )
-                                } else {
-                                    (theme::palette::SURFACE, egui::Align::Min)
-                                };
-                                ui.with_layout(egui::Layout::top_down(align), |ui| {
-                                    egui::Frame::new()
-                                        .fill(fill)
-                                        .corner_radius(egui::CornerRadius::same(10))
-                                        .inner_margin(egui::Margin::symmetric(10, 6))
-                                        .show(ui, |ui| {
-                                            ui.set_max_width(max_w);
-                                            ui.label(&msg.text);
-                                        });
-                                });
-                                ui.add_space(6.0);
-                            }
-                        });
-                });
-            });
-        if close {
-            self.chat = None;
-        }
-        if start_dl {
-            let ctx = ui.ctx().clone();
-            self.start_model_download(&ctx, chronicle_derive::model::default_preset());
-        }
     }
 }

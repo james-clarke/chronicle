@@ -27,6 +27,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/002_corrections_fts.sql")),
         M::up(include_str!("../migrations/003_spans_url_meta.sql")),
         M::up(include_str!("../migrations/004_task_identity.sql")),
+        M::up(include_str!("../migrations/005_chat_conversations.sql")),
     ])
 });
 
@@ -268,7 +269,7 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
 /// requires it), user-declared tasks are never pruned, and a batch survives
 /// while spans or intervals still reference it.
 pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
-    const STMTS: [&str; 6] = [
+    const STMTS: [&str; 7] = [
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
         "DELETE FROM intervals WHERE id IN (SELECT id FROM intervals WHERE end_ts < ?1 \
@@ -282,6 +283,9 @@ pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, Sto
          AND id NOT IN (SELECT batch_id FROM spans WHERE batch_id IS NOT NULL) \
          AND id NOT IN (SELECT batch_id FROM intervals) LIMIT ?2)",
         "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE ts < ?1 LIMIT ?2)",
+        "DELETE FROM conversations WHERE id IN (SELECT id FROM conversations WHERE created_ts < ?1 \
+         AND id NOT IN (SELECT conversation_id FROM chat_messages WHERE conversation_id IS NOT NULL) \
+         LIMIT ?2)",
     ];
     let mut total = 0u64;
     for sql in STMTS {
@@ -874,27 +878,60 @@ pub fn search_spans(
 pub fn insert_chat_message(
     conn: &Connection,
     ts: jiff::Timestamp,
+    conversation_id: i64,
     role: &str,
     content: &str,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "INSERT INTO chat_messages (ts, role, content) VALUES (?1, ?2, ?3)",
-        params![ts_to_ms(ts), role, content],
+        "INSERT INTO chat_messages (ts, conversation_id, role, content) VALUES (?1, ?2, ?3, ?4)",
+        params![ts_to_ms(ts), conversation_id, role, content],
     )?;
     Ok(())
 }
 
-/// Last `n` chat messages, oldest first.
+/// Last `n` messages of one conversation, oldest first.
 pub fn recent_chat_messages(
     conn: &Connection,
+    conversation_id: i64,
     n: usize,
 ) -> Result<Vec<(String, String)>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT role, content FROM (
-             SELECT id, role, content FROM chat_messages ORDER BY id DESC LIMIT ?1
+             SELECT id, role, content FROM chat_messages
+             WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2
          ) ORDER BY id",
     )?;
-    let rows = stmt.query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(params![conversation_id, n as i64], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn create_conversation(conn: &Connection, ts: jiff::Timestamp) -> Result<i64, StorageError> {
+    conn.execute(
+        "INSERT INTO conversations (created_ts) VALUES (?1)",
+        params![ts_to_ms(ts)],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Conversations by recency of last activity: (id, last_ts, first user
+/// question — empty when the conversation has none yet).
+pub fn list_conversations(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(i64, i64, String)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id,
+                COALESCE((SELECT MAX(ts) FROM chat_messages m
+                          WHERE m.conversation_id = c.id), c.created_ts) AS last_ts,
+                COALESCE((SELECT content FROM chat_messages m
+                          WHERE m.conversation_id = c.id AND m.role = 'user'
+                          ORDER BY m.id LIMIT 1), '') AS snippet
+         FROM conversations c
+         ORDER BY last_ts DESC, c.id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -966,5 +1003,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits, 1, "FTS rebuilt over migrated identity labels");
+    }
+
+    // 005 backfills existing chat history into conversation 1; an empty
+    // database gets no conversation row.
+    #[test]
+    fn migration_005_backfills_chat_history() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let pre = rusqlite_migration::Migrations::new(vec![
+            rusqlite_migration::M::up(include_str!("../migrations/001_schema.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/002_corrections_fts.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/003_spans_url_meta.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/004_task_identity.sql")),
+        ]);
+        pre.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO chat_messages (ts, role, content) VALUES
+                 (100, 'user', 'q'), (200, 'assistant', 'a');",
+        )
+        .unwrap();
+
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let (id, created): (i64, i64) = conn
+            .query_row("SELECT id, created_ts FROM conversations", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((id, created), (1, 100));
+        let orphans: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM chat_messages WHERE conversation_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn migration_005_empty_db_gets_no_conversation() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM conversations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
