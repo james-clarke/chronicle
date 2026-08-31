@@ -254,6 +254,8 @@ struct TimelineApp {
     was_focused: bool,
     /// `CHRONICLE_UI_NO_AUTOHIDE` disables hiding (visual-test loop).
     autohide: bool,
+    /// Top-right corner placement done (needs monitor size, so not at boot).
+    positioned: bool,
 }
 
 impl TimelineApp {
@@ -310,6 +312,7 @@ impl TimelineApp {
             started: Instant::now(),
             was_focused: false,
             autohide: std::env::var_os("CHRONICLE_UI_NO_AUTOHIDE").is_none(),
+            positioned: false,
         }
     }
 
@@ -612,6 +615,17 @@ impl eframe::App for TimelineApp {
     // Runs even while the window is hidden (unlike `ui`), so the stdin toggle
     // can bring the window back after a hide.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Park the widget in the top-right corner once the monitor size is
+        // known (SNI hosts don't report icon coordinates; a fixed corner
+        // beats the WM's arbitrary placement). No-op on Wayland.
+        if !self.positioned
+            && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
+        {
+            let margin = 12.0;
+            let pos = egui::pos2((monitor.x - WIDGET_W - margin).max(0.0), margin);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            self.positioned = true;
+        }
         let hide = |app: &Self| {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             app.visible.store(false, Ordering::SeqCst);
