@@ -34,7 +34,11 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     // see remember_size) is remembered in `meta`.
     let (w, h) = chronicle_core::storage::open(&db_path)
         .ok()
-        .and_then(|c| chronicle_core::storage::get_meta(&c, "ui_window_size").ok().flatten())
+        .and_then(|c| {
+            chronicle_core::storage::get_meta(&c, "ui_window_size")
+                .ok()
+                .flatten()
+        })
         .and_then(|s| parse_size(&s))
         .unwrap_or((360.0, 560.0));
     let options = eframe::NativeOptions {
@@ -159,7 +163,10 @@ enum Action {
         interval_ids: Vec<i64>,
         to_task: i64,
     },
-    Merge { from_task: i64, to_task: i64 },
+    Merge {
+        from_task: i64,
+        to_task: i64,
+    },
     Reopen(i64),
 }
 
@@ -276,7 +283,8 @@ impl TimelineApp {
             .unwrap_or(ppp);
         let s = ctx.viewport_rect().size() * (ppp / nppp);
         let cur = (s.x, s.y);
-        let same = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() <= 1.0 && (a.1 - b.1).abs() <= 1.0;
+        let same =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() <= 1.0 && (a.1 - b.1).abs() <= 1.0;
         if self.win_size_saved.is_some_and(|sv| same(sv, cur)) {
             self.win_size_pending = None;
             return;
@@ -432,9 +440,7 @@ impl TimelineApp {
             };
             group.total_ms += end_ms - start_ms;
             match group.sessions.last_mut() {
-                Some(s)
-                    if start_ms - s.end.timestamp().as_millisecond() <= SESSION_GAP_MS =>
-                {
+                Some(s) if start_ms - s.end.timestamp().as_millisecond() <= SESSION_GAP_MS => {
                     if end.timestamp() > s.end.timestamp() {
                         s.end = end.clone();
                     }
@@ -594,6 +600,12 @@ impl eframe::App for TimelineApp {
         self.reload_if_stale();
         self.remember_size(ui);
 
+        // Settings takeover: replaces the whole window, top bar included.
+        if self.settings.is_some() {
+            self.settings_ui(ui);
+            return;
+        }
+
         let top_frame = egui::Frame::new()
             .fill(theme::palette::SURFACE)
             .inner_margin(egui::Margin::symmetric(12, 8));
@@ -727,7 +739,6 @@ impl eframe::App for TimelineApp {
             });
 
         self.chat_panel_ui(ui);
-        self.settings_window(ui.ctx());
 
         match self.view {
             View::Home => self.home_ui(ui),

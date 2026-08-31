@@ -48,85 +48,90 @@ impl TimelineApp {
             let spans = &self.spans;
             let new_label = &mut self.new_label;
             let new_project = &mut self.new_project;
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                theme::section_header(ui, "Working on", None);
-                ui.add_space(6.0);
-                // One column plan shared by the declare row and every task row,
-                // so the whole section reads as a single aligned table.
-                let label_w = (ui.available_width() - 230.0).clamp(160.0, 460.0);
-                egui::Grid::new("working_on")
-                    .num_columns(4)
-                    .striped(true)
-                    .spacing([10.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(new_label)
-                                .desired_width(label_w)
-                                .hint_text("declare a task\u{2026}"),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(new_project)
-                                .desired_width(PROJECT_COL)
-                                .hint_text("project"),
-                        );
-                        ui.label("");
-                        if ui.button("add").clicked() {
-                            pending = Some(Action::Declare);
-                        }
-                        ui.end_row();
-                        for &o in &open_vis {
-                            let t = &open_tasks[o];
-                            task_cells(ui, t, label_w, true);
-                            ui.menu_button("\u{2026}", |ui| {
-                                if ui.button("close").clicked() {
-                                    pending = Some(Action::Close(t.task_id));
-                                    ui.close();
-                                }
-                                merge_menu(ui, t.task_id, &candidates, &mut pending);
-                            });
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    theme::section_header(ui, "Working on", None);
+                    ui.add_space(6.0);
+                    // One column plan shared by the declare row and every task row,
+                    // so the whole section reads as a single aligned table.
+                    let label_w = (ui.available_width() - 230.0).clamp(160.0, 460.0);
+                    egui::Grid::new("working_on")
+                        .num_columns(4)
+                        .striped(true)
+                        .spacing([10.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(new_label)
+                                    .desired_width(label_w)
+                                    .hint_text("declare a task\u{2026}"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(new_project)
+                                    .desired_width(PROJECT_COL)
+                                    .hint_text("project"),
+                            );
+                            ui.label("");
+                            if ui.button("add").clicked() {
+                                pending = Some(Action::Declare);
+                            }
                             ui.end_row();
+                            for &o in &open_vis {
+                                let t = &open_tasks[o];
+                                task_cells(ui, t, label_w, true);
+                                ui.menu_button("\u{2026}", |ui| {
+                                    if ui.button("close").clicked() {
+                                        pending = Some(Action::Close(t.task_id));
+                                        ui.close();
+                                    }
+                                    merge_menu(ui, t.task_id, &candidates, &mut pending);
+                                });
+                                ui.end_row();
+                            }
+                        });
+                    if !closed_vis.is_empty() {
+                        ui.add_space(4.0);
+                        let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };
+                        if ui
+                            .small_button(format!("{arrow} recently closed"))
+                            .clicked()
+                        {
+                            *show_closed = !*show_closed;
+                        }
+                        if *show_closed {
+                            egui::Grid::new("recently_closed")
+                                .num_columns(4)
+                                .striped(true)
+                                .spacing([10.0, 6.0])
+                                .show(ui, |ui| {
+                                    for &c in &closed_vis {
+                                        let t = &closed_tasks[c];
+                                        task_cells(ui, t, label_w, false);
+                                        if ui.small_button("reopen").clicked() {
+                                            pending = Some(Action::Reopen(t.task_id));
+                                        }
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    }
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let arrow = if *show_spans { "\u{25bc}" } else { "\u{25b6}" };
+                        if ui
+                            .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
+                            .clicked()
+                        {
+                            *show_spans = !*show_spans;
                         }
                     });
-                if !closed_vis.is_empty() {
-                    ui.add_space(4.0);
-                    let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };
-                    if ui.small_button(format!("{arrow} recently closed")).clicked() {
-                        *show_closed = !*show_closed;
-                    }
-                    if *show_closed {
-                        egui::Grid::new("recently_closed")
-                            .num_columns(4)
-                            .striped(true)
-                            .spacing([10.0, 6.0])
-                            .show(ui, |ui| {
-                                for &c in &closed_vis {
-                                    let t = &closed_tasks[c];
-                                    task_cells(ui, t, label_w, false);
-                                    if ui.small_button("reopen").clicked() {
-                                        pending = Some(Action::Reopen(t.task_id));
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    }
-                }
-
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let arrow = if *show_spans { "\u{25bc}" } else { "\u{25b6}" };
-                    if ui
-                        .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
-                        .clicked()
-                    {
-                        *show_spans = !*show_spans;
+                    if *show_spans {
+                        for &s in &span_vis {
+                            span_row(ui, &spans[s]);
+                        }
                     }
                 });
-                if *show_spans {
-                    for &s in &span_vis {
-                        span_row(ui, &spans[s]);
-                    }
-                }
-            });
         });
         if let Some(action) = pending {
             self.apply_action(action);

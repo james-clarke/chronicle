@@ -34,10 +34,18 @@ impl TimelineApp {
                     let color = theme::series_color_for(group.task_id);
                     if narrow {
                         egui::CentralPanel::default().show(ui, |ui| {
-                            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                                close_detail =
-                                    detail_ui(ui, group, color, edit, &candidates, &mut pending);
-                            });
+                            egui::ScrollArea::vertical()
+                                .auto_shrink(false)
+                                .show(ui, |ui| {
+                                    close_detail = detail_ui(
+                                        ui,
+                                        group,
+                                        color,
+                                        edit,
+                                        &candidates,
+                                        &mut pending,
+                                    );
+                                });
                         });
                         if close_detail {
                             self.selected_task = None;
@@ -79,29 +87,31 @@ impl TimelineApp {
             let spans = &self.spans;
             let edit = &mut self.edit;
             let selected_task = &mut self.selected_task;
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                today_header(ui, groups, spans);
-                if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
-                    activity_band(ui, groups, &group_vis, lo, hi, day_start);
-                }
-                ui.add_space(4.0);
-                if groups.is_empty() {
-                    ui.weak("no tasks derived yet");
-                } else if group_vis.is_empty() {
-                    ui.weak("no tasks match the filter");
-                }
-                for &g in &group_vis {
-                    task_card(
-                        ui,
-                        &groups[g],
-                        theme::series_color_for(groups[g].task_id),
-                        edit,
-                        selected_task,
-                        &candidates,
-                        &mut pending,
-                    );
-                }
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    today_header(ui, groups, spans);
+                    if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
+                        activity_band(ui, groups, &group_vis, lo, hi, day_start);
+                    }
+                    ui.add_space(4.0);
+                    if groups.is_empty() {
+                        ui.weak("no tasks derived yet");
+                    } else if group_vis.is_empty() {
+                        ui.weak("no tasks match the filter");
+                    }
+                    for &g in &group_vis {
+                        task_card(
+                            ui,
+                            &groups[g],
+                            theme::series_color_for(groups[g].task_id),
+                            edit,
+                            selected_task,
+                            &candidates,
+                            &mut pending,
+                        );
+                    }
+                });
         });
         if let Some(action) = pending {
             self.apply_action(action);
@@ -249,7 +259,11 @@ fn task_card(
     pending: &mut Option<Action>,
 ) {
     let selected = *selected_task == Some(group.task_id);
-    let stroke_color = if selected { color } else { theme::palette::SURFACE_2 };
+    let stroke_color = if selected {
+        color
+    } else {
+        theme::palette::SURFACE_2
+    };
     // Sense on the container (registered before children) so the card is
     // clickable without stealing clicks from its own buttons/menus.
     let resp = ui
@@ -308,8 +322,7 @@ fn card_frame(
                 return;
             }
             ui.horizontal(|ui| {
-                let (dot, _) =
-                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 4.0, color);
                 // Leave room for the duration + confidence dot + menu.
                 let label_w = (ui.available_width() - 110.0).max(60.0);
@@ -346,9 +359,7 @@ fn card_frame(
                 if group.declared {
                     theme::badge(ui, "declared", theme::palette::TEXT_DIM);
                 }
-                if let (Some(first), Some(last)) =
-                    (group.sessions.first(), group.sessions.last())
-                {
+                if let (Some(first), Some(last)) = (group.sessions.first(), group.sessions.last()) {
                     ui.label(
                         egui::RichText::new(format!(
                             "{}\u{2013}{}",
@@ -490,7 +501,13 @@ fn detail_ui(
     if !group.evidence.is_empty() {
         ui.add_space(8.0);
         theme::section_header(ui, "Where the time went", None);
-        let max_ms = group.evidence.iter().map(|e| e.ms).max().unwrap_or(1).max(1);
+        let max_ms = group
+            .evidence
+            .iter()
+            .map(|e| e.ms)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         for e in group.evidence.iter().take(6) {
             ui.horizontal(|ui| {
                 ui.add_sized(
@@ -504,14 +521,10 @@ fn detail_ui(
                 );
                 let dur_text = fmt_dur(e.ms);
                 let bar_w = (ui.available_width() - 52.0).max(20.0);
-                let (rect, resp) = ui
-                    .allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(bar_w, 8.0), egui::Sense::hover());
                 let painter = ui.painter();
-                painter.rect_filled(
-                    rect,
-                    egui::CornerRadius::same(4),
-                    theme::palette::SURFACE_2,
-                );
+                painter.rect_filled(rect, egui::CornerRadius::same(4), theme::palette::SURFACE_2);
                 let frac = e.ms as f32 / max_ms as f32;
                 let fill = egui::Rect::from_min_size(
                     rect.min,

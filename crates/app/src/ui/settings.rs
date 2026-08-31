@@ -109,136 +109,184 @@ impl TimelineApp {
         }
     }
 
-    pub(super) fn settings_window(&mut self, ctx: &egui::Context) {
+    /// Full-window takeover: replaces every panel (top bar included) while
+    /// `self.settings` is Some — a floating window can't fit the widget-sized
+    /// default viewport.
+    pub(super) fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let config_path = self.config_path.clone();
         let data_dir = self.data_dir.clone();
         let model_dl = &self.model_dl;
         let mut start_dl = false;
+        let mut close = false;
         let Some(panel) = &mut self.settings else {
             return;
         };
-        let mut open = true;
-        egui::Window::new("settings")
-            .open(&mut open)
-            .resizable(true)
-            .default_width(420.0)
-            .show(ctx, |ui| {
-                section(ui, "Capture", true);
-                egui::Grid::new("settings_capture")
-                    .num_columns(3)
-                    .show(ui, |ui| {
-                        ui.label("afk close");
-                        ui.add(egui::DragValue::new(&mut panel.afk_close_secs).range(30..=3600));
-                        ui.weak("secs");
-                        ui.end_row();
-                    });
-                ui.label("excluded apps (one regex per line, never stored)");
-                ui.add(
-                    egui::TextEdit::multiline(&mut panel.excluded_apps)
-                        .desired_rows(2)
-                        .font(egui::TextStyle::Monospace),
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Settings")
+                        .text_style(egui::TextStyle::Heading)
+                        .color(theme::palette::TEXT),
                 );
-                ui.label("excluded titles (one regex per line)");
-                ui.add(
-                    egui::TextEdit::multiline(&mut panel.excluded_titles)
-                        .desired_rows(2)
-                        .font(egui::TextStyle::Monospace),
-                );
-
-                section(ui, "Derivation", false);
-                egui::Grid::new("settings_derive")
-                    .num_columns(3)
-                    .show(ui, |ui| {
-                        ui.label("batch every");
-                        ui.add(egui::DragValue::new(&mut panel.batch_minutes).range(5..=240));
-                        ui.weak("minutes");
-                        ui.end_row();
-                        ui.label("derive after idle");
-                        ui.add(egui::DragValue::new(&mut panel.derive_idle_secs).range(60..=3600));
-                        ui.weak("secs");
-                        ui.end_row();
-                        ui.label("task autoclose");
-                        ui.add(egui::DragValue::new(&mut panel.task_autoclose_days).range(0..=365));
-                        ui.weak("days (0 = never)");
-                        ui.end_row();
-                    });
-
-                section(ui, "Model", false);
-                ui.label("model path (empty = default preset)");
-                ui.text_edit_singleline(&mut panel.model_path);
-                match chronicle_derive::model::resolve(
-                    opt_path(&panel.model_path).as_deref(),
-                    &data_dir,
-                ) {
-                    Some(p) => {
-                        ui.weak(format!("using {}", p.display()));
-                    }
-                    None => match model_dl {
-                        Some(dl) if dl.finished.is_none() => {
-                            super::onboarding::progress_ui(ui, dl);
-                        }
-                        _ => {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(theme::palette::AMBER, "no model downloaded");
-                                if ui.small_button("download").clicked() {
-                                    start_dl = true;
-                                }
-                            });
-                        }
-                    },
-                }
-
-                section(ui, "Storage & server", false);
-                egui::Grid::new("settings_storage")
-                    .num_columns(3)
-                    .show(ui, |ui| {
-                        ui.label("retention");
-                        ui.add(egui::DragValue::new(&mut panel.retention_days).range(0..=3650));
-                        ui.weak("days (0 = keep forever)");
-                        ui.end_row();
-                        ui.label("aw endpoint port");
-                        ui.add(egui::DragValue::new(&mut panel.port).range(1024..=65535));
-                        ui.label("");
-                        ui.end_row();
-                    });
-
-                section(ui, "Integrations", false);
-                ui.label("mcp config path (empty = mcp.toml in data dir)");
-                ui.text_edit_singleline(&mut panel.mcp_config);
-
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    let save =
-                        egui::Button::new(egui::RichText::new("save").color(theme::palette::BG))
-                            .fill(theme::palette::ACCENT);
-                    if ui.add(save).clicked() {
-                        panel.status = Some(match panel.save(&config_path) {
-                            Ok(()) => Ok("saved \u{2014} restart daemon to apply".into()),
-                            Err(e) => Err(e),
-                        });
-                    }
-                    match &panel.status {
-                        Some(Ok(msg)) => {
-                            ui.weak(msg.as_str());
-                        }
-                        Some(Err(msg)) => {
-                            egui::Frame::new()
-                                .fill(theme::palette::RED.gamma_multiply(0.15))
-                                .corner_radius(egui::CornerRadius::same(6))
-                                .inner_margin(egui::Margin::same(6))
-                                .show(ui, |ui| {
-                                    ui.colored_label(theme::palette::RED, msg);
-                                });
-                        }
-                        None => {}
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("\u{d7}").clicked() {
+                        close = true;
                     }
                 });
             });
-        if !open {
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    // Center the form; cap width so it stays readable when wide.
+                    let max_w = ui.available_width().min(520.0);
+                    let pad = ((ui.available_width() - max_w) / 2.0).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(pad);
+                        ui.vertical(|ui| {
+                            ui.set_max_width(max_w);
+                            section(ui, "Capture", true);
+                            egui::Grid::new("settings_capture")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("afk close");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.afk_close_secs)
+                                            .range(30..=3600),
+                                    );
+                                    ui.weak("secs");
+                                    ui.end_row();
+                                });
+                            ui.label("excluded apps (one regex per line, never stored)");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut panel.excluded_apps)
+                                    .desired_rows(2)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            ui.label("excluded titles (one regex per line)");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut panel.excluded_titles)
+                                    .desired_rows(2)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+
+                            section(ui, "Derivation", false);
+                            egui::Grid::new("settings_derive")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("batch every");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.batch_minutes)
+                                            .range(5..=240),
+                                    );
+                                    ui.weak("minutes");
+                                    ui.end_row();
+                                    ui.label("derive after idle");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.derive_idle_secs)
+                                            .range(60..=3600),
+                                    );
+                                    ui.weak("secs");
+                                    ui.end_row();
+                                    ui.label("task autoclose");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.task_autoclose_days)
+                                            .range(0..=365),
+                                    );
+                                    ui.weak("days (0 = never)");
+                                    ui.end_row();
+                                });
+
+                            section(ui, "Model", false);
+                            ui.label("model path (empty = default preset)");
+                            ui.text_edit_singleline(&mut panel.model_path);
+                            match chronicle_derive::model::resolve(
+                                opt_path(&panel.model_path).as_deref(),
+                                &data_dir,
+                            ) {
+                                Some(p) => {
+                                    ui.weak(format!("using {}", p.display()));
+                                }
+                                None => match model_dl {
+                                    Some(dl) if dl.finished.is_none() => {
+                                        super::onboarding::progress_ui(ui, dl);
+                                    }
+                                    _ => {
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(
+                                                theme::palette::AMBER,
+                                                "no model downloaded",
+                                            );
+                                            if ui.small_button("download").clicked() {
+                                                start_dl = true;
+                                            }
+                                        });
+                                    }
+                                },
+                            }
+
+                            section(ui, "Storage & server", false);
+                            egui::Grid::new("settings_storage")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("retention");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.retention_days)
+                                            .range(0..=3650),
+                                    );
+                                    ui.weak("days (0 = keep forever)");
+                                    ui.end_row();
+                                    ui.label("aw endpoint port");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.port).range(1024..=65535),
+                                    );
+                                    ui.label("");
+                                    ui.end_row();
+                                });
+
+                            section(ui, "Integrations", false);
+                            ui.label("mcp config path (empty = mcp.toml in data dir)");
+                            ui.text_edit_singleline(&mut panel.mcp_config);
+
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                let save = egui::Button::new(
+                                    egui::RichText::new("save").color(theme::palette::BG),
+                                )
+                                .fill(theme::palette::ACCENT);
+                                if ui.add(save).clicked() {
+                                    panel.status = Some(match panel.save(&config_path) {
+                                        Ok(()) => {
+                                            Ok("saved \u{2014} restart daemon to apply".into())
+                                        }
+                                        Err(e) => Err(e),
+                                    });
+                                }
+                                match &panel.status {
+                                    Some(Ok(msg)) => {
+                                        ui.weak(msg.as_str());
+                                    }
+                                    Some(Err(msg)) => {
+                                        egui::Frame::new()
+                                            .fill(theme::palette::RED.gamma_multiply(0.15))
+                                            .corner_radius(egui::CornerRadius::same(6))
+                                            .inner_margin(egui::Margin::same(6))
+                                            .show(ui, |ui| {
+                                                ui.colored_label(theme::palette::RED, msg);
+                                            });
+                                    }
+                                    None => {}
+                                }
+                            });
+                        });
+                    });
+                });
+        });
+        if close {
             self.settings = None;
         }
         if start_dl {
-            self.start_model_download(ctx, chronicle_derive::model::default_preset());
+            self.start_model_download(ui.ctx(), chronicle_derive::model::default_preset());
         }
     }
 }
