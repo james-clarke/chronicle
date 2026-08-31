@@ -281,24 +281,24 @@ impl TimelineApp {
                              everything stays local.",
                     );
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        for (i, spec) in model::PRESETS.iter().enumerate() {
-                            let hint = if i == 0 {
-                                "recommended \u{b7} ~2.4 GiB"
-                            } else {
-                                "low-RAM \u{b7} ~1.1 GiB"
-                            };
-                            if ui
-                                .selectable_label(
-                                    self.preset_pick == i,
-                                    format!("{} ({hint})", spec.name),
-                                )
-                                .clicked()
-                            {
-                                self.preset_pick = i;
-                            }
+                    // Stacked, not side by side: both labels together are
+                    // wider than the 400px widget.
+                    for (i, spec) in model::PRESETS.iter().enumerate() {
+                        let hint = if i == 0 {
+                            "recommended \u{b7} ~2.4 GiB"
+                        } else {
+                            "low-RAM \u{b7} ~1.1 GiB"
+                        };
+                        if ui
+                            .selectable_label(
+                                self.preset_pick == i,
+                                format!("{} ({hint})", spec.name),
+                            )
+                            .clicked()
+                        {
+                            self.preset_pick = i;
                         }
-                    });
+                    }
                     ui.add_space(4.0);
                     let dl_btn = egui::Button::new(
                         egui::RichText::new("download model").color(theme::palette::BG),

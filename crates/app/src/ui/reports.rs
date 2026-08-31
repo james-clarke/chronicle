@@ -1,4 +1,4 @@
-//! Reports view: week-at-a-glance per-task/per-day table.
+//! Reports view: stacked per-day chart plus per-task week totals.
 
 use eframe::egui;
 use jiff::Zoned;
@@ -31,87 +31,75 @@ impl TimelineApp {
                     }
                 });
             };
-            egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                week_chart(ui, r, &today);
-                ui.add_space(14.0);
-                ui.label(
-                    egui::RichText::new("Tasks")
-                        .text_style(egui::TextStyle::Heading)
-                        .color(theme::palette::TEXT),
-                );
-                ui.add_space(4.0);
-                egui::Grid::new("week_report")
-                    .striped(true)
-                    .min_col_width(48.0)
-                    .show(ui, |ui| {
-                        ui.label("");
-                        for d in &r.days {
-                            let name = d.strftime("%a").to_string();
-                            let text = if *d == today {
-                                egui::RichText::new(name).color(theme::palette::ACCENT)
-                            } else {
-                                egui::RichText::new(name).color(theme::palette::TEXT_DIM)
-                            };
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    week_chart(ui, r, &today);
+                    ui.add_space(14.0);
+                    ui.label(
+                        egui::RichText::new("Tasks")
+                            .text_style(egui::TextStyle::Heading)
+                            .color(theme::palette::TEXT),
+                    );
+                    ui.add_space(4.0);
+                    // Per-day distribution lives in the chart above; rows show
+                    // week totals only (per-day cells don't fit at 400px).
+                    // Right-to-left so total and badge keep their room and the
+                    // label truncates into whatever is left.
+                    for t in &r.tasks {
+                        let color = theme::series_color_for(t.task_id);
+                        ui.horizontal(|ui| {
+                            let (dot, _) = ui
+                                .allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 4.0, color);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.label(text);
+                                    ui.monospace(
+                                        egui::RichText::new(fmt_dur(t.total_ms))
+                                            .color(theme::palette::TEXT),
+                                    );
+                                    if t.project != chronicle_core::report::UNTAGGED {
+                                        theme::badge(ui, &t.project, color);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(egui::Label::new(&t.label).truncate());
+                                        },
+                                    );
                                 },
                             );
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new("total").color(theme::palette::TEXT_DIM));
                         });
-                        ui.end_row();
-                        for t in &r.tasks {
-                            let color = theme::series_color_for(t.task_id);
-                            ui.horizontal(|ui| {
-                                ui.set_max_width(220.0);
-                                let (dot, _) = ui.allocate_exact_size(
-                                    egui::vec2(8.0, 8.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().circle_filled(dot.center(), 4.0, color);
-                                ui.add(egui::Label::new(&t.label).truncate());
-                                if t.project != chronicle_core::report::UNTAGGED {
-                                    theme::badge(ui, &t.project, color);
-                                }
-                            });
-                            for ms in &t.by_day {
-                                num_cell(ui, *ms, false);
+                    }
+                    if r.tasks.is_empty() {
+                        ui.weak("no tasks this week");
+                    }
+                    ui.add_space(14.0);
+                    ui.label(
+                        egui::RichText::new("Projects")
+                            .text_style(egui::TextStyle::Heading)
+                            .color(theme::palette::TEXT),
+                    );
+                    ui.add_space(4.0);
+                    egui::Grid::new("week_projects")
+                        .striped(true)
+                        .min_col_width(48.0)
+                        .show(ui, |ui| {
+                            for p in &r.projects {
+                                num_cell(ui, p.total_ms, false);
+                                theme::badge(ui, &p.project, theme::palette::ACCENT);
+                                ui.end_row();
                             }
-                            num_cell(ui, t.total_ms, true);
+                            num_cell(ui, r.grand_total_ms, true);
+                            ui.label(
+                                egui::RichText::new("total")
+                                    .text_style(egui::TextStyle::Heading)
+                                    .color(theme::palette::TEXT),
+                            );
                             ui.end_row();
-                        }
-                    });
-                if r.tasks.is_empty() {
-                    ui.weak("no tasks this week");
-                }
-                ui.add_space(14.0);
-                ui.label(
-                    egui::RichText::new("Projects")
-                        .text_style(egui::TextStyle::Heading)
-                        .color(theme::palette::TEXT),
-                );
-                ui.add_space(4.0);
-                egui::Grid::new("week_projects")
-                    .striped(true)
-                    .min_col_width(48.0)
-                    .show(ui, |ui| {
-                        for p in &r.projects {
-                            num_cell(ui, p.total_ms, false);
-                            theme::badge(ui, &p.project, theme::palette::ACCENT);
-                            ui.end_row();
-                        }
-                        num_cell(ui, r.grand_total_ms, true);
-                        ui.label(
-                            egui::RichText::new("total")
-                                .text_style(egui::TextStyle::Heading)
-                                .color(theme::palette::TEXT),
-                        );
-                        ui.end_row();
-                    });
-            });
+                        });
+                });
         });
     }
 }

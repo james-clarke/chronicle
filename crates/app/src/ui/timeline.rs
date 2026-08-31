@@ -302,12 +302,20 @@ fn card_frame(
             // container sense never sees them.
             ui.style_mut().interaction.selectable_labels = false;
             if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
+                // Two rows: label alone, then project + actions (376px total
+                // content width leaves no room for a single row).
+                {
+                    let e = edit.as_mut().expect("checked above");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut e.label)
+                            .desired_width(ui.available_width()),
+                    );
+                }
                 ui.horizontal(|ui| {
                     let e = edit.as_mut().expect("checked above");
-                    ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
                     ui.add(
                         egui::TextEdit::singleline(&mut e.project)
-                            .desired_width(110.0)
+                            .desired_width(ui.available_width() - 110.0)
                             .hint_text("project"),
                     );
                     if ui.button("save").clicked()

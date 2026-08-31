@@ -40,7 +40,11 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     let boot_conn = chronicle_core::storage::open(&db_path).ok();
     let zoom = boot_conn
         .as_ref()
-        .and_then(|c| chronicle_core::storage::get_meta(c, "ui_zoom_factor").ok().flatten())
+        .and_then(|c| {
+            chronicle_core::storage::get_meta(c, "ui_zoom_factor")
+                .ok()
+                .flatten()
+        })
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|z| (0.5..=2.0).contains(z));
     drop(boot_conn);
@@ -245,6 +249,11 @@ struct TimelineApp {
     visible: Arc<AtomicBool>,
     /// Startup instant; focus-loss hiding waits out WM map-time focus flapping.
     started: Instant,
+    /// Focus was observed at least once; hide-on-focus-loss stays disarmed
+    /// until then (the WM may map us unfocused, e.g. Openbox).
+    was_focused: bool,
+    /// `CHRONICLE_UI_NO_AUTOHIDE` disables hiding (visual-test loop).
+    autohide: bool,
 }
 
 impl TimelineApp {
@@ -264,7 +273,13 @@ impl TimelineApp {
             conn: None,
             tz,
             day,
-            view: View::Home,
+            // `CHRONICLE_UI_VIEW` picks the start tab (visual-test loop).
+            view: match std::env::var("CHRONICLE_UI_VIEW").as_deref() {
+                Ok("timeline") => View::Timeline,
+                Ok("reports") => View::Reports,
+                Ok("chat") => View::Chat,
+                _ => View::Home,
+            },
             week_anchor: chronicle_core::timeref::week_start(day).unwrap_or(day),
             report: None,
             spans: Vec::new(),
@@ -293,6 +308,8 @@ impl TimelineApp {
             service_status: None,
             visible,
             started: Instant::now(),
+            was_focused: false,
+            autohide: std::env::var_os("CHRONICLE_UI_NO_AUTOHIDE").is_none(),
         }
     }
 
@@ -601,10 +618,14 @@ impl eframe::App for TimelineApp {
         };
         // `unwrap_or(true)`: unknown focus state must not hide the window.
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
-        if self.visible.load(Ordering::SeqCst)
-            && !focused
+        if focused {
+            self.was_focused = true;
+        } else if self.autohide
+            && self.was_focused
+            && self.visible.load(Ordering::SeqCst)
             && self.started.elapsed() > Duration::from_millis(300)
         {
+            self.was_focused = false;
             hide(self);
         }
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -656,111 +677,117 @@ impl eframe::App for TimelineApp {
                                 }
                             }
                         });
-                    ui.add_space(6.0);
-                    match self.view {
-                        // Home is day-independent: no nav controls.
-                        View::Home => {}
-                        View::Chat => {
-                            if ui.button("new chat").clicked() {
-                                self.chat_new();
-                            }
-                            self.chat_history_menu(ui);
-                            if self.chat_warming() {
-                                ui.weak("loading model\u{2026}");
-                            }
-                        }
-                        View::Timeline => {
-                            if ui.button("\u{25c0}").clicked() {
-                                self.shift_day(-1);
-                            }
-                            if ui.button("\u{25b6}").clicked() {
-                                self.shift_day(1);
-                            }
-                            if ui.button("today").clicked() {
-                                self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
-                                self.loaded_at = None;
-                            }
-                            let narrow = ui.ctx().viewport_rect().width() < 700.0;
-                            let fmt = if narrow { "%a %-d %b" } else { "%a %-d %b %Y" };
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(self.day.strftime(fmt).to_string())
-                                        .text_style(egui::TextStyle::Heading)
-                                        .color(theme::palette::TEXT),
-                                )
-                                .truncate(),
-                            );
-                        }
-                        View::Reports => {
-                            if ui.button("\u{25c0}").clicked() {
-                                self.shift_week(-1);
-                            }
-                            if ui.button("\u{25b6}").clicked() {
-                                self.shift_week(1);
-                            }
-                            if ui.button("this week").clicked() {
-                                let today = Zoned::now().with_time_zone(self.tz.clone()).date();
-                                self.week_anchor =
-                                    chronicle_core::timeref::week_start(today).unwrap_or(today);
-                                self.loaded_at = None;
-                            }
-                            let sunday = self.week_anchor.checked_add(6.days()).ok();
-                            let range = match sunday {
-                                Some(sun) => format!(
-                                    "{} \u{2013} {}",
-                                    self.week_anchor.strftime("%-d %b"),
-                                    sun.strftime("%-d %b %Y")
-                                ),
-                                None => self.week_anchor.to_string(),
-                            };
-                            ui.label(
-                                egui::RichText::new(range)
-                                    .text_style(egui::TextStyle::Heading)
-                                    .color(theme::palette::TEXT),
-                            );
-                        }
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let narrow = ui.ctx().viewport_rect().width() < 700.0;
-                        if narrow {
-                            // Widget width: fold the actions into one menu.
-                            ui.menu_button("\u{2026}", |ui| {
-                                if ui.button("settings").clicked() {
-                                    self.toggle_settings();
-                                    ui.close();
-                                }
-                                if ui.button("derive now").clicked() {
-                                    if !crate::send_ctrl(&self.sock_path, "derive") {
-                                        self.error = Some("daemon not reachable".into());
+                        // Widget width: actions fold into one menu.
+                        ui.menu_button("\u{2026}", |ui| {
+                            if matches!(self.view, View::Timeline | View::Home) {
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.filter)
+                                            .desired_width(120.0)
+                                            .hint_text("filter\u{2026}"),
+                                    );
+                                    if !self.filter.is_empty()
+                                        && ui.small_button("\u{d7}").clicked()
+                                    {
+                                        self.filter.clear();
                                     }
-                                    ui.close();
-                                }
-                            });
-                            return;
-                        }
-                        if ui.button("settings").clicked() {
-                            self.toggle_settings();
-                        }
-                        if ui.button("derive now").clicked()
-                            && !crate::send_ctrl(&self.sock_path, "derive")
-                        {
-                            self.error = Some("daemon not reachable".into());
-                        }
-                        if matches!(self.view, View::Timeline | View::Home) {
-                            if !self.filter.is_empty() && ui.small_button("\u{d7}").clicked() {
-                                self.filter.clear();
+                                });
+                                ui.separator();
                             }
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.filter)
-                                    .desired_width(150.0)
-                                    .hint_text("filter\u{2026}"),
-                            );
-                            if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            if ui.button("settings").clicked() {
+                                self.toggle_settings();
+                                ui.close();
+                            }
+                            if ui.button("derive now").clicked() {
+                                if !crate::send_ctrl(&self.sock_path, "derive") {
+                                    self.error = Some("daemon not reachable".into());
+                                }
+                                ui.close();
+                            }
+                        });
+                        if !self.filter.is_empty() {
+                            // Active-filter cue while the menu is closed.
+                            if ui
+                                .small_button(format!("\u{d7} {}", self.filter))
+                                .on_hover_text("clear filter")
+                                .clicked()
+                            {
                                 self.filter.clear();
                             }
                         }
                     });
                 });
+                // Per-view controls on a second row; tabs + nav don't fit
+                // side by side at 400px.
+                if self.view != View::Home {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        match self.view {
+                            // Home is day-independent: no nav controls.
+                            View::Home => {}
+                            View::Chat => {
+                                if ui.button("new chat").clicked() {
+                                    self.chat_new();
+                                }
+                                self.chat_history_menu(ui);
+                                if self.chat_warming() {
+                                    ui.weak("loading model\u{2026}");
+                                }
+                            }
+                            View::Timeline => {
+                                if ui.button("\u{25c0}").clicked() {
+                                    self.shift_day(-1);
+                                }
+                                if ui.button("\u{25b6}").clicked() {
+                                    self.shift_day(1);
+                                }
+                                if ui.button("today").clicked() {
+                                    self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
+                                    self.loaded_at = None;
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(
+                                            self.day.strftime("%a %-d %b %Y").to_string(),
+                                        )
+                                        .text_style(egui::TextStyle::Heading)
+                                        .color(theme::palette::TEXT),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                            View::Reports => {
+                                if ui.button("\u{25c0}").clicked() {
+                                    self.shift_week(-1);
+                                }
+                                if ui.button("\u{25b6}").clicked() {
+                                    self.shift_week(1);
+                                }
+                                if ui.button("this week").clicked() {
+                                    let today = Zoned::now().with_time_zone(self.tz.clone()).date();
+                                    self.week_anchor =
+                                        chronicle_core::timeref::week_start(today).unwrap_or(today);
+                                    self.loaded_at = None;
+                                }
+                                let sunday = self.week_anchor.checked_add(6.days()).ok();
+                                let range = match sunday {
+                                    Some(sun) => format!(
+                                        "{} \u{2013} {}",
+                                        self.week_anchor.strftime("%-d %b"),
+                                        sun.strftime("%-d %b %Y")
+                                    ),
+                                    None => self.week_anchor.to_string(),
+                                };
+                                ui.label(
+                                    egui::RichText::new(range)
+                                        .text_style(egui::TextStyle::Heading)
+                                        .color(theme::palette::TEXT),
+                                );
+                            }
+                        }
+                    });
+                }
             });
 
         match self.view {

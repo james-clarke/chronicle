@@ -56,11 +56,13 @@ impl TimelineApp {
                     ui.add_space(6.0);
                     // One column plan shared by the declare row and every task row,
                     // so the whole section reads as a single aligned table.
-                    let label_w = (ui.available_width() - 230.0).clamp(160.0, 460.0);
+                    // Fixed costs: project + status + menu button + 3 gaps,
+                    // plus a little slack so the grid never overflows 400px.
+                    let label_w = (ui.available_width() - 204.0).clamp(160.0, 460.0);
                     egui::Grid::new("working_on")
                         .num_columns(4)
                         .striped(true)
-                        .spacing([10.0, 6.0])
+                        .spacing([8.0, 6.0])
                         .show(ui, |ui| {
                             ui.add(
                                 egui::TextEdit::singleline(new_label)
@@ -103,7 +105,7 @@ impl TimelineApp {
                             egui::Grid::new("recently_closed")
                                 .num_columns(4)
                                 .striped(true)
-                                .spacing([10.0, 6.0])
+                                .spacing([8.0, 6.0])
                                 .show(ui, |ui| {
                                     for &c in &closed_vis {
                                         let t = &closed_tasks[c];
@@ -145,7 +147,7 @@ impl TimelineApp {
 
 /// Fixed column widths shared by both task grids (and the declare row), so
 /// badges line up regardless of label length.
-const PROJECT_COL: f32 = 96.0;
+const PROJECT_COL: f32 = 84.0;
 const STATUS_COL: f32 = 64.0;
 const ROW_H: f32 = 20.0;
 
