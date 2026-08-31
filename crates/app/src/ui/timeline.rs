@@ -82,6 +82,7 @@ impl TimelineApp {
                         .frame(frame)
                         .resizable(true)
                         .default_size(320.0)
+                        .size_range(280.0..=420.0)
                         .show(ui, |ui| {
                             close_detail =
                                 detail_ui(ui, group, color, edit, &candidates, &mut pending);
@@ -337,13 +338,43 @@ fn task_card(
 ) {
     let selected = *selected_task == Some(group.task_id);
     let stroke_color = if selected { color } else { theme::palette::SURFACE_2 };
-    let resp = egui::Frame::new()
+    // Sense on the container (registered before children) so the card is
+    // clickable without stealing clicks from its own buttons/menus.
+    let resp = ui
+        .scope_builder(
+            egui::UiBuilder::new()
+                .id_salt(("task_card", group.task_id))
+                .sense(egui::Sense::click()),
+            |ui| {
+                card_frame(ui, group, color, stroke_color, edit, candidates, pending);
+            },
+        )
+        .response;
+    if resp.clicked() {
+        *selected_task = if selected { None } else { Some(group.task_id) };
+    }
+    ui.add_space(2.0);
+}
+
+fn card_frame(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    color: egui::Color32,
+    stroke_color: egui::Color32,
+    edit: &mut Option<EditState>,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
+    egui::Frame::new()
         .fill(theme::palette::SURFACE)
         .stroke(egui::Stroke::new(1.0, stroke_color))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::symmetric(12, 11))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Labels must not grab clicks for text selection, or the card's
+            // container sense never sees them.
+            ui.style_mut().interaction.selectable_labels = false;
             if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
                 ui.horizontal(|ui| {
                     let e = edit.as_mut().expect("checked above");
@@ -432,18 +463,7 @@ fn task_card(
                     );
                 }
             });
-        })
-        .response;
-    // Registered after the card's own widgets, so buttons/menus keep priority.
-    let resp = ui.interact(
-        resp.rect,
-        ui.id().with(("task_card", group.task_id)),
-        egui::Sense::click(),
-    );
-    if resp.clicked() {
-        *selected_task = if selected { None } else { Some(group.task_id) };
-    }
-    ui.add_space(2.0);
+        });
 }
 
 /// Detail pane: identity, summary, session chips (with whole-session move),
