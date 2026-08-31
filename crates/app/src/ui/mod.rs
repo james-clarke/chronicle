@@ -2,6 +2,7 @@
 //! "toggle\n" to our stdin to raise the window; closing it exits the process.
 
 mod chat;
+mod home;
 mod onboarding;
 mod reports;
 mod settings;
@@ -164,6 +165,7 @@ enum Action {
 
 #[derive(PartialEq, Clone, Copy)]
 enum View {
+    Home,
     Timeline,
     Reports,
 }
@@ -232,7 +234,7 @@ impl TimelineApp {
             conn: None,
             tz,
             day,
-            view: View::Timeline,
+            view: View::Home,
             week_anchor: chronicle_core::timeref::week_start(day).unwrap_or(day),
             report: None,
             spans: Vec::new(),
@@ -306,6 +308,20 @@ impl TimelineApp {
             self.week_anchor = anchor;
             self.loaded_at = None;
         }
+    }
+
+    /// Reassignment targets: every task in sight (open + today's).
+    fn merge_candidates(&self) -> Vec<(i64, String)> {
+        let mut candidates: Vec<(i64, String)> = Vec::new();
+        for t in &self.open_tasks {
+            candidates.push((t.task_id, t.label.clone()));
+        }
+        for g in &self.groups {
+            if !candidates.iter().any(|(id, _)| *id == g.task_id) {
+                candidates.push((g.task_id, g.label.clone()));
+            }
+        }
+        candidates
     }
 
     fn reload_if_stale(&mut self) {
@@ -592,9 +608,11 @@ impl eframe::App for TimelineApp {
                         .inner_margin(egui::Margin::same(3))
                         .show(ui, |ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
-                            for (view, label) in
-                                [(View::Timeline, "timeline"), (View::Reports, "reports")]
-                            {
+                            for (view, label) in [
+                                (View::Home, "home"),
+                                (View::Timeline, "timeline"),
+                                (View::Reports, "reports"),
+                            ] {
                                 if ui.selectable_label(self.view == view, label).clicked()
                                     && self.view != view
                                 {
@@ -605,6 +623,8 @@ impl eframe::App for TimelineApp {
                         });
                     ui.add_space(6.0);
                     match self.view {
+                        // Home is day-independent: no nav controls.
+                        View::Home => {}
                         View::Timeline => {
                             if ui.button("\u{25c0}").clicked() {
                                 self.shift_day(-1);
@@ -689,7 +709,7 @@ impl eframe::App for TimelineApp {
                         {
                             self.error = Some("daemon not reachable".into());
                         }
-                        if self.view == View::Timeline {
+                        if matches!(self.view, View::Timeline | View::Home) {
                             if !self.filter.is_empty() && ui.small_button("\u{d7}").clicked() {
                                 self.filter.clear();
                             }
@@ -709,12 +729,14 @@ impl eframe::App for TimelineApp {
         self.chat_panel_ui(ui);
         self.settings_window(ui.ctx());
 
-        if self.view == View::Reports {
-            self.reports_ui(ui);
-            return;
+        match self.view {
+            View::Home => self.home_ui(ui),
+            View::Timeline => self.timeline_ui(ui),
+            View::Reports => {
+                self.reports_ui(ui);
+                return;
+            }
         }
-
-        self.timeline_ui(ui);
 
         // Only scheduled wake-up; no unconditional repaint.
         ui.ctx().request_repaint_after(WAKE_EVERY);

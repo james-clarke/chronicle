@@ -157,6 +157,27 @@ pub(super) fn confidence_color(band: Band) -> Option<Color32> {
     }
 }
 
+/// Section header: heading text, optional weak count, hairline underneath.
+pub(super) fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .text_style(egui::TextStyle::Heading)
+                    .color(palette::TEXT),
+            );
+            if let Some(n) = count {
+                ui.weak(format!("\u{b7} {n}"));
+            }
+        })
+        .response;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        resp.rect.bottom() + 2.0,
+        egui::Stroke::new(1.0, palette::SURFACE_2),
+    );
+}
+
 /// Small tinted pill: dimmed fill of `color`, text in `color`.
 pub(super) fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
