@@ -82,6 +82,11 @@ struct TaskGroup {
     project: Option<String>,
     declared: bool,
     intervals: Vec<IntervalRow>,
+    /// Adjacent/near-adjacent intervals merged for display (gap ≤ [`SESSION_GAP_MS`]).
+    sessions: Vec<SessionRow>,
+    /// Per-app focus time inside this task's intervals, largest first.
+    evidence: Vec<EvidenceApp>,
+    /// Sum of interval durations clamped to the shown day.
     total_ms: i64,
 }
 
@@ -90,6 +95,27 @@ struct IntervalRow {
     start: Zoned,
     end: Zoned,
     confidence: f64,
+}
+
+/// Display gap under which adjacent intervals merge into one session.
+const SESSION_GAP_MS: i64 = 5 * 60 * 1000;
+
+/// A run of merged intervals shown as one row/chip.
+struct SessionRow {
+    start: Zoned,
+    end: Zoned,
+    /// Member intervals, for whole-session reassign.
+    interval_ids: Vec<i64>,
+    /// Lowest member-interval confidence.
+    confidence: f64,
+}
+
+/// One app's overlap-joined focus time within a task's intervals.
+struct EvidenceApp {
+    app: String,
+    ms: i64,
+    /// Title with the most overlap time under this app.
+    top_title: String,
 }
 
 /// An open task in the "working on" list.
@@ -309,9 +335,10 @@ impl TimelineApp {
         let rows = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
         let mut groups: Vec<TaskGroup> = Vec::new();
         for t in rows {
+            let start_ms = t.start_ts.as_millisecond();
+            let end_ms = t.end_ts.as_millisecond();
             let start = t.start_ts.to_zoned(self.tz.clone());
             let end = t.end_ts.to_zoned(self.tz.clone());
-            let dur = t.end_ts.as_millisecond() - t.start_ts.as_millisecond();
             let group = match groups.iter_mut().find(|g| g.task_id == t.id) {
                 Some(g) => g,
                 None => {
@@ -321,18 +348,58 @@ impl TimelineApp {
                         project: t.project.clone(),
                         declared: t.declared,
                         intervals: Vec::new(),
+                        sessions: Vec::new(),
+                        evidence: Vec::new(),
                         total_ms: 0,
                     });
                     groups.last_mut().expect("just pushed")
                 }
             };
-            group.total_ms += dur;
+            group.total_ms += end_ms.min(hi) - start_ms.max(lo);
+            match group.sessions.last_mut() {
+                Some(s)
+                    if start_ms - s.end.timestamp().as_millisecond() <= SESSION_GAP_MS =>
+                {
+                    if end.timestamp() > s.end.timestamp() {
+                        s.end = end.clone();
+                    }
+                    s.interval_ids.push(t.interval_id);
+                    s.confidence = s.confidence.min(t.confidence);
+                }
+                _ => group.sessions.push(SessionRow {
+                    start: start.clone(),
+                    end: end.clone(),
+                    interval_ids: vec![t.interval_id],
+                    confidence: t.confidence,
+                }),
+            }
             group.intervals.push(IntervalRow {
                 interval_id: t.interval_id,
                 start,
                 end,
                 confidence: t.confidence,
             });
+        }
+        // Rows arrive per task in overlap-descending order, so the first title
+        // seen for an app is that app's top title.
+        let mut evidence: std::collections::HashMap<i64, Vec<EvidenceApp>> =
+            std::collections::HashMap::new();
+        for row in chronicle_core::storage::evidence_in_range(conn, lo, hi)? {
+            let apps = evidence.entry(row.task_id).or_default();
+            match apps.iter_mut().find(|a| a.app == row.app) {
+                Some(a) => a.ms += row.ms,
+                None => apps.push(EvidenceApp {
+                    app: row.app,
+                    ms: row.ms,
+                    top_title: row.title,
+                }),
+            }
+        }
+        for group in &mut groups {
+            if let Some(mut apps) = evidence.remove(&group.task_id) {
+                apps.sort_by_key(|a| std::cmp::Reverse(a.ms));
+                group.evidence = apps;
+            }
         }
         Ok(groups)
     }

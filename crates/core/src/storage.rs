@@ -768,6 +768,44 @@ pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, 
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// One (task, app, title) focus-overlap aggregate from [`evidence_in_range`].
+pub struct EvidenceRow {
+    pub task_id: i64,
+    pub app: String,
+    pub title: String,
+    pub ms: i64,
+}
+
+/// Focus spans overlap-joined to task intervals in `[lo, hi)`, grouped by
+/// (task, app, title) and summed by overlap time clamped to the range.
+/// Ordered per task by overlap descending.
+pub fn evidence_in_range(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<EvidenceRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT i.task_id, s.app, s.title,
+                SUM(MIN(s.end_ts, i.end_ts, ?2) - MAX(s.start_ts, i.start_ts, ?1)) AS ms
+         FROM spans s JOIN intervals i
+           ON s.end_ts > i.start_ts AND s.start_ts < i.end_ts
+         WHERE s.kind = 'focus'
+           AND s.end_ts > ?1 AND s.start_ts < ?2
+           AND i.end_ts > ?1 AND i.start_ts < ?2
+         GROUP BY i.task_id, s.app, s.title
+         ORDER BY i.task_id, ms DESC",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok(EvidenceRow {
+            task_id: r.get(0)?,
+            app: r.get(1)?,
+            title: r.get(2)?,
+            ms: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn spans_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SpanDraft>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT start_ts, end_ts, app, title, kind, url FROM spans
