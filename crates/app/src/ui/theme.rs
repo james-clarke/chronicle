@@ -14,6 +14,13 @@ pub(super) mod palette {
     pub const TEXT: Color32 = Color32::from_rgb(0xe4, 0xe5, 0xea);
     pub const TEXT_DIM: Color32 = Color32::from_rgb(0xb8, 0xba, 0xc4);
     pub const ACCENT: Color32 = Color32::from_rgb(0x7a, 0x9e, 0xf5);
+    /// Categorical task-identity colors (CVD-checked on BG); cycles by
+    /// group index. Status colors below stay out of this set.
+    pub const SERIES: [Color32; 3] = [
+        Color32::from_rgb(0x5e, 0x87, 0xea),
+        Color32::from_rgb(0x27, 0xa9, 0x7f),
+        Color32::from_rgb(0xbd, 0x88, 0x27),
+    ];
     pub const AMBER: Color32 = Color32::from_rgb(0xd9, 0xa4, 0x41);
     pub const ORANGE: Color32 = Color32::from_rgb(0xe0, 0x78, 0x4f);
     pub const RED: Color32 = Color32::from_rgb(0xe0, 0x6c, 0x75);
@@ -115,6 +122,11 @@ fn style(style: &mut egui::Style) {
     v.widgets.hovered.bg_fill = Color32::from_rgb(0x2c, 0x2e, 0x38);
     v.widgets.active.fg_stroke.color = palette::TEXT;
     v.widgets.open.weak_bg_fill = palette::SURFACE_2;
+}
+
+/// Identity color for the day's `idx`-th task group.
+pub(super) fn series_color(idx: usize) -> Color32 {
+    palette::SERIES[idx % palette::SERIES.len()]
 }
 
 /// Confidence bucket for an interval's task assignment.

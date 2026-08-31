@@ -1,30 +1,13 @@
-//! Timeline view: virtual-scrolled day breakdown (working-on list, project
-//! totals, task groups with intervals, raw spans).
+//! Timeline view: widget-style "Today" face — focus-total header, activity
+//! band, task cards — with the working-on list and raw spans below.
 
 use eframe::egui;
+use jiff::{ToSpan, Zoned};
 
-use super::{
-    Action, EditState, IntervalRow, OpenRow, SpanRow, TaskGroup, TimelineApp, fmt_dur, theme,
-};
+use super::{Action, EditState, OpenRow, SpanRow, TaskGroup, TimelineApp, fmt_dur, theme};
 
 impl TimelineApp {
     pub(super) fn timeline_ui(&mut self, ui: &mut egui::Ui) {
-        // Flat row list for the virtual scroller: working-on section, then
-        // the day's tasks grouped with their intervals, then raw spans.
-        enum RowKind {
-            WorkingHeader,
-            DeclareForm,
-            Open(usize),
-            ClosedToggle,
-            Closed(usize),
-            ProjectsHeader,
-            Project(usize),
-            TasksHeader,
-            TaskHeader(usize),
-            Interval(usize, usize),
-            SpansHeader,
-            Span(usize),
-        }
         // Filtered index sets; empty query keeps everything.
         let q = self.filter.trim().to_lowercase();
         let open_vis: Vec<usize> = (0..self.open_tasks.len())
@@ -52,42 +35,6 @@ impl TimelineApp {
             })
             .collect();
 
-        let mut rows: Vec<RowKind> = vec![RowKind::WorkingHeader, RowKind::DeclareForm];
-        rows.extend(open_vis.iter().copied().map(RowKind::Open));
-        if !closed_vis.is_empty() {
-            rows.push(RowKind::ClosedToggle);
-            if self.show_closed {
-                rows.extend(closed_vis.iter().copied().map(RowKind::Closed));
-            }
-        }
-        // Per-project totals for the shown day, biggest first ("(none)" =
-        // untagged); sums the same group totals the Tasks section shows.
-        let mut projects: Vec<(String, i64)> = Vec::new();
-        for &g in &group_vis {
-            let g = &self.groups[g];
-            let name = g.project.clone().unwrap_or_else(|| "(none)".into());
-            match projects.iter_mut().find(|(n, _)| *n == name) {
-                Some((_, ms)) => *ms += g.total_ms,
-                None => projects.push((name, g.total_ms)),
-            }
-        }
-        projects.sort_by_key(|&(_, ms)| std::cmp::Reverse(ms));
-        if !projects.is_empty() {
-            rows.push(RowKind::ProjectsHeader);
-            rows.extend((0..projects.len()).map(RowKind::Project));
-        }
-        rows.push(RowKind::TasksHeader);
-        for &g in &group_vis {
-            rows.push(RowKind::TaskHeader(g));
-            rows.extend((0..self.groups[g].intervals.len()).map(|i| RowKind::Interval(g, i)));
-        }
-        rows.push(RowKind::SpansHeader);
-        if self.show_spans {
-            rows.extend(span_vis.iter().copied().map(RowKind::Span));
-        }
-        let tasks_shown = group_vis.len();
-        let spans_shown = span_vis.len();
-
         // Reassignment targets: every task in sight (open + today's).
         let mut candidates: Vec<(i64, String)> = Vec::new();
         for t in &self.open_tasks {
@@ -98,6 +45,9 @@ impl TimelineApp {
                 candidates.push((g.task_id, g.label.clone()));
             }
         }
+
+        let day_range = self.day_range_ms().ok();
+        let day_start = self.day.to_zoned(self.tz.clone()).ok();
 
         let mut pending: Option<Action> = None;
         egui::CentralPanel::default().show(ui, |ui| {
@@ -110,7 +60,6 @@ impl TimelineApp {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 return;
             }
-            let row_height = ui.text_style_height(&egui::TextStyle::Body) + 10.0;
             let groups = &self.groups;
             let open_tasks = &self.open_tasks;
             let closed_tasks = &self.closed_tasks;
@@ -120,98 +69,73 @@ impl TimelineApp {
             let edit = &mut self.edit;
             let new_label = &mut self.new_label;
             let new_project = &mut self.new_project;
-            egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-                ui,
-                row_height,
-                rows.len(),
-                |ui, range| {
-                    for i in range {
-                        match rows[i] {
-                            RowKind::WorkingHeader => {
-                                section_header(ui, "Working on", None);
-                            }
-                            RowKind::DeclareForm => {
-                                ui.horizontal(|ui| {
-                                    let label_w =
-                                        (ui.available_width() - 220.0).clamp(240.0, 420.0);
-                                    ui.add(
-                                        egui::TextEdit::singleline(new_label)
-                                            .desired_width(label_w)
-                                            .hint_text("declare a task\u{2026}"),
-                                    );
-                                    ui.add(
-                                        egui::TextEdit::singleline(new_project)
-                                            .desired_width(110.0)
-                                            .hint_text("project"),
-                                    );
-                                    if ui.button("add").clicked() {
-                                        pending = Some(Action::Declare);
-                                    }
-                                });
-                            }
-                            RowKind::Open(o) => {
-                                open_row(ui, &open_tasks[o], &candidates, &mut pending)
-                            }
-                            RowKind::ClosedToggle => {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(12.0);
-                                    let arrow = if *show_closed { "\u{25be}" } else { "\u{25b8}" };
-                                    if ui
-                                        .small_button(format!("{arrow} recently closed"))
-                                        .clicked()
-                                    {
-                                        *show_closed = !*show_closed;
-                                    }
-                                });
-                            }
-                            RowKind::Closed(c) => closed_row(ui, &closed_tasks[c], &mut pending),
-                            RowKind::ProjectsHeader => {
-                                section_header(ui, "Projects", Some(projects.len()));
-                            }
-                            RowKind::Project(p) => {
-                                let (name, ms) = &projects[p];
-                                ui.horizontal(|ui| {
-                                    ui.add_space(18.0);
-                                    theme::badge(ui, name, theme::palette::ACCENT);
-                                    ui.weak(fmt_dur(*ms));
-                                });
-                            }
-                            RowKind::TasksHeader => {
-                                if groups.is_empty() {
-                                    ui.horizontal(|ui| {
-                                        section_header(ui, "Tasks", None);
-                                        ui.weak("none derived yet");
-                                    });
-                                } else {
-                                    section_header(ui, "Tasks", Some(tasks_shown));
-                                }
-                            }
-                            RowKind::TaskHeader(g) => {
-                                task_header_row(ui, &groups[g], edit, &candidates, &mut pending)
-                            }
-                            RowKind::Interval(g, iv) => interval_row(
-                                ui,
-                                &groups[g],
-                                &groups[g].intervals[iv],
-                                &candidates,
-                                &mut pending,
-                            ),
-                            RowKind::SpansHeader => {
-                                ui.horizontal(|ui| {
-                                    let arrow = if *show_spans { "\u{25be}" } else { "\u{25b8}" };
-                                    if ui
-                                        .small_button(format!("{arrow} Spans \u{b7} {spans_shown}"))
-                                        .clicked()
-                                    {
-                                        *show_spans = !*show_spans;
-                                    }
-                                });
-                            }
-                            RowKind::Span(s) => span_row(ui, &spans[s]),
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                today_header(ui, groups, spans);
+                if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
+                    activity_band(ui, groups, &group_vis, lo, hi, day_start);
+                }
+                ui.add_space(4.0);
+                if groups.is_empty() {
+                    ui.weak("no tasks derived yet");
+                } else if group_vis.is_empty() {
+                    ui.weak("no tasks match the filter");
+                }
+                for &g in &group_vis {
+                    task_card(ui, &groups[g], theme::series_color(g), edit, &candidates, &mut pending);
+                }
+                ui.add_space(10.0);
+
+                section_header(ui, "Working on", None);
+                ui.horizontal(|ui| {
+                    let label_w = (ui.available_width() - 220.0).clamp(240.0, 420.0);
+                    ui.add(
+                        egui::TextEdit::singleline(new_label)
+                            .desired_width(label_w)
+                            .hint_text("declare a task\u{2026}"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(new_project)
+                            .desired_width(110.0)
+                            .hint_text("project"),
+                    );
+                    if ui.button("add").clicked() {
+                        pending = Some(Action::Declare);
+                    }
+                });
+                for &o in &open_vis {
+                    open_row(ui, &open_tasks[o], &candidates, &mut pending);
+                }
+                if !closed_vis.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        let arrow = if *show_closed { "\u{25be}" } else { "\u{25b8}" };
+                        if ui.small_button(format!("{arrow} recently closed")).clicked() {
+                            *show_closed = !*show_closed;
+                        }
+                    });
+                    if *show_closed {
+                        for &c in &closed_vis {
+                            closed_row(ui, &closed_tasks[c], &mut pending);
                         }
                     }
-                },
-            );
+                }
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let arrow = if *show_spans { "\u{25be}" } else { "\u{25b8}" };
+                    if ui
+                        .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
+                        .clicked()
+                    {
+                        *show_spans = !*show_spans;
+                    }
+                });
+                if *show_spans {
+                    for &s in &span_vis {
+                        span_row(ui, &spans[s]);
+                    }
+                }
+            });
         });
         if let Some(action) = pending {
             self.apply_action(action);
@@ -225,6 +149,280 @@ fn matches_filter(q: &str, label: &str, project: Option<&str>) -> bool {
     q.is_empty()
         || label.to_lowercase().contains(q)
         || project.is_some_and(|p| p.to_lowercase().contains(q))
+}
+
+/// Focus total left; away/switching totals right.
+fn today_header(ui: &mut egui::Ui, groups: &[TaskGroup], spans: &[SpanRow]) {
+    let total: i64 = groups.iter().map(|g| g.total_ms).sum();
+    let mut away = 0i64;
+    let mut switching = 0i64;
+    for s in spans {
+        let dur = s.end.timestamp().as_millisecond() - s.start.timestamp().as_millisecond();
+        match s.kind.as_str() {
+            "afk" => away += dur,
+            "context-switching" => switching += dur,
+            _ => {}
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(fmt_dur(total))
+                .size(22.0)
+                .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                .color(theme::palette::TEXT),
+        );
+        ui.label(
+            egui::RichText::new("focused")
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if away > 0 || switching > 0 {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "away {} \u{b7} switching {}",
+                        fmt_dur(away),
+                        fmt_dur(switching)
+                    ))
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+                );
+            }
+        });
+    });
+}
+
+/// Horizontal day strip: one colored segment per display session (task
+/// identity color), background showing through = away. Hour labels below.
+fn activity_band(
+    ui: &mut egui::Ui,
+    groups: &[TaskGroup],
+    vis: &[usize],
+    lo: i64,
+    hi: i64,
+    day_start: &Zoned,
+) {
+    const HOUR_MS: i64 = 3_600_000;
+    let mut segments: Vec<(i64, i64, egui::Color32)> = Vec::new();
+    let (mut act_lo, mut act_hi) = (i64::MAX, i64::MIN);
+    for &g in vis {
+        let color = theme::series_color(g);
+        for s in &groups[g].sessions {
+            let s_lo = s.start.timestamp().as_millisecond().max(lo);
+            let s_hi = s.end.timestamp().as_millisecond().min(hi);
+            if s_hi <= s_lo {
+                continue;
+            }
+            act_lo = act_lo.min(s_lo);
+            act_hi = act_hi.max(s_hi);
+            segments.push((s_lo, s_hi, color));
+        }
+    }
+    if segments.is_empty() {
+        return;
+    }
+    // Pad the shown range out to whole local hours.
+    let band_lo = lo + (act_lo - lo) / HOUR_MS * HOUR_MS;
+    let band_hi = (lo + (act_hi - lo + HOUR_MS - 1) / HOUR_MS * HOUR_MS).min(hi);
+    let span = (band_hi - band_lo).max(1) as f32;
+
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(7), theme::palette::SURFACE);
+    for (s_lo, s_hi, color) in &segments {
+        let x0 = rect.left() + (s_lo - band_lo) as f32 / span * rect.width();
+        let x1 = rect.left() + (s_hi - band_lo) as f32 / span * rect.width();
+        let seg = egui::Rect::from_min_max(
+            egui::pos2(x0, rect.top() + 2.0),
+            egui::pos2(x1.max(x0 + 2.0), rect.bottom() - 2.0),
+        );
+        painter.rect_filled(seg, egui::CornerRadius::same(3), *color);
+    }
+
+    // Hour tick labels, thinned to at most ~6.
+    let hours = ((band_hi - band_lo) / HOUR_MS).max(1);
+    let step = (hours + 5) / 6;
+    let (label_rect, _) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let first_hour = (band_lo - lo) / HOUR_MS;
+    for k in (0..=hours).step_by(step as usize) {
+        let ms = band_lo + k * HOUR_MS;
+        let Ok(z) = day_start.checked_add((first_hour + k).hours()) else {
+            continue;
+        };
+        let x = label_rect.left() + (ms - band_lo) as f32 / span * label_rect.width();
+        painter.text(
+            egui::pos2(
+                x.clamp(label_rect.left() + 14.0, label_rect.right() - 14.0),
+                label_rect.top(),
+            ),
+            egui::Align2::CENTER_TOP,
+            z.strftime("%H:%M").to_string(),
+            egui::FontId::new(10.0, egui::FontFamily::Proportional),
+            theme::palette::TEXT_DIM,
+        );
+    }
+}
+
+/// One task card: identity dot + label + duration, then project pill, time
+/// range, and top evidence line. Actions live in the `⋯` menu.
+fn task_card(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    color: egui::Color32,
+    edit: &mut Option<EditState>,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
+    egui::Frame::new()
+        .fill(theme::palette::SURFACE)
+        .stroke(egui::Stroke::new(1.0, theme::palette::SURFACE_2))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::symmetric(12, 11))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
+                ui.horizontal(|ui| {
+                    let e = edit.as_mut().expect("checked above");
+                    ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut e.project)
+                            .desired_width(110.0)
+                            .hint_text("project"),
+                    );
+                    if ui.button("save").clicked()
+                        && let Some(e) = edit.take()
+                    {
+                        *pending = Some(Action::Rename(e));
+                    }
+                    if ui.button("cancel").clicked() {
+                        *edit = None;
+                    }
+                });
+                return;
+            }
+            ui.horizontal(|ui| {
+                let (dot, _) =
+                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, color);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&group.label)
+                            .size(13.0)
+                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                            .color(theme::palette::TEXT),
+                    )
+                    .truncate(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    card_menu(ui, group, edit, candidates, pending);
+                    confidence_dot(ui, group);
+                    ui.label(
+                        egui::RichText::new(fmt_dur(group.total_ms))
+                            .size(12.0)
+                            .color(theme::palette::TEXT_DIM),
+                    );
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                if let Some(project) = &group.project {
+                    theme::badge(ui, project, color);
+                }
+                if group.declared {
+                    theme::badge(ui, "declared", theme::palette::TEXT_DIM);
+                }
+                if let (Some(first), Some(last)) =
+                    (group.sessions.first(), group.sessions.last())
+                {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}\u{2013}{}",
+                            first.start.strftime("%H:%M"),
+                            last.end.strftime("%H:%M")
+                        ))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                    );
+                }
+                if let Some(e) = group.evidence.first() {
+                    let text = if e.top_title.is_empty() {
+                        e.app.clone()
+                    } else {
+                        format!("{} \u{b7} {}", e.app, e.top_title)
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .text_style(egui::TextStyle::Small)
+                                .color(theme::palette::TEXT_DIM),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+        });
+    ui.add_space(2.0);
+}
+
+/// Duration-weighted confidence; a small tinted dot appears only when the
+/// assignment is not high-confidence (hover for the %).
+fn confidence_dot(ui: &mut egui::Ui, group: &TaskGroup) {
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for iv in &group.intervals {
+        let dur =
+            (iv.end.timestamp().as_millisecond() - iv.start.timestamp().as_millisecond()) as f64;
+        num += iv.confidence * dur;
+        den += dur;
+    }
+    if den <= 0.0 {
+        return;
+    }
+    let conf = num / den;
+    if let Some(color) = theme::confidence_color(theme::confidence_band(conf)) {
+        let (dot, resp) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+        ui.painter().circle_filled(dot.center(), 3.0, color);
+        resp.on_hover_text(format!("confidence {:.0}%", conf * 100.0));
+    }
+}
+
+/// `⋯` actions: rename, merge into, close.
+fn card_menu(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    edit: &mut Option<EditState>,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
+    ui.menu_button("\u{2026}", |ui| {
+        if ui.button("rename").clicked() {
+            *edit = Some(EditState {
+                task_id: group.task_id,
+                label: group.label.clone(),
+                project: group.project.clone().unwrap_or_default(),
+            });
+            ui.close();
+        }
+        ui.menu_button("merge into", |ui| {
+            for (task_id, label) in candidates {
+                if *task_id == group.task_id {
+                    continue;
+                }
+                if ui.button(label).clicked() {
+                    *pending = Some(Action::Merge {
+                        from_task: group.task_id,
+                        to_task: *task_id,
+                    });
+                    ui.close();
+                }
+            }
+        });
+        if ui.button("close task").clicked() {
+            *pending = Some(Action::Close(group.task_id));
+            ui.close();
+        }
+    });
 }
 
 /// Section header: heading text, optional weak count, hairline underneath.
@@ -312,106 +510,6 @@ fn merge_menu(
                 ui.close();
             }
         }
-    });
-}
-
-/// Group header: identity, total time, rename edit (writes a correction).
-fn task_header_row(
-    ui: &mut egui::Ui,
-    group: &TaskGroup,
-    edit: &mut Option<EditState>,
-    candidates: &[(i64, String)],
-    pending: &mut Option<Action>,
-) {
-    // Card-look: full-width fill painted under the row content (pre-registered
-    // so it draws behind).
-    let bg = ui.painter().add(egui::Shape::Noop);
-    let resp = ui
-        .horizontal(|ui| {
-            if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
-                let e = edit.as_mut().expect("checked above");
-                ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(220.0));
-                ui.add(
-                    egui::TextEdit::singleline(&mut e.project)
-                        .desired_width(110.0)
-                        .hint_text("project"),
-                );
-                if ui.button("save").clicked()
-                    && let Some(e) = edit.take()
-                {
-                    *pending = Some(Action::Rename(e));
-                }
-                if ui.button("cancel").clicked() {
-                    *edit = None;
-                }
-            } else {
-                ui.strong(&group.label);
-                project_badge(ui, &group.project);
-                declared_badge(ui, group.declared);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    merge_menu(ui, group.task_id, candidates, pending);
-                    if ui.small_button("edit").clicked() {
-                        *edit = Some(EditState {
-                            task_id: group.task_id,
-                            label: group.label.clone(),
-                            project: group.project.clone().unwrap_or_default(),
-                        });
-                    }
-                    ui.weak(fmt_dur(group.total_ms));
-                });
-            }
-        })
-        .response;
-    let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), resp.rect.y_range())
-        .expand2(egui::vec2(0.0, 2.0));
-    ui.painter().set(
-        bg,
-        egui::Shape::rect_filled(rect, egui::CornerRadius::same(4), theme::palette::SURFACE),
-    );
-}
-
-/// One interval under its task header; "move" reassigns it to another task
-/// (a 'reassign' correction).
-fn interval_row(
-    ui: &mut egui::Ui,
-    group: &TaskGroup,
-    interval: &IntervalRow,
-    candidates: &[(i64, String)],
-    pending: &mut Option<Action>,
-) {
-    let time = format!(
-        "{}\u{2013}{}",
-        interval.start.strftime("%H:%M:%S"),
-        interval.end.strftime("%H:%M:%S")
-    );
-    let dur = fmt_dur(
-        interval.end.timestamp().as_millisecond() - interval.start.timestamp().as_millisecond(),
-    );
-    ui.horizontal(|ui| {
-        ui.add_space(18.0);
-        ui.monospace(time);
-        ui.weak(format!("{dur:>7}"));
-        let pct = format!("{:.0}%", interval.confidence * 100.0);
-        match theme::confidence_color(theme::confidence_band(interval.confidence)) {
-            Some(color) => theme::badge(ui, &pct, color),
-            None => {
-                ui.weak(pct);
-            }
-        }
-        ui.menu_button("move", |ui| {
-            for (task_id, label) in candidates {
-                if *task_id == group.task_id {
-                    continue;
-                }
-                if ui.button(label).clicked() {
-                    *pending = Some(Action::Reassign {
-                        interval_id: interval.interval_id,
-                        to_task: *task_id,
-                    });
-                    ui.close();
-                }
-            }
-        });
     });
 }
 
