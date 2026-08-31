@@ -31,16 +31,20 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     let db_path = data_dir.join("chronicle.db");
     let config_path = data_dir.join("config.toml");
     // Compact widget by default; the last window size (winit-logical units,
-    // see remember_size) is remembered in `meta`.
-    let (w, h) = chronicle_core::storage::open(&db_path)
-        .ok()
-        .and_then(|c| {
-            chronicle_core::storage::get_meta(&c, "ui_window_size")
-                .ok()
-                .flatten()
-        })
+    // see remember_size) and zoom factor are remembered in `meta`.
+    let boot_conn = chronicle_core::storage::open(&db_path).ok();
+    let meta = |key: &str| {
+        boot_conn
+            .as_ref()
+            .and_then(|c| chronicle_core::storage::get_meta(c, key).ok().flatten())
+    };
+    let (w, h) = meta("ui_window_size")
         .and_then(|s| parse_size(&s))
         .unwrap_or((360.0, 560.0));
+    let zoom = meta("ui_zoom_factor")
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|z| (0.5..=2.0).contains(z));
+    drop(boot_conn);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Chronicle")
@@ -55,6 +59,9 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx);
+            if let Some(z) = zoom {
+                cc.egui_ctx.set_zoom_factor(z);
+            }
             spawn_stdin_listener(cc.egui_ctx.clone());
             Ok(Box::new(TimelineApp::new(
                 data_dir,
@@ -197,6 +204,8 @@ struct TimelineApp {
     show_closed: bool,
     /// Raw spans section expander state (collapsed by default; debug-grade).
     show_spans: bool,
+    /// Meta flag `ui_show_spans_debug`: raw spans list visible on Home.
+    spans_debug: bool,
     /// Case-insensitive substring filter over the day's rows.
     filter: String,
     new_label: String,
@@ -251,6 +260,7 @@ impl TimelineApp {
             closed_tasks: Vec::new(),
             show_closed: false,
             show_spans: false,
+            spans_debug: false,
             filter: String::new(),
             new_label: String::new(),
             new_project: String::new(),
@@ -363,6 +373,10 @@ impl TimelineApp {
             self.warning = chronicle_core::storage::get_meta(conn, "server_error")
                 .ok()
                 .flatten();
+            self.spans_debug = chronicle_core::storage::get_meta(conn, "ui_show_spans_debug")
+                .ok()
+                .flatten()
+                .is_some();
         }
         let model_path = chronicle_core::config::Config::load(&self.config_path)
             .ok()

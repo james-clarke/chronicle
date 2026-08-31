@@ -118,6 +118,9 @@ impl TimelineApp {
         let model_dl = &self.model_dl;
         let mut start_dl = false;
         let mut close = false;
+        let mut zoom_pick: Option<f32> = None;
+        let mut spans_toggle: Option<bool> = None;
+        let spans_debug_now = self.spans_debug;
         let Some(panel) = &mut self.settings else {
             return;
         };
@@ -248,6 +251,27 @@ impl TimelineApp {
                             ui.label("mcp config path (empty = mcp.toml in data dir)");
                             ui.text_edit_singleline(&mut panel.mcp_config);
 
+                            // UI-only prefs: applied immediately, stored in
+                            // db meta (not config.toml), no daemon restart.
+                            section(ui, "Appearance", false);
+                            ui.horizontal(|ui| {
+                                ui.label("ui scale");
+                                for (label, z) in
+                                    [("compact", 0.9f32), ("default", 1.0), ("comfortable", 1.15)]
+                                {
+                                    let active = (ui.ctx().zoom_factor() - z).abs() < 0.01;
+                                    if ui.selectable_label(active, label).clicked() && !active {
+                                        ui.ctx().set_zoom_factor(z);
+                                        zoom_pick = Some(z);
+                                    }
+                                }
+                            });
+                            ui.weak("Ctrl +/\u{2212}/0 also works anywhere");
+                            let mut dbg = spans_debug_now;
+                            if ui.checkbox(&mut dbg, "show raw spans on home").changed() {
+                                spans_toggle = Some(dbg);
+                            }
+
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 let save = egui::Button::new(
@@ -284,6 +308,15 @@ impl TimelineApp {
         });
         if close {
             self.settings = None;
+        }
+        if let (Some(z), Some(conn)) = (zoom_pick, self.conn.as_ref()) {
+            let _ =
+                chronicle_core::storage::set_meta(conn, "ui_zoom_factor", Some(&format!("{z:.2}")));
+        }
+        if let (Some(on), Some(conn)) = (spans_toggle, self.conn.as_ref()) {
+            let value = on.then_some("1");
+            let _ = chronicle_core::storage::set_meta(conn, "ui_show_spans_debug", value);
+            self.spans_debug = on;
         }
         if start_dl {
             self.start_model_download(ui.ctx(), chronicle_derive::model::default_preset());

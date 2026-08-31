@@ -45,6 +45,7 @@ impl TimelineApp {
             let closed_tasks = &self.closed_tasks;
             let show_closed = &mut self.show_closed;
             let show_spans = &mut self.show_spans;
+            let spans_debug = self.spans_debug;
             let spans = &self.spans;
             let new_label = &mut self.new_label;
             let new_project = &mut self.new_project;
@@ -116,19 +117,22 @@ impl TimelineApp {
                         }
                     }
 
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let arrow = if *show_spans { "\u{25bc}" } else { "\u{25b6}" };
-                        if ui
-                            .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
-                            .clicked()
-                        {
-                            *show_spans = !*show_spans;
-                        }
-                    });
-                    if *show_spans {
-                        for &s in &span_vis {
-                            span_row(ui, &spans[s]);
+                    // Debug-grade raw spans; hidden unless enabled in settings.
+                    if spans_debug {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let arrow = if *show_spans { "\u{25bc}" } else { "\u{25b6}" };
+                            if ui
+                                .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
+                                .clicked()
+                            {
+                                *show_spans = !*show_spans;
+                            }
+                        });
+                        if *show_spans {
+                            for &s in &span_vis {
+                                span_row(ui, &spans[s]);
+                            }
                         }
                     }
                 });

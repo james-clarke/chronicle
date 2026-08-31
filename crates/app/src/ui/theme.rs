@@ -80,11 +80,11 @@ fn style(style: &mut egui::Style) {
     .into();
 
     let spacing = &mut style.spacing;
-    spacing.item_spacing = egui::vec2(8.0, 6.0);
-    spacing.button_padding = egui::vec2(10.0, 5.0);
+    spacing.item_spacing = egui::vec2(6.0, 4.0);
+    spacing.button_padding = egui::vec2(8.0, 4.0);
     spacing.window_margin = egui::Margin::same(14);
     spacing.menu_margin = egui::Margin::same(8);
-    spacing.interact_size.y = 26.0;
+    spacing.interact_size.y = 24.0;
     spacing.extra_text_line_spacing = 1.0;
 
     let v = &mut style.visuals;

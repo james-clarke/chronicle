@@ -295,7 +295,7 @@ fn card_frame(
         .fill(theme::palette::SURFACE)
         .stroke(egui::Stroke::new(1.0, stroke_color))
         .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(12, 11))
+        .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             // Labels must not grab clicks for text selection, or the card's
