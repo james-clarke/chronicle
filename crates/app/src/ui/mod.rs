@@ -34,6 +34,13 @@ const WIDGET_W: f32 = 400.0;
 const WIDGET_H: f32 = 640.0;
 
 pub fn run(data_dir: &Path) -> anyhow::Result<()> {
+    // Bare-WM desktops (Openbox et al.) render 1:1, but winit derives an X11
+    // scale factor from the monitor's physical DPI, ballooning the widget
+    // (~1.65x on a 158-DPI panel). Pin 1:1 unless the user overrides.
+    if std::env::var_os("WINIT_X11_SCALE_FACTOR").is_none() {
+        // SAFETY: before eframe::run_native, no other threads yet.
+        unsafe { std::env::set_var("WINIT_X11_SCALE_FACTOR", "1") };
+    }
     let db_path = data_dir.join("chronicle.db");
     let config_path = data_dir.join("config.toml");
     // Zoom factor is remembered in `meta`; window size is fixed.
@@ -615,14 +622,22 @@ impl eframe::App for TimelineApp {
     // Runs even while the window is hidden (unlike `ui`), so the stdin toggle
     // can bring the window back after a hide.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Park the widget in the top-right corner once the monitor size is
-        // known (SNI hosts don't report icon coordinates; a fixed corner
-        // beats the WM's arbitrary placement). No-op on Wayland.
+        // Park the widget in the bottom-right corner, above the tray, once
+        // the monitor size is known (SNI hosts don't report icon coordinates;
+        // a fixed corner beats the WM's arbitrary placement). No-op on
+        // Wayland.
         if !self.positioned
             && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
         {
             let margin = 12.0;
-            let pos = egui::pos2((monitor.x - WIDGET_W - margin).max(0.0), margin);
+            // Uniform hover gap on right and bottom; bottom additionally
+            // clears a typical bottom panel (tint2 ~24px) since
+            // _NET_WORKAREA isn't exposed through egui.
+            let panel = 24.0;
+            let pos = egui::pos2(
+                (monitor.x - WIDGET_W - margin).max(0.0),
+                (monitor.y - panel - WIDGET_H - margin).max(0.0),
+            );
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
             self.positioned = true;
         }
