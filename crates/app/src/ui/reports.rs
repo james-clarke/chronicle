@@ -179,7 +179,11 @@ fn insights_strip(ui: &mut egui::Ui, wi: &WeekInsights) {
         .delta
         .as_ref()
         .map(|d| {
-            let sign = if d.grand_total_delta_ms >= 0 { "+" } else { "-" };
+            let sign = if d.grand_total_delta_ms >= 0 {
+                "+"
+            } else {
+                "-"
+            };
             format!("{sign}{}", fmt_dur(d.grand_total_delta_ms.abs()))
         })
         .unwrap_or_else(|| "\u{b7}".into());
@@ -311,8 +315,11 @@ fn week_chart(
                 ui.horizontal(|ui| {
                     let (dot, _) =
                         ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter()
-                        .circle_filled(dot.center(), 3.0, theme::series_color_for(t.task_id));
+                    ui.painter().circle_filled(
+                        dot.center(),
+                        3.0,
+                        theme::series_color_for(t.task_id),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.weak(egui::RichText::new(fmt_dur(ms)).monospace());
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {

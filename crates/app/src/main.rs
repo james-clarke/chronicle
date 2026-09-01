@@ -420,7 +420,7 @@ fn bench(
                 .unwrap_or_default();
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], None),
+                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], &[], None),
                 open,
                 expect,
             ));
@@ -440,7 +440,7 @@ fn bench(
             let corrections = storage::similar_corrections(&conn, &spans, 4)?;
             cases.push((
                 format!("batch:{id}"),
-                digest::build_digest(&spans, &tz, &open, &corrections, None),
+                digest::build_digest(&spans, &tz, &open, &corrections, &[], None),
                 open,
                 None,
             ));
@@ -544,11 +544,13 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| data_dir.join("mcp.toml"));
         let mcp_context = chronicle_mcp::gather_context(&mcp_path);
+        let vcs = storage::vcs_in_range(&conn, batch.start_ts, batch.end_ts)?;
         let digest = chronicle_core::digest::build_digest(
             &spans,
             &tz,
             &open,
             &corrections,
+            &vcs,
             mcp_context.as_deref(),
         );
         let raw = chronicle_derive::infer_intervals(&model_path, &digest)?;
@@ -556,7 +558,19 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, &open);
         let intervals = clamp_intervals(linked, &spans, batch.start_ts, batch.end_ts);
         let n = intervals.len();
-        storage::store_derivation(&mut conn, batch_id, &slots, &intervals)?;
+        let stored = storage::store_derivation(&mut conn, batch_id, &slots, &intervals)?;
+        // Deterministic anchoring: majority branch names the ticket key.
+        match regex::Regex::new(&config.ticket_regex) {
+            Ok(re) => {
+                let prior = storage::branch_state_before(&conn, batch.start_ts)?;
+                for (task_id, key) in
+                    chronicle_core::anchor::anchor_tasks(&stored, &prior, &vcs, &re)
+                {
+                    storage::set_task_external_ref(&conn, task_id, &key)?;
+                }
+            }
+            Err(e) => tracing::warn!("bad ticket_regex, skipping anchoring: {e}"),
+        }
         Ok(n)
     })();
     match result {
@@ -632,11 +646,14 @@ fn run_ai_job(
             let hi = Timestamp::now().as_millisecond();
             let lo = hi - lookback_min * 60_000;
             let spans = storage::spans_in_range(conn, lo, hi)?;
-            if spans.iter().all(|s| s.kind != chronicle_core::sessionizer::SpanKind::Focus) {
+            if spans
+                .iter()
+                .all(|s| s.kind != chronicle_core::sessionizer::SpanKind::Focus)
+            {
                 bail!("no recent focus activity to suggest from");
             }
             let tz = TimeZone::system();
-            let digest = chronicle_core::digest::build_digest(&spans, &tz, &[], &[], None);
+            let digest = chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], None);
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
         }
@@ -678,7 +695,9 @@ fn run_ai_job(
 /// Local civil dates covering `[lo, hi)` in `tz`.
 fn civil_days(lo: i64, hi: i64, tz: &TimeZone) -> anyhow::Result<Vec<jiff::civil::Date>> {
     let mut days = Vec::new();
-    let mut d = chronicle_core::types::ms_to_ts(lo).to_zoned(tz.clone()).date();
+    let mut d = chronicle_core::types::ms_to_ts(lo)
+        .to_zoned(tz.clone())
+        .date();
     let last = chronicle_core::types::ms_to_ts((hi - 1).max(lo))
         .to_zoned(tz.clone())
         .date();
@@ -1490,9 +1509,43 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
 
     let afk = X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
     let threshold_ms = u64::from(config.afk_close_secs) * 1000;
+    let gtx = tx.clone();
     std::thread::Builder::new()
         .name("afk".into())
-        .spawn(move || afk_loop(afk, tx, threshold_ms))?;
+        .spawn(move || afk_loop(afk, gtx, threshold_ms))?;
+
+    spawn_git_capture(config, tx)
+}
+
+/// Git poller: optional, never load-bearing — a dead thread loses git
+/// evidence, not capture.
+fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::git::GitProvider;
+
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| match (p.strip_prefix("~/"), &home) {
+            (Some(rest), Some(h)) => h.join(rest),
+            _ => PathBuf::from(p),
+        })
+        .collect();
+    let git = GitProvider::new(&repos);
+    if git.is_empty() {
+        if !repos.is_empty() {
+            tracing::warn!("git_repos configured but none resolved to a git dir");
+        }
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("git".into())
+        .spawn(move || {
+            if let Err(e) = git.run(tx) {
+                tracing::error!("git provider exited: {e}");
+            }
+        })?;
     Ok(())
 }
 
@@ -1576,7 +1629,7 @@ impl Filters {
         let (app, title, url) = match event {
             CaptureEvent::Focus(e) | CaptureEvent::TitleChanged(e) => (&e.app, &e.title, None),
             CaptureEvent::Url(e) => (&e.app, &e.title, Some(&e.url)),
-            CaptureEvent::Afk { .. } => return false,
+            CaptureEvent::Vcs(_) | CaptureEvent::Afk { .. } => return false,
         };
         self.apps.iter().any(|r| r.is_match(app))
             || self

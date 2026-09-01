@@ -691,8 +691,8 @@ impl TimelineApp {
                 let project = edit.project.trim();
                 let project = (!project.is_empty()).then_some(project);
                 let group = self.groups.iter().find(|g| g.task_id == edit.task_id);
-                let identity_changed = group
-                    .is_none_or(|g| g.label != label || g.project.as_deref() != project);
+                let identity_changed =
+                    group.is_none_or(|g| g.label != label || g.project.as_deref() != project);
                 // Description edits are separate from the correction few-shot
                 // mechanism: a description-only save records no 'rename'.
                 let desc = edit.description.trim();

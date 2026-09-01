@@ -112,7 +112,11 @@ impl TimelineApp {
                         "tasks appear here as the day is analyzed",
                     );
                 } else {
-                    theme::empty_state(ui, "no tasks match the filter", "clear it from the \u{2026} menu");
+                    theme::empty_state(
+                        ui,
+                        "no tasks match the filter",
+                        "clear it from the \u{2026} menu",
+                    );
                 }
                 return;
             }
@@ -319,6 +323,7 @@ fn activity_band(
 /// One task card: identity dot + label + duration, then project pill, time
 /// range, and top evidence line. Actions live in the `…` menu; clicking the
 /// card toggles its detail pane.
+#[allow(clippy::too_many_arguments)]
 fn task_card(
     ui: &mut egui::Ui,
     content_w: f32,
@@ -356,7 +361,15 @@ fn task_card(
                 .sense(egui::Sense::click()),
             |ui| {
                 card_frame(
-                    ui, content_w, group, color, stroke_color, fill, edit, candidates, pending,
+                    ui,
+                    content_w,
+                    group,
+                    color,
+                    stroke_color,
+                    fill,
+                    edit,
+                    candidates,
+                    pending,
                 );
             },
         )
@@ -687,10 +700,9 @@ fn detail_actions(
         merge_menu(ui, group.task_id, candidates, pending);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Destructive action: tinted, and kept apart on the right.
-            let close_btn = egui::Button::new(
-                egui::RichText::new("close task").color(theme::palette::RED),
-            )
-            .fill(theme::palette::RED.gamma_multiply(0.12));
+            let close_btn =
+                egui::Button::new(egui::RichText::new("close task").color(theme::palette::RED))
+                    .fill(theme::palette::RED.gamma_multiply(0.12));
             if ui.add(close_btn).clicked() {
                 *pending = Some(Action::Close(group.task_id));
             }
