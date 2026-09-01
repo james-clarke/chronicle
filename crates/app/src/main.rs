@@ -765,6 +765,36 @@ fn run_ai_job(
             )?;
             Ok(entry)
         }
+        "checkpoint" => {
+            let task_id = payload["task_id"]
+                .as_i64()
+                .context("payload lacks task_id")?;
+            let (label, project): (String, Option<String>) = conn.query_row(
+                "SELECT label, project FROM tasks WHERE id=?1",
+                [task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let tail = storage::journal_tail(conn, task_id, 15)?;
+            if tail.is_empty() {
+                bail!("no journal entries for task {task_id} to checkpoint");
+            }
+            let tz = TimeZone::system();
+            let mut journal = String::new();
+            for e in &tail {
+                use std::fmt::Write as _;
+                let hm = chronicle_core::types::ms_to_ts(e.start_ts)
+                    .to_zoned(tz.clone())
+                    .strftime("%m-%d %H:%M");
+                let _ = writeln!(journal, "- [{hm}] {}", e.entry);
+            }
+            let context: String = storage::task_context(conn, task_id)?
+                .map(|(_, c)| c.chars().take(2400).collect())
+                .unwrap_or_default();
+            let (state, next_steps) =
+                describer.checkpoint(&label, project.as_deref(), &context, &journal)?;
+            storage::upsert_checkpoint(conn, task_id, Timestamp::now(), &state, &next_steps)?;
+            Ok(format!("{state}\n{next_steps}"))
+        }
         "narrative" => {
             let lo = payload["lo"].as_i64().context("payload lacks lo")?;
             let hi = payload["hi"].as_i64().context("payload lacks hi")?;
@@ -1266,6 +1296,9 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     }
     let mut scheduler = Scheduler { worker: None };
     let mut idle_since: Option<i64> = None;
+    // Fires once per idle stretch: remembers which idle_since epoch already
+    // queued checkpoints, cleared when the user comes back.
+    let mut checkpointed_idle: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
     let exit_reason = 'daemon: loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
@@ -1310,6 +1343,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
+                maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
                 reap_ui(&mut ui_child);
                 next_refresh = Instant::now() + SESSIONIZE_EVERY;
             }
@@ -1344,6 +1378,50 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
 enum ExitReason {
     Signal,
     CaptureDied,
+}
+
+/// Lunch-scale AFK (m16): once per idle stretch, queue a background
+/// checkpoint job for every task with activity since its last checkpoint.
+/// Day end needs no separate trigger — the evening's long idle is one.
+fn maybe_enqueue_checkpoints(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    idle_since: Option<i64>,
+    checkpointed_idle: &mut Option<i64>,
+    now: Timestamp,
+) {
+    use chronicle_core::storage;
+    if config.checkpoint_afk_secs == 0 {
+        return;
+    }
+    let Some(since) = idle_since else {
+        *checkpointed_idle = None;
+        return;
+    };
+    if *checkpointed_idle == Some(since)
+        || now.as_millisecond() - since < i64::from(config.checkpoint_afk_secs) * 1000
+    {
+        return;
+    }
+    *checkpointed_idle = Some(since);
+    let tasks = match storage::tasks_needing_checkpoint(conn, since) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("checkpoint eligibility query failed: {e}");
+            return;
+        }
+    };
+    for task_id in tasks {
+        if let Err(e) = storage::enqueue_ai_job(
+            conn,
+            now,
+            "checkpoint",
+            0,
+            &storage::task_description_payload(task_id),
+        ) {
+            tracing::error!(task_id, "checkpoint enqueue failed: {e}");
+        }
+    }
 }
 
 const DERIVE_TIMEOUT: Duration = Duration::from_secs(300);

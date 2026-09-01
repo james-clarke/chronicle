@@ -50,6 +50,9 @@ pub struct Config {
     /// Full-match-anywhere regex extracting a ticket key from branch names,
     /// used to anchor derived tasks (`tasks.external_ref`).
     pub ticket_regex: String,
+    /// Idle at least this long (lunch-scale) queues a checkpoint per task
+    /// with activity since its last one. 0 = feature off.
+    pub checkpoint_afk_secs: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +90,7 @@ impl Default for Config {
             distraction_patterns: Vec::new(),
             git_repos: Vec::new(),
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
+            checkpoint_afk_secs: 1800,
             model_path: None,
             mcp_config: None,
         }

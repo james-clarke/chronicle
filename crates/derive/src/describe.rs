@@ -21,6 +21,8 @@ const DESCRIPTION_PROMPT: &str = include_str!("../../../prompts/task_description
 const SUGGEST_PROMPT: &str = include_str!("../../../prompts/suggest_task_v1.txt");
 const NARRATIVE_PROMPT: &str = include_str!("../../../prompts/narrative_v1.txt");
 const JOURNAL_PROMPT: &str = include_str!("../../../prompts/journal_v1.txt");
+const CHECKPOINT_PROMPT: &str = include_str!("../../../prompts/checkpoint_v1.txt");
+const CHECKPOINT_GRAMMAR: &str = include_str!("../../../grammars/checkpoint_v1.gbnf");
 const SUGGEST_GRAMMAR: &str = include_str!("../../../grammars/suggest_task_v1.gbnf");
 
 const N_CTX: u32 = 4096;
@@ -101,6 +103,37 @@ impl Describer {
             bail!("model produced an empty narrative");
         }
         Ok(out.trim().to_owned())
+    }
+
+    /// Grammar-constrained checkpoint: (state, next_steps) from the task's
+    /// journal tail and optional external ticket context.
+    pub fn checkpoint(
+        &self,
+        label: &str,
+        project: Option<&str>,
+        context: &str,
+        journal: &str,
+    ) -> anyhow::Result<(String, String)> {
+        #[derive(serde::Deserialize)]
+        struct Out {
+            state: String,
+            next_steps: String,
+        }
+        let project_line = project.map(|p| format!(" [{p}]")).unwrap_or_default();
+        let context_section = if context.trim().is_empty() {
+            String::new()
+        } else {
+            format!("Ticket context:\n{}\n", context.trim())
+        };
+        let prompt = CHECKPOINT_PROMPT
+            .replace("{label}", label)
+            .replace("{project_line}", &project_line)
+            .replace("{context_section}", &context_section)
+            .replace("{journal}", journal);
+        let out = self.generate(&prompt, Some(CHECKPOINT_GRAMMAR))?;
+        let parsed: Out = serde_json::from_str(&out)
+            .with_context(|| format!("model output is not valid checkpoint JSON: {out}"))?;
+        Ok((parsed.state, parsed.next_steps))
     }
 
     /// Grammar-constrained declare suggestion from a recent-activity digest.

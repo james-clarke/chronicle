@@ -1,0 +1,10 @@
+# Constrains the checkpoint output to one JSON object with two prose fields.
+# Containment layer for untrusted journal/ticket text, same as suggest_task.
+# Bounded repetition (x{0,N}) only — chained x? x? is pathologically slow.
+
+root ::= "{" ws "\"state\"" ws ":" ws string ws "," ws "\"next_steps\"" ws ":" ws string ws "}"
+
+# 300 chars per field keeps the whole object inside the 256-token gen cap.
+string ::= "\"" char{0,300} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= [ \n\t]{0,4}
