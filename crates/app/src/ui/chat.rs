@@ -50,7 +50,8 @@ impl ChatPanel {
         conversation_id: i64,
         task_scope: Option<(i64, String)>,
     ) -> anyhow::Result<Self> {
-        let mut child = crate::spawn_chat_worker(conversation_id, task_scope.as_ref().map(|(id, _)| *id))?;
+        let mut child =
+            crate::spawn_chat_worker(conversation_id, task_scope.as_ref().map(|(id, _)| *id))?;
         let stdout = child.stdout.take().expect("chat worker stdout is piped");
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
@@ -160,8 +161,8 @@ impl ChatPanel {
         conversation_id: i64,
         task_scope: Option<(i64, String)>,
     ) {
-        let same_scope = self.task_scope.as_ref().map(|(id, _)| *id)
-            == task_scope.as_ref().map(|(id, _)| *id);
+        let same_scope =
+            self.task_scope.as_ref().map(|(id, _)| *id) == task_scope.as_ref().map(|(id, _)| *id);
         if self.busy || (conversation_id == self.conversation_id && same_scope) {
             return;
         }
@@ -349,11 +350,7 @@ impl TimelineApp {
         egui::Panel::bottom("chat_input").show(ui, |ui| {
             if let Some((_, label)) = &chat.task_scope {
                 ui.horizontal(|ui| {
-                    theme::badge(
-                        ui,
-                        &format!("scoped to {label}"),
-                        theme::palette::ACCENT,
-                    );
+                    theme::badge(ui, &format!("scoped to {label}"), theme::palette::ACCENT);
                     if ui
                         .small_button("\u{2715}")
                         .on_hover_text("back to general chat")

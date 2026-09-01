@@ -786,8 +786,7 @@ pub fn task_context(
     conn: &Connection,
     task_id: i64,
 ) -> Result<Option<(i64, String)>, StorageError> {
-    let mut stmt =
-        conn.prepare("SELECT fetched_ts, content FROM task_context WHERE task_id=?1")?;
+    let mut stmt = conn.prepare("SELECT fetched_ts, content FROM task_context WHERE task_id=?1")?;
     let mut rows = stmt.query([task_id])?;
     Ok(rows
         .next()?
@@ -817,6 +816,9 @@ pub fn insert_journal_entry(
     Ok(())
 }
 
+/// Journal evidence: span lines, interval ids, and the covered `(lo, hi)`.
+pub type BatchEvidence = (String, Vec<i64>, i64, i64);
+
 /// The task's batch-scoped journal evidence: focus-span lines overlapping the
 /// task's intervals in this batch, plus the interval ids and the covered
 /// window. None when the batch no longer holds intervals for the task.
@@ -824,7 +826,7 @@ pub fn task_batch_evidence(
     conn: &Connection,
     task_id: i64,
     batch_id: i64,
-) -> Result<Option<(String, Vec<i64>, i64, i64)>, StorageError> {
+) -> Result<Option<BatchEvidence>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, start_ts, end_ts FROM intervals
          WHERE task_id=?1 AND batch_id=?2 ORDER BY start_ts",
@@ -961,12 +963,15 @@ pub fn tasks_needing_checkpoint(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Resume-card row: `(task_id, label, external_ref, checkpoint)`.
+pub type ResumeCheckpoint = (i64, String, Option<String>, Checkpoint);
+
 /// Newest checkpoint written after `since_ms`, with its task's identity —
-/// the Home resume card. `(task_id, label, external_ref, checkpoint)`.
+/// the Home resume card.
 pub fn latest_checkpoint_since(
     conn: &Connection,
     since_ms: i64,
-) -> Result<Option<(i64, String, Option<String>, Checkpoint)>, StorageError> {
+) -> Result<Option<ResumeCheckpoint>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT c.task_id, t.label, t.external_ref, c.ts, c.state, c.next_steps
          FROM checkpoints c JOIN tasks t ON t.id = c.task_id
@@ -1822,7 +1827,10 @@ mod tests {
 
         super::upsert_task_context(&conn, 5, "mcp", crate::types::ms_to_ts(1_000), "v1").unwrap();
         super::upsert_task_context(&conn, 5, "mcp", ts, "v2").unwrap();
-        assert_eq!(super::task_context(&conn, 5).unwrap(), Some((2_000, "v2".into())));
+        assert_eq!(
+            super::task_context(&conn, 5).unwrap(),
+            Some((2_000, "v2".into()))
+        );
         assert_eq!(super::task_context(&conn, 6).unwrap(), None);
 
         for (i, entry) in ["one", "two", "three"].iter().enumerate() {
@@ -1839,7 +1847,10 @@ mod tests {
         super::upsert_checkpoint(&conn, 5, crate::types::ms_to_ts(1_000), "s1", "n1").unwrap();
         super::upsert_checkpoint(&conn, 5, ts, "s2", "n2").unwrap();
         let cp = super::get_checkpoint(&conn, 5).unwrap().unwrap();
-        assert_eq!((cp.ts, cp.state.as_str(), cp.next_steps.as_str()), (2_000, "s2", "n2"));
+        assert_eq!(
+            (cp.ts, cp.state.as_str(), cp.next_steps.as_str()),
+            (2_000, "s2", "n2")
+        );
 
         let a = super::conversation_for_task(&conn, 5, ts).unwrap();
         let b = super::conversation_for_task(&conn, 5, ts).unwrap();

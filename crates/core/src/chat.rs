@@ -56,12 +56,11 @@ pub fn build_task_context(
     task_id: i64,
     tz: &TimeZone,
 ) -> Result<String, StorageError> {
-    let (label, project, external_ref): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT label, project, external_ref FROM tasks WHERE id=?1",
-            [task_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+    let (label, project, external_ref): (String, Option<String>, Option<String>) = conn.query_row(
+        "SELECT label, project, external_ref FROM tasks WHERE id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
     let mut out = String::new();
     let project = project.map(|p| format!(" [{p}]")).unwrap_or_default();
     let anchor = external_ref.map(|r| format!(" ({r})")).unwrap_or_default();
@@ -74,7 +73,9 @@ pub fn build_task_context(
         let _ = writeln!(
             out,
             "\n## Checkpoint ({})\n{}\nNext: {}",
-            ms_to_ts(cp.ts).to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M"),
+            ms_to_ts(cp.ts)
+                .to_zoned(tz.clone())
+                .strftime("%Y-%m-%d %H:%M"),
             cp.state,
             cp.next_steps
         );
@@ -311,7 +312,10 @@ mod tests {
         crate::storage::upsert_checkpoint(&conn, 5, ts, "API wired", "add tests").unwrap();
 
         let out = super::build_task_context(&conn, 5, &TimeZone::UTC).unwrap();
-        assert!(out.starts_with("# Task: sending plans [plans] (ABC-123)"), "{out}");
+        assert!(
+            out.starts_with("# Task: sending plans [plans] (ABC-123)"),
+            "{out}"
+        );
         for needle in [
             "## External context",
             "ticket body",

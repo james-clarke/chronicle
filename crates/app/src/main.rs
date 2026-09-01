@@ -766,13 +766,8 @@ fn run_ai_job(
                     }
                 }
             }
-            let entry = describer.journal_entry(
-                &label,
-                project.as_deref(),
-                &context,
-                &git,
-                &evidence,
-            )?;
+            let entry =
+                describer.journal_entry(&label, project.as_deref(), &context, &git, &evidence)?;
             storage::insert_journal_entry(
                 conn,
                 task_id,

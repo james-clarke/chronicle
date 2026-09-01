@@ -59,10 +59,7 @@ pub fn fetch_context(config_path: &Path, ext_ref: &str) -> Option<String> {
         .fetch_calls
         .iter()
         .map(|c| ContextCall {
-            args_json: c
-                .args_json
-                .as_ref()
-                .map(|raw| substitute_ref(raw, ext_ref)),
+            args_json: c.args_json.as_ref().map(|raw| substitute_ref(raw, ext_ref)),
             ..c.clone()
         })
         .collect();
