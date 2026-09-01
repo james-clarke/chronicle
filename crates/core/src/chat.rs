@@ -48,6 +48,65 @@ pub fn build_context(
     Ok(out)
 }
 
+/// Task-scoped grounding (m16): the task IS the retrieval — external context,
+/// checkpoint, journal tail, falling back to raw span evidence for a task
+/// with no workspace material yet. Same size cap as [`build_context`].
+pub fn build_task_context(
+    conn: &Connection,
+    task_id: i64,
+    tz: &TimeZone,
+) -> Result<String, StorageError> {
+    let (label, project, external_ref): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT label, project, external_ref FROM tasks WHERE id=?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+    let mut out = String::new();
+    let project = project.map(|p| format!(" [{p}]")).unwrap_or_default();
+    let anchor = external_ref.map(|r| format!(" ({r})")).unwrap_or_default();
+    let _ = writeln!(out, "# Task: {label}{project}{anchor}");
+
+    if let Some((_, content)) = storage::task_context(conn, task_id)? {
+        let _ = writeln!(out, "\n## External context\n{}", content.trim());
+    }
+    if let Some(cp) = storage::get_checkpoint(conn, task_id)? {
+        let _ = writeln!(
+            out,
+            "\n## Checkpoint ({})\n{}\nNext: {}",
+            ms_to_ts(cp.ts).to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M"),
+            cp.state,
+            cp.next_steps
+        );
+    }
+    let journal = storage::journal_tail(conn, task_id, 15)?;
+    if !journal.is_empty() {
+        let _ = writeln!(out, "\n## Journal");
+        for e in &journal {
+            let _ = writeln!(
+                out,
+                "- [{}] {}",
+                ms_to_ts(e.start_ts)
+                    .to_zoned(tz.clone())
+                    .strftime("%m-%d %H:%M"),
+                e.entry
+            );
+        }
+    } else {
+        // Freshly declared task: raw span evidence beats an empty prompt.
+        let evidence = storage::task_evidence_text(conn, task_id)?;
+        if !evidence.trim().is_empty() {
+            let _ = writeln!(out, "\n## Screen evidence\n{}", evidence.trim());
+        }
+    }
+    let mut cut = MAX_CHARS.min(out.len());
+    while !out.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    out.truncate(cut);
+    Ok(out)
+}
+
 fn today_range(now: &Zoned) -> (i64, i64) {
     let lo = now
         .start_of_day()
@@ -222,5 +281,60 @@ fn fmt_dur(ms: i64) -> String {
         format!("{m}m")
     } else {
         format!("{}s", s % 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jiff::tz::TimeZone;
+
+    fn db() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::test_migrate(&mut conn);
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, project, status, source, created_ts, external_ref)
+                 VALUES (5, 'sending plans', 'plans', 'open', 'user', 10, 'ABC-123');",
+        )
+        .unwrap();
+        conn
+    }
+
+    // Workspace material renders in priority order; a task without any falls
+    // back to raw span evidence.
+    #[test]
+    fn build_task_context_sections_and_fallback() {
+        let conn = db();
+        let ts = crate::types::ms_to_ts(1_000);
+        crate::storage::upsert_task_context(&conn, 5, "mcp", ts, "ticket body").unwrap();
+        crate::storage::insert_journal_entry(&conn, 5, 1, 10, 90, "wired the API", "[1]").unwrap();
+        crate::storage::upsert_checkpoint(&conn, 5, ts, "API wired", "add tests").unwrap();
+
+        let out = super::build_task_context(&conn, 5, &TimeZone::UTC).unwrap();
+        assert!(out.starts_with("# Task: sending plans [plans] (ABC-123)"), "{out}");
+        for needle in [
+            "## External context",
+            "ticket body",
+            "## Checkpoint",
+            "Next: add tests",
+            "## Journal",
+            "wired the API",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in {out}");
+        }
+
+        // Fresh task: no journal, so span evidence stands in.
+        conn.execute_batch(
+            "INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (6, 'fresh', 'open', 'user', 10);
+             INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+                 VALUES (6, 1, 10, 90, 0.9);
+             INSERT INTO spans (batch_id, start_ts, end_ts, app, title, kind)
+                 VALUES (1, 10, 90, 'code', 'editing foo.rs', 'focus');",
+        )
+        .unwrap();
+        let out = super::build_task_context(&conn, 6, &TimeZone::UTC).unwrap();
+        assert!(out.contains("## Screen evidence"), "{out}");
+        assert!(out.contains("code editing foo.rs"), "{out}");
     }
 }

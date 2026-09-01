@@ -227,6 +227,8 @@ enum Action {
     GenerateNarrative,
     /// Queue a context (re-)fetch for an anchored task.
     FetchContext(i64),
+    /// Open task-scoped chat for the task.
+    ChatAboutTask(i64),
 }
 
 /// Declare-suggestion lifecycle (home view chip).
@@ -324,6 +326,8 @@ struct TimelineApp {
     autohide: bool,
     /// Top-right corner placement done (needs monitor size, so not at boot).
     positioned: bool,
+    /// Pending "chat about task" click, consumed by the chat view.
+    chat_task_request: Option<i64>,
     /// Resume card: newest checkpoint written since the previous UI open
     /// (loaded once per launch; ✕ or "open workspace" clears it).
     resume: Option<ResumeRow>,
@@ -401,6 +405,7 @@ impl TimelineApp {
             was_focused: false,
             autohide: std::env::var_os("CHRONICLE_UI_NO_AUTOHIDE").is_none(),
             positioned: false,
+            chat_task_request: None,
             resume: None,
             resume_checked: false,
         }
@@ -926,6 +931,11 @@ impl TimelineApp {
                     let _ = crate::send_ctrl(&self.sock_path, "derive");
                 }
                 result.map(|_| ())
+            }
+            Action::ChatAboutTask(task_id) => {
+                self.chat_task_request = Some(task_id);
+                self.view = View::Chat;
+                return;
             }
             Action::UseSuggestion => {
                 if let Some(SuggestionState::Ready(s)) = self.suggestion.take() {

@@ -32,6 +32,8 @@ pub(super) struct ChatPanel {
     child: Child,
     rx: mpsc::Receiver<ChatEvent>,
     conversation_id: i64,
+    /// Retrieval scoped to this task's workspace (m16): (task_id, label).
+    task_scope: Option<(i64, String)>,
     transcript: Vec<ChatMsg>,
     input: String,
     /// Model still loading; no questions accepted yet.
@@ -46,8 +48,9 @@ impl ChatPanel {
         ctx: &egui::Context,
         conn: Option<&Connection>,
         conversation_id: i64,
+        task_scope: Option<(i64, String)>,
     ) -> anyhow::Result<Self> {
-        let mut child = crate::spawn_chat_worker(conversation_id)?;
+        let mut child = crate::spawn_chat_worker(conversation_id, task_scope.as_ref().map(|(id, _)| *id))?;
         let stdout = child.stdout.take().expect("chat worker stdout is piped");
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
@@ -78,6 +81,7 @@ impl ChatPanel {
             child,
             rx,
             conversation_id,
+            task_scope,
             transcript,
             input: String::new(),
             warming: true,
@@ -148,19 +152,45 @@ impl ChatPanel {
         self.error = None;
     }
 
-    /// Point the panel (and worker) at another conversation. No-op while an
-    /// answer is streaming.
-    fn switch_conversation(&mut self, conn: Option<&Connection>, conversation_id: i64) {
-        if self.busy || conversation_id == self.conversation_id {
+    /// Point the panel (and worker) at another conversation, with its task
+    /// scope (None = general retrieval). No-op while an answer is streaming.
+    fn switch_conversation(
+        &mut self,
+        conn: Option<&Connection>,
+        conversation_id: i64,
+        task_scope: Option<(i64, String)>,
+    ) {
+        let same_scope = self.task_scope.as_ref().map(|(id, _)| *id)
+            == task_scope.as_ref().map(|(id, _)| *id);
+        if self.busy || (conversation_id == self.conversation_id && same_scope) {
             return;
         }
-        if !self.send_line(&crate::chatproto::ClientMsg::Switch { conversation_id }) {
+        if !self.send_line(&crate::chatproto::ClientMsg::Switch {
+            conversation_id,
+            task_id: task_scope.as_ref().map(|(id, _)| *id),
+        }) {
             return;
         }
         self.conversation_id = conversation_id;
+        self.task_scope = task_scope;
         self.transcript = load_transcript(conn, conversation_id);
         self.error = None;
     }
+}
+
+/// (task_id, label) scope of a conversation, when it is task-scoped.
+fn conversation_scope(conn: &Connection, conversation_id: i64) -> Option<(i64, String)> {
+    let task_id = chronicle_core::storage::conversation_task(conn, conversation_id)
+        .ok()
+        .flatten()?;
+    Some((task_id, task_label(conn, task_id)))
+}
+
+fn task_label(conn: &Connection, task_id: i64) -> String {
+    conn.query_row("SELECT label FROM tasks WHERE id=?1", [task_id], |r| {
+        r.get(0)
+    })
+    .unwrap_or_else(|_| format!("task {task_id}"))
 }
 
 fn load_transcript(conn: Option<&Connection>, conversation_id: i64) -> Vec<ChatMsg> {
@@ -196,9 +226,42 @@ impl TimelineApp {
                 }
             },
         };
-        match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id) {
+        // The latest conversation may be task-scoped; the worker must match.
+        let task_scope = conversation_scope(conn, conversation_id);
+        match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id, task_scope) {
             Ok(panel) => self.chat = Some(panel),
             Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
+        }
+    }
+
+    /// Route a "chat about task" click: resolve the task's conversation and
+    /// point the panel (or a fresh worker) at it, task-scoped.
+    fn chat_take_task_request(&mut self, ctx: &egui::Context) {
+        let Some(task_id) = self.chat_task_request else {
+            return;
+        };
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        if self.chat.as_ref().is_some_and(|c| c.busy) {
+            return; // keep the request; retried next frame
+        }
+        self.chat_task_request = None;
+        let conversation_id =
+            match chronicle_core::storage::conversation_for_task(conn, task_id, Timestamp::now()) {
+                Ok(id) => id,
+                Err(e) => {
+                    self.error = Some(format!("task conversation failed: {e}"));
+                    return;
+                }
+            };
+        let scope = Some((task_id, task_label(conn, task_id)));
+        match self.chat.as_mut() {
+            Some(chat) => chat.switch_conversation(Some(conn), conversation_id, scope),
+            None => match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id, scope) {
+                Ok(panel) => self.chat = Some(panel),
+                Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
+            },
         }
     }
 
@@ -211,7 +274,7 @@ impl TimelineApp {
             return;
         }
         match chronicle_core::storage::create_conversation(conn, Timestamp::now()) {
-            Ok(id) => chat.switch_conversation(Some(conn), id),
+            Ok(id) => chat.switch_conversation(Some(conn), id, None),
             Err(e) => self.error = Some(format!("conversation create failed: {e}")),
         }
     }
@@ -238,7 +301,8 @@ impl TimelineApp {
                     .selectable_label(current, format!("{date} \u{b7} {head}"))
                     .clicked()
                 {
-                    chat.switch_conversation(Some(conn), *id);
+                    let scope = conversation_scope(conn, *id);
+                    chat.switch_conversation(Some(conn), *id, scope);
                     ui.close();
                 }
             }
@@ -250,7 +314,22 @@ impl TimelineApp {
         self.chat.as_ref().is_some_and(|c| c.warming)
     }
 
+    /// Clear the task scope: back to the newest general thread.
+    fn chat_clear_scope(&mut self) {
+        let (Some(conn), Some(chat)) = (self.conn.as_ref(), self.chat.as_mut()) else {
+            return;
+        };
+        let general = chronicle_core::storage::latest_general_conversation(conn)
+            .ok()
+            .flatten()
+            .or_else(|| chronicle_core::storage::create_conversation(conn, Timestamp::now()).ok());
+        if let Some(id) = general {
+            chat.switch_conversation(Some(conn), id, None);
+        }
+    }
+
     pub(super) fn chat_ui(&mut self, ui: &mut egui::Ui) {
+        self.chat_take_task_request(ui.ctx());
         self.chat_ensure(ui.ctx());
         let Some(chat) = &mut self.chat else {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -266,7 +345,24 @@ impl TimelineApp {
         };
         chat.drain_events();
         let mut start_dl = false;
+        let mut clear_scope = false;
         egui::Panel::bottom("chat_input").show(ui, |ui| {
+            if let Some((_, label)) = &chat.task_scope {
+                ui.horizontal(|ui| {
+                    theme::badge(
+                        ui,
+                        &format!("scoped to {label}"),
+                        theme::palette::ACCENT,
+                    );
+                    if ui
+                        .small_button("\u{2715}")
+                        .on_hover_text("back to general chat")
+                        .clicked()
+                    {
+                        clear_scope = true;
+                    }
+                });
+            }
             if let Some(error) = &chat.error {
                 egui::Frame::new()
                     .fill(theme::palette::RED.gamma_multiply(0.12))
@@ -367,6 +463,9 @@ impl TimelineApp {
                     }
                 });
         });
+        if clear_scope {
+            self.chat_clear_scope();
+        }
         if start_dl {
             let ctx = ui.ctx().clone();
             self.start_model_download(&ctx, chronicle_derive::model::default_preset());

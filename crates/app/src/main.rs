@@ -39,6 +39,9 @@ enum Cmd {
         /// Conversation whose history seeds the model context.
         #[arg(long)]
         conversation: i64,
+        /// Scope retrieval to this task's workspace (m16).
+        #[arg(long)]
+        task: Option<i64>,
     },
     /// Internal: ephemeral AI-job worker (descriptions, suggestions, narratives).
     #[command(hide = true)]
@@ -156,7 +159,7 @@ fn main() -> anyhow::Result<()> {
             only.as_deref(),
             model.as_deref(),
         ),
-        Cmd::ChatWorker { conversation } => chat_worker(&data_dir, conversation),
+        Cmd::ChatWorker { conversation, task } => chat_worker(&data_dir, conversation, task),
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
     }
@@ -171,8 +174,11 @@ pub(crate) mod chatproto {
             ask: String,
         },
         /// Drop model history and re-seed from another conversation.
+        /// `task_id` scopes retrieval to that task's workspace (m16).
         Switch {
             conversation_id: i64,
+            #[serde(default)]
+            task_id: Option<i64>,
         },
     }
 
@@ -194,7 +200,11 @@ pub(crate) mod chatproto {
 /// Warm chat worker, spawned by the UI when the chat panel opens and killed
 /// when it closes. The model stays resident between questions; retrieval is
 /// local-DB only (time-ref range or FTS, in chronicle_core::chat).
-fn chat_worker(data_dir: &Path, mut conversation_id: i64) -> anyhow::Result<()> {
+fn chat_worker(
+    data_dir: &Path,
+    mut conversation_id: i64,
+    mut task_scope: Option<i64>,
+) -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
 
     use chatproto::{ClientMsg, WorkerMsg};
@@ -262,8 +272,10 @@ fn chat_worker(data_dir: &Path, mut conversation_id: i64) -> anyhow::Result<()> 
             Ok(ClientMsg::Ask { ask }) => ask,
             Ok(ClientMsg::Switch {
                 conversation_id: id,
+                task_id,
             }) => {
                 conversation_id = id;
+                task_scope = task_id;
                 history = seed_history(id);
                 continue;
             }
@@ -278,7 +290,14 @@ fn chat_worker(data_dir: &Path, mut conversation_id: i64) -> anyhow::Result<()> 
         {
             tracing::error!("chat message insert failed: {e}");
         }
-        let context = match chronicle_core::chat::build_context(&conn, &ask, &Zoned::now()) {
+        let context = match match task_scope {
+            Some(task_id) => chronicle_core::chat::build_task_context(
+                &conn,
+                task_id,
+                &jiff::tz::TimeZone::system(),
+            ),
+            None => chronicle_core::chat::build_context(&conn, &ask, &Zoned::now()),
+        } {
             Ok(ctx) => ctx,
             Err(e) => {
                 send(&WorkerMsg::Err {
@@ -1224,14 +1243,20 @@ fn spawn_ui_child() -> std::io::Result<Child> {
 }
 
 /// llama/ggml noise goes to the log file, not the UI's terminal.
-pub(crate) fn spawn_chat_worker(conversation_id: i64) -> std::io::Result<Child> {
-    Command::new(own_exe()?)
-        .args([
-            "chat-worker",
-            "--conversation",
-            &conversation_id.to_string(),
-        ])
-        .stdin(Stdio::piped())
+pub(crate) fn spawn_chat_worker(
+    conversation_id: i64,
+    task_scope: Option<i64>,
+) -> std::io::Result<Child> {
+    let mut cmd = Command::new(own_exe()?);
+    cmd.args([
+        "chat-worker",
+        "--conversation",
+        &conversation_id.to_string(),
+    ]);
+    if let Some(task_id) = task_scope {
+        cmd.args(["--task", &task_id.to_string()]);
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

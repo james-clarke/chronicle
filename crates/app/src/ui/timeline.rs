@@ -788,6 +788,9 @@ fn detail_actions(
     pending: &mut Option<Action>,
 ) {
     ui.horizontal(|ui| {
+        if ui.button("chat").clicked() {
+            *pending = Some(Action::ChatAboutTask(group.task_id));
+        }
         if ui.button("rename").clicked() {
             *edit = Some(EditState {
                 task_id: group.task_id,

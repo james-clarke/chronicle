@@ -34,6 +34,12 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
     ])
 });
 
+/// Migrate an in-memory connection for sibling modules' unit tests.
+#[cfg(test)]
+pub(crate) fn test_migrate(conn: &mut Connection) {
+    MIGRATIONS.to_latest(conn).unwrap();
+}
+
 pub fn open(path: &Path) -> Result<Connection, StorageError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -1001,6 +1007,29 @@ pub fn conversation_for_task(
         [task_id],
         |r| r.get(0),
     )?)
+}
+
+/// The task a conversation is scoped to, if any.
+pub fn conversation_task(
+    conn: &Connection,
+    conversation_id: i64,
+) -> Result<Option<i64>, StorageError> {
+    Ok(conn.query_row(
+        "SELECT task_id FROM conversations WHERE id=?1",
+        [conversation_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Newest conversation not scoped to a task (clearing a task scope returns
+/// the user to their general thread).
+pub fn latest_general_conversation(conn: &Connection) -> Result<Option<i64>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM conversations WHERE task_id IS NULL
+         ORDER BY created_ts DESC, id DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
 }
 
 /// Close open derived tasks whose last interval ended over `days` days ago
