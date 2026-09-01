@@ -857,18 +857,20 @@ fn run_ai_job(
                 .timestamp()
                 .as_millisecond();
             let rows = storage::standup_digest(conn, lo, hi)?;
-            let digest = if rows.is_empty() {
+            let text = if rows.is_empty() {
                 // Journals only exist once tasks run long enough to batch;
                 // fall back to a plain activity summary so day one still
-                // drafts something.
+                // drafts something. Stored verbatim, no LLM pass: with only
+                // durations and app names as input, the model invents
+                // outcomes and next steps (seen live even with a
+                // don't-invent instruction in the digest).
                 let Some(fallback) = standup_activity_fallback(conn, config, lo, hi)? else {
                     bail!("no journal entries or task activity on {day} to draft a standup from");
                 };
                 fallback
             } else {
-                standup_digest_text(&rows, &tz)
+                describer.standup(&standup_digest_text(&rows, &tz))?
             };
-            let text = describer.standup(&digest)?;
             storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
             Ok(text)
         }
@@ -913,8 +915,9 @@ fn standup_digest_text(
     out
 }
 
-/// Journal-free standup digest: per task, the day's focused total and top
-/// apps. `None` when the day holds no task activity. Background-scale tasks
+/// Journal-free standup draft, stored verbatim (no LLM pass): per task, the
+/// day's focused total and top apps. `None` when the day holds no task
+/// activity. Background-scale tasks
 /// (short, undeclared, unanchored — see `Config::background_minutes`) are
 /// left out unless they are all there is.
 fn standup_activity_fallback(
@@ -969,10 +972,8 @@ fn standup_activity_fallback(
         }
     }
     let mut out = String::from(
-        "(No journal entries were written this day; the lines below are focus-time \
-         summaries from activity capture. Only focus durations and app names are \
-         known — say what was worked on and for how long, and do not invent \
-         outcomes, reviews, feedback, or next steps.)\n\n",
+        "No journal entries were written this day; this is a focus-time summary \
+         from activity capture.\n\n",
     );
     for id in &order {
         let a = &aggs[id];
