@@ -197,6 +197,73 @@ pub fn delta(current: &RangeReport, prior: &RangeReport) -> Delta {
     }
 }
 
+/// Cheap deterministic fold over a report's numbers; changes whenever the
+/// underlying data does. Shared by the UI (staleness check) and the
+/// narrative worker (stamped into the cache) — the two must agree.
+pub fn report_data_hash(r: &RangeReport) -> i64 {
+    let mut h = r.grand_total_ms.wrapping_mul(31);
+    for t in &r.tasks {
+        h = h.wrapping_mul(31).wrapping_add(t.total_ms ^ t.task_id);
+    }
+    h
+}
+
+/// Compact stats digest fed to the narrative prompt: numbers only, rendered
+/// from data the worker recomputed itself.
+pub fn narrative_digest(
+    r: &RangeReport,
+    m: &FocusMetrics,
+    apps: &[(String, i64)],
+    d: Option<&Delta>,
+) -> String {
+    use std::fmt::Write;
+    let fmt = crate::digest::fmt_dur;
+    let mut out = String::new();
+    if let (Some(first), Some(last)) = (r.days.first(), r.days.last()) {
+        let _ = writeln!(out, "Range: {first} to {last}");
+    }
+    let _ = writeln!(out, "Total focus: {}", fmt(r.grand_total_ms));
+    let _ = writeln!(out, "\nTop tasks:");
+    for t in r.tasks.iter().take(5) {
+        let _ = writeln!(out, "- {} [{}]: {}", t.label, t.project, fmt(t.total_ms));
+    }
+    if !r.projects.is_empty() {
+        let _ = writeln!(out, "\nProjects:");
+        for p in &r.projects {
+            let _ = writeln!(out, "- {}: {}", p.project, fmt(p.total_ms));
+        }
+    }
+    if !apps.is_empty() {
+        let _ = writeln!(out, "\nTop apps:");
+        for (app, ms) in apps.iter().take(5) {
+            let _ = writeln!(out, "- {app}: {}", fmt(*ms));
+        }
+    }
+    let _ = writeln!(
+        out,
+        "\nFocus quality: longest block {}, deep work {}, {} task switches{}",
+        fmt(m.longest_block_ms),
+        fmt(m.deep_work_ms),
+        m.switch_count,
+        m.most_fragmented_hour
+            .map(|h| format!(", most fragmented hour {h:02}:00"))
+            .unwrap_or_default()
+    );
+    if let Some(d) = d {
+        let sign = |v: i64| if v >= 0 { "+" } else { "-" };
+        let _ = writeln!(
+            out,
+            "\nVersus prior period: total {}{}",
+            sign(d.grand_total_delta_ms),
+            fmt(d.grand_total_delta_ms.abs())
+        );
+        for (p, v) in d.per_project.iter().take(5) {
+            let _ = writeln!(out, "- {p}: {}{}", sign(*v), fmt(v.abs()));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

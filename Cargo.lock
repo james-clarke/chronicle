@@ -799,6 +799,7 @@ version = "0.1.0"
 dependencies = [
  "directories",
  "jiff",
+ "regex",
  "rusqlite",
  "rusqlite_migration",
  "serde",

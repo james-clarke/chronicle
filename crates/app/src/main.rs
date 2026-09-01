@@ -40,6 +40,18 @@ enum Cmd {
         #[arg(long)]
         conversation: i64,
     },
+    /// Internal: ephemeral AI-job worker (descriptions, suggestions, narratives).
+    #[command(hide = true)]
+    AiJob {
+        #[arg(long)]
+        id: i64,
+    },
+    /// Generate descriptions for closed tasks that lack one, newest first.
+    BackfillDescriptions {
+        /// Max tasks to describe this run; rerun to continue.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Show or hide the UI of the running daemon.
     Toggle,
     /// Report daemon health and recent activity.
@@ -145,6 +157,8 @@ fn main() -> anyhow::Result<()> {
             model.as_deref(),
         ),
         Cmd::ChatWorker { conversation } => chat_worker(&data_dir, conversation),
+        Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
+        Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
     }
 }
 
@@ -556,6 +570,168 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Ephemeral AI-job worker: claim job → kind-specific inference → store
+/// result → exit. Any failure marks the job failed (retry-once via attempts
+/// cap), mirroring the derive worker.
+fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let _guard = init_logging(data_dir)?;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let Some(model_path) = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+    else {
+        bail!("no model available; run `chronicle model pull`")
+    };
+    let Some(job) = storage::claim_ai_job(&conn, job_id)? else {
+        bail!("ai job {job_id} is not eligible")
+    };
+    match run_ai_job(&conn, &model_path, &job) {
+        Ok(result) => {
+            storage::complete_ai_job(&conn, job_id, &result)?;
+            tracing::info!(job_id, kind = %job.kind, "ai job done");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(job_id, kind = %job.kind, "ai job failed: {e:#}");
+            storage::fail_ai_job(&conn, job_id, &format!("{e:#}"))?;
+            Err(e)
+        }
+    }
+}
+
+fn run_ai_job(
+    conn: &rusqlite::Connection,
+    model_path: &Path,
+    job: &chronicle_core::storage::AiJobRow,
+) -> anyhow::Result<String> {
+    use chronicle_core::{insights, report, storage};
+    let payload: serde_json::Value = serde_json::from_str(&job.payload)?;
+    let describer = chronicle_derive::describe::Describer::load(model_path)?;
+    match job.kind.as_str() {
+        "task_description" => {
+            let task_id = payload["task_id"]
+                .as_i64()
+                .context("payload lacks task_id")?;
+            let (label, project): (String, Option<String>) = conn.query_row(
+                "SELECT label, project FROM tasks WHERE id=?1",
+                [task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let evidence = storage::task_evidence_text(conn, task_id)?;
+            if evidence.trim().is_empty() {
+                bail!("no span evidence for task {task_id}");
+            }
+            let desc = describer.describe_task(&label, project.as_deref(), &evidence)?;
+            storage::set_task_description(conn, task_id, &desc)?;
+            Ok(desc)
+        }
+        "suggest_task" => {
+            let lookback_min = payload["lookback_min"].as_i64().unwrap_or(15);
+            let hi = Timestamp::now().as_millisecond();
+            let lo = hi - lookback_min * 60_000;
+            let spans = storage::spans_in_range(conn, lo, hi)?;
+            if spans.iter().all(|s| s.kind != chronicle_core::sessionizer::SpanKind::Focus) {
+                bail!("no recent focus activity to suggest from");
+            }
+            let tz = TimeZone::system();
+            let digest = chronicle_core::digest::build_digest(&spans, &tz, &[], &[], None);
+            let s = describer.suggest_task(&digest)?;
+            Ok(serde_json::to_string(&s)?)
+        }
+        "narrative" => {
+            let lo = payload["lo"].as_i64().context("payload lacks lo")?;
+            let hi = payload["hi"].as_i64().context("payload lacks hi")?;
+            let tz = TimeZone::system();
+            let days = civil_days(lo, hi, &tz)?;
+            let tasks = storage::tasks_in_range(conn, lo, hi)?;
+            let r = report::build(&tasks, days.clone(), &tz)?;
+            if r.grand_total_ms == 0 {
+                bail!("no activity in range to narrate");
+            }
+            let sessions = insights::sessions_from_tasks(&tasks, lo, hi);
+            let metrics = insights::focus_metrics(&sessions, &tz);
+            let spans = storage::spans_in_range(conn, lo, hi)?;
+            let apps = insights::top_apps(&spans, lo, hi, 5);
+            let delta = insights::prior_period(&days).and_then(|pd| {
+                let plo = pd
+                    .first()?
+                    .to_zoned(tz.clone())
+                    .ok()?
+                    .timestamp()
+                    .as_millisecond();
+                let ptasks = storage::tasks_in_range(conn, plo, lo).ok()?;
+                let pr = report::build(&ptasks, pd, &tz).ok()?;
+                (pr.grand_total_ms > 0).then(|| insights::delta(&r, &pr))
+            });
+            let digest = insights::narrative_digest(&r, &metrics, &apps, delta.as_ref());
+            let text = describer.narrative(&digest)?;
+            let hash = insights::report_data_hash(&r);
+            storage::upsert_narrative(conn, lo, hi, hash, Timestamp::now(), &text)?;
+            Ok(text)
+        }
+        other => bail!("unknown ai job kind {other}"),
+    }
+}
+
+/// Local civil dates covering `[lo, hi)` in `tz`.
+fn civil_days(lo: i64, hi: i64, tz: &TimeZone) -> anyhow::Result<Vec<jiff::civil::Date>> {
+    let mut days = Vec::new();
+    let mut d = chronicle_core::types::ms_to_ts(lo).to_zoned(tz.clone()).date();
+    let last = chronicle_core::types::ms_to_ts((hi - 1).max(lo))
+        .to_zoned(tz.clone())
+        .date();
+    while d <= last {
+        days.push(d);
+        d = d.checked_add(jiff::Span::new().days(1))?;
+    }
+    Ok(days)
+}
+
+/// One-shot in-process backfill (loads the model once, like `bench`); an
+/// occasional operator command, not routed through the daemon queue where 50
+/// jobs would starve derivation. Stop the daemon's unit first if it might
+/// derive concurrently — two llama processes fight for the same cores.
+fn backfill_descriptions(data_dir: &Path, limit: usize) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    use std::io::Write as _;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let Some(model_path) = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+    else {
+        bail!("no model available; run `chronicle model pull`")
+    };
+    let tasks = storage::closed_tasks_missing_description(&conn, limit)?;
+    if tasks.is_empty() {
+        println!("nothing to backfill");
+        return Ok(());
+    }
+    let describer = chronicle_derive::describe::Describer::load(&model_path)?;
+    let total = tasks.len();
+    let mut done = 0usize;
+    let mut skipped = 0usize;
+    for (i, t) in tasks.iter().enumerate() {
+        print!("\x1b[2K\r{}/{total} {:.40}", i + 1, t.label);
+        let _ = std::io::stdout().flush();
+        let evidence = storage::task_evidence_text(&conn, t.id)?;
+        if evidence.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        match describer.describe_task(&t.label, t.project.as_deref(), &evidence) {
+            Ok(desc) => {
+                storage::set_task_description(&conn, t.id, &desc)?;
+                done += 1;
+            }
+            Err(e) => {
+                skipped += 1;
+                eprintln!("\ntask {} failed: {e:#}", t.id);
+            }
+        }
+    }
+    println!("\x1b[2K\rdescribed {done}/{total} closed tasks ({skipped} skipped)");
+    Ok(())
 }
 
 /// Offsets are minutes from batch start, untrusted model output: clamp into
@@ -1016,10 +1192,17 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     // Child drop leaks the OS process — kills must be explicit. SIGKILL on the
     // derive worker is safe: `store_derivation` commits in one transaction, and
     // `fail_batch` records the burned attempt immediately.
-    if let Some((mut child, _, batch_id)) = scheduler.worker.take() {
+    if let Some((mut child, _, kind)) = scheduler.worker.take() {
         let _ = child.kill();
         let _ = child.wait();
-        let _ = chronicle_core::storage::fail_batch(&conn, batch_id);
+        match kind {
+            WorkerKind::Batch(id) => {
+                let _ = chronicle_core::storage::fail_batch(&conn, id);
+            }
+            WorkerKind::AiJob(id) => {
+                let _ = chronicle_core::storage::fail_ai_job(&conn, id, "daemon shutdown");
+            }
+        }
     }
     if let Some(mut child) = ui_child.take() {
         let _ = child.kill();
@@ -1041,9 +1224,16 @@ const DERIVE_TIMEOUT: Duration = Duration::from_secs(300);
 const LOW_LOAD: f64 = 1.0;
 const BATTERY_DEFER_PCT: u32 = 30;
 
+/// What the single worker slot is running.
+enum WorkerKind {
+    Batch(i64),
+    AiJob(i64),
+}
+
 struct Scheduler {
-    /// At most one derive worker at a time: (child, started, batch id).
-    worker: Option<(Child, Instant, i64)>,
+    /// At most one inference worker at a time (derive or ai-job): the whole
+    /// design assumes a single resident llama.cpp process.
+    worker: Option<(Child, Instant, WorkerKind)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1082,66 +1272,105 @@ impl Scheduler {
         force: bool,
     ) {
         use chronicle_core::storage;
-        if let Some((child, started, batch_id)) = &mut self.worker {
-            let batch_id = *batch_id;
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // A worker that died before reporting leaves the batch
-                    // `running`; count that as the failed attempt it was.
+        if let Some((child, started, kind)) = &mut self.worker {
+            // A worker that died before reporting leaves its row `running`;
+            // count that as the failed attempt it was.
+            let mark_dead = |conn: &rusqlite::Connection, kind: &WorkerKind| match *kind {
+                WorkerKind::Batch(id) => {
                     let stuck = matches!(
-                        storage::batch_status(conn, batch_id),
+                        storage::batch_status(conn, id),
                         Ok(Some(ref s)) if s == "running"
                     );
                     if stuck {
-                        let _ = storage::fail_batch(conn, batch_id);
+                        let _ = storage::fail_batch(conn, id);
                     }
+                }
+                WorkerKind::AiJob(id) => {
+                    let stuck = matches!(
+                        storage::ai_job_status(conn, id),
+                        Ok(Some((ref s, _))) if s == "running"
+                    );
+                    if stuck {
+                        let _ = storage::fail_ai_job(conn, id, "worker died");
+                    }
+                }
+            };
+            let id = match kind {
+                WorkerKind::Batch(id) | WorkerKind::AiJob(id) => *id,
+            };
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    mark_dead(conn, kind);
                     if !status.success() {
-                        tracing::warn!(batch_id, %status, "derive worker failed");
+                        tracing::warn!(id, %status, "inference worker failed");
                     }
                     self.worker = None;
                 }
                 Ok(None) => {
                     if started.elapsed() >= DERIVE_TIMEOUT {
-                        tracing::warn!(batch_id, "derive worker timed out; killing");
+                        tracing::warn!(id, "inference worker timed out; killing");
                         let _ = child.kill();
                         let _ = child.wait();
-                        let _ = storage::fail_batch(conn, batch_id);
+                        mark_dead(conn, kind);
                         self.worker = None;
                     }
                     return; // one worker at a time
                 }
                 Err(e) => {
-                    tracing::error!(batch_id, "derive worker wait failed: {e}");
+                    tracing::error!(id, "inference worker wait failed: {e}");
                     self.worker = None;
                 }
             }
         }
-        if !force && !derive_gates_open(config, idle_since) {
+        // An interactive AI job (a user actively waiting on a suggestion)
+        // jumps the idle gate; background jobs and derivation respect it.
+        let interactive = storage::next_eligible_ai_job(conn, storage::AI_JOB_INTERACTIVE)
+            .ok()
+            .flatten();
+        if interactive.is_none() && !force && !derive_gates_open(config, idle_since) {
             return;
         }
         if on_low_battery() {
-            tracing::debug!("derivation deferred: battery low");
+            tracing::debug!("inference deferred: battery low");
             return;
         }
         prune_if_due(conn, config);
         if chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_none() {
-            tracing::debug!("derivation skipped: no model downloaded");
+            tracing::debug!("inference skipped: no model downloaded");
             return;
         }
-        let batch_id = match storage::next_eligible_batch(conn) {
-            Ok(Some(id)) => id,
-            Ok(None) => return,
+        if let Some(job_id) = interactive {
+            self.spawn(spawn_ai_job_worker(job_id), WorkerKind::AiJob(job_id));
+            return;
+        }
+        // Derivation stays ahead of background summarization.
+        match storage::next_eligible_batch(conn) {
+            Ok(Some(batch_id)) => {
+                self.spawn(spawn_derive_worker(batch_id), WorkerKind::Batch(batch_id));
+                return;
+            }
+            Ok(None) => {}
             Err(e) => {
                 tracing::error!("eligible-batch query failed: {e}");
                 return;
             }
+        }
+        if let Ok(Some(job_id)) = storage::next_eligible_ai_job(conn, i64::MIN) {
+            self.spawn(spawn_ai_job_worker(job_id), WorkerKind::AiJob(job_id));
+        }
+    }
+
+    fn spawn(&mut self, child: std::io::Result<Child>, kind: WorkerKind) {
+        let (id, what) = match kind {
+            WorkerKind::Batch(id) => (id, "derive"),
+            WorkerKind::AiJob(id) => (id, "ai-job"),
         };
-        match spawn_derive_worker(batch_id) {
+        match child {
             Ok(child) => {
-                tracing::info!(batch_id, "derive worker spawned");
-                self.worker = Some((child, Instant::now(), batch_id));
+                tracing::info!(id, "{what} worker spawned");
+                self.worker = Some((child, Instant::now(), kind));
             }
-            Err(e) => tracing::error!(batch_id, "failed to spawn derive worker: {e}"),
+            Err(e) => tracing::error!(id, "failed to spawn {what} worker: {e}"),
         }
     }
 }
@@ -1188,6 +1417,14 @@ fn spawn_derive_worker(batch_id: i64) -> std::io::Result<Child> {
     // Worker logging goes to the log file; keep the daemon terminal clean.
     Command::new(own_exe()?)
         .args(["derive", "--batch", &batch_id.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+fn spawn_ai_job_worker(job_id: i64) -> std::io::Result<Child> {
+    Command::new(own_exe()?)
+        .args(["ai-job", "--id", &job_id.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
