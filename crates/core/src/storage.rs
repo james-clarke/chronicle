@@ -31,6 +31,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/006_task_descriptions.sql")),
         M::up(include_str!("../migrations/007_vcs_events.sql")),
         M::up(include_str!("../migrations/008_task_workspace.sql")),
+        M::up(include_str!("../migrations/009_standup_drafts.sql")),
     ])
 });
 
@@ -995,6 +996,105 @@ pub fn latest_checkpoint_since(
         .transpose()?)
 }
 
+/// One task's slice of a standup digest: the day's journal entries plus the
+/// checkpoint, when one was written during or after the day.
+pub struct StandupDigestRow {
+    pub task_id: i64,
+    pub label: String,
+    pub project: Option<String>,
+    pub external_ref: Option<String>,
+    pub entries: Vec<JournalEntry>,
+    pub checkpoint: Option<Checkpoint>,
+}
+
+/// Journal entries overlapping `[lo, hi)` grouped by task, chronological
+/// within each task — the raw material for a standup draft.
+pub fn standup_digest(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<StandupDigestRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT j.task_id, t.label, t.project, t.external_ref,
+                j.id, j.batch_id, j.start_ts, j.end_ts, j.entry
+         FROM journal_entries j JOIN tasks t ON t.id = j.task_id
+         WHERE j.start_ts < ?2 AND j.end_ts > ?1
+         ORDER BY j.task_id, j.start_ts, j.id",
+    )?;
+    let mut rows = stmt.query([lo, hi])?;
+    let mut out: Vec<StandupDigestRow> = Vec::new();
+    while let Some(r) = rows.next()? {
+        let task_id: i64 = r.get(0)?;
+        let entry = JournalEntry {
+            id: r.get(4)?,
+            batch_id: r.get(5)?,
+            start_ts: r.get(6)?,
+            end_ts: r.get(7)?,
+            entry: r.get(8)?,
+        };
+        match out.last_mut() {
+            Some(row) if row.task_id == task_id => row.entries.push(entry),
+            _ => out.push(StandupDigestRow {
+                task_id,
+                label: r.get(1)?,
+                project: r.get(2)?,
+                external_ref: r.get(3)?,
+                entries: vec![entry],
+                checkpoint: None,
+            }),
+        }
+    }
+    for row in &mut out {
+        row.checkpoint = get_checkpoint(conn, row.task_id)?.filter(|c| c.ts >= lo);
+    }
+    Ok(out)
+}
+
+/// Cache the day's standup draft, replacing any prior text for the day.
+pub fn upsert_standup_draft(
+    conn: &Connection,
+    day: &str,
+    ts: jiff::Timestamp,
+    content: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO standup_drafts (day, ts, content) VALUES (?1, ?2, ?3)
+         ON CONFLICT(day) DO UPDATE SET ts=excluded.ts, content=excluded.content",
+        params![day, ts_to_ms(ts), content],
+    )?;
+    Ok(())
+}
+
+/// (ts, content) of the cached standup draft for a day, if drafted.
+pub fn get_standup_draft(
+    conn: &Connection,
+    day: &str,
+) -> Result<Option<(i64, String)>, StorageError> {
+    let mut stmt = conn.prepare("SELECT ts, content FROM standup_drafts WHERE day=?1")?;
+    let mut rows = stmt.query([day])?;
+    Ok(rows
+        .next()?
+        .map(|r| Ok::<_, rusqlite::Error>((r.get(0)?, r.get(1)?)))
+        .transpose()?)
+}
+
+/// True while a standup job for this day is queued or running (dedupe on
+/// every daemon tick).
+pub fn pending_standup_job(conn: &Connection, day: &str) -> Result<bool, StorageError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE kind='standup' AND status IN ('pending','running') AND payload=?1",
+        [standup_payload(day)],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Canonical payload for a standup job; stored and matched verbatim.
+pub fn standup_payload(day: &str) -> String {
+    format!("{{\"day\":{day:?}}}")
+}
+
 /// The task's chat thread, creating it on first use (at most one per task;
 /// the partial unique index makes re-entry return the same conversation).
 pub fn conversation_for_task(
@@ -1912,5 +2012,73 @@ mod tests {
         // Task 2's checkpoint postdates its activity; task 3 is older than 24 h.
         super::upsert_checkpoint(&conn, 2, crate::types::ms_to_ts(now), "s", "n").unwrap();
         assert_eq!(super::tasks_needing_checkpoint(&conn, now).unwrap(), [1]);
+    }
+
+    #[test]
+    fn standup_draft_upsert_replaces() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts(1_000);
+        super::upsert_standup_draft(&conn, "2026-09-01", ts, "first").unwrap();
+        super::upsert_standup_draft(&conn, "2026-09-01", crate::types::ms_to_ts(2_000), "second")
+            .unwrap();
+        assert_eq!(
+            super::get_standup_draft(&conn, "2026-09-01").unwrap(),
+            Some((2_000, "second".to_owned()))
+        );
+        assert_eq!(super::get_standup_draft(&conn, "2026-09-02").unwrap(), None);
+    }
+
+    // The digest groups a day's journal entries by task (chronological within
+    // each), excludes out-of-window entries, and attaches only checkpoints
+    // written at or after the window start.
+    #[test]
+    fn standup_digest_gathers_tasks_and_checkpoints() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES
+                 (1, 0, 100, 'done'), (2, 100, 300, 'done'), (3, 300, 900, 'done');
+             INSERT INTO tasks (id, label, project, status, source, created_ts) VALUES
+                 (1, 'alpha', 'proj', 'open', 'user', 10),
+                 (2, 'beta', NULL, 'open', 'user', 10);",
+        )
+        .unwrap();
+        // Task 1: one entry before the window, two inside. Task 2: one inside.
+        super::insert_journal_entry(&conn, 1, 1, 50, 90, "too early", "[]").unwrap();
+        super::insert_journal_entry(&conn, 1, 2, 200, 250, "morning", "[]").unwrap();
+        super::insert_journal_entry(&conn, 1, 3, 300, 350, "afternoon", "[]").unwrap();
+        super::insert_journal_entry(&conn, 2, 2, 220, 260, "beta work", "[]").unwrap();
+        // Task 1's checkpoint predates the window: dropped. Task 2's is fresh.
+        super::upsert_checkpoint(&conn, 1, crate::types::ms_to_ts(90), "old", "old next").unwrap();
+        super::upsert_checkpoint(&conn, 2, crate::types::ms_to_ts(260), "state", "next").unwrap();
+        let rows = super::standup_digest(&conn, 100, 400).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "alpha");
+        assert_eq!(rows[0].project.as_deref(), Some("proj"));
+        let entries: Vec<&str> = rows[0].entries.iter().map(|e| e.entry.as_str()).collect();
+        assert_eq!(entries, ["morning", "afternoon"]);
+        assert!(rows[0].checkpoint.is_none(), "stale checkpoint dropped");
+        assert_eq!(rows[1].label, "beta");
+        assert_eq!(rows[1].checkpoint.as_ref().unwrap().state, "state");
+        assert!(super::standup_digest(&conn, 500, 600).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_standup_job_dedupes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        assert!(!super::pending_standup_job(&conn, "2026-09-01").unwrap());
+        let ts = crate::types::ms_to_ts(1_000);
+        super::enqueue_ai_job(
+            &conn,
+            ts,
+            "standup",
+            0,
+            &super::standup_payload("2026-09-01"),
+        )
+        .unwrap();
+        assert!(super::pending_standup_job(&conn, "2026-09-01").unwrap());
+        assert!(!super::pending_standup_job(&conn, "2026-09-02").unwrap());
     }
 }

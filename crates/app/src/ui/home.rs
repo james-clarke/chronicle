@@ -67,6 +67,61 @@ impl TimelineApp {
         }
     }
 
+    /// Standup card: yesterday's drafted update, a spinner while drafting,
+    /// or a lone draft button. Returns true when (re)drafting was clicked.
+    fn standup_card_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut generate = false;
+        if self.standup.is_none() && self.standup_job.is_none() {
+            if !self.model_missing
+                && ui
+                    .small_button("draft standup")
+                    .on_hover_text("draft a standup from yesterday's journals")
+                    .clicked()
+            {
+                generate = true;
+            }
+            ui.add_space(4.0);
+            return generate;
+        }
+        egui::Frame::new()
+            .fill(theme::palette::SURFACE)
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                let day = self
+                    .standup
+                    .as_ref()
+                    .map(|s| format!("Standup \u{b7} {}", s.day))
+                    .unwrap_or_else(|| "Standup".to_owned());
+                ui.label(
+                    egui::RichText::new(day)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                if self.standup_job.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.weak("drafting from yesterday's journals\u{2026}");
+                    });
+                } else if let Some(standup) = &self.standup {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&standup.content)
+                                .text_style(egui::TextStyle::Small)
+                                .color(theme::palette::TEXT),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(4.0);
+                    if !self.model_missing && ui.small_button("redraft").clicked() {
+                        generate = true;
+                    }
+                }
+            });
+        ui.add_space(8.0);
+        generate
+    }
+
     pub(super) fn home_ui(&mut self, ui: &mut egui::Ui) {
         // Filtered index sets; empty query keeps everything.
         let q = self.filter.trim().to_lowercase();
@@ -95,6 +150,9 @@ impl TimelineApp {
             self.model_card_ui(ui);
             self.service_card_ui(ui);
             self.resume_card_ui(ui);
+            if self.standup_card_ui(ui) {
+                pending = Some(Action::GenerateStandup);
+            }
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }

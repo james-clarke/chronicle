@@ -79,6 +79,11 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = ReportFormat::Csv)]
         format: ReportFormat,
     },
+    /// Print the drafted standup for a day (default: yesterday).
+    Standup {
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        day: Option<String>,
+    },
     /// Manage local LLM models.
     Model {
         #[command(subcommand)]
@@ -142,6 +147,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Report { day, week, format } => {
             report(&data_dir, day.as_deref(), week.as_deref(), format)
         }
+        Cmd::Standup { day } => standup_cmd(&data_dir, day.as_deref()),
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
@@ -840,8 +846,64 @@ fn run_ai_job(
             storage::upsert_narrative(conn, lo, hi, hash, Timestamp::now(), &text)?;
             Ok(text)
         }
+        "standup" => {
+            let day = payload["day"].as_str().context("payload lacks day")?;
+            let tz = TimeZone::system();
+            let date: jiff::civil::Date = day.parse().context("bad day in payload")?;
+            let start = date.to_zoned(tz.clone())?;
+            let lo = start.timestamp().as_millisecond();
+            let hi = start
+                .checked_add(jiff::Span::new().days(1))?
+                .timestamp()
+                .as_millisecond();
+            let rows = storage::standup_digest(conn, lo, hi)?;
+            if rows.is_empty() {
+                bail!("no journal entries on {day} to draft a standup from");
+            }
+            let digest = standup_digest_text(&rows, &tz);
+            let text = describer.standup(&digest)?;
+            storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
+            Ok(text)
+        }
         other => bail!("unknown ai job kind {other}"),
     }
+}
+
+/// Render the standup digest rows for the prompt: per task, the day's
+/// journal tail (last 5 entries keeps multi-task days inside the prompt
+/// budget) plus the fresh checkpoint if one exists.
+fn standup_digest_text(
+    rows: &[chronicle_core::storage::StandupDigestRow],
+    tz: &TimeZone,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for row in rows {
+        let project = row
+            .project
+            .as_deref()
+            .map(|p| format!(" [{p}]"))
+            .unwrap_or_default();
+        let anchor = row
+            .external_ref
+            .as_deref()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "Task: {}{project}{anchor}", row.label);
+        let skip = row.entries.len().saturating_sub(5);
+        for e in &row.entries[skip..] {
+            let hm = chronicle_core::types::ms_to_ts(e.start_ts)
+                .to_zoned(tz.clone())
+                .strftime("%H:%M");
+            let _ = writeln!(out, "- [{hm}] {}", e.entry);
+        }
+        if let Some(c) = &row.checkpoint {
+            let _ = writeln!(out, "Checkpoint: {}", c.state);
+            let _ = writeln!(out, "Next steps: {}", c.next_steps);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Local civil dates covering `[lo, hi)` in `tz`.
@@ -1364,6 +1426,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
+                maybe_enqueue_standup(&conn, now);
                 reap_ui(&mut ui_child);
                 next_refresh = Instant::now() + SESSIONIZE_EVERY;
             }
@@ -1441,6 +1504,45 @@ fn maybe_enqueue_checkpoints(
         ) {
             tracing::error!(task_id, "checkpoint enqueue failed: {e}");
         }
+    }
+}
+
+/// Standup draft trigger: once yesterday has journal entries and no draft or
+/// queued job exists for it, queue a background standup job. The gate is
+/// pure DB state (draft row + job dedupe), so it is restart-safe and cheap
+/// to re-check every tick.
+fn maybe_enqueue_standup(conn: &rusqlite::Connection, now: Timestamp) {
+    use chronicle_core::storage;
+    let tz = TimeZone::system();
+    let today = now.to_zoned(tz.clone()).date();
+    let Ok(yd) = today.checked_sub(jiff::Span::new().days(1)) else {
+        return;
+    };
+    let day = yd.to_string();
+    if storage::get_standup_draft(conn, &day)
+        .map(|d| d.is_some())
+        .unwrap_or(true)
+        || storage::pending_standup_job(conn, &day).unwrap_or(true)
+    {
+        return;
+    }
+    let (Ok(lo), Ok(hi)) = (yd.to_zoned(tz.clone()), today.to_zoned(tz)) else {
+        return;
+    };
+    let (lo, hi) = (
+        lo.timestamp().as_millisecond(),
+        hi.timestamp().as_millisecond(),
+    );
+    match storage::standup_digest(conn, lo, hi) {
+        Ok(rows) if !rows.is_empty() => {
+            if let Err(e) =
+                storage::enqueue_ai_job(conn, now, "standup", 0, &storage::standup_payload(&day))
+            {
+                tracing::error!(%day, "standup enqueue failed: {e}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!(%day, "standup eligibility query failed: {e}"),
     }
 }
 
@@ -2066,6 +2168,22 @@ fn report(
     match format {
         ReportFormat::Csv => print!("{}", chronicle_core::report::to_csv(&r)),
         ReportFormat::Md => print!("{}", chronicle_core::report::to_md(&r)),
+    }
+    Ok(())
+}
+
+fn standup_cmd(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let date: civil::Date = match day {
+        Some(d) => d.parse().with_context(|| format!("bad --day {d:?}"))?,
+        None => Zoned::now().date().checked_sub(1.day())?,
+    };
+    let key = date.to_string();
+    match chronicle_core::storage::get_standup_draft(&conn, &key)? {
+        Some((_, content)) => println!("{content}"),
+        None => println!(
+            "no standup draft yet for {key} — it drafts in the daemon's next idle window once the day has journal entries"
+        ),
     }
     Ok(())
 }

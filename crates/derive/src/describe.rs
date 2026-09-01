@@ -22,6 +22,7 @@ const SUGGEST_PROMPT: &str = include_str!("../../../prompts/suggest_task_v1.txt"
 const NARRATIVE_PROMPT: &str = include_str!("../../../prompts/narrative_v1.txt");
 const JOURNAL_PROMPT: &str = include_str!("../../../prompts/journal_v1.txt");
 const CHECKPOINT_PROMPT: &str = include_str!("../../../prompts/checkpoint_v1.txt");
+const STANDUP_PROMPT: &str = include_str!("../../../prompts/standup_v1.txt");
 const CHECKPOINT_GRAMMAR: &str = include_str!("../../../grammars/checkpoint_v1.gbnf");
 const SUGGEST_GRAMMAR: &str = include_str!("../../../grammars/suggest_task_v1.gbnf");
 
@@ -101,6 +102,17 @@ impl Describer {
         let out = self.generate(&prompt, None)?;
         if out.trim().is_empty() {
             bail!("model produced an empty narrative");
+        }
+        Ok(out.trim().to_owned())
+    }
+
+    /// Morning standup draft (one short paragraph per task) over a
+    /// pre-rendered digest of a day's journal entries and checkpoints.
+    pub fn standup(&self, digest: &str) -> anyhow::Result<String> {
+        let prompt = STANDUP_PROMPT.replace("{digest}", digest);
+        let out = self.generate(&prompt, None)?;
+        if out.trim().is_empty() {
+            bail!("model produced an empty standup draft");
         }
         Ok(out.trim().to_owned())
     }

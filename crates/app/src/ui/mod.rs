@@ -225,6 +225,8 @@ enum Action {
     DismissSuggestion,
     /// Queue (or re-queue) the week-narrative job for the shown report.
     GenerateNarrative,
+    /// Queue (or re-queue) yesterday's standup-draft job.
+    GenerateStandup,
     /// Queue a context (re-)fetch for an anchored task.
     FetchContext(i64),
     /// Open task-scoped chat for the task.
@@ -333,6 +335,17 @@ struct TimelineApp {
     resume: Option<ResumeRow>,
     /// The once-per-launch resume check ran (meta `ui_last_open_ts` rotated).
     resume_checked: bool,
+    /// Yesterday's standup draft (Home card; refreshed every load).
+    standup: Option<StandupRow>,
+    /// In-flight standup job queued from the Home card button.
+    standup_job: Option<i64>,
+}
+
+/// Home standup card data.
+struct StandupRow {
+    /// Civil day the draft summarizes (ISO).
+    day: String,
+    content: String,
 }
 
 /// Home resume card data.
@@ -408,6 +421,8 @@ impl TimelineApp {
             chat_task_request: None,
             resume: None,
             resume_checked: false,
+            standup: None,
+            standup_job: None,
         }
     }
 
@@ -495,6 +510,21 @@ impl TimelineApp {
             let _ = chronicle_core::storage::set_meta(conn, "ui_last_open_ts", Some(&now_ms));
         }
         if let Some(conn) = self.conn.as_ref() {
+            // Refresh every load (unlike the once-per-launch resume card):
+            // the background job may finish between passes.
+            let yesterday = jiff::Timestamp::now()
+                .to_zoned(self.tz.clone())
+                .date()
+                .checked_sub(1.day())
+                .map(|d| d.to_string());
+            self.standup = yesterday.ok().and_then(|day| {
+                chronicle_core::storage::get_standup_draft(conn, &day)
+                    .ok()
+                    .flatten()
+                    .map(|(_, content)| StandupRow { day, content })
+            });
+        }
+        if let Some(conn) = self.conn.as_ref() {
             self.warning = chronicle_core::storage::get_meta(conn, "server_error")
                 .ok()
                 .flatten();
@@ -552,6 +582,17 @@ impl TimelineApp {
                 }
                 Ok(Some(_)) => {}
                 _ => self.narrative_job = None,
+            }
+        }
+        if let Some(job) = self.standup_job {
+            match chronicle_core::storage::ai_job_status(conn, job) {
+                Ok(Some((status, _))) if status == "done" || status == "failed" => {
+                    // The draft (or its absence) is re-read from
+                    // standup_drafts on the next load pass.
+                    self.standup_job = None;
+                }
+                Ok(Some(_)) => {}
+                _ => self.standup_job = None,
             }
         }
     }
@@ -964,6 +1005,30 @@ impl TimelineApp {
                 match result {
                     Ok(job) => {
                         self.narrative_job = Some(job);
+                        let _ = crate::send_ctrl(&self.sock_path, "derive");
+                        return;
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Action::GenerateStandup => {
+                let Ok(day) = jiff::Timestamp::now()
+                    .to_zoned(self.tz.clone())
+                    .date()
+                    .checked_sub(1.day())
+                else {
+                    return;
+                };
+                let result = chronicle_core::storage::enqueue_ai_job(
+                    conn,
+                    now,
+                    "standup",
+                    0,
+                    &chronicle_core::storage::standup_payload(&day.to_string()),
+                );
+                match result {
+                    Ok(job) => {
+                        self.standup_job = Some(job);
                         let _ = crate::send_ctrl(&self.sock_path, "derive");
                         return;
                     }
