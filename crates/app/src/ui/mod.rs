@@ -145,8 +145,8 @@ struct TaskGroup {
     task_context: Option<(i64, String)>,
     /// A fetch_context job for this task is queued or running.
     context_pending: bool,
-    /// Journal tail, oldest first, as (time label, entry text).
-    journal: Vec<(String, String)>,
+    /// Journal tail, oldest first, as (entry id, time label, entry text).
+    journal: Vec<(i64, String, String)>,
     /// Latest "where I am / what's next".
     checkpoint: Option<chronicle_core::storage::Checkpoint>,
 }
@@ -229,8 +229,24 @@ enum Action {
     GenerateStandup,
     /// Queue a context (re-)fetch for an anchored task.
     FetchContext(i64),
+    /// Save an in-place journal/checkpoint correction from the detail pane.
+    SaveWorkspaceEdit(WorkspaceEdit),
     /// Open task-scoped chat for the task.
     ChatAboutTask(i64),
+}
+
+/// In-flight inline edit of a workspace artifact in the detail pane.
+/// Saving logs a correction row (kind 'journal'/'checkpoint').
+enum WorkspaceEdit {
+    Journal {
+        entry_id: i64,
+        text: String,
+    },
+    Checkpoint {
+        task_id: i64,
+        state: String,
+        next_steps: String,
+    },
 }
 
 /// Declare-suggestion lifecycle (home view chip).
@@ -294,6 +310,8 @@ struct TimelineApp {
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
+    /// In-flight journal/checkpoint inline edit (detail pane).
+    ws_edit: Option<WorkspaceEdit>,
     /// Task whose detail pane is open (card click toggles).
     selected_task: Option<i64>,
     loaded_at: Option<Instant>,
@@ -400,6 +418,7 @@ impl TimelineApp {
             new_label: String::new(),
             new_project: String::new(),
             edit: None,
+            ws_edit: None,
             selected_task: None,
             loaded_at: None,
             error: None,
@@ -791,7 +810,7 @@ impl TimelineApp {
                         .to_zoned(self.tz.clone())
                         .strftime("%a %H:%M")
                         .to_string();
-                    (time, e.entry)
+                    (e.id, time, e.entry)
                 })
                 .collect();
             group.checkpoint =
@@ -972,6 +991,35 @@ impl TimelineApp {
                     let _ = crate::send_ctrl(&self.sock_path, "derive");
                 }
                 result.map(|_| ())
+            }
+            Action::SaveWorkspaceEdit(w) => {
+                self.ws_edit = None;
+                match w {
+                    WorkspaceEdit::Journal { entry_id, text } => {
+                        let text = text.trim().to_owned();
+                        if text.is_empty() {
+                            return;
+                        }
+                        chronicle_core::storage::update_journal_entry(conn, now, entry_id, &text)
+                    }
+                    WorkspaceEdit::Checkpoint {
+                        task_id,
+                        state,
+                        next_steps,
+                    } => {
+                        let state = state.trim().to_owned();
+                        if state.is_empty() {
+                            return;
+                        }
+                        chronicle_core::storage::update_checkpoint(
+                            conn,
+                            now,
+                            task_id,
+                            &state,
+                            next_steps.trim(),
+                        )
+                    }
+                }
             }
             Action::ChatAboutTask(task_id) => {
                 self.chat_task_request = Some(task_id);

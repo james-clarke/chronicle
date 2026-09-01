@@ -914,6 +914,75 @@ pub fn journal_payload(task_id: i64, batch_id: i64) -> String {
     format!("{{\"task_id\":{task_id},\"batch_id\":{batch_id}}}")
 }
 
+/// Rewrite one journal entry's text, logging the edit as a correction
+/// (kind='journal'). The empty ctx keeps workspace edits out of the
+/// rename-similarity FTS, which matches on span context.
+pub fn update_journal_entry(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    entry_id: i64,
+    text: &str,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    let (task_id, old): (i64, String) = tx.query_row(
+        "SELECT task_id, entry FROM journal_entries WHERE id=?1",
+        [entry_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if old != text {
+        tx.execute(
+            "UPDATE journal_entries SET entry=?2 WHERE id=?1",
+            params![entry_id, text],
+        )?;
+        tx.execute(
+            "INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind)
+             VALUES (?1, ?2, ?3, ?4, '', 'journal')",
+            params![ts_to_ms(ts), task_id, old, text],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Rewrite the task's checkpoint text, logging the edit as a correction
+/// (kind='checkpoint'; next_steps ride the project columns). The checkpoint's
+/// own ts stays put so an edit doesn't resurface the resume card.
+pub fn update_checkpoint(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    task_id: i64,
+    state: &str,
+    next_steps: &str,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    let (old_state, old_next): (String, String) = tx.query_row(
+        "SELECT state, next_steps FROM checkpoints WHERE task_id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if old_state != state || old_next != next_steps {
+        tx.execute(
+            "UPDATE checkpoints SET state=?2, next_steps=?3 WHERE task_id=?1",
+            params![task_id, state, next_steps],
+        )?;
+        tx.execute(
+            "INSERT INTO corrections
+                 (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', 'checkpoint')",
+            params![
+                ts_to_ms(ts),
+                task_id,
+                old_state,
+                state,
+                old_next,
+                next_steps
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn upsert_checkpoint(
     conn: &Connection,
     task_id: i64,
@@ -2080,5 +2149,60 @@ mod tests {
         .unwrap();
         assert!(super::pending_standup_job(&conn, "2026-09-01").unwrap());
         assert!(!super::pending_standup_job(&conn, "2026-09-02").unwrap());
+    }
+
+    // Workspace edits rewrite the row and log a correction; saving unchanged
+    // text logs nothing.
+    #[test]
+    fn workspace_edits_log_corrections() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (5, 'work', 'open', 'user', 10);",
+        )
+        .unwrap();
+        super::insert_journal_entry(&conn, 5, 1, 10, 90, "draft text", "[]").unwrap();
+        let entry_id = super::journal_tail(&conn, 5, 1).unwrap()[0].id;
+        let ts = crate::types::ms_to_ts(1_000);
+        super::update_journal_entry(&mut conn, ts, entry_id, "draft text").unwrap();
+        super::update_journal_entry(&mut conn, ts, entry_id, "fixed text").unwrap();
+        assert_eq!(
+            super::journal_tail(&conn, 5, 1).unwrap()[0].entry,
+            "fixed text"
+        );
+
+        super::upsert_checkpoint(&conn, 5, ts, "state", "next").unwrap();
+        super::update_checkpoint(&mut conn, ts, 5, "state", "next").unwrap();
+        super::update_checkpoint(&mut conn, ts, 5, "better state", "better next").unwrap();
+        let cp = super::get_checkpoint(&conn, 5).unwrap().unwrap();
+        assert_eq!(
+            (cp.state.as_str(), cp.next_steps.as_str(), cp.ts),
+            ("better state", "better next", 1_000,)
+        );
+
+        let log: Vec<(String, String, String)> = conn
+            .prepare("SELECT kind, old_label, new_label FROM corrections ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            log,
+            [
+                (
+                    "journal".to_owned(),
+                    "draft text".to_owned(),
+                    "fixed text".to_owned()
+                ),
+                (
+                    "checkpoint".to_owned(),
+                    "state".to_owned(),
+                    "better state".to_owned()
+                ),
+            ]
+        );
     }
 }

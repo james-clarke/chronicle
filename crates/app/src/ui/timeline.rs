@@ -4,7 +4,7 @@
 use eframe::egui;
 use jiff::{ToSpan, Zoned};
 
-use super::{Action, EditState, SpanRow, TaskGroup, TimelineApp, fmt_dur, theme};
+use super::{Action, EditState, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, fmt_dur, theme};
 
 impl TimelineApp {
     pub(super) fn timeline_ui(&mut self, ui: &mut egui::Ui) {
@@ -30,6 +30,7 @@ impl TimelineApp {
                 Some(gi) => {
                     let group = &self.groups[gi];
                     let edit = &mut self.edit;
+                    let ws_edit = &mut self.ws_edit;
                     let mut close_detail = false;
                     let color = theme::series_color_for(group.task_id);
                     if narrow {
@@ -52,6 +53,7 @@ impl TimelineApp {
                                         group,
                                         color,
                                         edit,
+                                        ws_edit,
                                         &candidates,
                                         &mut pending,
                                     );
@@ -74,8 +76,15 @@ impl TimelineApp {
                         .default_size(320.0)
                         .size_range(280.0..=420.0)
                         .show(ui, |ui| {
-                            close_detail =
-                                detail_ui(ui, group, color, edit, &candidates, &mut pending);
+                            close_detail = detail_ui(
+                                ui,
+                                group,
+                                color,
+                                edit,
+                                ws_edit,
+                                &candidates,
+                                &mut pending,
+                            );
                             ui.add_space(10.0);
                             detail_actions(ui, group, edit, &candidates, &mut pending);
                         });
@@ -512,6 +521,7 @@ fn detail_ui(
     group: &TaskGroup,
     color: egui::Color32,
     edit: &mut Option<EditState>,
+    ws_edit: &mut Option<WorkspaceEdit>,
     candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) -> bool {
@@ -704,36 +714,119 @@ fn detail_ui(
     if let Some(cp) = &group.checkpoint {
         ui.add_space(8.0);
         theme::section_header(ui, "Checkpoint", None);
-        ui.label(
-            egui::RichText::new(&cp.state)
-                .text_style(egui::TextStyle::Small)
-                .color(theme::palette::TEXT),
-        );
-        ui.label(
-            egui::RichText::new(format!("Next: {}", cp.next_steps))
-                .text_style(egui::TextStyle::Small)
-                .color(theme::palette::TEXT_DIM),
-        );
+        let editing = matches!(ws_edit,
+            Some(WorkspaceEdit::Checkpoint { task_id, .. }) if *task_id == group.task_id);
+        if editing {
+            if let Some(WorkspaceEdit::Checkpoint {
+                state, next_steps, ..
+            }) = ws_edit.as_mut()
+            {
+                ui.add(
+                    egui::TextEdit::multiline(state)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add(
+                    egui::TextEdit::multiline(next_steps)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("next steps"),
+                );
+            }
+            ui.horizontal(|ui| {
+                if ui.small_button("save").clicked() {
+                    *pending = Some(Action::SaveWorkspaceEdit(
+                        ws_edit.take().expect("checked above"),
+                    ));
+                }
+                if ui.small_button("cancel").clicked() {
+                    *ws_edit = None;
+                }
+            });
+        } else {
+            // Click either line to correct the checkpoint in place.
+            let state = ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(&cp.state)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT),
+                    )
+                    .wrap()
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_text("edit");
+            let next = ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("Next: {}", cp.next_steps))
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                    )
+                    .wrap()
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_text("edit");
+            if state.clicked() || next.clicked() {
+                *ws_edit = Some(WorkspaceEdit::Checkpoint {
+                    task_id: group.task_id,
+                    state: cp.state.clone(),
+                    next_steps: cp.next_steps.clone(),
+                });
+            }
+        }
     }
 
     if !group.journal.is_empty() {
         ui.add_space(8.0);
         theme::section_header(ui, "Journal", Some(group.journal.len()));
-        for (time, entry) in &group.journal {
+        for (id, time, entry) in &group.journal {
+            let editing = matches!(ws_edit,
+                Some(WorkspaceEdit::Journal { entry_id, .. }) if entry_id == id);
+            if editing {
+                if let Some(WorkspaceEdit::Journal { text, .. }) = ws_edit.as_mut() {
+                    ui.add(
+                        egui::TextEdit::multiline(text)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui.small_button("save").clicked() {
+                        *pending = Some(Action::SaveWorkspaceEdit(
+                            ws_edit.take().expect("checked above"),
+                        ));
+                    }
+                    if ui.small_button("cancel").clicked() {
+                        *ws_edit = None;
+                    }
+                });
+                continue;
+            }
             ui.horizontal_top(|ui| {
                 ui.label(
                     egui::RichText::new(time)
                         .text_style(egui::TextStyle::Small)
                         .color(theme::palette::TEXT_DIM),
                 );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(entry)
-                            .text_style(egui::TextStyle::Small)
-                            .color(theme::palette::TEXT),
+                // Click an entry to correct it in place.
+                let resp = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(entry)
+                                .text_style(egui::TextStyle::Small)
+                                .color(theme::palette::TEXT),
+                        )
+                        .wrap()
+                        .sense(egui::Sense::click()),
                     )
-                    .wrap(),
-                );
+                    .on_hover_text("edit");
+                if resp.clicked() {
+                    *ws_edit = Some(WorkspaceEdit::Journal {
+                        entry_id: *id,
+                        text: entry.clone(),
+                    });
+                }
             });
         }
     }
