@@ -30,6 +30,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/005_chat_conversations.sql")),
         M::up(include_str!("../migrations/006_task_descriptions.sql")),
         M::up(include_str!("../migrations/007_vcs_events.sql")),
+        M::up(include_str!("../migrations/008_task_workspace.sql")),
     ])
 });
 
@@ -465,6 +466,17 @@ pub fn pending_description_job(conn: &Connection, task_id: i64) -> Result<bool, 
     Ok(n > 0)
 }
 
+/// True while a context-fetch job for this task is queued or running.
+pub fn pending_fetch_context_job(conn: &Connection, task_id: i64) -> Result<bool, StorageError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE kind='fetch_context' AND status IN ('pending','running') AND payload=?1",
+        [task_description_payload(task_id)],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT start_ts, end_ts, app, title, kind, url FROM spans
@@ -724,6 +736,187 @@ pub fn get_narrative(
         .next()?
         .map(|r| Ok::<_, rusqlite::Error>((r.get(0)?, r.get(1)?)))
         .transpose()?)
+}
+
+/// One journal row: derived prose for one batch's slice of a task.
+pub struct JournalEntry {
+    pub id: i64,
+    pub batch_id: i64,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub entry: String,
+}
+
+/// Latest "where I am / what's next" for a task.
+pub struct Checkpoint {
+    pub ts: i64,
+    pub state: String,
+    pub next_steps: String,
+}
+
+/// Replace the task's MCP-fetched context bundle (one per task).
+pub fn upsert_task_context(
+    conn: &Connection,
+    task_id: i64,
+    source: &str,
+    ts: jiff::Timestamp,
+    content: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO task_context (task_id, source, fetched_ts, content)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(task_id) DO UPDATE
+           SET source=excluded.source, fetched_ts=excluded.fetched_ts,
+               content=excluded.content",
+        params![task_id, source, ts_to_ms(ts), content],
+    )?;
+    Ok(())
+}
+
+/// (fetched_ts, content) of the task's context bundle, if fetched.
+pub fn task_context(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Option<(i64, String)>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT fetched_ts, content FROM task_context WHERE task_id=?1")?;
+    let mut rows = stmt.query([task_id])?;
+    Ok(rows
+        .next()?
+        .map(|r| Ok::<_, rusqlite::Error>((r.get(0)?, r.get(1)?)))
+        .transpose()?)
+}
+
+pub fn insert_journal_entry(
+    conn: &Connection,
+    task_id: i64,
+    batch_id: i64,
+    start_ts: i64,
+    end_ts: i64,
+    entry: &str,
+    evidence: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO journal_entries (task_id, batch_id, start_ts, end_ts, entry, evidence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![task_id, batch_id, start_ts, end_ts, entry, evidence],
+    )?;
+    Ok(())
+}
+
+/// Last `n` journal entries for a task, chronological (oldest of the tail
+/// first) so prompts and UI read forward.
+pub fn journal_tail(
+    conn: &Connection,
+    task_id: i64,
+    n: usize,
+) -> Result<Vec<JournalEntry>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, batch_id, start_ts, end_ts, entry FROM (
+             SELECT id, batch_id, start_ts, end_ts, entry FROM journal_entries
+             WHERE task_id=?1 ORDER BY start_ts DESC, id DESC LIMIT ?2
+         ) ORDER BY start_ts, id",
+    )?;
+    let rows = stmt.query_map(params![task_id, n as i64], |r| {
+        Ok(JournalEntry {
+            id: r.get(0)?,
+            batch_id: r.get(1)?,
+            start_ts: r.get(2)?,
+            end_ts: r.get(3)?,
+            entry: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// True while a journal job for this batch's slice of the task is queued or
+/// running (dedupe on batch retry).
+pub fn pending_journal_job(
+    conn: &Connection,
+    task_id: i64,
+    batch_id: i64,
+) -> Result<bool, StorageError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE kind='journal' AND status IN ('pending','running') AND payload=?1",
+        [journal_payload(task_id, batch_id)],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Canonical payload for a journal job; stored and matched verbatim.
+pub fn journal_payload(task_id: i64, batch_id: i64) -> String {
+    format!("{{\"task_id\":{task_id},\"batch_id\":{batch_id}}}")
+}
+
+pub fn upsert_checkpoint(
+    conn: &Connection,
+    task_id: i64,
+    ts: jiff::Timestamp,
+    state: &str,
+    next_steps: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO checkpoints (task_id, ts, state, next_steps)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(task_id) DO UPDATE
+           SET ts=excluded.ts, state=excluded.state, next_steps=excluded.next_steps",
+        params![task_id, ts_to_ms(ts), state, next_steps],
+    )?;
+    Ok(())
+}
+
+pub fn get_checkpoint(conn: &Connection, task_id: i64) -> Result<Option<Checkpoint>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT ts, state, next_steps FROM checkpoints WHERE task_id=?1")?;
+    let mut rows = stmt.query([task_id])?;
+    Ok(rows
+        .next()?
+        .map(|r| {
+            Ok::<_, rusqlite::Error>(Checkpoint {
+                ts: r.get(0)?,
+                state: r.get(1)?,
+                next_steps: r.get(2)?,
+            })
+        })
+        .transpose()?)
+}
+
+/// Tasks with interval activity since their checkpoint (or never
+/// checkpointed), bounded to activity in the 24 h before `since_ms` so a
+/// stale daemon restart doesn't fan out over old open tasks.
+pub fn tasks_needing_checkpoint(
+    conn: &Connection,
+    since_ms: i64,
+) -> Result<Vec<i64>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT i.task_id FROM intervals i
+         LEFT JOIN checkpoints c ON c.task_id = i.task_id
+         WHERE i.end_ts > COALESCE(c.ts, 0)
+           AND i.start_ts < ?1 AND i.end_ts > ?1 - 86400000",
+    )?;
+    let rows = stmt.query_map([since_ms], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The task's chat thread, creating it on first use (at most one per task;
+/// the partial unique index makes re-entry return the same conversation).
+pub fn conversation_for_task(
+    conn: &Connection,
+    task_id: i64,
+    now: jiff::Timestamp,
+) -> Result<i64, StorageError> {
+    conn.execute(
+        "INSERT INTO conversations (created_ts, task_id) VALUES (?1, ?2)
+         ON CONFLICT(task_id) WHERE task_id IS NOT NULL DO NOTHING",
+        params![ts_to_ms(now), task_id],
+    )?;
+    Ok(conn.query_row(
+        "SELECT id FROM conversations WHERE task_id=?1",
+        [task_id],
+        |r| r.get(0),
+    )?)
 }
 
 /// Close open derived tasks whose last interval ended over `days` days ago
@@ -1460,5 +1653,108 @@ mod tests {
         super::claim_ai_job(&conn, low).unwrap().unwrap();
         super::fail_ai_job(&conn, low, "boom").unwrap();
         assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), None);
+    }
+
+    // 008 adds the workspace tables; task deletion cascades workspace rows
+    // and unscopes (not deletes) the task's conversation, so the existing
+    // orphan-guard and prune statements stay valid.
+    #[test]
+    fn migration_008_workspace_rows_cascade_with_task() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let ts = crate::types::ms_to_ts(1_000);
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (5, 'work', 'open', 'derived', 10);",
+        )
+        .unwrap();
+        super::upsert_task_context(&conn, 5, "mcp", ts, "ticket body").unwrap();
+        super::insert_journal_entry(&conn, 5, 1, 10, 90, "did things", "[1]").unwrap();
+        super::upsert_checkpoint(&conn, 5, ts, "state", "next").unwrap();
+        let conv = super::conversation_for_task(&conn, 5, ts).unwrap();
+
+        conn.execute("DELETE FROM tasks WHERE id=5", []).unwrap();
+        for table in ["task_context", "journal_entries", "checkpoints"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} cascades with its task");
+        }
+        let scoped: Option<i64> = conn
+            .query_row(
+                "SELECT task_id FROM conversations WHERE id=?1",
+                [conv],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scoped, None, "conversation survives unscoped");
+    }
+
+    // Context upsert replaces; checkpoint upsert overwrites; journal tail is
+    // chronological and capped; the per-task conversation is created once.
+    #[test]
+    fn workspace_accessors() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts(2_000);
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (5, 'work', 'open', 'user', 10);",
+        )
+        .unwrap();
+
+        super::upsert_task_context(&conn, 5, "mcp", crate::types::ms_to_ts(1_000), "v1").unwrap();
+        super::upsert_task_context(&conn, 5, "mcp", ts, "v2").unwrap();
+        assert_eq!(super::task_context(&conn, 5).unwrap(), Some((2_000, "v2".into())));
+        assert_eq!(super::task_context(&conn, 6).unwrap(), None);
+
+        for (i, entry) in ["one", "two", "three"].iter().enumerate() {
+            let t = 10 + i as i64 * 10;
+            super::insert_journal_entry(&conn, 5, 1, t, t + 5, entry, "[]").unwrap();
+        }
+        let tail = super::journal_tail(&conn, 5, 2).unwrap();
+        assert_eq!(
+            tail.iter().map(|e| e.entry.as_str()).collect::<Vec<_>>(),
+            ["two", "three"],
+            "tail keeps newest n, reads oldest-first"
+        );
+
+        super::upsert_checkpoint(&conn, 5, crate::types::ms_to_ts(1_000), "s1", "n1").unwrap();
+        super::upsert_checkpoint(&conn, 5, ts, "s2", "n2").unwrap();
+        let cp = super::get_checkpoint(&conn, 5).unwrap().unwrap();
+        assert_eq!((cp.ts, cp.state.as_str(), cp.next_steps.as_str()), (2_000, "s2", "n2"));
+
+        let a = super::conversation_for_task(&conn, 5, ts).unwrap();
+        let b = super::conversation_for_task(&conn, 5, ts).unwrap();
+        assert_eq!(a, b, "same task resumes the same conversation");
+    }
+
+    // Only tasks with interval activity since their checkpoint (within the
+    // 24 h window before the idle instant) need a new checkpoint.
+    #[test]
+    fn tasks_needing_checkpoint_filters() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let now = 200_000_000i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts) VALUES
+                 (1, 'fresh', 'open', 'user', 10),
+                 (2, 'checkpointed', 'open', 'user', 10),
+                 (3, 'stale', 'open', 'user', 10);
+             INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES
+                 (1, 1, {a}, {b}, 0.9),
+                 (2, 1, {a}, {b}, 0.9),
+                 (3, 1, 100, 200, 0.9);",
+            a = now - 10_000,
+            b = now - 5_000,
+        ))
+        .unwrap();
+        // Task 2's checkpoint postdates its activity; task 3 is older than 24 h.
+        super::upsert_checkpoint(&conn, 2, crate::types::ms_to_ts(now), "s", "n").unwrap();
+        assert_eq!(super::tasks_needing_checkpoint(&conn, now).unwrap(), [1]);
     }
 }
