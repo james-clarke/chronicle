@@ -19,11 +19,42 @@ pub struct UrlEvent {
     pub url: String,
 }
 
+/// A git observation from the repo poller (m15). Stored in `vcs_events`,
+/// never in `events` — these are point markers, not focus time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VcsEvent {
+    pub ts: Timestamp,
+    /// Repo directory name (short), not the full path.
+    pub repo: String,
+    pub branch: String,
+    pub kind: VcsKind,
+    /// Commit kind only.
+    pub commit_id: Option<String>,
+    /// Commit subject line; None when git(1) was unavailable.
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VcsKind {
+    Checkout,
+    Commit,
+}
+
+impl VcsKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VcsKind::Checkout => "checkout",
+            VcsKind::Commit => "commit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureEvent {
     Focus(FocusEvent),
     TitleChanged(FocusEvent),
     Url(UrlEvent),
+    Vcs(VcsEvent),
     Afk { idle: bool, ts: Timestamp },
 }
 
@@ -67,6 +98,8 @@ pub struct Task {
     pub declared: bool,
     /// User-edited or AI-generated summary of the task (tasks.description).
     pub description: Option<String>,
+    /// External anchor (ticket key), set deterministically from branch names.
+    pub external_ref: Option<String>,
 }
 
 /// A past user correction surfaced into the digest as few-shot guidance.

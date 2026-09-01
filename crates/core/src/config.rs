@@ -44,6 +44,12 @@ pub struct Config {
     /// Regexes marking apps/sites as distractions in insights (matched
     /// against the app name and browser site key). Empty = feature off.
     pub distraction_patterns: Vec<String>,
+    /// Repo paths polled for branch/commit evidence (`~` expanded).
+    /// Empty = git capture off.
+    pub git_repos: Vec<String>,
+    /// Full-match-anywhere regex extracting a ticket key from branch names,
+    /// used to anchor derived tasks (`tasks.external_ref`).
+    pub ticket_regex: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +85,8 @@ impl Default for Config {
             excluded_apps: Vec::new(),
             excluded_titles: Vec::new(),
             distraction_patterns: Vec::new(),
+            git_repos: Vec::new(),
+            ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             model_path: None,
             mcp_config: None,
         }

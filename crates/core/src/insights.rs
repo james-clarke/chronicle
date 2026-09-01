@@ -35,11 +35,7 @@ pub fn sessions_from_tasks(tasks: &[Task], lo: i64, hi: i64) -> Vec<Session> {
         }
         // Rows arrive ordered by interval start, so the latest session of
         // this task is the merge candidate.
-        match sessions
-            .iter_mut()
-            .rev()
-            .find(|sess| sess.task_id == t.id)
-        {
+        match sessions.iter_mut().rev().find(|sess| sess.task_id == t.id) {
             Some(sess) if s - sess.end_ms <= SESSION_GAP_MS && s >= sess.start_ms => {
                 sess.end_ms = sess.end_ms.max(e);
             }
@@ -146,9 +142,9 @@ pub fn distraction_ms(spans: &[SpanDraft], patterns: &[regex::Regex], lo: i64, h
             continue;
         }
         let site = s.url.as_deref().map(crate::digest::site_key);
-        let hit = patterns.iter().any(|p| {
-            p.is_match(&s.app) || site.as_deref().is_some_and(|k| p.is_match(k))
-        });
+        let hit = patterns
+            .iter()
+            .any(|p| p.is_match(&s.app) || site.as_deref().is_some_and(|k| p.is_match(k)));
         if hit {
             total += ms;
         }
@@ -279,6 +275,7 @@ mod tests {
             end_ts: crate::types::ms_to_ts(end_min * 60_000),
             confidence: 1.0,
             declared: false,
+            external_ref: None,
             description: None,
         }
     }

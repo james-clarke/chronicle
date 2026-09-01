@@ -6,7 +6,7 @@ use std::fmt::Write;
 use jiff::tz::TimeZone;
 
 use crate::sessionizer::{SpanDraft, SpanKind};
-use crate::types::{Correction, OpenTask};
+use crate::types::{Correction, OpenTask, VcsEvent, VcsKind};
 
 pub const MAX_TOKENS: usize = 3000;
 
@@ -20,6 +20,7 @@ pub fn build_digest(
     tz: &TimeZone,
     open_tasks: &[OpenTask],
     corrections: &[Correction],
+    vcs: &[VcsEvent],
     mcp_context: Option<&str>,
 ) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
@@ -28,6 +29,7 @@ pub fn build_digest(
             tz,
             open_tasks,
             corrections,
+            vcs,
             mcp_context,
             apps_cap,
             title_chars,
@@ -36,7 +38,7 @@ pub fn build_digest(
             return out;
         }
     }
-    let mut out = render(spans, tz, open_tasks, corrections, mcp_context, 3, 24);
+    let mut out = render(spans, tz, open_tasks, corrections, vcs, mcp_context, 3, 24);
     let mut cut = (MAX_TOKENS * 4).min(out.len());
     while !out.is_char_boundary(cut) {
         cut -= 1;
@@ -45,11 +47,13 @@ pub fn build_digest(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     spans: &[SpanDraft],
     tz: &TimeZone,
     open_tasks: &[OpenTask],
     corrections: &[Correction],
+    vcs: &[VcsEvent],
     mcp_context: Option<&str>,
     apps_cap: usize,
     title_chars: usize,
@@ -123,6 +127,38 @@ fn render(
         let _ = writeln!(out, "\n## Sites by time");
         for (site, ms) in &sites {
             let _ = writeln!(out, "- {site}: {}", fmt_dur(*ms));
+        }
+    }
+
+    // Branch names and commit subjects are the strongest task-identity signal
+    // in the window. Last 10 inside it; omitted when empty so git-less
+    // digests (and their goldens) are unchanged.
+    let win_lo = first.start.as_millisecond();
+    let win_hi = last.end.as_millisecond();
+    let in_window: Vec<&VcsEvent> = vcs
+        .iter()
+        .filter(|v| {
+            let ms = v.ts.as_millisecond();
+            ms >= win_lo && ms < win_hi
+        })
+        .collect();
+    if !in_window.is_empty() {
+        let _ = writeln!(out, "\n## Git activity");
+        let skip = in_window.len().saturating_sub(10);
+        for v in &in_window[skip..] {
+            let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
+            match v.kind {
+                VcsKind::Checkout => {
+                    let _ = writeln!(out, "- {hm} checkout {} \u{2192} {}", v.repo, v.branch);
+                }
+                VcsKind::Commit => {
+                    let _ = write!(out, "- {hm} commit {}", v.repo);
+                    if let Some(s) = &v.summary {
+                        let _ = write!(out, " \"{}\"", clip(s, title_chars));
+                    }
+                    let _ = writeln!(out, " [{}]", v.branch);
+                }
+            }
         }
     }
 

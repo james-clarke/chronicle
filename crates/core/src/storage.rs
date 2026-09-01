@@ -7,8 +7,8 @@ use rusqlite_migration::{M, Migrations};
 
 use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
 use crate::types::{
-    CaptureEvent, Correction, Event, FocusEvent, NewInterval, OpenTask, Task, TaskSlot, ms_to_ts,
-    ts_to_ms,
+    CaptureEvent, Correction, Event, FocusEvent, NewInterval, OpenTask, Task, TaskSlot, VcsEvent,
+    VcsKind, ms_to_ts, ts_to_ms,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +29,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/004_task_identity.sql")),
         M::up(include_str!("../migrations/005_chat_conversations.sql")),
         M::up(include_str!("../migrations/006_task_descriptions.sql")),
+        M::up(include_str!("../migrations/007_vcs_events.sql")),
     ])
 });
 
@@ -69,7 +70,104 @@ pub fn insert_event(conn: &Connection, event: &CaptureEvent) -> Result<(), Stora
             )?;
             Ok(())
         }
+        CaptureEvent::Vcs(e) => insert_vcs_event(conn, e),
     }
+}
+
+/// A checkout matching the repo's latest stored checkout is dropped: the
+/// poller re-announces its state on daemon start, and replays must not stack
+/// duplicate branch markers.
+pub fn insert_vcs_event(conn: &Connection, e: &VcsEvent) -> Result<(), StorageError> {
+    if e.kind == VcsKind::Checkout {
+        use rusqlite::OptionalExtension;
+        let last: Option<String> = conn
+            .query_row(
+                "SELECT branch FROM vcs_events WHERE repo=?1 AND kind='checkout'
+                 ORDER BY ts DESC, id DESC LIMIT 1",
+                params![e.repo],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if last.as_deref() == Some(e.branch.as_str()) {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "INSERT INTO vcs_events (ts, repo, branch, kind, commit_id, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            ts_to_ms(e.ts),
+            e.repo,
+            e.branch,
+            e.kind.as_str(),
+            e.commit_id,
+            e.summary
+        ],
+    )?;
+    Ok(())
+}
+
+fn vcs_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VcsEvent> {
+    let kind: String = r.get(3)?;
+    Ok(VcsEvent {
+        ts: ms_to_ts(r.get(0)?),
+        repo: r.get(1)?,
+        branch: r.get(2)?,
+        kind: if kind == "commit" {
+            VcsKind::Commit
+        } else {
+            VcsKind::Checkout
+        },
+        commit_id: r.get(4)?,
+        summary: r.get(5)?,
+    })
+}
+
+const VCS_COLS: &str = "ts, repo, branch, kind, commit_id, summary";
+
+pub fn vcs_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<VcsEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {VCS_COLS} FROM vcs_events WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id"
+    ))?;
+    let rows = stmt.query_map([lo, hi], vcs_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Latest checkout per repo strictly before `lo` — the branch state a window
+/// opens under, for repos with no checkout inside it.
+pub fn branch_state_before(conn: &Connection, lo: i64) -> Result<Vec<VcsEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {VCS_COLS} FROM vcs_events
+         WHERE kind='checkout' AND ts < ?1
+           AND id IN (SELECT MAX(id) FROM vcs_events
+                      WHERE kind='checkout' AND ts < ?1 GROUP BY repo)"
+    ))?;
+    let rows = stmt.query_map([lo], vcs_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Commits whose ts falls inside any of the task's intervals, oldest first.
+pub fn commits_for_task(conn: &Connection, task_id: i64) -> Result<Vec<VcsEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT {VCS_COLS} FROM vcs_events v
+         JOIN intervals i ON i.task_id=?1 AND v.ts >= i.start_ts AND v.ts < i.end_ts
+         WHERE v.kind='commit' ORDER BY v.ts"
+    ))?;
+    let rows = stmt.query_map([task_id], vcs_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Anchoring never overwrites: first ref wins, user edits win over both.
+pub fn set_task_external_ref(
+    conn: &Connection,
+    task_id: i64,
+    external_ref: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE tasks SET external_ref=?2 WHERE id=?1 AND external_ref IS NULL",
+        params![task_id, external_ref],
+    )?;
+    Ok(())
 }
 
 fn insert_focus(conn: &Connection, kind: &str, e: &FocusEvent) -> Result<(), StorageError> {
@@ -387,8 +485,9 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
 /// requires it), user-declared tasks are never pruned, and a batch survives
 /// while spans or intervals still reference it.
 pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
-    const STMTS: [&str; 9] = [
+    const STMTS: [&str; 10] = [
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
+        "DELETE FROM vcs_events WHERE id IN (SELECT id FROM vcs_events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
         "DELETE FROM intervals WHERE id IN (SELECT id FROM intervals WHERE end_ts < ?1 \
          AND id NOT IN (SELECT interval_id FROM corrections WHERE interval_id IS NOT NULL) \
@@ -620,13 +719,14 @@ const DELETE_ORPHAN_TASKS: &str = "DELETE FROM tasks WHERE source='derived' \
 /// Replace the batch's derived intervals and mark it done. `New` slots become
 /// task identity rows (created_ts = their earliest interval); derived tasks
 /// orphaned by the replace are removed. Replacing keeps a retried batch
-/// idempotent.
+/// idempotent. Returns the stored intervals as `(task_id, start_ms, end_ms)`
+/// for the caller's anchoring pass.
 pub fn store_derivation(
     conn: &mut Connection,
     batch_id: i64,
     slots: &[TaskSlot],
     intervals: &[NewInterval],
-) -> Result<(), StorageError> {
+) -> Result<Vec<(i64, i64, i64)>, StorageError> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM intervals WHERE batch_id=?1", [batch_id])?;
     let mut ids: Vec<Option<i64>> = Vec::with_capacity(slots.len());
@@ -653,6 +753,7 @@ pub fn store_derivation(
             }
         }
     }
+    let mut stored = Vec::with_capacity(intervals.len());
     for iv in intervals {
         let Some(Some(task_id)) = ids.get(iv.slot) else {
             continue;
@@ -668,11 +769,12 @@ pub fn store_derivation(
                 iv.confidence
             ],
         )?;
+        stored.push((*task_id, ts_to_ms(iv.start_ts), ts_to_ms(iv.end_ts)));
     }
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.execute("UPDATE batches SET status='done' WHERE id=?1", [batch_id])?;
     tx.commit()?;
-    Ok(())
+    Ok(stored)
 }
 
 /// Focus spans overlapping any of the task's intervals, as "app title" lines.
@@ -960,11 +1062,12 @@ fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         confidence: r.get(6)?,
         declared: r.get(7)?,
         description: r.get(8)?,
+        external_ref: r.get(9)?,
     })
 }
 
 const TASK_COLS: &str = "t.id, i.id, t.label, t.project, i.start_ts, i.end_ts, i.confidence, \
-     t.source='user', t.description";
+     t.source='user', t.description, t.external_ref";
 
 pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, StorageError> {
     let mut stmt = conn.prepare(&format!(
@@ -1272,9 +1375,7 @@ mod tests {
         super::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn.execute_batch("PRAGMA foreign_key_check").unwrap();
         let desc: Option<String> = conn
-            .query_row("SELECT description FROM tasks WHERE id=1", [], |r| {
-                r.get(0)
-            })
+            .query_row("SELECT description FROM tasks WHERE id=1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(desc, None);
         for table in ["ai_jobs", "narratives"] {
@@ -1305,7 +1406,10 @@ mod tests {
         assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(high));
 
         let job = super::claim_ai_job(&conn, high).unwrap().unwrap();
-        assert_eq!((job.kind.as_str(), job.payload.as_str()), ("suggest_task", "{}"));
+        assert_eq!(
+            (job.kind.as_str(), job.payload.as_str()),
+            ("suggest_task", "{}")
+        );
         // Running jobs are not eligible; a re-claim returns None.
         assert!(super::claim_ai_job(&conn, high).unwrap().is_none());
         assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(low));

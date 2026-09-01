@@ -93,6 +93,7 @@ fn day1_digest_golden() {
         &TimeZone::UTC,
         &[],
         &[],
+        &[],
         None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
@@ -127,6 +128,7 @@ fn day2_web_per_site_spans() {
         &TimeZone::UTC,
         &[],
         &[],
+        &[],
         None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
@@ -145,7 +147,7 @@ fn eval_digest(fixture: &str) -> String {
     let stream_end = events.last().expect("fixture has events").ts;
     let spans = sessionize(&events, stream_end, &config);
     check_golden(&format!("{fixture}.spans.golden"), &render_spans(&spans));
-    build_digest(&spans, &TimeZone::UTC, &[], &[], None)
+    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], None)
 }
 
 #[test]
@@ -273,8 +275,8 @@ fn correction_changes_next_digest() {
     );
     assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
 
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], None);
-    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, &[], None);
     assert_ne!(plain, with, "correction must change the digest");
     check_golden("day1.corrections.digest.golden", &with);
 }
@@ -571,13 +573,13 @@ fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
     let ctx = "### jira.search\nCHR-42 fix AFK split";
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], Some(ctx));
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], Some(ctx));
     assert_eq!(with, format!("{plain}\n## Workspace context\n{ctx}\n"));
     // Blank context must not add the section (goldens stay MCP-free).
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], Some("  \n")),
+        build_digest(current, &TimeZone::UTC, &[], &[], &[], Some("  \n")),
         plain
     );
 }
@@ -628,4 +630,129 @@ fn chat_context_includes_project_totals() {
         ctx.contains("## Totals by project") && ctx.contains("- chronicle: 1h30m"),
         "missing totals section:\n{ctx}"
     );
+}
+
+#[test]
+fn digest_git_activity_section() {
+    use chronicle_core::types::{VcsEvent, VcsKind, ms_to_ts, ts_to_ms};
+
+    let (spans, config) = day1();
+    let batches = assign_batches(&spans, &config);
+    let current = &spans[batches[0].spans.clone()];
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
+    let t0 = ts_to_ms(current.first().unwrap().start);
+    let vcs = [
+        VcsEvent {
+            ts: ms_to_ts(t0 + 60_000),
+            repo: "app".into(),
+            branch: "ABC-123-sending-plans".into(),
+            kind: VcsKind::Checkout,
+            commit_id: None,
+            summary: None,
+        },
+        VcsEvent {
+            ts: ms_to_ts(t0 + 120_000),
+            repo: "app".into(),
+            branch: "ABC-123-sending-plans".into(),
+            kind: VcsKind::Commit,
+            commit_id: Some("abc123".into()),
+            summary: Some("feat: plan model".into()),
+        },
+    ];
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &vcs, None);
+    assert!(with.contains("## Git activity"), "digest: {with}");
+    assert!(
+        with.contains("checkout app \u{2192} ABC-123-sending-plans"),
+        "digest: {with}"
+    );
+    assert!(
+        with.contains("commit app \"feat: plan model\" [ABC-123-sending-plans]"),
+        "digest: {with}"
+    );
+    // Out-of-window events must not add the section (goldens stay git-free).
+    let outside = [VcsEvent {
+        ts: ms_to_ts(t0 - 3_600_000),
+        ..vcs[0].clone()
+    }];
+    assert_eq!(
+        build_digest(current, &TimeZone::UTC, &[], &[], &outside, None),
+        plain
+    );
+}
+
+#[test]
+fn vcs_events_store_dedupe_and_anchor_guard() {
+    use chronicle_core::storage;
+    use chronicle_core::types::{NewInterval, TaskSlot, VcsEvent, VcsKind, ms_to_ts};
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m15_vcs.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+
+    let checkout = |ts: i64, branch: &str| VcsEvent {
+        ts: ms_to_ts(ts),
+        repo: "app".into(),
+        branch: branch.into(),
+        kind: VcsKind::Checkout,
+        commit_id: None,
+        summary: None,
+    };
+    storage::insert_vcs_event(&conn, &checkout(1_000, "main")).unwrap();
+    // Re-announced state on daemon restart must not stack a duplicate.
+    storage::insert_vcs_event(&conn, &checkout(2_000, "main")).unwrap();
+    storage::insert_vcs_event(&conn, &checkout(3_000, "ABC-1-x")).unwrap();
+    let commit = VcsEvent {
+        ts: ms_to_ts(4_000),
+        repo: "app".into(),
+        branch: "ABC-1-x".into(),
+        kind: VcsKind::Commit,
+        commit_id: Some("abc".into()),
+        summary: Some("feat: x".into()),
+    };
+    storage::insert_vcs_event(&conn, &commit).unwrap();
+    let all = storage::vcs_in_range(&conn, 0, 10_000).unwrap();
+    assert_eq!(all.len(), 3, "duplicate checkout must be dropped");
+
+    // Branch state strictly before a window: latest checkout per repo.
+    let prior = storage::branch_state_before(&conn, 3_500).unwrap();
+    assert_eq!(prior.len(), 1);
+    assert_eq!(prior[0].branch, "ABC-1-x");
+
+    // Anchor guard: first ref wins, no overwrite.
+    let slots = [TaskSlot::New {
+        label: "work".into(),
+        project: None,
+    }];
+    let intervals = [NewInterval {
+        slot: 0,
+        start_ts: ms_to_ts(3_000),
+        end_ts: ms_to_ts(5_000),
+        confidence: 0.9,
+    }];
+    conn.execute(
+        "INSERT INTO batches (start_ts, end_ts, status) VALUES (3000, 5000, 'running')",
+        [],
+    )
+    .unwrap();
+    let batch_id = conn.last_insert_rowid();
+    let stored = storage::store_derivation(&mut conn, batch_id, &slots, &intervals).unwrap();
+    assert_eq!(stored.len(), 1);
+    let task_id = stored[0].0;
+    storage::set_task_external_ref(&conn, task_id, "ABC-1").unwrap();
+    storage::set_task_external_ref(&conn, task_id, "XYZ-9").unwrap();
+    let got: String = conn
+        .query_row(
+            "SELECT external_ref FROM tasks WHERE id=?1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(got, "ABC-1", "first ref wins, no overwrite");
+
+    // Commits inside the task's intervals surface as evidence.
+    let commits = storage::commits_for_task(&conn, task_id).unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].summary.as_deref(), Some("feat: x"));
 }

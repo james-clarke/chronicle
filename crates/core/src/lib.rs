@@ -1,3 +1,4 @@
+pub mod anchor;
 pub mod chat;
 pub mod config;
 pub mod digest;
