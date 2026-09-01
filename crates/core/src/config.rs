@@ -41,6 +41,9 @@ pub struct Config {
     /// Regexes; matching apps/titles are never stored at all.
     pub excluded_apps: Vec<String>,
     pub excluded_titles: Vec<String>,
+    /// Regexes marking apps/sites as distractions in insights (matched
+    /// against the app name and browser site key). Empty = feature off.
+    pub distraction_patterns: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,6 +78,7 @@ impl Default for Config {
             .to_vec(),
             excluded_apps: Vec::new(),
             excluded_titles: Vec::new(),
+            distraction_patterns: Vec::new(),
             model_path: None,
             mcp_config: None,
         }

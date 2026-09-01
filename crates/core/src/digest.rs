@@ -249,7 +249,7 @@ fn render(
 }
 
 /// `https://docs.rs/axum/latest/` → `docs.rs/axum`.
-fn site_key(url: &str) -> String {
+pub(crate) fn site_key(url: &str) -> String {
     let host = crate::sessionizer::domain(url);
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let path = rest.split_once('/').map_or("", |(_, p)| p);
