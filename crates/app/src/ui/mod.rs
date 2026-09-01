@@ -1252,6 +1252,11 @@ impl eframe::App for TimelineApp {
             hide(self);
         }
         if ctx.input(|i| i.viewport().close_requested()) {
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                // Standalone run (no daemon stdin pipe): a hidden window
+                // could never be re-toggled, so close really quits.
+                return;
+            }
             // CancelClose must be queued the same frame as the close event.
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             hide(self);
@@ -1314,6 +1319,16 @@ impl eframe::App for TimelineApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    // Routes through the close_requested
+                                    // handler: daemon child hides (reopen via
+                                    // `chronicle toggle`), standalone quits.
+                                    if ui
+                                        .button("\u{d7}")
+                                        .on_hover_text("close (reopen: chronicle toggle)")
+                                        .clicked()
+                                    {
+                                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
                                     // Widget width: actions fold into one menu.
                                     ui.menu_button("\u{2026}", |ui| {
                                         if matches!(self.view, View::Timeline | View::Home) {
