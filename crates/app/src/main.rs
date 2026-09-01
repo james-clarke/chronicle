@@ -624,7 +624,7 @@ fn run_ai_job(
                 bail!("no span evidence for task {task_id}");
             }
             let desc = describer.describe_task(&label, project.as_deref(), &evidence)?;
-            storage::set_task_description(conn, task_id, &desc)?;
+            storage::set_task_description(conn, task_id, Some(&desc))?;
             Ok(desc)
         }
         "suggest_task" => {
@@ -721,7 +721,7 @@ fn backfill_descriptions(data_dir: &Path, limit: usize) -> anyhow::Result<()> {
         }
         match describer.describe_task(&t.label, t.project.as_deref(), &evidence) {
             Ok(desc) => {
-                storage::set_task_description(&conn, t.id, &desc)?;
+                storage::set_task_description(&conn, t.id, Some(&desc))?;
                 done += 1;
             }
             Err(e) => {

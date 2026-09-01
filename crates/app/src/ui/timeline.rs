@@ -537,6 +537,12 @@ fn detail_ui(
         }
     });
     theme::ai_summary_line(ui, group.ai_summary.as_deref(), true);
+    if group.ai_pending {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.weak("writing description\u{2026}");
+        });
+    }
     let n = group.sessions.len();
     ui.weak(format!(
         "{} across {n} session{}",
@@ -544,14 +550,24 @@ fn detail_ui(
         if n == 1 { "" } else { "s" }
     ));
     if edit.as_ref().is_some_and(|e| e.task_id == group.task_id) {
-        ui.horizontal(|ui| {
+        {
             let e = edit.as_mut().expect("checked above");
-            ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(160.0));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(160.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut e.project)
+                        .desired_width(80.0)
+                        .hint_text("project"),
+                );
+            });
             ui.add(
-                egui::TextEdit::singleline(&mut e.project)
-                    .desired_width(80.0)
-                    .hint_text("project"),
+                egui::TextEdit::multiline(&mut e.description)
+                    .desired_rows(2)
+                    .desired_width(ui.available_width())
+                    .hint_text("description"),
             );
+        }
+        ui.horizontal(|ui| {
             if ui.button("save").clicked()
                 && let Some(e) = edit.take()
             {
@@ -665,6 +681,7 @@ fn detail_actions(
                 task_id: group.task_id,
                 label: group.label.clone(),
                 project: group.project.clone().unwrap_or_default(),
+                description: group.ai_summary.clone().unwrap_or_default(),
             });
         }
         merge_menu(ui, group.task_id, candidates, pending);
@@ -716,6 +733,7 @@ fn card_menu(
                 task_id: group.task_id,
                 label: group.label.clone(),
                 project: group.project.clone().unwrap_or_default(),
+                description: group.ai_summary.clone().unwrap_or_default(),
             });
             ui.close();
         }

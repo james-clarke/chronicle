@@ -1,12 +1,17 @@
-//! Reports view: stacked per-day chart plus per-task week totals.
+//! Reports view: stacked per-day chart, insight strip, AI narrative, and
+//! per-task week totals.
 
 use eframe::egui;
 use jiff::Zoned;
 
-use super::{TimelineApp, fmt_dur, theme};
+use super::{Action, TimelineApp, WeekInsights, fmt_dur, theme};
 
 impl TimelineApp {
     pub(super) fn reports_ui(&mut self, ui: &mut egui::Ui) {
+        let mut pending: Option<Action> = None;
+        let week_insights = &self.week_insights;
+        let narrative_busy = self.narrative_job.is_some();
+        let model_missing = self.model_missing;
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
@@ -35,6 +40,12 @@ impl TimelineApp {
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     week_chart(ui, r, &today);
+                    if let Some(wi) = week_insights {
+                        ui.add_space(10.0);
+                        narrative_ui(ui, wi, narrative_busy, model_missing, &mut pending);
+                        ui.add_space(10.0);
+                        insights_strip(ui, wi);
+                    }
                     ui.add_space(14.0);
                     theme::section_header(ui, "Tasks", Some(r.tasks.len()));
                     ui.add_space(4.0);
@@ -93,6 +104,115 @@ impl TimelineApp {
                         });
                 });
         });
+        if let Some(action) = pending {
+            self.apply_action(action);
+        }
+    }
+}
+
+/// AI week summary: cached text, a spinner while a job runs, or the
+/// generate/update button. Explicit trigger only — never auto-queued.
+fn narrative_ui(
+    ui: &mut egui::Ui,
+    wi: &WeekInsights,
+    busy: bool,
+    model_missing: bool,
+    pending: &mut Option<Action>,
+) {
+    if let Some(text) = &wi.narrative {
+        egui::Frame::new()
+            .fill(theme::palette::SURFACE)
+            .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(text)
+                            .text_style(egui::TextStyle::Small)
+                            .italics()
+                            .color(theme::palette::TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+            });
+        return;
+    }
+    if busy {
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.weak("writing summary\u{2026}");
+        });
+        return;
+    }
+    if !model_missing {
+        let label = if wi.narrative_stale {
+            "update summary"
+        } else {
+            "generate summary"
+        };
+        if ui.small_button(label).clicked() {
+            *pending = Some(Action::GenerateNarrative);
+        }
+    }
+}
+
+/// 2×2 focus-quality stats plus a top-apps line.
+fn insights_strip(ui: &mut egui::Ui, wi: &WeekInsights) {
+    let stat = |ui: &mut egui::Ui, value: String, label: &str| {
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(value)
+                    .size(15.0)
+                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .color(theme::palette::TEXT),
+            );
+            ui.label(
+                egui::RichText::new(label)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+            );
+        });
+    };
+    let m = &wi.metrics;
+    let delta_text = wi
+        .delta
+        .as_ref()
+        .map(|d| {
+            let sign = if d.grand_total_delta_ms >= 0 { "+" } else { "-" };
+            format!("{sign}{}", fmt_dur(d.grand_total_delta_ms.abs()))
+        })
+        .unwrap_or_else(|| "\u{b7}".into());
+    let half = (ui.available_width() - 8.0) / 2.0;
+    egui::Grid::new("focus_stats")
+        .num_columns(2)
+        .striped(false)
+        .min_col_width(half)
+        .spacing([8.0, 8.0])
+        .show(ui, |ui| {
+            stat(ui, fmt_dur(m.longest_block_ms), "longest focus block");
+            stat(ui, fmt_dur(m.deep_work_ms), "deep work (25m+ blocks)");
+            ui.end_row();
+            stat(ui, m.switch_count.to_string(), "task switches");
+            stat(ui, delta_text, "vs prior week");
+            ui.end_row();
+        });
+    if !wi.top_apps.is_empty() {
+        ui.add_space(4.0);
+        let line = wi
+            .top_apps
+            .iter()
+            .map(|(app, ms)| format!("{app} {}", fmt_dur(*ms)))
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("top apps: {line}"))
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+            )
+            .truncate(),
+        );
     }
 }
 

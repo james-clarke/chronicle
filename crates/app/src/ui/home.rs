@@ -49,6 +49,8 @@ impl TimelineApp {
             let spans = &self.spans;
             let new_label = &mut self.new_label;
             let new_project = &mut self.new_project;
+            let suggestion = &self.suggestion;
+            let model_missing = self.model_missing;
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
@@ -101,6 +103,80 @@ impl TimelineApp {
                                 ui.end_row();
                             }
                         });
+                    // AI declare-suggestion: button → spinner → dismissible
+                    // chip whose "use" pre-fills the declare inputs.
+                    if !model_missing {
+                        ui.add_space(4.0);
+                        match suggestion {
+                            None => {
+                                if ui
+                                    .small_button("suggest")
+                                    .on_hover_text("suggest a task from the last 15 minutes")
+                                    .clicked()
+                                {
+                                    pending = Some(Action::SuggestTask);
+                                }
+                            }
+                            Some(super::SuggestionState::Pending(_)) => {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new().size(12.0));
+                                    ui.weak("reading the last 15 minutes\u{2026}");
+                                });
+                            }
+                            Some(super::SuggestionState::Failed(msg)) => {
+                                ui.horizontal(|ui| {
+                                    ui.weak(msg.as_str());
+                                    if ui.small_button("\u{d7}").clicked() {
+                                        pending = Some(Action::DismissSuggestion);
+                                    }
+                                });
+                            }
+                            Some(super::SuggestionState::Ready(s)) => {
+                                egui::Frame::new()
+                                    .fill(theme::palette::ACCENT.gamma_multiply(0.10))
+                                    .stroke(egui::Stroke::new(
+                                        1.0,
+                                        theme::palette::ACCENT.gamma_multiply(0.35),
+                                    ))
+                                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                                    .inner_margin(egui::Margin::same(8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&s.label)
+                                                        .color(theme::palette::TEXT),
+                                                )
+                                                .truncate(),
+                                            );
+                                            if let Some(p) = &s.project {
+                                                theme::badge(ui, p, theme::palette::ACCENT);
+                                            }
+                                        });
+                                        if let Some(d) = &s.description {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(d)
+                                                        .text_style(egui::TextStyle::Small)
+                                                        .color(theme::palette::TEXT_DIM),
+                                                )
+                                                .wrap(),
+                                            );
+                                        }
+                                        ui.horizontal(|ui| {
+                                            if ui.small_button("use").clicked() {
+                                                pending = Some(Action::UseSuggestion);
+                                            }
+                                            if ui.small_button("dismiss").clicked() {
+                                                pending = Some(Action::DismissSuggestion);
+                                            }
+                                        });
+                                    });
+                            }
+                        }
+                    }
+
                     if !closed_vis.is_empty() {
                         ui.add_space(4.0);
                         let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };

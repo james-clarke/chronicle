@@ -132,9 +132,11 @@ struct TaskGroup {
     evidence: Vec<EvidenceApp>,
     /// Sum of interval durations clamped to the shown day.
     total_ms: i64,
-    /// AI-written 1-2 sentence summary; layout placeholder until the
-    /// description pipeline (phase 2) populates it from `tasks.description`.
+    /// 1-2 sentence summary from `tasks.description` (AI-written on close,
+    /// user-editable).
     ai_summary: Option<String>,
+    /// A description job for this task is queued or running.
+    ai_pending: bool,
 }
 
 struct IntervalRow {
@@ -178,6 +180,7 @@ struct EditState {
     task_id: i64,
     label: String,
     project: String,
+    description: String,
 }
 
 /// Deferred mutation collected during rendering, applied after the frame's
@@ -196,6 +199,32 @@ enum Action {
         to_task: i64,
     },
     Reopen(i64),
+    /// Queue an interactive declare-suggestion job.
+    SuggestTask,
+    /// Copy the ready suggestion into the declare inputs.
+    UseSuggestion,
+    DismissSuggestion,
+    /// Queue (or re-queue) the week-narrative job for the shown report.
+    GenerateNarrative,
+}
+
+/// Declare-suggestion lifecycle (home view chip).
+enum SuggestionState {
+    Pending(i64),
+    Ready(chronicle_core::types::SuggestedTask),
+    Failed(String),
+}
+
+/// Week-level insight aggregates computed alongside the report.
+struct WeekInsights {
+    range: (i64, i64),
+    metrics: chronicle_core::insights::FocusMetrics,
+    top_apps: Vec<(String, i64)>,
+    delta: Option<chronicle_core::insights::Delta>,
+    /// Cached narrative whose hash matches the current report.
+    narrative: Option<String>,
+    /// A cached narrative exists but the data moved on.
+    narrative_stale: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -217,6 +246,14 @@ struct TimelineApp {
     /// Monday of the week the Reports view shows.
     week_anchor: civil::Date,
     report: Option<chronicle_core::report::RangeReport>,
+    /// Insight strip + narrative state for the shown report week.
+    week_insights: Option<WeekInsights>,
+    /// In-flight narrative job for the shown week.
+    narrative_job: Option<i64>,
+    /// Declare-suggestion chip state (home view).
+    suggestion: Option<SuggestionState>,
+    /// Suggestion description carried into the next Declare.
+    pending_declare_description: Option<String>,
     spans: Vec<SpanRow>,
     groups: Vec<TaskGroup>,
     open_tasks: Vec<OpenRow>,
@@ -294,6 +331,10 @@ impl TimelineApp {
             },
             week_anchor: chronicle_core::timeref::week_start(day).unwrap_or(day),
             report: None,
+            week_insights: None,
+            narrative_job: None,
+            suggestion: None,
+            pending_declare_description: None,
             spans: Vec::new(),
             groups: Vec::new(),
             open_tasks: Vec::new(),
@@ -374,9 +415,13 @@ impl TimelineApp {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+        self.poll_ai_jobs();
         if self.view == View::Reports {
             match self.load_report() {
-                Ok(r) => self.report = Some(r),
+                Ok(r) => {
+                    self.week_insights = self.load_week_insights(&r).ok();
+                    self.report = Some(r);
+                }
                 Err(e) => self.error = Some(e.to_string()),
             }
         }
@@ -403,6 +448,93 @@ impl TimelineApp {
                     .flatten()
                     .is_some();
         }
+    }
+
+    /// Advance in-flight AI job state (suggestion chip, narrative spinner).
+    fn poll_ai_jobs(&mut self) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        if let Some(SuggestionState::Pending(job)) = self.suggestion {
+            match chronicle_core::storage::ai_job_status(conn, job) {
+                Ok(Some((status, result))) => match status.as_str() {
+                    "done" => {
+                        self.suggestion = result
+                            .as_deref()
+                            .and_then(|r| serde_json::from_str(r).ok())
+                            .map(SuggestionState::Ready)
+                            .or(Some(SuggestionState::Failed("bad suggestion".into())));
+                    }
+                    "failed" => {
+                        self.suggestion =
+                            Some(SuggestionState::Failed("no suggestion (see logs)".into()));
+                    }
+                    _ => {}
+                },
+                _ => self.suggestion = None,
+            }
+        }
+        if let Some(job) = self.narrative_job {
+            match chronicle_core::storage::ai_job_status(conn, job) {
+                Ok(Some((status, _))) if status == "done" || status == "failed" => {
+                    // The narrative (or its absence) is picked up by the next
+                    // load_week_insights pass below.
+                    self.narrative_job = None;
+                }
+                Ok(Some(_)) => {}
+                _ => self.narrative_job = None,
+            }
+        }
+    }
+
+    /// Metrics, top apps, prior-week delta, and cached-narrative state for
+    /// the report being shown.
+    fn load_week_insights(
+        &self,
+        r: &chronicle_core::report::RangeReport,
+    ) -> anyhow::Result<WeekInsights> {
+        use chronicle_core::{insights, storage};
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        let lo = r.days[0]
+            .to_zoned(self.tz.clone())?
+            .timestamp()
+            .as_millisecond();
+        let hi = r.days[r.days.len() - 1]
+            .to_zoned(self.tz.clone())?
+            .checked_add(1.day())?
+            .timestamp()
+            .as_millisecond();
+        let tasks = storage::tasks_in_range(conn, lo, hi)?;
+        let sessions = insights::sessions_from_tasks(&tasks, lo, hi);
+        let metrics = insights::focus_metrics(&sessions, &self.tz);
+        let spans = storage::spans_in_range(conn, lo, hi)?;
+        let top_apps = insights::top_apps(&spans, lo, hi, 3);
+        let delta = insights::prior_period(&r.days).and_then(|pd| {
+            let plo = pd
+                .first()?
+                .to_zoned(self.tz.clone())
+                .ok()?
+                .timestamp()
+                .as_millisecond();
+            let ptasks = storage::tasks_in_range(conn, plo, lo).ok()?;
+            let pr = chronicle_core::report::build(&ptasks, pd, &self.tz).ok()?;
+            (pr.grand_total_ms > 0).then(|| insights::delta(r, &pr))
+        });
+        let hash = insights::report_data_hash(r);
+        let cached = storage::get_narrative(conn, lo, hi)?;
+        let (narrative, narrative_stale) = match cached {
+            Some((h, text)) if h == hash => (Some(text), false),
+            Some(_) => (None, true),
+            None => (None, false),
+        };
+        Ok(WeekInsights {
+            range: (lo, hi),
+            metrics,
+            top_apps,
+            delta,
+            narrative,
+            narrative_stale,
+        })
     }
 
     fn day_range_ms(&self) -> anyhow::Result<(i64, i64)> {
@@ -460,7 +592,8 @@ impl TimelineApp {
                         sessions: Vec::new(),
                         evidence: Vec::new(),
                         total_ms: 0,
-                        ai_summary: None,
+                        ai_summary: t.description.clone(),
+                        ai_pending: false,
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -507,6 +640,11 @@ impl TimelineApp {
                 apps.sort_by_key(|a| std::cmp::Reverse(a.ms));
                 group.evidence = apps;
             }
+            if group.ai_summary.is_none() {
+                group.ai_pending =
+                    chronicle_core::storage::pending_description_job(conn, group.task_id)
+                        .unwrap_or(false);
+            }
         }
         Ok(groups)
     }
@@ -552,16 +690,36 @@ impl TimelineApp {
                 }
                 let project = edit.project.trim();
                 let project = (!project.is_empty()).then_some(project);
-                // No-op if nothing changed.
-                if self
-                    .groups
-                    .iter()
-                    .find(|g| g.task_id == edit.task_id)
-                    .is_some_and(|g| g.label == label && g.project.as_deref() == project)
-                {
+                let group = self.groups.iter().find(|g| g.task_id == edit.task_id);
+                let identity_changed = group
+                    .is_none_or(|g| g.label != label || g.project.as_deref() != project);
+                // Description edits are separate from the correction few-shot
+                // mechanism: a description-only save records no 'rename'.
+                let desc = edit.description.trim();
+                let desc_changed =
+                    group.is_none_or(|g| g.ai_summary.as_deref().unwrap_or("") != desc);
+                if !identity_changed && !desc_changed {
                     return;
                 }
-                chronicle_core::storage::insert_correction(conn, now, edit.task_id, &label, project)
+                let result = if identity_changed {
+                    chronicle_core::storage::insert_correction(
+                        conn,
+                        now,
+                        edit.task_id,
+                        &label,
+                        project,
+                    )
+                } else {
+                    Ok(())
+                };
+                if result.is_ok() && desc_changed {
+                    let _ = chronicle_core::storage::set_task_description(
+                        conn,
+                        edit.task_id,
+                        (!desc.is_empty()).then_some(desc),
+                    );
+                }
+                result
             }
             Action::Declare => {
                 let label = self.new_label.trim().to_owned();
@@ -570,15 +728,36 @@ impl TimelineApp {
                 }
                 let project = self.new_project.trim();
                 let project = (!project.is_empty()).then_some(project);
-                let result = chronicle_core::storage::insert_user_task(conn, now, &label, project)
-                    .map(|_| ());
-                if result.is_ok() {
+                let result = chronicle_core::storage::insert_user_task(conn, now, &label, project);
+                if let Ok(task_id) = result {
                     self.new_label.clear();
                     self.new_project.clear();
+                    if let Some(desc) = self.pending_declare_description.take() {
+                        let _ = chronicle_core::storage::set_task_description(
+                            conn,
+                            task_id,
+                            Some(&desc),
+                        );
+                    }
                 }
-                result
+                result.map(|_| ())
             }
-            Action::Close(task_id) => chronicle_core::storage::close_task(conn, now, task_id),
+            Action::Close(task_id) => {
+                let closed = chronicle_core::storage::close_task(conn, now, task_id);
+                if closed.is_ok() {
+                    // Best-effort: an AI description for the finished task.
+                    // The daemon's scheduler picks it up; the 5s reload shows
+                    // the result when it lands.
+                    let _ = chronicle_core::storage::enqueue_ai_job(
+                        conn,
+                        now,
+                        "task_description",
+                        chronicle_core::storage::AI_JOB_INTERACTIVE,
+                        &chronicle_core::storage::task_description_payload(task_id),
+                    );
+                }
+                closed
+            }
             Action::ReassignSession {
                 interval_ids,
                 to_task,
@@ -587,6 +766,57 @@ impl TimelineApp {
                 chronicle_core::storage::merge_task(conn, now, from_task, to_task)
             }
             Action::Reopen(task_id) => chronicle_core::storage::reopen_task(conn, task_id),
+            Action::SuggestTask => {
+                let result = chronicle_core::storage::enqueue_ai_job(
+                    conn,
+                    now,
+                    "suggest_task",
+                    10,
+                    "{\"lookback_min\":15}",
+                );
+                match result {
+                    Ok(job) => {
+                        self.suggestion = Some(SuggestionState::Pending(job));
+                        // Poke the daemon so the job runs now, not next tick.
+                        let _ = crate::send_ctrl(&self.sock_path, "derive");
+                        return;
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Action::UseSuggestion => {
+                if let Some(SuggestionState::Ready(s)) = self.suggestion.take() {
+                    self.new_label = s.label;
+                    self.new_project = s.project.unwrap_or_default();
+                    self.pending_declare_description = s.description;
+                }
+                return;
+            }
+            Action::DismissSuggestion => {
+                self.suggestion = None;
+                return;
+            }
+            Action::GenerateNarrative => {
+                let Some(wi) = &self.week_insights else {
+                    return;
+                };
+                let (lo, hi) = wi.range;
+                let result = chronicle_core::storage::enqueue_ai_job(
+                    conn,
+                    now,
+                    "narrative",
+                    0,
+                    &format!("{{\"lo\":{lo},\"hi\":{hi}}}"),
+                );
+                match result {
+                    Ok(job) => {
+                        self.narrative_job = Some(job);
+                        let _ = crate::send_ctrl(&self.sock_path, "derive");
+                        return;
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         };
         match result {
             Ok(()) => self.loaded_at = None,

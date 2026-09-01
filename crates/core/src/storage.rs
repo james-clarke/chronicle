@@ -523,10 +523,11 @@ pub fn close_task(
     Ok(())
 }
 
+/// `None` clears the description.
 pub fn set_task_description(
     conn: &Connection,
     task_id: i64,
-    description: &str,
+    description: Option<&str>,
 ) -> Result<(), StorageError> {
     conn.execute(
         "UPDATE tasks SET description=?1 WHERE id=?2",
