@@ -857,10 +857,17 @@ fn run_ai_job(
                 .timestamp()
                 .as_millisecond();
             let rows = storage::standup_digest(conn, lo, hi)?;
-            if rows.is_empty() {
-                bail!("no journal entries on {day} to draft a standup from");
-            }
-            let digest = standup_digest_text(&rows, &tz);
+            let digest = if rows.is_empty() {
+                // Journals only exist once tasks run long enough to batch;
+                // fall back to a plain activity summary so day one still
+                // drafts something.
+                let Some(fallback) = standup_activity_fallback(conn, config, lo, hi)? else {
+                    bail!("no journal entries or task activity on {day} to draft a standup from");
+                };
+                fallback
+            } else {
+                standup_digest_text(&rows, &tz)
+            };
             let text = describer.standup(&digest)?;
             storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
             Ok(text)
@@ -904,6 +911,95 @@ fn standup_digest_text(
         out.push('\n');
     }
     out
+}
+
+/// Journal-free standup digest: per task, the day's focused total and top
+/// apps. `None` when the day holds no task activity. Background-scale tasks
+/// (short, undeclared, unanchored — see `Config::background_minutes`) are
+/// left out unless they are all there is.
+fn standup_activity_fallback(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    lo: i64,
+    hi: i64,
+) -> anyhow::Result<Option<String>> {
+    use chronicle_core::storage;
+    use std::fmt::Write as _;
+    struct Agg {
+        label: String,
+        project: Option<String>,
+        external_ref: Option<String>,
+        declared: bool,
+        total_ms: i64,
+    }
+    let mut order: Vec<i64> = Vec::new();
+    let mut aggs: std::collections::HashMap<i64, Agg> = std::collections::HashMap::new();
+    for t in storage::tasks_in_range(conn, lo, hi)? {
+        let dur = t.end_ts.as_millisecond().min(hi) - t.start_ts.as_millisecond().max(lo);
+        let agg = aggs.entry(t.id).or_insert_with(|| {
+            order.push(t.id);
+            Agg {
+                label: t.label,
+                project: t.project,
+                external_ref: t.external_ref,
+                declared: t.declared,
+                total_ms: 0,
+            }
+        });
+        agg.total_ms += dur.max(0);
+    }
+    if order.is_empty() {
+        return Ok(None);
+    }
+    let background_ms = i64::from(config.background_minutes) * 60_000;
+    let foreground =
+        |a: &Agg| a.declared || a.external_ref.is_some() || a.total_ms >= background_ms;
+    if order.iter().any(|id| foreground(&aggs[id])) {
+        order.retain(|id| foreground(&aggs[id]));
+    }
+    // Top apps per task, largest first (evidence_in_range returns per-title
+    // rows in overlap-descending order; sum per app).
+    let mut apps: std::collections::HashMap<i64, Vec<(String, i64)>> =
+        std::collections::HashMap::new();
+    for row in storage::evidence_in_range(conn, lo, hi)? {
+        let list = apps.entry(row.task_id).or_default();
+        match list.iter_mut().find(|(a, _)| *a == row.app) {
+            Some((_, ms)) => *ms += row.ms,
+            None => list.push((row.app, row.ms)),
+        }
+    }
+    let mut out = String::from(
+        "(No journal entries were written this day; the lines below are focus-time \
+         summaries from activity capture. Only focus durations and app names are \
+         known — say what was worked on and for how long, and do not invent \
+         outcomes, reviews, feedback, or next steps.)\n\n",
+    );
+    for id in &order {
+        let a = &aggs[id];
+        let project = a
+            .project
+            .as_deref()
+            .map(|p| format!(" [{p}]"))
+            .unwrap_or_default();
+        let anchor = a
+            .external_ref
+            .as_deref()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
+        let _ = writeln!(out, "Task: {}{project}{anchor}", a.label);
+        let _ = writeln!(out, "- focused {}", fmt_secs((a.total_ms / 1000) as u64));
+        if let Some(list) = apps.get_mut(id) {
+            list.sort_by_key(|(_, ms)| -*ms);
+            let tops: Vec<String> = list
+                .iter()
+                .take(3)
+                .map(|(app, ms)| format!("{app} {}", fmt_secs((*ms / 1000) as u64)))
+                .collect();
+            let _ = writeln!(out, "- mainly in: {}", tops.join(", "));
+        }
+        out.push('\n');
+    }
+    Ok(Some(out))
 }
 
 /// Local civil dates covering `[lo, hi)` in `tz`.

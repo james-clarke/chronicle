@@ -80,6 +80,7 @@ impl TimelineApp {
             {
                 generate = true;
             }
+            self.standup_error_ui(ui);
             ui.add_space(4.0);
             return generate;
         }
@@ -116,10 +117,25 @@ impl TimelineApp {
                     if !self.model_missing && ui.small_button("redraft").clicked() {
                         generate = true;
                     }
+                    self.standup_error_ui(ui);
                 }
             });
         ui.add_space(8.0);
         generate
+    }
+
+    /// Reason the last standup job failed, if any.
+    fn standup_error_ui(&self, ui: &mut egui::Ui) {
+        if let Some(err) = &self.standup_error {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("couldn't draft: {err}"))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::AMBER),
+                )
+                .wrap(),
+            );
+        }
     }
 
     pub(super) fn home_ui(&mut self, ui: &mut egui::Ui) {

@@ -1,6 +1,7 @@
 //! Tray-popup widget window, run as a `chronicle ui` child process. The daemon
-//! writes "toggle\n" to our stdin to show/hide the window; losing focus or a
-//! close request hides it (the process stays alive for the next toggle).
+//! writes "toggle\n" to our stdin to show/hide the window; a close request
+//! hides it (the process stays alive for the next toggle). The window stays
+//! open on focus loss unless `CHRONICLE_UI_AUTOHIDE=1`.
 
 mod chat;
 mod home;
@@ -54,19 +55,37 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         })
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|z| (0.5..=2.0).contains(z));
+    // Last dragged-to position ("x,y" logical px); restored at boot so the
+    // window comes back where the user left it, re-clamped once the monitor
+    // size is known (see `logic`).
+    let saved_pos = boot_conn
+        .as_ref()
+        .and_then(|c| {
+            chronicle_core::storage::get_meta(c, "ui_window_pos")
+                .ok()
+                .flatten()
+        })
+        .and_then(|s| {
+            let (x, y) = s.split_once(',')?;
+            Some(egui::pos2(x.parse().ok()?, y.parse().ok()?))
+        });
     drop(boot_conn);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Chronicle")
+        .with_inner_size([WIDGET_W, WIDGET_H])
+        // min == max == inner: some X11 WMs ignore resizable(false) but
+        // honor WM_SIZE_HINTS, so pin all three.
+        .with_min_inner_size([WIDGET_W, WIDGET_H])
+        .with_max_inner_size([WIDGET_W, WIDGET_H])
+        .with_resizable(false)
+        .with_decorations(false)
+        .with_always_on_top()
+        .with_window_type(egui::X11WindowType::Utility);
+    if let Some(p) = saved_pos {
+        viewport = viewport.with_position(p);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Chronicle")
-            .with_inner_size([WIDGET_W, WIDGET_H])
-            // min == max == inner: some X11 WMs ignore resizable(false) but
-            // honor WM_SIZE_HINTS, so pin all three.
-            .with_min_inner_size([WIDGET_W, WIDGET_H])
-            .with_max_inner_size([WIDGET_W, WIDGET_H])
-            .with_resizable(false)
-            .with_decorations(false)
-            .with_always_on_top()
-            .with_window_type(egui::X11WindowType::Utility),
+        viewport,
         ..Default::default()
     };
     let sock_path = crate::socket_path(data_dir);
@@ -89,6 +108,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                 sock_path,
                 config_path,
                 visible,
+                saved_pos,
             )))
         }),
     )
@@ -149,6 +169,9 @@ struct TaskGroup {
     journal: Vec<(i64, String, String)>,
     /// Latest "where I am / what's next".
     checkpoint: Option<chronicle_core::storage::Checkpoint>,
+    /// Short, undeclared, unanchored scrap of a task (Wordle-scale); folds
+    /// into the timeline's collapsed background strip.
+    background: bool,
 }
 
 /// One commit shown as task evidence.
@@ -303,6 +326,8 @@ struct TimelineApp {
     show_closed: bool,
     /// Raw spans section expander state (collapsed by default; debug-grade).
     show_spans: bool,
+    /// Timeline's background strip is expanded (session-local).
+    show_background: bool,
     /// Meta flag `ui_show_spans_debug`: raw spans list visible on Home.
     spans_debug: bool,
     /// Case-insensitive substring filter over the day's rows.
@@ -342,10 +367,14 @@ struct TimelineApp {
     /// Focus was observed at least once; hide-on-focus-loss stays disarmed
     /// until then (the WM may map us unfocused, e.g. Openbox).
     was_focused: bool,
-    /// `CHRONICLE_UI_NO_AUTOHIDE` disables hiding (visual-test loop).
+    /// Hide on focus loss (popover behavior). Off by default — the window
+    /// stays open until closed; `CHRONICLE_UI_AUTOHIDE=1` opts back in.
     autohide: bool,
-    /// Top-right corner placement done (needs monitor size, so not at boot).
+    /// Corner/restore placement done (needs monitor size, so not at boot).
     positioned: bool,
+    /// Last persisted window position (meta `ui_window_pos`); written when a
+    /// drag settles, restored at boot.
+    saved_pos: Option<egui::Pos2>,
     /// Pending "chat about task" click, consumed by the chat view.
     chat_task_request: Option<i64>,
     /// Resume card: newest checkpoint written since the previous UI open
@@ -357,6 +386,8 @@ struct TimelineApp {
     standup: Option<StandupRow>,
     /// In-flight standup job queued from the Home card button.
     standup_job: Option<i64>,
+    /// Why the last standup job failed (shown on the card; cleared on retry).
+    standup_error: Option<String>,
 }
 
 /// Home standup card data.
@@ -384,6 +415,7 @@ impl TimelineApp {
         sock_path: PathBuf,
         config_path: PathBuf,
         visible: Arc<AtomicBool>,
+        saved_pos: Option<egui::Pos2>,
     ) -> Self {
         let tz = TimeZone::system();
         let day = Zoned::now().with_time_zone(tz.clone()).date();
@@ -413,6 +445,7 @@ impl TimelineApp {
             closed_tasks: Vec::new(),
             show_closed: false,
             show_spans: false,
+            show_background: false,
             spans_debug: false,
             filter: String::new(),
             new_label: String::new(),
@@ -435,13 +468,15 @@ impl TimelineApp {
             visible,
             started: Instant::now(),
             was_focused: false,
-            autohide: std::env::var_os("CHRONICLE_UI_NO_AUTOHIDE").is_none(),
+            autohide: std::env::var_os("CHRONICLE_UI_AUTOHIDE").is_some(),
             positioned: false,
+            saved_pos,
             chat_task_request: None,
             resume: None,
             resume_checked: false,
             standup: None,
             standup_job: None,
+            standup_error: None,
         }
     }
 
@@ -605,9 +640,11 @@ impl TimelineApp {
         }
         if let Some(job) = self.standup_job {
             match chronicle_core::storage::ai_job_status(conn, job) {
-                Ok(Some((status, _))) if status == "done" || status == "failed" => {
-                    // The draft (or its absence) is re-read from
-                    // standup_drafts on the next load pass.
+                Ok(Some((status, result))) if status == "done" || status == "failed" => {
+                    // The draft itself is re-read from standup_drafts on the
+                    // next load pass; a failure surfaces on the card.
+                    self.standup_error = (status == "failed")
+                        .then(|| result.unwrap_or_else(|| "job failed (see logs)".into()));
                     self.standup_job = None;
                 }
                 Ok(Some(_)) => {}
@@ -729,6 +766,7 @@ impl TimelineApp {
                         context_pending: false,
                         journal: Vec::new(),
                         checkpoint: None,
+                        background: false,
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -815,6 +853,21 @@ impl TimelineApp {
                 .collect();
             group.checkpoint =
                 chronicle_core::storage::get_checkpoint(conn, group.task_id).unwrap_or(None);
+        }
+        // Background classification last: it needs journal/checkpoint state.
+        let background_ms = i64::from(
+            chronicle_core::config::Config::load(&self.config_path)
+                .map(|c| c.background_minutes)
+                .unwrap_or(10),
+        ) * 60_000;
+        if background_ms > 0 {
+            for group in &mut groups {
+                group.background = !group.declared
+                    && group.external_ref.is_none()
+                    && group.journal.is_empty()
+                    && group.checkpoint.is_none()
+                    && group.total_ms < background_ms;
+            }
         }
         Ok(groups)
     }
@@ -1077,6 +1130,7 @@ impl TimelineApp {
                 match result {
                     Ok(job) => {
                         self.standup_job = Some(job);
+                        self.standup_error = None;
                         let _ = crate::send_ctrl(&self.sock_path, "derive");
                         return;
                     }
@@ -1122,10 +1176,22 @@ impl eframe::App for TimelineApp {
     // Runs even while the window is hidden (unlike `ui`), so the stdin toggle
     // can bring the window back after a hide.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Park the widget in the bottom-right corner, above the tray, once
-        // the monitor size is known (SNI hosts don't report icon coordinates;
-        // a fixed corner beats the WM's arbitrary placement). No-op on
-        // Wayland.
+        // Place the window once the monitor size is known: the saved position
+        // when one exists and still lands on-screen, else parked bottom-right
+        // above the tray (SNI hosts don't report icon coordinates; a fixed
+        // corner beats the WM's arbitrary placement). No-op on Wayland.
+        // Unit soup: `monitor_size`, the fixed widget size, and winit's boot
+        // `with_position` are all winit-logical px, but `OuterPosition` and
+        // `outer_rect` are egui points, which the zoom factor shrinks
+        // (physical = points × pixels_per_point, and pixels_per_point =
+        // native × zoom). Positions are computed and persisted in
+        // winit-logical px and converted at the egui boundary — skipping the
+        // conversion is the old "window half off-screen at zoom 1.15" bug.
+        let to_points = ctx
+            .input(|i| i.viewport().native_pixels_per_point)
+            .unwrap_or(1.0)
+            / ctx.pixels_per_point();
+        let placed_before = self.positioned;
         if !self.positioned
             && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
         {
@@ -1134,12 +1200,37 @@ impl eframe::App for TimelineApp {
             // clears a typical bottom panel (tint2 ~24px) since
             // _NET_WORKAREA isn't exposed through egui.
             let panel = 24.0;
-            let pos = egui::pos2(
-                (monitor.x - WIDGET_W - margin).max(0.0),
-                (monitor.y - panel - WIDGET_H - margin).max(0.0),
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+            // On-screen = at least a grabbable slice of the top bar visible.
+            let usable = |p: egui::Pos2| {
+                p.x > -(WIDGET_W - 60.0)
+                    && p.x + 60.0 < monitor.x
+                    && p.y >= 0.0
+                    && p.y + 60.0 < monitor.y
+            };
+            let pos = self.saved_pos.filter(|&p| usable(p)).unwrap_or_else(|| {
+                egui::pos2(
+                    (monitor.x - WIDGET_W - margin).max(0.0),
+                    (monitor.y - panel - WIDGET_H - margin).max(0.0),
+                )
+            });
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                (pos.to_vec2() * to_points).to_pos2(),
+            ));
             self.positioned = true;
+        }
+        // Persist the position once a drag settles (pointer up, moved since
+        // the last save). Skipped until a frame after placement ran so
+        // neither the WM's initial spot nor a stale pre-park rect is saved.
+        if placed_before
+            && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
+            && !ctx.input(|i| i.pointer.any_down())
+            && let pos = (rect.min.to_vec2() / to_points).to_pos2()
+            && self.saved_pos.is_none_or(|p| (p - pos).length_sq() > 4.0)
+            && let Some(conn) = self.conn.as_ref()
+        {
+            let val = format!("{},{}", pos.x.round(), pos.y.round());
+            let _ = chronicle_core::storage::set_meta(conn, "ui_window_pos", Some(&val));
+            self.saved_pos = Some(pos);
         }
         let hide = |app: &Self| {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -1320,6 +1411,17 @@ impl eframe::App for TimelineApp {
                             }
                         }
                     });
+                }
+                // Empty bar space drags the window (decoration-less window
+                // is otherwise unmovable). Registered after the children so
+                // egui's smallest-area hit test keeps buttons clickable.
+                let drag = ui.interact(
+                    ui.max_rect(),
+                    egui::Id::new("window_drag"),
+                    egui::Sense::drag(),
+                );
+                if drag.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             });
 

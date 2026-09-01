@@ -44,6 +44,11 @@ pub struct Config {
     /// Regexes marking apps/sites as distractions in insights (matched
     /// against the app name and browser site key). Empty = feature off.
     pub distraction_patterns: Vec<String>,
+    /// Derived tasks totaling under this many minutes in a day collapse into
+    /// the timeline's background strip and stay out of activity-only standup
+    /// drafts (0 = off). Declared tasks and tasks with journals, checkpoints,
+    /// or a ticket ref never collapse.
+    pub background_minutes: u32,
     /// Repo paths polled for branch/commit evidence (`~` expanded).
     /// Empty = git capture off.
     pub git_repos: Vec<String>,
@@ -88,6 +93,7 @@ impl Default for Config {
             excluded_apps: Vec::new(),
             excluded_titles: Vec::new(),
             distraction_patterns: Vec::new(),
+            background_minutes: 10,
             git_repos: Vec::new(),
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,

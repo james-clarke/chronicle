@@ -8,14 +8,15 @@ use super::{Action, EditState, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, f
 
 impl TimelineApp {
     pub(super) fn timeline_ui(&mut self, ui: &mut egui::Ui) {
-        // Filtered index set; empty query keeps everything.
+        // Filtered index sets; empty query keeps everything. Background
+        // scraps leave the card list for the collapsed strip below it.
         let q = self.filter.trim().to_lowercase();
-        let group_vis: Vec<usize> = (0..self.groups.len())
+        let (bg_vis, group_vis): (Vec<usize>, Vec<usize>) = (0..self.groups.len())
             .filter(|&g| {
                 let t = &self.groups[g];
                 matches_filter(&q, &t.label, t.project.as_deref())
             })
-            .collect();
+            .partition(|&g| self.groups[g].background);
         let candidates = self.merge_candidates();
 
         let day_range = self.day_range_ms().ok();
@@ -108,10 +109,15 @@ impl TimelineApp {
             let spans = &self.spans;
             let edit = &mut self.edit;
             let selected_task = &mut self.selected_task;
+            let show_background = &mut self.show_background;
+            // Foreground and background together, interval order restored,
+            // for the activity band (the band stays honest).
+            let mut band_vis: Vec<usize> = group_vis.iter().chain(&bg_vis).copied().collect();
+            band_vis.sort_unstable();
             // Pinned once; every row below sizes from this instead of
             // re-querying available_width (see theme::content_width).
             let content_w = theme::content_width(ui);
-            if groups.is_empty() || group_vis.is_empty() {
+            if groups.is_empty() || (group_vis.is_empty() && bg_vis.is_empty()) {
                 today_header(ui, groups, spans);
                 ui.add_space(48.0);
                 if groups.is_empty() {
@@ -134,7 +140,7 @@ impl TimelineApp {
                 .show(ui, |ui| {
                     today_header(ui, groups, spans);
                     if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
-                        activity_band(ui, content_w, groups, &group_vis, lo, hi, day_start);
+                        activity_band(ui, content_w, groups, &band_vis, lo, hi, day_start);
                     }
                     ui.add_space(4.0);
                     for &g in &group_vis {
@@ -148,6 +154,51 @@ impl TimelineApp {
                             &candidates,
                             &mut pending,
                         );
+                    }
+                    if !bg_vis.is_empty() {
+                        let total: i64 = bg_vis.iter().map(|&g| groups[g].total_ms).sum();
+                        ui.add_space(2.0);
+                        // ▼/▶: Inter lacks the small-triangle codepoints.
+                        let arrow = if *show_background {
+                            "\u{25bc}"
+                        } else {
+                            "\u{25b6}"
+                        };
+                        let label = format!(
+                            "{arrow} background \u{b7} {} task{} \u{b7} {}",
+                            bg_vis.len(),
+                            if bg_vis.len() == 1 { "" } else { "s" },
+                            fmt_dur(total)
+                        );
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(label)
+                                        .text_style(egui::TextStyle::Small)
+                                        .color(theme::palette::TEXT_DIM),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("short scattered sessions; declare one to promote it")
+                            .clicked()
+                        {
+                            *show_background = !*show_background;
+                        }
+                        if *show_background {
+                            ui.add_space(4.0);
+                            for &g in &bg_vis {
+                                task_card(
+                                    ui,
+                                    content_w,
+                                    &groups[g],
+                                    theme::series_color_for(groups[g].task_id),
+                                    edit,
+                                    selected_task,
+                                    &candidates,
+                                    &mut pending,
+                                );
+                            }
+                        }
                     }
                 });
         });

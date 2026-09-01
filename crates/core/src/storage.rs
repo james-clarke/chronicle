@@ -449,7 +449,10 @@ pub fn ai_job_status(
     conn: &Connection,
     id: i64,
 ) -> Result<Option<(String, Option<String>)>, StorageError> {
-    let mut stmt = conn.prepare("SELECT status, result FROM ai_jobs WHERE id=?1")?;
+    // Failed jobs carry their reason in `error`; surface it through the same
+    // slot so pollers can show it.
+    let mut stmt =
+        conn.prepare("SELECT status, COALESCE(result, error) FROM ai_jobs WHERE id=?1")?;
     let mut rows = stmt.query([id])?;
     Ok(rows
         .next()?

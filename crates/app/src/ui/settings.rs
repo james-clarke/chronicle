@@ -16,6 +16,7 @@ pub(super) struct SettingsPanel {
     derive_idle_secs: u32,
     retention_days: u32,
     task_autoclose_days: u32,
+    background_minutes: u32,
     port: u16,
     model_path: String,
     mcp_config: String,
@@ -36,6 +37,7 @@ impl SettingsPanel {
             derive_idle_secs: config.derive_idle_secs,
             retention_days: config.retention_days,
             task_autoclose_days: config.task_autoclose_days,
+            background_minutes: config.background_minutes,
             port: config.port,
             model_path: path_str(&config.model_path),
             mcp_config: path_str(&config.mcp_config),
@@ -53,6 +55,7 @@ impl SettingsPanel {
         config.derive_idle_secs = self.derive_idle_secs;
         config.retention_days = self.retention_days;
         config.task_autoclose_days = self.task_autoclose_days;
+        config.background_minutes = self.background_minutes;
         config.port = self.port;
         config.model_path = opt_path(&self.model_path);
         config.mcp_config = opt_path(&self.mcp_config);
@@ -197,6 +200,13 @@ impl TimelineApp {
                                             .range(0..=365),
                                     );
                                     ui.weak("days (0 = never)");
+                                    ui.end_row();
+                                    ui.label("background under");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.background_minutes)
+                                            .range(0..=120),
+                                    );
+                                    ui.weak("minutes (0 = off)");
                                     ui.end_row();
                                 });
 
