@@ -955,6 +955,35 @@ pub fn tasks_needing_checkpoint(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Newest checkpoint written after `since_ms`, with its task's identity —
+/// the Home resume card. `(task_id, label, external_ref, checkpoint)`.
+pub fn latest_checkpoint_since(
+    conn: &Connection,
+    since_ms: i64,
+) -> Result<Option<(i64, String, Option<String>, Checkpoint)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT c.task_id, t.label, t.external_ref, c.ts, c.state, c.next_steps
+         FROM checkpoints c JOIN tasks t ON t.id = c.task_id
+         WHERE c.ts > ?1 ORDER BY c.ts DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query([since_ms])?;
+    Ok(rows
+        .next()?
+        .map(|r| {
+            Ok::<_, rusqlite::Error>((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                Checkpoint {
+                    ts: r.get(3)?,
+                    state: r.get(4)?,
+                    next_steps: r.get(5)?,
+                },
+            ))
+        })
+        .transpose()?)
+}
+
 /// The task's chat thread, creating it on first use (at most one per task;
 /// the partial unique index makes re-entry return the same conversation).
 pub fn conversation_for_task(

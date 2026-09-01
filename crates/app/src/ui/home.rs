@@ -7,6 +7,66 @@ use super::timeline::{matches_filter, merge_menu};
 use super::{Action, OpenRow, SpanRow, TimelineApp, fmt_dur, theme};
 
 impl TimelineApp {
+    /// "Where you left off" card: newest checkpoint since the last UI open.
+    fn resume_card_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(resume) = &self.resume else {
+            return;
+        };
+        let mut open = false;
+        let mut dismiss = false;
+        egui::Frame::new()
+            .fill(theme::palette::SURFACE)
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Where you left off")
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("\u{2715}").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&resume.label).strong());
+                    if let Some(external_ref) = &resume.external_ref {
+                        theme::badge(ui, external_ref, theme::palette::TEXT_DIM);
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(&resume.state)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Next: {}", resume.next_steps))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.add_space(4.0);
+                if ui.button("open workspace").clicked() {
+                    open = true;
+                }
+            });
+        ui.add_space(8.0);
+        if open {
+            let resume = self.resume.take().expect("checked above");
+            self.selected_task = Some(resume.task_id);
+            // The checkpointed work may be yesterday's — show its day.
+            self.day = chronicle_core::types::ms_to_ts(resume.ts)
+                .to_zoned(self.tz.clone())
+                .date();
+            self.loaded_at = None;
+            self.view = super::View::Timeline;
+        } else if dismiss {
+            self.resume = None;
+        }
+    }
+
     pub(super) fn home_ui(&mut self, ui: &mut egui::Ui) {
         // Filtered index sets; empty query keeps everything.
         let q = self.filter.trim().to_lowercase();
@@ -34,6 +94,7 @@ impl TimelineApp {
         egui::CentralPanel::default().show(ui, |ui| {
             self.model_card_ui(ui);
             self.service_card_ui(ui);
+            self.resume_card_ui(ui);
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }

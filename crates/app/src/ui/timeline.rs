@@ -701,7 +701,81 @@ fn detail_ui(
         }
     }
 
+    if let Some(cp) = &group.checkpoint {
+        ui.add_space(8.0);
+        theme::section_header(ui, "Checkpoint", None);
+        ui.label(
+            egui::RichText::new(&cp.state)
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT),
+        );
+        ui.label(
+            egui::RichText::new(format!("Next: {}", cp.next_steps))
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        );
+    }
+
+    if !group.journal.is_empty() {
+        ui.add_space(8.0);
+        theme::section_header(ui, "Journal", Some(group.journal.len()));
+        for (time, entry) in &group.journal {
+            ui.horizontal_top(|ui| {
+                ui.label(
+                    egui::RichText::new(time)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(entry)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+    }
+
+    if let Some((fetched_ts, content)) = &group.task_context {
+        ui.add_space(8.0);
+        theme::section_header(ui, "Context", None);
+        let fetched = chronicle_core::types::ms_to_ts(*fetched_ts)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%b %-d %H:%M")
+            .to_string();
+        ui.label(
+            egui::RichText::new(format!("fetched {fetched}"))
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        );
+        egui::CollapsingHeader::new(
+            egui::RichText::new(context_preview(content))
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT),
+        )
+        .id_salt(("task_context", group.task_id))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(content)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT),
+            );
+        });
+    }
+
     close
+}
+
+/// First line of the context bundle, clipped, as the collapsed summary.
+fn context_preview(content: &str) -> String {
+    let line = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut p: String = line.chars().take(60).collect();
+    if p.len() < line.len() {
+        p.push('\u{2026}');
+    }
+    p
 }
 
 /// Correction actions for the selected task; rendered pinned to the widget's

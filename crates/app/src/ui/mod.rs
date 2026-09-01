@@ -145,6 +145,10 @@ struct TaskGroup {
     task_context: Option<(i64, String)>,
     /// A fetch_context job for this task is queued or running.
     context_pending: bool,
+    /// Journal tail, oldest first, as (time label, entry text).
+    journal: Vec<(String, String)>,
+    /// Latest "where I am / what's next".
+    checkpoint: Option<chronicle_core::storage::Checkpoint>,
 }
 
 /// One commit shown as task evidence.
@@ -320,6 +324,22 @@ struct TimelineApp {
     autohide: bool,
     /// Top-right corner placement done (needs monitor size, so not at boot).
     positioned: bool,
+    /// Resume card: newest checkpoint written since the previous UI open
+    /// (loaded once per launch; ✕ or "open workspace" clears it).
+    resume: Option<ResumeRow>,
+    /// The once-per-launch resume check ran (meta `ui_last_open_ts` rotated).
+    resume_checked: bool,
+}
+
+/// Home resume card data.
+struct ResumeRow {
+    task_id: i64,
+    /// Checkpoint write time (ms); "open workspace" jumps to its civil day.
+    ts: i64,
+    label: String,
+    external_ref: Option<String>,
+    state: String,
+    next_steps: String,
 }
 
 impl TimelineApp {
@@ -381,6 +401,8 @@ impl TimelineApp {
             was_focused: false,
             autohide: std::env::var_os("CHRONICLE_UI_NO_AUTOHIDE").is_none(),
             positioned: false,
+            resume: None,
+            resume_checked: false,
         }
     }
 
@@ -441,6 +463,31 @@ impl TimelineApp {
                 }
                 Err(e) => self.error = Some(e.to_string()),
             }
+        }
+        if let Some(conn) = self.conn.as_ref()
+            && !self.resume_checked
+        {
+            // Once per launch: card shows checkpoints newer than the last
+            // open, then the marker rotates to now.
+            self.resume_checked = true;
+            let last_open = chronicle_core::storage::get_meta(conn, "ui_last_open_ts")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0);
+            self.resume = chronicle_core::storage::latest_checkpoint_since(conn, last_open)
+                .ok()
+                .flatten()
+                .map(|(task_id, label, external_ref, cp)| ResumeRow {
+                    task_id,
+                    ts: cp.ts,
+                    label,
+                    external_ref,
+                    state: cp.state,
+                    next_steps: cp.next_steps,
+                });
+            let now_ms = jiff::Timestamp::now().as_millisecond().to_string();
+            let _ = chronicle_core::storage::set_meta(conn, "ui_last_open_ts", Some(&now_ms));
         }
         if let Some(conn) = self.conn.as_ref() {
             self.warning = chronicle_core::storage::get_meta(conn, "server_error")
@@ -615,6 +662,8 @@ impl TimelineApp {
                         commits: Vec::new(),
                         task_context: None,
                         context_pending: false,
+                        journal: Vec::new(),
+                        checkpoint: None,
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -688,6 +737,19 @@ impl TimelineApp {
                     chronicle_core::storage::pending_fetch_context_job(conn, group.task_id)
                         .unwrap_or(false);
             }
+            group.journal = chronicle_core::storage::journal_tail(conn, group.task_id, 15)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| {
+                    let time = chronicle_core::types::ms_to_ts(e.start_ts)
+                        .to_zoned(self.tz.clone())
+                        .strftime("%a %H:%M")
+                        .to_string();
+                    (time, e.entry)
+                })
+                .collect();
+            group.checkpoint =
+                chronicle_core::storage::get_checkpoint(conn, group.task_id).unwrap_or(None);
         }
         Ok(groups)
     }
