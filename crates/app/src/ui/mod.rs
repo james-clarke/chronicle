@@ -132,6 +132,9 @@ struct TaskGroup {
     evidence: Vec<EvidenceApp>,
     /// Sum of interval durations clamped to the shown day.
     total_ms: i64,
+    /// AI-written 1-2 sentence summary; layout placeholder until the
+    /// description pipeline (phase 2) populates it from `tasks.description`.
+    ai_summary: Option<String>,
 }
 
 struct IntervalRow {
@@ -457,6 +460,7 @@ impl TimelineApp {
                         sessions: Vec::new(),
                         evidence: Vec::new(),
                         total_ms: 0,
+                        ai_summary: None,
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -679,6 +683,10 @@ impl eframe::App for TimelineApp {
         egui::Panel::top("day_picker")
             .frame(top_frame)
             .show(ui, |ui| {
+                // Pin the bar's width up front so an over-long child (filter
+                // chip, date label) can't inflate the row past the window and
+                // displace the right-aligned menu's hitbox.
+                ui.set_max_width(theme::content_width(ui));
                 ui.horizontal(|ui| {
                     // Segmented view switcher.
                     egui::Frame::new()

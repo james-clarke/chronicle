@@ -30,6 +30,51 @@ pub(super) mod palette {
 /// Proportional family with Inter Medium first; for headings and emphasis.
 pub(super) const MEDIUM: &str = "inter-medium";
 
+/// Corner radii: SM inputs/buttons/badges, MD menus/cards-within-cards,
+/// LG cards/panels.
+pub(super) const RADIUS_SM: u8 = 6;
+pub(super) const RADIUS_MD: u8 = 8;
+pub(super) const RADIUS_LG: u8 = 10;
+
+/// Content width for a view, computed once at the top of `*_ui` and threaded
+/// into all width math. Never re-query `available_width()` per child: one
+/// over-wide sibling widens the parent Ui's max_rect for everything after it,
+/// so later widths inflate past the 400pt window and get hard-clipped.
+pub(super) fn content_width(ui: &egui::Ui) -> f32 {
+    ui.available_width()
+}
+
+/// Centered empty-state: dim headline + weak hint, for any view with nothing
+/// to show. Caller centers it vertically (or it just tops the panel).
+pub(super) fn empty_state(ui: &mut egui::Ui, headline: &str, hint: &str) {
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new(headline)
+                .size(15.0)
+                .family(egui::FontFamily::Name(MEDIUM.into()))
+                .color(palette::TEXT_DIM),
+        );
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(hint)
+                .text_style(egui::TextStyle::Small)
+                .color(palette::TEXT_DIM.gamma_multiply(0.75)),
+        );
+    });
+}
+
+/// One dim italic line for an AI-written task summary; renders nothing while
+/// no summary exists. `wrap` for the roomy detail pane, truncate on cards.
+pub(super) fn ai_summary_line(ui: &mut egui::Ui, text: Option<&str>, wrap: bool) {
+    let Some(text) = text else { return };
+    let rich = egui::RichText::new(text)
+        .text_style(egui::TextStyle::Small)
+        .italics()
+        .color(palette::TEXT_DIM);
+    let label = egui::Label::new(rich);
+    ui.add(if wrap { label.wrap() } else { label.truncate() });
+}
+
 pub(super) fn apply(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -178,17 +223,22 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize
     );
 }
 
-/// Small tinted pill: dimmed fill of `color`, text in `color`.
+/// Small tinted pill: dimmed fill of `color`, text in `color`. Text
+/// truncates against the containing cell so a long project name can never
+/// widen a grid column past the 400pt window.
 pub(super) fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     egui::Frame::new()
         .fill(color.gamma_multiply(0.18))
-        .corner_radius(egui::CornerRadius::same(6))
+        .corner_radius(egui::CornerRadius::same(RADIUS_SM))
         .inner_margin(egui::Margin::symmetric(6, 1))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(text)
-                    .color(color)
-                    .text_style(egui::TextStyle::Small),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .color(color)
+                        .text_style(egui::TextStyle::Small),
+                )
+                .truncate(),
             );
         });
 }

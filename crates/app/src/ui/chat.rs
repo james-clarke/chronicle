@@ -254,9 +254,12 @@ impl TimelineApp {
         self.chat_ensure(ui.ctx());
         let Some(chat) = &mut self.chat else {
             egui::CentralPanel::default().show(ui, |ui| {
-                ui.weak("chat unavailable");
+                ui.add_space(ui.available_height() * 0.35);
+                theme::empty_state(ui, "chat unavailable", "");
                 if let Some(error) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
+                    ui.vertical_centered(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    });
                 }
             });
             return;
@@ -266,11 +269,28 @@ impl TimelineApp {
         egui::Panel::bottom("chat_input").show(ui, |ui| {
             if let Some(error) = &chat.error {
                 egui::Frame::new()
-                    .fill(theme::palette::RED.gamma_multiply(0.15))
-                    .corner_radius(egui::CornerRadius::same(6))
-                    .inner_margin(egui::Margin::same(6))
+                    .fill(theme::palette::RED.gamma_multiply(0.12))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        theme::palette::RED.gamma_multiply(0.4),
+                    ))
+                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                    .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        ui.colored_label(theme::palette::RED, error);
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            egui::RichText::new("Chat unavailable")
+                                .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                                .color(theme::palette::RED),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(error)
+                                    .text_style(egui::TextStyle::Small)
+                                    .color(theme::palette::TEXT_DIM),
+                            )
+                            .wrap(),
+                        );
                         if error.contains("no model") && ui.small_button("download model").clicked()
                         {
                             start_dl = true;
@@ -309,7 +329,12 @@ impl TimelineApp {
                 .show(ui, |ui| {
                     let max_w = ui.available_width() * 0.85;
                     if chat.transcript.is_empty() && !chat.warming {
-                        ui.weak("new chat \u{2014} ask about your day");
+                        ui.add_space(ui.available_height() * 0.35);
+                        theme::empty_state(
+                            ui,
+                            "ask about your day",
+                            "try \"what did I work on this morning?\"",
+                        );
                     }
                     for msg in &chat.transcript {
                         if !msg.user && msg.text.is_empty() && chat.busy {

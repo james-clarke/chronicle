@@ -56,9 +56,14 @@ impl TimelineApp {
                     ui.add_space(6.0);
                     // One column plan shared by the declare row and every task row,
                     // so the whole section reads as a single aligned table.
-                    // Fixed costs: project + status + menu button + 3 gaps,
-                    // plus a little slack so the grid never overflows 400px.
-                    let label_w = (ui.available_width() - 204.0).clamp(160.0, 460.0);
+                    // Every column is a fixed-width `cell` — including the
+                    // action column — so Grid can never auto-widen past 400px.
+                    let label_w = (theme::content_width(ui)
+                        - PROJECT_COL
+                        - STATUS_COL
+                        - ACTION_COL
+                        - 3.0 * 8.0)
+                        .max(120.0);
                     egui::Grid::new("working_on")
                         .num_columns(4)
                         .striped(true)
@@ -75,19 +80,23 @@ impl TimelineApp {
                                     .hint_text("project"),
                             );
                             ui.label("");
-                            if ui.button("add").clicked() {
-                                pending = Some(Action::Declare);
-                            }
+                            cell(ui, ACTION_COL, |ui| {
+                                if ui.button("add").clicked() {
+                                    pending = Some(Action::Declare);
+                                }
+                            });
                             ui.end_row();
                             for &o in &open_vis {
                                 let t = &open_tasks[o];
                                 task_cells(ui, t, label_w, true);
-                                ui.menu_button("\u{2026}", |ui| {
-                                    if ui.button("close").clicked() {
-                                        pending = Some(Action::Close(t.task_id));
-                                        ui.close();
-                                    }
-                                    merge_menu(ui, t.task_id, &candidates, &mut pending);
+                                cell(ui, ACTION_COL, |ui| {
+                                    ui.menu_button("\u{2026}", |ui| {
+                                        if ui.button("close").clicked() {
+                                            pending = Some(Action::Close(t.task_id));
+                                            ui.close();
+                                        }
+                                        merge_menu(ui, t.task_id, &candidates, &mut pending);
+                                    });
                                 });
                                 ui.end_row();
                             }
@@ -110,9 +119,11 @@ impl TimelineApp {
                                     for &c in &closed_vis {
                                         let t = &closed_tasks[c];
                                         task_cells(ui, t, label_w, false);
-                                        if ui.small_button("reopen").clicked() {
-                                            pending = Some(Action::Reopen(t.task_id));
-                                        }
+                                        cell(ui, ACTION_COL, |ui| {
+                                            if ui.small_button("reopen").clicked() {
+                                                pending = Some(Action::Reopen(t.task_id));
+                                            }
+                                        });
                                         ui.end_row();
                                     }
                                 });
@@ -149,6 +160,8 @@ impl TimelineApp {
 /// badges line up regardless of label length.
 const PROJECT_COL: f32 = 84.0;
 const STATUS_COL: f32 = 64.0;
+/// Widest 4th-column content across both grids ("reopen" small button).
+const ACTION_COL: f32 = 56.0;
 const ROW_H: f32 = 20.0;
 
 /// Left-aligned fixed-width cell; contents clip rather than widen the column.

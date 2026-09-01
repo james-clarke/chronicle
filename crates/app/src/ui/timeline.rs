@@ -33,6 +33,16 @@ impl TimelineApp {
                     let mut close_detail = false;
                     let color = theme::series_color_for(group.task_id);
                     if narrow {
+                        // Actions pinned to the widget's bottom edge; the
+                        // bottom panel must be added before the CentralPanel.
+                        let frame = egui::Frame::new()
+                            .fill(theme::palette::SURFACE)
+                            .inner_margin(egui::Margin::symmetric(12, 8));
+                        egui::Panel::bottom("task_detail_actions")
+                            .frame(frame)
+                            .show(ui, |ui| {
+                                detail_actions(ui, group, edit, &candidates, &mut pending);
+                            });
                         egui::CentralPanel::default().show(ui, |ui| {
                             egui::ScrollArea::vertical()
                                 .auto_shrink(false)
@@ -66,6 +76,8 @@ impl TimelineApp {
                         .show(ui, |ui| {
                             close_detail =
                                 detail_ui(ui, group, color, edit, &candidates, &mut pending);
+                            ui.add_space(10.0);
+                            detail_actions(ui, group, edit, &candidates, &mut pending);
                         });
                     if close_detail {
                         self.selected_task = None;
@@ -87,22 +99,35 @@ impl TimelineApp {
             let spans = &self.spans;
             let edit = &mut self.edit;
             let selected_task = &mut self.selected_task;
+            // Pinned once; every row below sizes from this instead of
+            // re-querying available_width (see theme::content_width).
+            let content_w = theme::content_width(ui);
+            if groups.is_empty() || group_vis.is_empty() {
+                today_header(ui, groups, spans);
+                ui.add_space(48.0);
+                if groups.is_empty() {
+                    theme::empty_state(
+                        ui,
+                        "nothing derived yet",
+                        "tasks appear here as the day is analyzed",
+                    );
+                } else {
+                    theme::empty_state(ui, "no tasks match the filter", "clear it from the \u{2026} menu");
+                }
+                return;
+            }
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     today_header(ui, groups, spans);
                     if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
-                        activity_band(ui, groups, &group_vis, lo, hi, day_start);
+                        activity_band(ui, content_w, groups, &group_vis, lo, hi, day_start);
                     }
                     ui.add_space(4.0);
-                    if groups.is_empty() {
-                        ui.weak("no tasks derived yet");
-                    } else if group_vis.is_empty() {
-                        ui.weak("no tasks match the filter");
-                    }
                     for &g in &group_vis {
                         task_card(
                             ui,
+                            content_w,
                             &groups[g],
                             theme::series_color_for(groups[g].task_id),
                             edit,
@@ -175,6 +200,7 @@ fn today_header(ui: &mut egui::Ui, groups: &[TaskGroup], spans: &[SpanRow]) {
 /// identity color), background showing through = away. Hour labels below.
 fn activity_band(
     ui: &mut egui::Ui,
+    width: f32,
     groups: &[TaskGroup],
     vis: &[usize],
     lo: i64,
@@ -182,11 +208,11 @@ fn activity_band(
     day_start: &Zoned,
 ) {
     const HOUR_MS: i64 = 3_600_000;
-    let mut segments: Vec<(i64, i64, egui::Color32)> = Vec::new();
+    // (clamped start, clamped end, group index, session index).
+    let mut segments: Vec<(i64, i64, usize, usize)> = Vec::new();
     let (mut act_lo, mut act_hi) = (i64::MAX, i64::MIN);
     for &g in vis {
-        let color = theme::series_color_for(groups[g].task_id);
-        for s in &groups[g].sessions {
+        for (si, s) in groups[g].sessions.iter().enumerate() {
             let s_lo = s.start.timestamp().as_millisecond().max(lo);
             let s_hi = s.end.timestamp().as_millisecond().min(hi);
             if s_hi <= s_lo {
@@ -194,7 +220,7 @@ fn activity_band(
             }
             act_lo = act_lo.min(s_lo);
             act_hi = act_hi.max(s_hi);
-            segments.push((s_lo, s_hi, color));
+            segments.push((s_lo, s_hi, g, si));
         }
     }
     if segments.is_empty() {
@@ -205,18 +231,62 @@ fn activity_band(
     let band_hi = (lo + (act_hi - lo + HOUR_MS - 1) / HOUR_MS * HOUR_MS).min(hi);
     let span = (band_hi - band_lo).max(1) as f32;
 
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
+    // Pointer x → ms, the inverse of the segment placement below, so the
+    // tooltip always describes the segment actually under the cursor.
+    let hover_ms = resp
+        .hover_pos()
+        .map(|p| band_lo + ((p.x - rect.left()) / rect.width() * span) as i64);
+    let hovered_seg = hover_ms.and_then(|ms| {
+        segments
+            .iter()
+            .position(|&(s_lo, s_hi, _, _)| ms >= s_lo && ms < s_hi)
+    });
     let painter = ui.painter();
     painter.rect_filled(rect, egui::CornerRadius::same(7), theme::palette::SURFACE);
-    for (s_lo, s_hi, color) in &segments {
+    for (i, (s_lo, s_hi, g, _)) in segments.iter().enumerate() {
         let x0 = rect.left() + (s_lo - band_lo) as f32 / span * rect.width();
         let x1 = rect.left() + (s_hi - band_lo) as f32 / span * rect.width();
+        let hovered = hovered_seg == Some(i);
+        // Hovered segment brightens and grows into the band's 3px padding.
+        let grow = 3.0
+            * ui.ctx()
+                .animate_bool_with_time(resp.id.with(i), hovered, 0.08);
         let seg = egui::Rect::from_min_max(
-            egui::pos2(x0, rect.top() + 2.0),
-            egui::pos2(x1.max(x0 + 2.0), rect.bottom() - 2.0),
+            egui::pos2(x0, rect.top() + 4.0 - grow),
+            egui::pos2(x1.max(x0 + 2.0), rect.bottom() - 4.0 + grow),
         );
-        painter.rect_filled(seg, egui::CornerRadius::same(3), *color);
+        let color = theme::series_color_for(groups[*g].task_id);
+        let color = if hovered {
+            color.gamma_multiply(1.2)
+        } else {
+            color
+        };
+        painter.rect_filled(seg, egui::CornerRadius::same(3), color);
+    }
+    if let Some(i) = hovered_seg {
+        let (s_lo, s_hi, g, si) = segments[i];
+        let group = &groups[g];
+        let s = &group.sessions[si];
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        resp.on_hover_ui_at_pointer(|ui| {
+            ui.set_max_width(220.0);
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(
+                    dot.center(),
+                    3.0,
+                    theme::series_color_for(group.task_id),
+                );
+                ui.add(egui::Label::new(&group.label).truncate());
+            });
+            ui.weak(format!(
+                "{}\u{2013}{} \u{b7} {}",
+                s.start.strftime("%H:%M"),
+                s.end.strftime("%H:%M"),
+                fmt_dur(s_hi - s_lo)
+            ));
+        });
     }
 
     // Hour tick labels, thinned to at most ~6.
@@ -251,6 +321,7 @@ fn activity_band(
 /// card toggles its detail pane.
 fn task_card(
     ui: &mut egui::Ui,
+    content_w: f32,
     group: &TaskGroup,
     color: egui::Color32,
     edit: &mut Option<EditState>,
@@ -264,6 +335,18 @@ fn task_card(
     } else {
         theme::palette::SURFACE_2
     };
+    // Hover fill from last frame's state (one-frame lag is invisible; the
+    // frame's own fill has to be chosen before its response exists).
+    let hover_key = egui::Id::new(("card_hover", group.task_id));
+    let hovered = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(hover_key))
+        .unwrap_or(false);
+    let fill = if hovered {
+        theme::palette::SURFACE_2
+    } else {
+        theme::palette::SURFACE
+    };
     // Sense on the container (registered before children) so the card is
     // clickable without stealing clicks from its own buttons/menus.
     let resp = ui
@@ -272,32 +355,43 @@ fn task_card(
                 .id_salt(("task_card", group.task_id))
                 .sense(egui::Sense::click()),
             |ui| {
-                card_frame(ui, group, color, stroke_color, edit, candidates, pending);
+                card_frame(
+                    ui, content_w, group, color, stroke_color, fill, edit, candidates, pending,
+                );
             },
         )
         .response;
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(hover_key, resp.hovered()));
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked() {
         *selected_task = if selected { None } else { Some(group.task_id) };
     }
     ui.add_space(2.0);
 }
 
+#[expect(clippy::too_many_arguments)]
 fn card_frame(
     ui: &mut egui::Ui,
+    content_w: f32,
     group: &TaskGroup,
     color: egui::Color32,
     stroke_color: egui::Color32,
+    fill: egui::Color32,
     edit: &mut Option<EditState>,
     candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) {
     egui::Frame::new()
-        .fill(theme::palette::SURFACE)
+        .fill(fill)
         .stroke(egui::Stroke::new(1.0, stroke_color))
-        .corner_radius(egui::CornerRadius::same(10))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
+            // Pinned from the view's content width, never available_width():
+            // an over-wide sibling above would otherwise inflate this card
+            // past the window and hard-clip its right edge.
+            ui.set_width(content_w - 20.0);
             // Labels must not grab clicks for text selection, or the card's
             // container sense never sees them.
             ui.style_mut().interaction.selectable_labels = false;
@@ -394,6 +488,7 @@ fn card_frame(
                     );
                 }
             });
+            theme::ai_summary_line(ui, group.ai_summary.as_deref(), false);
         });
 }
 
@@ -441,6 +536,7 @@ fn detail_ui(
             theme::badge(ui, "declared", theme::palette::TEXT_DIM);
         }
     });
+    theme::ai_summary_line(ui, group.ai_summary.as_deref(), true);
     let n = group.sessions.len();
     ui.weak(format!(
         "{} across {n} session{}",
@@ -551,7 +647,18 @@ fn detail_ui(
         }
     }
 
-    ui.add_space(10.0);
+    close
+}
+
+/// Correction actions for the selected task; rendered pinned to the widget's
+/// bottom edge in narrow mode, inline at the pane's end when wide.
+fn detail_actions(
+    ui: &mut egui::Ui,
+    group: &TaskGroup,
+    edit: &mut Option<EditState>,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
     ui.horizontal(|ui| {
         if ui.button("rename").clicked() {
             *edit = Some(EditState {
@@ -561,11 +668,17 @@ fn detail_ui(
             });
         }
         merge_menu(ui, group.task_id, candidates, pending);
-        if ui.button("close task").clicked() {
-            *pending = Some(Action::Close(group.task_id));
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Destructive action: tinted, and kept apart on the right.
+            let close_btn = egui::Button::new(
+                egui::RichText::new("close task").color(theme::palette::RED),
+            )
+            .fill(theme::palette::RED.gamma_multiply(0.12));
+            if ui.add(close_btn).clicked() {
+                *pending = Some(Action::Close(group.task_id));
+            }
+        });
     });
-    close
 }
 
 /// Duration-weighted confidence; a small tinted dot appears only when the
