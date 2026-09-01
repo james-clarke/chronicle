@@ -28,6 +28,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/003_spans_url_meta.sql")),
         M::up(include_str!("../migrations/004_task_identity.sql")),
         M::up(include_str!("../migrations/005_chat_conversations.sql")),
+        M::up(include_str!("../migrations/006_task_descriptions.sql")),
     ])
 });
 
@@ -159,10 +160,15 @@ pub struct BatchRow {
 /// Crash recovery: a `running` batch with no live worker (daemon restart)
 /// counts as a failed attempt.
 pub fn reset_stale_running(conn: &Connection) -> Result<usize, StorageError> {
-    Ok(conn.execute(
+    let n = conn.execute(
         "UPDATE batches SET status='failed' WHERE status='running'",
         [],
-    )?)
+    )?;
+    let m = conn.execute(
+        "UPDATE ai_jobs SET status='failed', error='interrupted' WHERE status='running'",
+        [],
+    )?;
+    Ok(n + m)
 }
 
 const ELIGIBLE: &str = "status IN ('pending','failed') AND attempts < 2";
@@ -213,6 +219,118 @@ pub fn batch_status(conn: &Connection, id: i64) -> Result<Option<String>, Storag
 pub fn fail_batch(conn: &Connection, id: i64) -> Result<(), StorageError> {
     conn.execute("UPDATE batches SET status='failed' WHERE id=?1", [id])?;
     Ok(())
+}
+
+/// A claimed AI job: what the worker needs to run it.
+pub struct AiJobRow {
+    pub id: i64,
+    pub kind: String,
+    pub payload: String,
+}
+
+/// Priority at or above which an AI job means a user is actively waiting;
+/// the scheduler skips its idle gate for these.
+pub const AI_JOB_INTERACTIVE: i64 = 5;
+
+/// Queue a local-LLM job (same lifecycle as batches: pending → running →
+/// done/failed, one retry). Returns the job id for status polling.
+pub fn enqueue_ai_job(
+    conn: &Connection,
+    ts: jiff::Timestamp,
+    kind: &str,
+    priority: i64,
+    payload: &str,
+) -> Result<i64, StorageError> {
+    conn.execute(
+        "INSERT INTO ai_jobs (kind, priority, created_ts, payload) VALUES (?1, ?2, ?3, ?4)",
+        params![kind, priority, ts_to_ms(ts), payload],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Next AI job worth running with priority >= `min_priority`: highest
+/// priority first, then oldest. Same eligibility rules as batches.
+pub fn next_eligible_ai_job(
+    conn: &Connection,
+    min_priority: i64,
+) -> Result<Option<i64>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM ai_jobs WHERE {ELIGIBLE} AND priority >= ?1
+         ORDER BY priority DESC, created_ts LIMIT 1"
+    ))?;
+    let mut rows = stmt.query([min_priority])?;
+    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+}
+
+/// Worker-side claim: flips the job to `running` and burns an attempt.
+pub fn claim_ai_job(conn: &Connection, id: i64) -> Result<Option<AiJobRow>, StorageError> {
+    let n = conn.execute(
+        &format!(
+            "UPDATE ai_jobs SET status='running', attempts=attempts+1 WHERE id=?1 AND {ELIGIBLE}"
+        ),
+        [id],
+    )?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let row = conn.query_row(
+        "SELECT id, kind, payload FROM ai_jobs WHERE id=?1",
+        [id],
+        |r| {
+            Ok(AiJobRow {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                payload: r.get(2)?,
+            })
+        },
+    )?;
+    Ok(Some(row))
+}
+
+pub fn complete_ai_job(conn: &Connection, id: i64, result: &str) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE ai_jobs SET status='done', result=?2, error=NULL WHERE id=?1",
+        params![id, result],
+    )?;
+    Ok(())
+}
+
+pub fn fail_ai_job(conn: &Connection, id: i64, error: &str) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE ai_jobs SET status='failed', error=?2 WHERE id=?1",
+        params![id, error],
+    )?;
+    Ok(())
+}
+
+/// (status, result) for a job, for UI polling.
+pub fn ai_job_status(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<(String, Option<String>)>, StorageError> {
+    let mut stmt = conn.prepare("SELECT status, result FROM ai_jobs WHERE id=?1")?;
+    let mut rows = stmt.query([id])?;
+    Ok(rows
+        .next()?
+        .map(|r| Ok::<_, rusqlite::Error>((r.get(0)?, r.get(1)?)))
+        .transpose()?)
+}
+
+/// Canonical payload for a task-description job; stored and matched verbatim
+/// so the UI can ask "is one queued for this task" by equality.
+pub fn task_description_payload(task_id: i64) -> String {
+    format!("{{\"task_id\":{task_id}}}")
+}
+
+/// True while a description job for this task is queued or running.
+pub fn pending_description_job(conn: &Connection, task_id: i64) -> Result<bool, StorageError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE kind='task_description' AND status IN ('pending','running') AND payload=?1",
+        [task_description_payload(task_id)],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, StorageError> {
@@ -269,7 +387,7 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
 /// requires it), user-declared tasks are never pruned, and a batch survives
 /// while spans or intervals still reference it.
 pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
-    const STMTS: [&str; 7] = [
+    const STMTS: [&str; 9] = [
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
         "DELETE FROM intervals WHERE id IN (SELECT id FROM intervals WHERE end_ts < ?1 \
@@ -285,6 +403,10 @@ pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, Sto
         "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM conversations WHERE id IN (SELECT id FROM conversations WHERE created_ts < ?1 \
          AND id NOT IN (SELECT conversation_id FROM chat_messages WHERE conversation_id IS NOT NULL) \
+         LIMIT ?2)",
+        "DELETE FROM ai_jobs WHERE id IN (SELECT id FROM ai_jobs WHERE created_ts < ?1 \
+         AND status IN ('done','failed') LIMIT ?2)",
+        "DELETE FROM narratives WHERE rowid IN (SELECT rowid FROM narratives WHERE created_ts < ?1 \
          LIMIT ?2)",
     ];
     let mut total = 0u64;
@@ -401,6 +523,75 @@ pub fn close_task(
     Ok(())
 }
 
+pub fn set_task_description(
+    conn: &Connection,
+    task_id: i64,
+    description: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE tasks SET description=?1 WHERE id=?2",
+        params![description, task_id],
+    )?;
+    Ok(())
+}
+
+/// Closed tasks with no description yet, newest close first, for the
+/// backfill command (a partial run covers the most recent history; rerunning
+/// naturally continues since described tasks drop out).
+pub fn closed_tasks_missing_description(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<OpenTask>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, project, source='user' FROM tasks
+         WHERE status='closed' AND (description IS NULL OR description='')
+         ORDER BY closed_ts DESC, id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok(OpenTask {
+            id: r.get(0)?,
+            label: r.get(1)?,
+            project: r.get(2)?,
+            declared: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Cache one generated range narrative, replacing any prior text for the range.
+pub fn upsert_narrative(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+    data_hash: i64,
+    ts: jiff::Timestamp,
+    text: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO narratives (range_lo, range_hi, data_hash, text, created_ts)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(range_lo, range_hi) DO UPDATE
+           SET data_hash=excluded.data_hash, text=excluded.text, created_ts=excluded.created_ts",
+        params![lo, hi, data_hash, text, ts_to_ms(ts)],
+    )?;
+    Ok(())
+}
+
+/// (data_hash, text) of the cached narrative for a range, if any.
+pub fn get_narrative(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Option<(i64, String)>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT data_hash, text FROM narratives WHERE range_lo=?1 AND range_hi=?2")?;
+    let mut rows = stmt.query([lo, hi])?;
+    Ok(rows
+        .next()?
+        .map(|r| Ok::<_, rusqlite::Error>((r.get(0)?, r.get(1)?)))
+        .transpose()?)
+}
+
 /// Close open derived tasks whose last interval ended over `days` days ago
 /// (candidate-list hygiene; declared tasks only close by hand). Closed is
 /// not deleted — history stays, retention prune owns deletion.
@@ -483,9 +674,16 @@ pub fn store_derivation(
     Ok(())
 }
 
+/// Focus spans overlapping any of the task's intervals, as "app title" lines.
+/// Used as the FTS-searchable snapshot on corrections and as the evidence fed
+/// to the task-description prompt.
+pub fn task_evidence_text(conn: &Connection, task_id: i64) -> Result<String, StorageError> {
+    task_span_ctx(conn, task_id)
+}
+
 /// Focus spans overlapping any of the task's intervals, as "app title" lines
 /// (FTS-searchable snapshot of what the corrected work looked like).
-fn task_span_ctx(tx: &rusqlite::Transaction, task_id: i64) -> Result<String, StorageError> {
+fn task_span_ctx(tx: &Connection, task_id: i64) -> Result<String, StorageError> {
     let mut ctx = String::new();
     let mut stmt = tx.prepare(
         "SELECT DISTINCT s.app, s.title FROM spans s
@@ -760,11 +958,12 @@ fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         end_ts: ms_to_ts(r.get(5)?),
         confidence: r.get(6)?,
         declared: r.get(7)?,
+        description: r.get(8)?,
     })
 }
 
 const TASK_COLS: &str = "t.id, i.id, t.label, t.project, i.start_ts, i.end_ts, i.confidence, \
-     t.source='user'";
+     t.source='user', t.description";
 
 pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, StorageError> {
     let mut stmt = conn.prepare(&format!(
@@ -1048,5 +1247,79 @@ mod tests {
             .query_row("SELECT count(*) FROM conversations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    // 006 adds tasks.description (NULL for existing rows) plus the ai_jobs
+    // queue and narratives cache.
+    #[test]
+    fn migration_006_adds_description_and_ai_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let pre = rusqlite_migration::Migrations::new(vec![
+            rusqlite_migration::M::up(include_str!("../migrations/001_schema.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/002_corrections_fts.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/003_spans_url_meta.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/004_task_identity.sql")),
+            rusqlite_migration::M::up(include_str!("../migrations/005_chat_conversations.sql")),
+        ]);
+        pre.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (1, 'work', 'open', 'user', 100);",
+        )
+        .unwrap();
+
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch("PRAGMA foreign_key_check").unwrap();
+        let desc: Option<String> = conn
+            .query_row("SELECT description FROM tasks WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(desc, None);
+        for table in ["ai_jobs", "narratives"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} exists and starts empty");
+        }
+    }
+
+    // Priority beats insertion order; the interactive floor filters; a claim
+    // burns an attempt and a second claim of a running job fails.
+    #[test]
+    fn ai_job_queue_priority_and_claim() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts(1_000);
+        let low = super::enqueue_ai_job(&conn, ts, "narrative", 0, "{}").unwrap();
+        let high = super::enqueue_ai_job(&conn, ts, "suggest_task", 10, "{}").unwrap();
+
+        // Interactive floor sees only the high-priority job.
+        assert_eq!(
+            super::next_eligible_ai_job(&conn, super::AI_JOB_INTERACTIVE).unwrap(),
+            Some(high)
+        );
+        // Unfiltered, the high-priority job still claims first despite being
+        // inserted second.
+        assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(high));
+
+        let job = super::claim_ai_job(&conn, high).unwrap().unwrap();
+        assert_eq!((job.kind.as_str(), job.payload.as_str()), ("suggest_task", "{}"));
+        // Running jobs are not eligible; a re-claim returns None.
+        assert!(super::claim_ai_job(&conn, high).unwrap().is_none());
+        assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(low));
+
+        super::complete_ai_job(&conn, high, "ok").unwrap();
+        assert_eq!(
+            super::ai_job_status(&conn, high).unwrap(),
+            Some(("done".into(), Some("ok".into())))
+        );
+        // Failed jobs retry once, then drop out.
+        super::claim_ai_job(&conn, low).unwrap().unwrap();
+        super::fail_ai_job(&conn, low, "boom").unwrap();
+        assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(low));
+        super::claim_ai_job(&conn, low).unwrap().unwrap();
+        super::fail_ai_job(&conn, low, "boom").unwrap();
+        assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), None);
     }
 }

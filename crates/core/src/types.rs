@@ -65,6 +65,8 @@ pub struct Task {
     pub end_ts: Timestamp,
     pub confidence: f64,
     pub declared: bool,
+    /// User-edited or AI-generated summary of the task (tasks.description).
+    pub description: Option<String>,
 }
 
 /// A past user correction surfaced into the digest as few-shot guidance.

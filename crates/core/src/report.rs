@@ -203,6 +203,7 @@ mod tests {
             end_ts: start_ts + jiff::Span::new().minutes(mins),
             confidence: 1.0,
             declared: false,
+            description: None,
         }
     }
 
