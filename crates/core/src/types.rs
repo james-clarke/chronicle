@@ -101,6 +101,15 @@ pub struct IntervalDraft {
     pub confidence: f64,
 }
 
+/// A declare-suggestion from the model: what the user seems to be working on
+/// right now, offered as a pre-fill for the declare-a-task row.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SuggestedTask {
+    pub label: String,
+    pub project: Option<String>,
+    pub description: Option<String>,
+}
+
 /// An open task offered to the model in the digest's numbered list.
 #[derive(Debug, Clone)]
 pub struct OpenTask {

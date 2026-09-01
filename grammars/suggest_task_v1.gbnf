@@ -1,0 +1,9 @@
+# Constrains the declare-suggestion output to one task JSON object.
+# Containment layer for untrusted title text, same as task_output_v3.
+# Bounded repetition (x{0,N}) only — chained x? x? is pathologically slow.
+
+root ::= "{" ws "\"label\"" ws ":" ws string ws "," ws "\"project\"" ws ":" ws (string | "null") ws "," ws "\"description\"" ws ":" ws (string | "null") ws "}"
+
+string ::= "\"" char{0,160} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= [ \n\t]{0,4}

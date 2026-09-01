@@ -165,7 +165,7 @@ fn clip_chars(s: &str, max_chars: usize) -> String {
 /// under /no_think) from a streamed sequence of pieces, plus leading
 /// whitespace, passing everything else through unchanged.
 #[derive(Default)]
-enum ThinkFilter {
+pub(crate) enum ThinkFilter {
     #[default]
     Start,
     Pending(String),
@@ -174,7 +174,7 @@ enum ThinkFilter {
 }
 
 impl ThinkFilter {
-    fn push(&mut self, piece: &str, emit: &mut impl FnMut(&str)) {
+    pub(crate) fn push(&mut self, piece: &str, emit: &mut impl FnMut(&str)) {
         match self {
             ThinkFilter::Pass => emit(piece),
             ThinkFilter::Start | ThinkFilter::Pending(_) => {
@@ -227,7 +227,7 @@ impl ThinkFilter {
 
     /// Flush anything still held: a partial non-think prefix is real output;
     /// an unclosed think block is not.
-    fn finish(&mut self, emit: &mut impl FnMut(&str)) {
+    pub(crate) fn finish(&mut self, emit: &mut impl FnMut(&str)) {
         if let ThinkFilter::Pending(buf) = self {
             let trimmed = buf.trim_start();
             if !trimmed.is_empty() {

@@ -2,6 +2,7 @@
 //! Corrections retrieval lands in M5.
 
 pub mod chat;
+pub mod describe;
 pub mod model;
 pub mod runner;
 
