@@ -388,6 +388,8 @@ struct TimelineApp {
     standup_job: Option<i64>,
     /// Why the last standup job failed (shown on the card; cleared on retry).
     standup_error: Option<String>,
+    /// Standup card expanded (collapsible; long drafts otherwise bury Home).
+    standup_open: bool,
 }
 
 /// Home standup card data.
@@ -477,6 +479,7 @@ impl TimelineApp {
             standup: None,
             standup_job: None,
             standup_error: None,
+            standup_open: true,
         }
     }
 
@@ -1274,153 +1277,159 @@ impl eframe::App for TimelineApp {
                 // chip, date label) can't inflate the row past the window and
                 // displace the right-aligned menu's hitbox.
                 ui.set_max_width(theme::content_width(ui));
-                ui.horizontal(|ui| {
-                    // Segmented view switcher.
-                    egui::Frame::new()
-                        .fill(theme::palette::INPUT_BG)
-                        .corner_radius(egui::CornerRadius::same(8))
-                        .inner_margin(egui::Margin::same(3))
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            for (view, label) in [
-                                (View::Home, "home"),
-                                (View::Timeline, "timeline"),
-                                (View::Reports, "reports"),
-                                (View::Chat, "chat"),
-                            ] {
-                                if ui.selectable_label(self.view == view, label).clicked()
-                                    && self.view != view
-                                {
-                                    if self.view == View::Chat {
-                                        // Leaving chat kills the warm worker
-                                        // (model resident only while visible).
-                                        self.chat = None;
-                                    }
-                                    self.view = view;
-                                    self.loaded_at = None;
-                                }
-                            }
-                        });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Widget width: actions fold into one menu.
-                        ui.menu_button("\u{2026}", |ui| {
-                            if matches!(self.view, View::Timeline | View::Home) {
-                                ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.filter)
-                                            .desired_width(120.0)
-                                            .hint_text("filter\u{2026}"),
-                                    );
-                                    if !self.filter.is_empty()
-                                        && ui.small_button("\u{d7}").clicked()
-                                    {
-                                        self.filter.clear();
+                // Empty bar space drags the window (decoration-less window is
+                // otherwise unmovable). Ui-background sense registers BEFORE
+                // the children, so buttons stay on top of the hit test; the
+                // old interact-after-children overlay sat on top and ate
+                // every press in the bar.
+                let bar =
+                    ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::drag()), |ui| {
+                        ui.horizontal(|ui| {
+                            // Segmented view switcher.
+                            egui::Frame::new()
+                                .fill(theme::palette::INPUT_BG)
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::same(3))
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+                                    for (view, label) in [
+                                        (View::Home, "home"),
+                                        (View::Timeline, "timeline"),
+                                        (View::Reports, "reports"),
+                                        (View::Chat, "chat"),
+                                    ] {
+                                        if ui.selectable_label(self.view == view, label).clicked()
+                                            && self.view != view
+                                        {
+                                            if self.view == View::Chat {
+                                                // Leaving chat kills the warm worker
+                                                // (model resident only while visible).
+                                                self.chat = None;
+                                            }
+                                            self.view = view;
+                                            self.loaded_at = None;
+                                        }
                                     }
                                 });
-                                ui.separator();
-                            }
-                            if ui.button("settings").clicked() {
-                                self.toggle_settings();
-                                ui.close();
-                            }
-                            if ui.button("derive now").clicked() {
-                                if !crate::send_ctrl(&self.sock_path, "derive") {
-                                    self.error = Some("daemon not reachable".into());
-                                }
-                                ui.close();
-                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Widget width: actions fold into one menu.
+                                    ui.menu_button("\u{2026}", |ui| {
+                                        if matches!(self.view, View::Timeline | View::Home) {
+                                            ui.horizontal(|ui| {
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut self.filter)
+                                                        .desired_width(120.0)
+                                                        .hint_text("filter\u{2026}"),
+                                                );
+                                                if !self.filter.is_empty()
+                                                    && ui.small_button("\u{d7}").clicked()
+                                                {
+                                                    self.filter.clear();
+                                                }
+                                            });
+                                            ui.separator();
+                                        }
+                                        if ui.button("settings").clicked() {
+                                            self.toggle_settings();
+                                            ui.close();
+                                        }
+                                        if ui.button("derive now").clicked() {
+                                            if !crate::send_ctrl(&self.sock_path, "derive") {
+                                                self.error = Some("daemon not reachable".into());
+                                            }
+                                            ui.close();
+                                        }
+                                    });
+                                    if !self.filter.is_empty() {
+                                        // Active-filter cue while the menu is closed.
+                                        if ui
+                                            .small_button(format!("\u{d7} {}", self.filter))
+                                            .on_hover_text("clear filter")
+                                            .clicked()
+                                        {
+                                            self.filter.clear();
+                                        }
+                                    }
+                                },
+                            );
                         });
-                        if !self.filter.is_empty() {
-                            // Active-filter cue while the menu is closed.
-                            if ui
-                                .small_button(format!("\u{d7} {}", self.filter))
-                                .on_hover_text("clear filter")
-                                .clicked()
-                            {
-                                self.filter.clear();
-                            }
+                        // Per-view controls on a second row; tabs + nav don't fit
+                        // side by side at 400px.
+                        if self.view != View::Home {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                match self.view {
+                                    // Home is day-independent: no nav controls.
+                                    View::Home => {}
+                                    View::Chat => {
+                                        if ui.button("new chat").clicked() {
+                                            self.chat_new();
+                                        }
+                                        self.chat_history_menu(ui);
+                                        if self.chat_warming() {
+                                            ui.weak("loading model\u{2026}");
+                                        }
+                                    }
+                                    View::Timeline => {
+                                        if ui.button("\u{25c0}").clicked() {
+                                            self.shift_day(-1);
+                                        }
+                                        if ui.button("\u{25b6}").clicked() {
+                                            self.shift_day(1);
+                                        }
+                                        if ui.button("today").clicked() {
+                                            self.day =
+                                                Zoned::now().with_time_zone(self.tz.clone()).date();
+                                            self.loaded_at = None;
+                                        }
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(
+                                                    self.day.strftime("%a %-d %b %Y").to_string(),
+                                                )
+                                                .text_style(egui::TextStyle::Heading)
+                                                .color(theme::palette::TEXT),
+                                            )
+                                            .truncate(),
+                                        );
+                                    }
+                                    View::Reports => {
+                                        if ui.button("\u{25c0}").clicked() {
+                                            self.shift_week(-1);
+                                        }
+                                        if ui.button("\u{25b6}").clicked() {
+                                            self.shift_week(1);
+                                        }
+                                        if ui.button("this week").clicked() {
+                                            let today =
+                                                Zoned::now().with_time_zone(self.tz.clone()).date();
+                                            self.week_anchor =
+                                                chronicle_core::timeref::week_start(today)
+                                                    .unwrap_or(today);
+                                            self.loaded_at = None;
+                                        }
+                                        let sunday = self.week_anchor.checked_add(6.days()).ok();
+                                        let range = match sunday {
+                                            Some(sun) => format!(
+                                                "{} \u{2013} {}",
+                                                self.week_anchor.strftime("%-d %b"),
+                                                sun.strftime("%-d %b %Y")
+                                            ),
+                                            None => self.week_anchor.to_string(),
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(range)
+                                                .text_style(egui::TextStyle::Heading)
+                                                .color(theme::palette::TEXT),
+                                        );
+                                    }
+                                }
+                            });
                         }
                     });
-                });
-                // Per-view controls on a second row; tabs + nav don't fit
-                // side by side at 400px.
-                if self.view != View::Home {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        match self.view {
-                            // Home is day-independent: no nav controls.
-                            View::Home => {}
-                            View::Chat => {
-                                if ui.button("new chat").clicked() {
-                                    self.chat_new();
-                                }
-                                self.chat_history_menu(ui);
-                                if self.chat_warming() {
-                                    ui.weak("loading model\u{2026}");
-                                }
-                            }
-                            View::Timeline => {
-                                if ui.button("\u{25c0}").clicked() {
-                                    self.shift_day(-1);
-                                }
-                                if ui.button("\u{25b6}").clicked() {
-                                    self.shift_day(1);
-                                }
-                                if ui.button("today").clicked() {
-                                    self.day = Zoned::now().with_time_zone(self.tz.clone()).date();
-                                    self.loaded_at = None;
-                                }
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(
-                                            self.day.strftime("%a %-d %b %Y").to_string(),
-                                        )
-                                        .text_style(egui::TextStyle::Heading)
-                                        .color(theme::palette::TEXT),
-                                    )
-                                    .truncate(),
-                                );
-                            }
-                            View::Reports => {
-                                if ui.button("\u{25c0}").clicked() {
-                                    self.shift_week(-1);
-                                }
-                                if ui.button("\u{25b6}").clicked() {
-                                    self.shift_week(1);
-                                }
-                                if ui.button("this week").clicked() {
-                                    let today = Zoned::now().with_time_zone(self.tz.clone()).date();
-                                    self.week_anchor =
-                                        chronicle_core::timeref::week_start(today).unwrap_or(today);
-                                    self.loaded_at = None;
-                                }
-                                let sunday = self.week_anchor.checked_add(6.days()).ok();
-                                let range = match sunday {
-                                    Some(sun) => format!(
-                                        "{} \u{2013} {}",
-                                        self.week_anchor.strftime("%-d %b"),
-                                        sun.strftime("%-d %b %Y")
-                                    ),
-                                    None => self.week_anchor.to_string(),
-                                };
-                                ui.label(
-                                    egui::RichText::new(range)
-                                        .text_style(egui::TextStyle::Heading)
-                                        .color(theme::palette::TEXT),
-                                );
-                            }
-                        }
-                    });
-                }
-                // Empty bar space drags the window (decoration-less window
-                // is otherwise unmovable). Registered after the children so
-                // egui's smallest-area hit test keeps buttons clickable.
-                let drag = ui.interact(
-                    ui.max_rect(),
-                    egui::Id::new("window_drag"),
-                    egui::Sense::drag(),
-                );
-                if drag.drag_started() {
+                if bar.response.drag_started() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             });

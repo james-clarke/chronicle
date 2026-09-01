@@ -94,25 +94,45 @@ impl TimelineApp {
                     .as_ref()
                     .map(|s| format!("Standup \u{b7} {}", s.day))
                     .unwrap_or_else(|| "Standup".to_owned());
-                ui.label(
-                    egui::RichText::new(day)
-                        .text_style(egui::TextStyle::Small)
-                        .color(theme::palette::TEXT_DIM),
-                );
+                ui.horizontal(|ui| {
+                    let arrow = if self.standup_open {
+                        "\u{25bc}"
+                    } else {
+                        "\u{25b6}"
+                    };
+                    if ui.small_button(arrow).clicked() {
+                        self.standup_open = !self.standup_open;
+                    }
+                    ui.label(
+                        egui::RichText::new(day)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                    );
+                });
+                if !self.standup_open {
+                    return;
+                }
                 if self.standup_job.is_some() {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(12.0));
                         ui.weak("drafting from yesterday's journals\u{2026}");
                     });
                 } else if let Some(standup) = &self.standup {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&standup.content)
-                                .text_style(egui::TextStyle::Small)
-                                .color(theme::palette::TEXT),
-                        )
-                        .wrap(),
-                    );
+                    // Long drafts (7-task fallback days) otherwise push the
+                    // whole task list off a 640px window.
+                    egui::ScrollArea::vertical()
+                        .id_salt("standup_draft")
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&standup.content)
+                                        .text_style(egui::TextStyle::Small)
+                                        .color(theme::palette::TEXT),
+                                )
+                                .wrap(),
+                            );
+                        });
                     ui.add_space(4.0);
                     if !self.model_missing && ui.small_button("redraft").clicked() {
                         generate = true;
