@@ -137,6 +137,17 @@ struct TaskGroup {
     ai_summary: Option<String>,
     /// A description job for this task is queued or running.
     ai_pending: bool,
+    /// External anchor (ticket key from `tasks.external_ref`).
+    external_ref: Option<String>,
+    /// Commits landed inside this task's intervals today, oldest first.
+    commits: Vec<CommitRow>,
+}
+
+/// One commit shown as task evidence.
+struct CommitRow {
+    time: Zoned,
+    /// Subject line, or the short hash when git(1) was unavailable.
+    summary: String,
 }
 
 struct IntervalRow {
@@ -594,6 +605,8 @@ impl TimelineApp {
                         total_ms: 0,
                         ai_summary: t.description.clone(),
                         ai_pending: false,
+                        external_ref: t.external_ref.clone(),
+                        commits: Vec::new(),
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -635,10 +648,25 @@ impl TimelineApp {
                 }),
             }
         }
+        let mut commits: std::collections::HashMap<i64, Vec<CommitRow>> =
+            std::collections::HashMap::new();
+        for (task_id, c) in chronicle_core::storage::commits_in_range(conn, lo, hi)? {
+            let summary = c
+                .summary
+                .or_else(|| c.commit_id.map(|h| h.chars().take(12).collect()))
+                .unwrap_or_default();
+            commits.entry(task_id).or_default().push(CommitRow {
+                time: c.ts.to_zoned(self.tz.clone()),
+                summary,
+            });
+        }
         for group in &mut groups {
             if let Some(mut apps) = evidence.remove(&group.task_id) {
                 apps.sort_by_key(|a| std::cmp::Reverse(a.ms));
                 group.evidence = apps;
+            }
+            if let Some(rows) = commits.remove(&group.task_id) {
+                group.commits = rows;
             }
             if group.ai_summary.is_none() {
                 group.ai_pending =

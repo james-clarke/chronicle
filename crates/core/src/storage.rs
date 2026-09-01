@@ -157,6 +157,40 @@ pub fn commits_for_task(conn: &Connection, task_id: i64) -> Result<Vec<VcsEvent>
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Commits inside any task interval overlapping `[lo, hi)`, keyed by task,
+/// oldest first per task (one range query for the whole timeline day).
+pub fn commits_in_range(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(i64, VcsEvent)>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT i.task_id, {VCS_COLS} FROM vcs_events v
+         JOIN intervals i ON v.ts >= i.start_ts AND v.ts < i.end_ts
+         WHERE v.kind='commit' AND v.ts >= ?1 AND v.ts < ?2
+         ORDER BY i.task_id, v.ts"
+    ))?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        let kind: String = r.get(4)?;
+        Ok((
+            r.get::<_, i64>(0)?,
+            VcsEvent {
+                ts: ms_to_ts(r.get(1)?),
+                repo: r.get(2)?,
+                branch: r.get(3)?,
+                kind: if kind == "commit" {
+                    VcsKind::Commit
+                } else {
+                    VcsKind::Checkout
+                },
+                commit_id: r.get(5)?,
+                summary: r.get(6)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Anchoring never overwrites: first ref wins, user edits win over both.
 pub fn set_task_external_ref(
     conn: &Connection,

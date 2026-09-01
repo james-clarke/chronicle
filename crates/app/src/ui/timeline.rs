@@ -545,6 +545,9 @@ fn detail_ui(
         if let Some(project) = &group.project {
             theme::badge(ui, project, color);
         }
+        if let Some(external_ref) = &group.external_ref {
+            theme::badge(ui, external_ref, theme::palette::TEXT_DIM);
+        }
         if group.declared {
             theme::badge(ui, "declared", theme::palette::TEXT_DIM);
         }
@@ -671,6 +674,28 @@ fn detail_ui(
                     egui::RichText::new(dur_text)
                         .text_style(egui::TextStyle::Small)
                         .color(theme::palette::TEXT_DIM),
+                );
+            });
+        }
+    }
+
+    if !group.commits.is_empty() {
+        ui.add_space(8.0);
+        theme::section_header(ui, "Commits", None);
+        for c in &group.commits {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(c.time.strftime("%H:%M").to_string())
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&c.summary)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT),
+                    )
+                    .truncate(),
                 );
             });
         }
