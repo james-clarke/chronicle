@@ -581,6 +581,21 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
             }
             Err(e) => tracing::warn!("bad ticket_regex, skipping anchoring: {e}"),
         }
+        // One journal entry per task touched by this batch (m16); the job's
+        // upsert keeps a re-derived batch idempotent.
+        let touched: std::collections::BTreeSet<i64> =
+            stored.iter().map(|(task_id, _, _)| *task_id).collect();
+        for task_id in touched {
+            if !storage::pending_journal_job(&conn, task_id, batch_id)? {
+                storage::enqueue_ai_job(
+                    &conn,
+                    Timestamp::now(),
+                    "journal",
+                    0,
+                    &storage::journal_payload(task_id, batch_id),
+                )?;
+            }
+        }
         Ok(n)
     })();
     match result {
@@ -690,6 +705,65 @@ fn run_ai_job(
             let digest = chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], None);
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
+        }
+        "journal" => {
+            let task_id = payload["task_id"]
+                .as_i64()
+                .context("payload lacks task_id")?;
+            let batch_id = payload["batch_id"]
+                .as_i64()
+                .context("payload lacks batch_id")?;
+            let Some((evidence, interval_ids, lo, hi)) =
+                storage::task_batch_evidence(conn, task_id, batch_id)?
+            else {
+                bail!("batch {batch_id} holds no intervals for task {task_id}")
+            };
+            if evidence.trim().is_empty() {
+                bail!("no span evidence for task {task_id} in batch {batch_id}");
+            }
+            let (label, project): (String, Option<String>) = conn.query_row(
+                "SELECT label, project FROM tasks WHERE id=?1",
+                [task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            // Head of the ticket context only: the prompt budget belongs to
+            // the session evidence, which truncation cuts from the tail.
+            let context: String = storage::task_context(conn, task_id)?
+                .map(|(_, c)| c.chars().take(1200).collect())
+                .unwrap_or_default();
+            let tz = TimeZone::system();
+            let mut git = String::new();
+            for v in storage::vcs_in_range(conn, lo, hi)? {
+                use std::fmt::Write as _;
+                let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
+                match v.kind {
+                    chronicle_core::types::VcsKind::Checkout => {
+                        let _ = writeln!(git, "- {hm} checkout {} \u{2192} {}", v.repo, v.branch);
+                    }
+                    chronicle_core::types::VcsKind::Commit => {
+                        let subject = v.summary.as_deref().unwrap_or("");
+                        let _ =
+                            writeln!(git, "- {hm} commit {} \"{subject}\" [{}]", v.repo, v.branch);
+                    }
+                }
+            }
+            let entry = describer.journal_entry(
+                &label,
+                project.as_deref(),
+                &context,
+                &git,
+                &evidence,
+            )?;
+            storage::insert_journal_entry(
+                conn,
+                task_id,
+                batch_id,
+                lo,
+                hi,
+                &entry,
+                &serde_json::to_string(&interval_ids)?,
+            )?;
+            Ok(entry)
         }
         "narrative" => {
             let lo = payload["lo"].as_i64().context("payload lacks lo")?;

@@ -789,6 +789,8 @@ pub fn task_context(
         .transpose()?)
 }
 
+/// Append the batch's journal entry for a task; a re-derived batch replaces
+/// its earlier entry (mirrors `store_derivation`'s replace semantics).
 pub fn insert_journal_entry(
     conn: &Connection,
     task_id: i64,
@@ -800,10 +802,61 @@ pub fn insert_journal_entry(
 ) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO journal_entries (task_id, batch_id, start_ts, end_ts, entry, evidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(task_id, batch_id) DO UPDATE
+           SET start_ts=excluded.start_ts, end_ts=excluded.end_ts,
+               entry=excluded.entry, evidence=excluded.evidence",
         params![task_id, batch_id, start_ts, end_ts, entry, evidence],
     )?;
     Ok(())
+}
+
+/// The task's batch-scoped journal evidence: focus-span lines overlapping the
+/// task's intervals in this batch, plus the interval ids and the covered
+/// window. None when the batch no longer holds intervals for the task.
+pub fn task_batch_evidence(
+    conn: &Connection,
+    task_id: i64,
+    batch_id: i64,
+) -> Result<Option<(String, Vec<i64>, i64, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, start_ts, end_ts FROM intervals
+         WHERE task_id=?1 AND batch_id=?2 ORDER BY start_ts",
+    )?;
+    let ivs: Vec<(i64, i64, i64)> = stmt
+        .query_map(params![task_id, batch_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let (Some(lo), Some(hi)) = (
+        ivs.iter().map(|iv| iv.1).min(),
+        ivs.iter().map(|iv| iv.2).max(),
+    ) else {
+        return Ok(None);
+    };
+    let mut ctx = String::new();
+    let mut stmt = tx_spans_for_intervals(conn)?;
+    let mut rows = stmt.query(params![task_id, batch_id])?;
+    while let Some(row) = rows.next()? {
+        let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
+        if ctx.len() + app.len() + title.len() + 2 > 2000 {
+            break;
+        }
+        ctx.push_str(&app);
+        ctx.push(' ');
+        ctx.push_str(&title);
+        ctx.push('\n');
+    }
+    Ok(Some((ctx, ivs.iter().map(|iv| iv.0).collect(), lo, hi)))
+}
+
+fn tx_spans_for_intervals(conn: &Connection) -> Result<rusqlite::Statement<'_>, StorageError> {
+    Ok(conn.prepare(
+        "SELECT DISTINCT s.app, s.title FROM spans s
+         JOIN intervals i ON i.task_id=?1 AND i.batch_id=?2
+           AND s.start_ts < i.end_ts AND s.end_ts > i.start_ts
+         WHERE s.kind='focus' ORDER BY s.app, s.title",
+    )?)
 }
 
 /// Last `n` journal entries for a task, chronological (oldest of the tail
@@ -1702,7 +1755,8 @@ mod tests {
         super::MIGRATIONS.to_latest(&mut conn).unwrap();
         let ts = crate::types::ms_to_ts(2_000);
         conn.execute_batch(
-            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES
+                 (1, 0, 100, 'done'), (2, 100, 200, 'done'), (3, 200, 300, 'done');
              INSERT INTO tasks (id, label, status, source, created_ts)
                  VALUES (5, 'work', 'open', 'user', 10);",
         )
@@ -1715,7 +1769,7 @@ mod tests {
 
         for (i, entry) in ["one", "two", "three"].iter().enumerate() {
             let t = 10 + i as i64 * 10;
-            super::insert_journal_entry(&conn, 5, 1, t, t + 5, entry, "[]").unwrap();
+            super::insert_journal_entry(&conn, 5, 1 + i as i64, t, t + 5, entry, "[]").unwrap();
         }
         let tail = super::journal_tail(&conn, 5, 2).unwrap();
         assert_eq!(
@@ -1732,6 +1786,37 @@ mod tests {
         let a = super::conversation_for_task(&conn, 5, ts).unwrap();
         let b = super::conversation_for_task(&conn, 5, ts).unwrap();
         assert_eq!(a, b, "same task resumes the same conversation");
+    }
+
+    // Batch-scoped evidence covers only this batch's intervals; the journal
+    // upsert replaces a re-derived batch's entry instead of duplicating.
+    #[test]
+    fn task_batch_evidence_and_journal_upsert() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES
+                 (1, 0, 100, 'done'), (2, 100, 200, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (5, 'work', 'open', 'user', 10);
+             INSERT INTO intervals (id, task_id, batch_id, start_ts, end_ts, confidence) VALUES
+                 (11, 5, 1, 10, 90, 0.9),
+                 (12, 5, 2, 110, 190, 0.9);
+             INSERT INTO spans (batch_id, start_ts, end_ts, app, title, kind) VALUES
+                 (1, 10, 90, 'code', 'editing foo.rs', 'focus'),
+                 (2, 110, 190, 'code', 'editing bar.rs', 'focus');",
+        )
+        .unwrap();
+        let (evidence, ids, lo, hi) = super::task_batch_evidence(&conn, 5, 1).unwrap().unwrap();
+        assert_eq!(evidence, "code editing foo.rs\n", "batch 2's span excluded");
+        assert_eq!((ids, lo, hi), (vec![11], 10, 90));
+        assert!(super::task_batch_evidence(&conn, 5, 99).unwrap().is_none());
+
+        super::insert_journal_entry(&conn, 5, 1, 10, 90, "first", "[11]").unwrap();
+        super::insert_journal_entry(&conn, 5, 1, 10, 90, "replaced", "[11]").unwrap();
+        let tail = super::journal_tail(&conn, 5, 10).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].entry, "replaced");
     }
 
     // Only tasks with interval activity since their checkpoint (within the

@@ -20,6 +20,7 @@ use crate::chat::ThinkFilter;
 const DESCRIPTION_PROMPT: &str = include_str!("../../../prompts/task_description_v1.txt");
 const SUGGEST_PROMPT: &str = include_str!("../../../prompts/suggest_task_v1.txt");
 const NARRATIVE_PROMPT: &str = include_str!("../../../prompts/narrative_v1.txt");
+const JOURNAL_PROMPT: &str = include_str!("../../../prompts/journal_v1.txt");
 const SUGGEST_GRAMMAR: &str = include_str!("../../../grammars/suggest_task_v1.gbnf");
 
 const N_CTX: u32 = 4096;
@@ -58,6 +59,36 @@ impl Describer {
         let out = self.generate(&prompt, None)?;
         if out.trim().is_empty() {
             bail!("model produced an empty description");
+        }
+        Ok(out.trim().to_owned())
+    }
+
+    /// 1-3 sentence journal entry for one batch's slice of a task. `context`
+    /// is the task's external ticket context (may be empty), `git` the
+    /// session's vcs lines, `evidence` the session's span lines.
+    pub fn journal_entry(
+        &self,
+        label: &str,
+        project: Option<&str>,
+        context: &str,
+        git: &str,
+        evidence: &str,
+    ) -> anyhow::Result<String> {
+        let project_line = project.map(|p| format!(" [{p}]")).unwrap_or_default();
+        let context_section = if context.trim().is_empty() {
+            String::new()
+        } else {
+            format!("Ticket context:\n{}\n", context.trim())
+        };
+        let prompt = JOURNAL_PROMPT
+            .replace("{label}", label)
+            .replace("{project_line}", &project_line)
+            .replace("{context_section}", &context_section)
+            .replace("{git}", if git.trim().is_empty() { "(none)" } else { git })
+            .replace("{evidence}", evidence);
+        let out = self.generate(&prompt, None)?;
+        if out.trim().is_empty() {
+            bail!("model produced an empty journal entry");
         }
         Ok(out.trim().to_owned())
     }

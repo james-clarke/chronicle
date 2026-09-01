@@ -24,6 +24,8 @@ CREATE TABLE journal_entries (
     evidence TEXT
 );
 CREATE INDEX idx_journal_task ON journal_entries (task_id, start_ts);
+-- One entry per batch per task; a re-derived batch replaces its entry.
+CREATE UNIQUE INDEX idx_journal_task_batch ON journal_entries (task_id, batch_id);
 
 -- Latest "where I am / what's next" only; regenerated, overwrites.
 CREATE TABLE checkpoints (
