@@ -167,13 +167,13 @@ Verify with `systemctl --user status chronicle` and `chronicle status` (exit 0 +
 
 ## Conventions
 
-`anyhow` in binaries, `thiserror` in libs · `tracing` + rotating file log (5 MB) · `rust-toolchain.toml` pins stable · CI: fmt + clippy + tests on Linux (3-OS matrix from M14) · `cargo clippy -- -D warnings` + `cargo fmt` clean at every milestone · fixture-driven tests: mock `FocusProvider` replays JSONL; sessionizer/digest have golden-output tests · every milestone ends with tests passing, `chronicle dump` demonstrating the capability, and a short `docs/mNN-notes.md`.
+`anyhow` in binaries, `thiserror` in libs · `tracing` + rotating file log (5 MB) · `rust-toolchain.toml` pins stable · CI: fmt + clippy + tests on Linux (3-OS matrix from M17) · `cargo clippy -- -D warnings` + `cargo fmt` clean at every milestone · fixture-driven tests: mock `FocusProvider` replays JSONL; sessionizer/digest have golden-output tests · every milestone ends with tests passing, `chronicle dump` demonstrating the capability, and a short `docs/mNN-notes.md`.
 
 ## Milestones
 
 Order: **Linux polish first, then macOS → Windows.** Ports wait until the product shape is nailed down on Linux — porting an unfinished shape multiplies rework by three platforms. Polish bar before porting: trustworthy data, appliance feel, visible product.
 
-**M0–M12 complete on Linux (2026-08-27; m12 reports accepted — timesheet export, reports UI, chat totals).**
+**M0–M14 complete on Linux (2026-09-01; m13 widget UI redesign + m14 AI layer — descriptions, insights, narratives, ai_jobs queue).** Direction doc for m15/m16: `m15-task-workspace.md`.
 
 | M | Deliverable | Acceptance |
 |---|---|---|
@@ -191,13 +191,16 @@ Order: **Linux polish first, then macOS → Windows.** Ports wait until the prod
 | 11 | **Daily-driver ops:** systemd user unit + autostart, SIGTERM clean shutdown, `chronicle status`, size-based log rotation | reboot → daemon up without a terminal; `chronicle status` reports healthy |
 | 12 | **Reports:** week/day summary view, timesheet export (CSV/md), chat aggregate queries | "how long on chronicle this week?" answered both in UI and chat; export opens in a spreadsheet |
 | 13 | **UI + onboarding polish:** settings visual pass, confidence tints, search, chat panel visuals, in-UI model download | fresh install to first derived task without touching a terminal |
-| 14 | **macOS port:** capture, AX onboarding + degraded app-only mode, tray, LaunchAgent, `metal`; ad-hoc sign + documented right-click-open | M1–M13 acceptance re-run on macOS |
-| 15 | **Windows port:** capture thread, tray, HKCU autostart, power guard, WTS lock | same re-run on Windows |
-| 16 | Packaging: Linux `.desktop` + tarball/AppImage; macOS `.app`; Windows installer | clean install on all three |
+| 14 | **AI layer:** task descriptions, declare suggestions, week narratives, `ai_jobs` queue + idle-gated worker, insights (sessions, focus metrics, deltas) | descriptions appear on tasks unaided; insights strip + week narrative in UI |
+| 15 | **Git evidence + task anchors:** `vcs_events` capture (HEAD/commit polling), digest git section, deterministic ticket-key anchoring (`tasks.external_ref`), anchor chip + commit evidence in detail pane — see `m15-task-workspace.md` | work 30 min on branch `ABC-123-…` → derived task anchored `ABC-123`; its commits listed in the detail pane |
+| 16 | **Task workspace:** MCP context fetch on task add, per-batch journal entries, AFK checkpoints ("where I am / next steps"), Home resume card, task-scoped chat | add task from a Jira key, work, leave ≥ 1 h, return → resume card shows journal + grounded next steps |
+| 17 | **macOS port:** capture, AX onboarding + degraded app-only mode, tray, LaunchAgent, `metal`; ad-hoc sign + documented right-click-open | M1–M16 acceptance re-run on macOS |
+| 18 | **Windows port:** capture thread, tray, HKCU autostart, power guard, WTS lock | same re-run on Windows |
+| 19 | Packaging: Linux `.desktop` + tarball/AppImage; macOS `.app`; Windows installer | clean install on all three |
 
 Intelligence iteration (prompt/model quality, fixture corpus growth) is **continuous and bench-gated**, not a milestone: every real failure becomes a fixture before it gets fixed.
 
-Get the $99 Apple Developer account **before M14** so notarization is a v1.1 config flip, not a scramble.
+Get the $99 Apple Developer account **before M17** so notarization is a v1.1 config flip, not a scramble.
 
 ## Deferred (v1.1+)
 
