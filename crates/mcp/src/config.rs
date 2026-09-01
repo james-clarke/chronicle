@@ -26,6 +26,10 @@ pub enum McpConfigError {
 pub struct McpConfig {
     pub servers: Vec<ServerConfig>,
     pub context_calls: Vec<ContextCall>,
+    /// Per-task context fetch (m16): same allowlist shape, but each call's
+    /// `args_json` may carry a `{ref}` placeholder replaced with the task's
+    /// external_ref at fetch time. Empty = feature off.
+    pub fetch_calls: Vec<ContextCall>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,7 +61,7 @@ impl McpConfig {
             return Ok(Self::default());
         }
         let cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
-        for call in &cfg.context_calls {
+        for call in cfg.context_calls.iter().chain(&cfg.fetch_calls) {
             if !cfg.servers.iter().any(|s| s.name == call.server) {
                 return Err(McpConfigError::UnknownServer(call.server.clone()));
             }

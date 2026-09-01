@@ -723,6 +723,21 @@ fn detail_actions(
             });
         }
         merge_menu(ui, group.task_id, candidates, pending);
+        if group.external_ref.is_some() {
+            let label = if group.context_pending {
+                "fetching\u{2026}"
+            } else if group.task_context.is_some() {
+                "re-fetch context"
+            } else {
+                "fetch context"
+            };
+            if ui
+                .add_enabled(!group.context_pending, egui::Button::new(label))
+                .clicked()
+            {
+                *pending = Some(Action::FetchContext(group.task_id));
+            }
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Destructive action: tinted, and kept apart on the right.
             let close_btn =

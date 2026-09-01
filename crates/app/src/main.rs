@@ -566,7 +566,17 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
                 for (task_id, key) in
                     chronicle_core::anchor::anchor_tasks(&stored, &prior, &vcs, &re)
                 {
-                    storage::set_task_external_ref(&conn, task_id, &key)?;
+                    // Newly anchored → fetch external context in the background
+                    // (acceptance: context lands without touching a terminal).
+                    if storage::set_task_external_ref(&conn, task_id, &key)? {
+                        storage::enqueue_ai_job(
+                            &conn,
+                            Timestamp::now(),
+                            "fetch_context",
+                            0,
+                            &storage::task_description_payload(task_id),
+                        )?;
+                    }
                 }
             }
             Err(e) => tracing::warn!("bad ticket_regex, skipping anchoring: {e}"),
@@ -594,14 +604,13 @@ fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
     let config = Config::load(&data_dir.join("config.toml"))?;
     let conn = storage::open(&data_dir.join("chronicle.db"))?;
-    let Some(model_path) = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
-    else {
-        bail!("no model available; run `chronicle model pull`")
-    };
+    // No unconditional model gate: fetch_context runs LLM-free; the LLM arms
+    // bail individually when no model resolves.
+    let model_path = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir);
     let Some(job) = storage::claim_ai_job(&conn, job_id)? else {
         bail!("ai job {job_id} is not eligible")
     };
-    match run_ai_job(&conn, &model_path, &job) {
+    match run_ai_job(&conn, &config, data_dir, model_path.as_deref(), &job) {
         Ok(result) => {
             storage::complete_ai_job(&conn, job_id, &result)?;
             tracing::info!(job_id, kind = %job.kind, "ai job done");
@@ -617,11 +626,36 @@ fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> {
 
 fn run_ai_job(
     conn: &rusqlite::Connection,
-    model_path: &Path,
+    config: &Config,
+    data_dir: &Path,
+    model_path: Option<&Path>,
     job: &chronicle_core::storage::AiJobRow,
 ) -> anyhow::Result<String> {
     use chronicle_core::{insights, report, storage};
     let payload: serde_json::Value = serde_json::from_str(&job.payload)?;
+    if job.kind == "fetch_context" {
+        let task_id = payload["task_id"]
+            .as_i64()
+            .context("payload lacks task_id")?;
+        let ext_ref: Option<String> = conn.query_row(
+            "SELECT external_ref FROM tasks WHERE id=?1",
+            [task_id],
+            |r| r.get(0),
+        )?;
+        let Some(ext_ref) = ext_ref else {
+            bail!("task {task_id} has no external_ref")
+        };
+        let mcp_path = config
+            .mcp_config
+            .clone()
+            .unwrap_or_else(|| data_dir.join("mcp.toml"));
+        let Some(content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref) else {
+            bail!("no fetch_calls configured or every call failed")
+        };
+        storage::upsert_task_context(conn, task_id, "mcp", Timestamp::now(), &content)?;
+        return Ok(content);
+    }
+    let model_path = model_path.context("no model available; run `chronicle model pull`")?;
     let describer = chronicle_derive::describe::Describer::load(model_path)?;
     match job.kind.as_str() {
         "task_description" => {

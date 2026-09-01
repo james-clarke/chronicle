@@ -141,6 +141,10 @@ struct TaskGroup {
     external_ref: Option<String>,
     /// Commits landed inside this task's intervals today, oldest first.
     commits: Vec<CommitRow>,
+    /// MCP-fetched context bundle as (fetched_ts, content).
+    task_context: Option<(i64, String)>,
+    /// A fetch_context job for this task is queued or running.
+    context_pending: bool,
 }
 
 /// One commit shown as task evidence.
@@ -217,6 +221,8 @@ enum Action {
     DismissSuggestion,
     /// Queue (or re-queue) the week-narrative job for the shown report.
     GenerateNarrative,
+    /// Queue a context (re-)fetch for an anchored task.
+    FetchContext(i64),
 }
 
 /// Declare-suggestion lifecycle (home view chip).
@@ -607,6 +613,8 @@ impl TimelineApp {
                         ai_pending: false,
                         external_ref: t.external_ref.clone(),
                         commits: Vec::new(),
+                        task_context: None,
+                        context_pending: false,
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -671,6 +679,13 @@ impl TimelineApp {
             if group.ai_summary.is_none() {
                 group.ai_pending =
                     chronicle_core::storage::pending_description_job(conn, group.task_id)
+                        .unwrap_or(false);
+            }
+            if group.external_ref.is_some() {
+                group.task_context =
+                    chronicle_core::storage::task_context(conn, group.task_id).unwrap_or(None);
+                group.context_pending =
+                    chronicle_core::storage::pending_fetch_context_job(conn, group.task_id)
                         .unwrap_or(false);
             }
         }
@@ -750,10 +765,21 @@ impl TimelineApp {
                 result
             }
             Action::Declare => {
-                let label = self.new_label.trim().to_owned();
-                if label.is_empty() {
+                let input = self.new_label.trim().to_owned();
+                if input.is_empty() {
                     return;
                 }
+                // The declare input also accepts a ticket key or ticket URL:
+                // the key becomes the anchor (and the label, when the input
+                // is nothing but the key/URL) and context fetch starts.
+                let ticket = chronicle_core::config::Config::load(&self.config_path)
+                    .ok()
+                    .and_then(|c| regex::Regex::new(&c.ticket_regex).ok())
+                    .and_then(|re| re.find(&input).map(|m| m.as_str().to_owned()));
+                let label = match &ticket {
+                    Some(key) if input == *key || input.starts_with("http") => key.clone(),
+                    _ => input,
+                };
                 let project = self.new_project.trim();
                 let project = (!project.is_empty()).then_some(project);
                 let result = chronicle_core::storage::insert_user_task(conn, now, &label, project);
@@ -766,6 +792,19 @@ impl TimelineApp {
                             task_id,
                             Some(&desc),
                         );
+                    }
+                    if let Some(key) = ticket
+                        && chronicle_core::storage::set_task_external_ref(conn, task_id, &key)
+                            .unwrap_or(false)
+                    {
+                        let _ = chronicle_core::storage::enqueue_ai_job(
+                            conn,
+                            now,
+                            "fetch_context",
+                            chronicle_core::storage::AI_JOB_INTERACTIVE,
+                            &chronicle_core::storage::task_description_payload(task_id),
+                        );
+                        let _ = crate::send_ctrl(&self.sock_path, "derive");
                     }
                 }
                 result.map(|_| ())
@@ -811,6 +850,20 @@ impl TimelineApp {
                     }
                     Err(e) => Err(e),
                 }
+            }
+            Action::FetchContext(task_id) => {
+                let result = chronicle_core::storage::enqueue_ai_job(
+                    conn,
+                    now,
+                    "fetch_context",
+                    chronicle_core::storage::AI_JOB_INTERACTIVE,
+                    &chronicle_core::storage::task_description_payload(task_id),
+                );
+                if result.is_ok() {
+                    // Poke the daemon so the job runs now, not next tick.
+                    let _ = crate::send_ctrl(&self.sock_path, "derive");
+                }
+                result.map(|_| ())
             }
             Action::UseSuggestion => {
                 if let Some(SuggestionState::Ready(s)) = self.suggestion.take() {

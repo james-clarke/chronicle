@@ -193,16 +193,17 @@ pub fn commits_in_range(
 }
 
 /// Anchoring never overwrites: first ref wins, user edits win over both.
+/// True when the ref was newly set (callers chain a context fetch on it).
 pub fn set_task_external_ref(
     conn: &Connection,
     task_id: i64,
     external_ref: &str,
-) -> Result<(), StorageError> {
-    conn.execute(
+) -> Result<bool, StorageError> {
+    let n = conn.execute(
         "UPDATE tasks SET external_ref=?2 WHERE id=?1 AND external_ref IS NULL",
         params![task_id, external_ref],
     )?;
-    Ok(())
+    Ok(n > 0)
 }
 
 fn insert_focus(conn: &Connection, kind: &str, e: &FocusEvent) -> Result<(), StorageError> {
@@ -449,8 +450,9 @@ pub fn ai_job_status(
         .transpose()?)
 }
 
-/// Canonical payload for a task-description job; stored and matched verbatim
-/// so the UI can ask "is one queued for this task" by equality.
+/// Canonical single-task payload (description and fetch_context jobs);
+/// stored and matched verbatim so the UI can ask "is one queued for this
+/// task" by equality.
 pub fn task_description_payload(task_id: i64) -> String {
     format!("{{\"task_id\":{task_id}}}")
 }

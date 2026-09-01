@@ -20,6 +20,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// ~800 tokens by the digest's chars/4 heuristic.
 const MAX_CONTEXT_CHARS: usize = 800 * 4;
+/// Task context is a standalone document the user reads (and chat injects),
+/// not squeezed into the digest's cap ladder — bigger budget.
+const MAX_FETCH_CHARS: usize = 6000;
 
 /// Run every allowlisted context call from the TOML config at `config_path`
 /// and format the results for the digest's `## Workspace context` section.
@@ -35,6 +38,46 @@ pub fn gather_context(config_path: &Path) -> Option<String> {
     if cfg.context_calls.is_empty() {
         return None;
     }
+    run_blocking(&cfg, &cfg.context_calls, MAX_CONTEXT_CHARS)
+}
+
+/// Fetch external context for one task ref (m16): run every `fetch_calls`
+/// entry with `{ref}` in its args replaced by `ext_ref`. None = feature off
+/// (no fetch_calls), bad config, or every call failed.
+pub fn fetch_context(config_path: &Path, ext_ref: &str) -> Option<String> {
+    let cfg = match McpConfig::load(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::warn!("mcp config {}: {e}", config_path.display());
+            return None;
+        }
+    };
+    if cfg.fetch_calls.is_empty() {
+        return None;
+    }
+    let calls: Vec<ContextCall> = cfg
+        .fetch_calls
+        .iter()
+        .map(|c| ContextCall {
+            args_json: c
+                .args_json
+                .as_ref()
+                .map(|raw| substitute_ref(raw, ext_ref)),
+            ..c.clone()
+        })
+        .collect();
+    run_blocking(&cfg, &calls, MAX_FETCH_CHARS)
+}
+
+/// Replace `{ref}` inside an args template. The ref is JSON-escaped first:
+/// the placeholder sits inside a string literal and the ref is user-editable,
+/// so a quote in it must not break out of the argument value.
+fn substitute_ref(raw: &str, ext_ref: &str) -> String {
+    let escaped = serde_json::to_string(ext_ref).unwrap_or_default();
+    raw.replace("{ref}", escaped.trim_matches('"'))
+}
+
+fn run_blocking(cfg: &McpConfig, calls: &[ContextCall], max_chars: usize) -> Option<String> {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -45,19 +88,18 @@ pub fn gather_context(config_path: &Path) -> Option<String> {
             return None;
         }
     };
-    let out = rt.block_on(gather(&cfg));
+    let out = rt.block_on(gather(cfg, calls));
     let out = out.trim();
     if out.is_empty() {
         return None;
     }
-    Some(truncate_chars(out, MAX_CONTEXT_CHARS))
+    Some(truncate_chars(out, max_chars))
 }
 
-async fn gather(cfg: &McpConfig) -> String {
+async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
     let mut out = String::new();
     for server in &cfg.servers {
-        let calls: Vec<&ContextCall> = cfg
-            .context_calls
+        let calls: Vec<&ContextCall> = all_calls
             .iter()
             .filter(|c| c.server == server.name)
             .collect();
@@ -142,5 +184,20 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
         head + "\u{2026}"
     } else {
         head
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn substitute_ref_escapes_json_metacharacters() {
+        assert_eq!(
+            super::substitute_ref(r#"{"issueIdOrKey":"{ref}"}"#, "ABC-123"),
+            r#"{"issueIdOrKey":"ABC-123"}"#
+        );
+        // A quote in a user-edited ref stays inside the string literal.
+        let out = super::substitute_ref(r#"{"q":"{ref}"}"#, "a\"b");
+        assert_eq!(out, r#"{"q":"a\"b"}"#);
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&out).unwrap();
     }
 }
