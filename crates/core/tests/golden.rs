@@ -94,6 +94,7 @@ fn day1_digest_golden() {
         &[],
         &[],
         &[],
+        &[],
         None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
@@ -129,6 +130,7 @@ fn day2_web_per_site_spans() {
         &[],
         &[],
         &[],
+        &[],
         None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
@@ -147,7 +149,7 @@ fn eval_digest(fixture: &str) -> String {
     let stream_end = events.last().expect("fixture has events").ts;
     let spans = sessionize(&events, stream_end, &config);
     check_golden(&format!("{fixture}.spans.golden"), &render_spans(&spans));
-    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], None)
+    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None)
 }
 
 #[test]
@@ -275,8 +277,8 @@ fn correction_changes_next_digest() {
     );
     assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
 
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
-    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, &[], &[], None);
     assert_ne!(plain, with, "correction must change the digest");
     check_golden("day1.corrections.digest.golden", &with);
 }
@@ -573,13 +575,13 @@ fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
     let ctx = "### jira.search\nCHR-42 fix AFK split";
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], Some(ctx));
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some(ctx));
     assert_eq!(with, format!("{plain}\n## Workspace context\n{ctx}\n"));
     // Blank context must not add the section (goldens stay MCP-free).
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &[], Some("  \n")),
+        build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some("  \n")),
         plain
     );
 }
@@ -639,7 +641,7 @@ fn digest_git_activity_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
     let t0 = ts_to_ms(current.first().unwrap().start);
     let vcs = [
         ActivityEvent {
@@ -661,7 +663,7 @@ fn digest_git_activity_section() {
             summary: Some("feat: plan model".into()),
         },
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &vcs, None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &vcs, None);
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("checkout app \u{2192} ABC-123-sending-plans"),
@@ -677,7 +679,7 @@ fn digest_git_activity_section() {
         ..vcs[0].clone()
     }];
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &outside, None),
+        build_digest(current, &TimeZone::UTC, &[], &[], &[], &outside, None),
         plain
     );
 }
@@ -727,7 +729,7 @@ fn digest_activity_section_mixed_kinds() {
         ),
         ev(ActivityKind::Call, 240_000, None, "", "", "Firefox"),
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &activity, None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &activity, None);
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("claude app@ABC-123-x 23m00s \"fix the flaky test\""),
@@ -1530,8 +1532,52 @@ fn eject_splits_interval_and_blocks_suggestion() {
     );
     let spans = storage::spans_in_range(&conn, 20_000, 30_000).unwrap();
     let few_shot = storage::similar_corrections(&conn, &spans, 4).unwrap();
-    assert_eq!(few_shot.len(), 1, "{few_shot:?}");
-    assert_eq!(few_shot[0].kind, "assign");
+    assert_eq!(
+        few_shot.iter().map(|c| c.kind.as_str()).collect::<Vec<_>>(),
+        ["assign", "eject"],
+        "positives first, then the eject as a negative example: {few_shot:?}"
+    );
+    assert_eq!(few_shot[1].ctx, "Firefox Jira ACME-7 board\n");
+
+    // The digest carries the eject as a `"work" ✗ "task"` line and a
+    // pre-pass placement as a minute-range hint pointing at the open task's
+    // index; a hinted task outside the open list is fetched by id.
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason)
+         VALUES (?1, 1, 30000, 60000, 0.5, 'prepass', 'repo chronicle')",
+        [task],
+    )
+    .unwrap();
+    let hints = storage::prepass_hints(&conn, 0, 100_000).unwrap();
+    assert_eq!(
+        hints,
+        [storage::Placement {
+            task_id: task,
+            start_ts: 30_000,
+            end_ts: 60_000,
+            reason: "repo chronicle".into()
+        }]
+    );
+    let hinted = storage::open_task_by_id(&conn, task).unwrap().unwrap();
+    assert_eq!(
+        (hinted.label.as_str(), hinted.declared),
+        ("Chronicle", false)
+    );
+    let all = storage::spans_in_range(&conn, 0, 100_000).unwrap();
+    let digest = build_digest(
+        &all,
+        &TimeZone::UTC,
+        &[hinted],
+        &few_shot,
+        &hints,
+        &[],
+        None,
+    );
+    check_golden("m24.hints.digest.golden", &digest);
+    // A hint naming a task outside the open list is dropped, not mislinked.
+    let orphan = build_digest(&all, &TimeZone::UTC, &[], &few_shot, &hints, &[], None);
+    assert!(!orphan.contains("Pre-pass hints"), "{orphan}");
+    assert!(orphan.contains("## Ejected"), "{orphan}");
     // A different task with the same evidence is still suggested.
     conn.execute(
         "INSERT INTO tasks (label, project, status, created_ts) VALUES ('Board triage', NULL, 'open', 0)",

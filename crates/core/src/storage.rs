@@ -1884,6 +1884,44 @@ pub fn task_last_end(conn: &Connection, task_id: i64) -> Result<Option<i64>, Sto
     )?)
 }
 
+/// The pre-pass's provisional intervals overlapping `[lo, hi)` (a batch's
+/// window), oldest first: the derive prompt's hints. Read before
+/// `store_derivation`, which drops them.
+pub fn prepass_hints(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Placement>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, start_ts, end_ts, COALESCE(reason, '') FROM intervals
+         WHERE source='prepass' AND start_ts < ?2 AND end_ts > ?1 ORDER BY start_ts, id",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok(Placement {
+            task_id: r.get(0)?,
+            start_ts: r.get(1)?,
+            end_ts: r.get(2)?,
+            reason: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The open task with this id, if still open.
+pub fn open_task_by_id(conn: &Connection, id: i64) -> Result<Option<OpenTask>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT id, label, project, source='user' FROM tasks WHERE status='open' AND id=?1",
+            [id],
+            |r| {
+                Ok(OpenTask {
+                    id: r.get(0)?,
+                    label: r.get(1)?,
+                    project: r.get(2)?,
+                    declared: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 /// End of the newest derived batch: where the pre-pass window opens.
 pub fn latest_done_batch_end(conn: &Connection) -> Result<Option<i64>, StorageError> {
     Ok(conn.query_row(
@@ -2081,17 +2119,24 @@ pub fn merge_task(
     Ok(())
 }
 
-/// Top-k past corrections whose stored span context matches the given batch
-/// spans (FTS over titles + apps, bm25-ranked, deduped by resulting label).
+/// Past corrections whose stored span context matches the given batch spans
+/// (FTS over titles + apps, bm25-ranked, deduped by resulting label): up to
+/// `k` positives (rename / assign / …) followed by up to `k` ejects, each on
+/// its own budget so a run of ejects cannot crowd the few-shot renames out.
 pub fn similar_corrections(
     conn: &Connection,
     spans: &[SpanDraft],
     k: usize,
 ) -> Result<Vec<Correction>, StorageError> {
-    Ok(corrections_matching(conn, &fts_or_query(spans), k)?
-        .into_iter()
+    let ranked = corrections_matching(conn, &fts_or_query(spans), k * 2)?;
+    let mut out: Vec<Correction> = ranked
+        .iter()
         .filter(|c| c.kind != "eject")
-        .collect())
+        .take(k)
+        .cloned()
+        .collect();
+    out.extend(ranked.into_iter().filter(|c| c.kind == "eject").take(k));
+    Ok(out)
 }
 
 /// Best past correction for free text (an unassigned run's app/title mix):
@@ -2164,7 +2209,7 @@ fn corrections_matching(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT c.old_label, c.new_label, c.old_project, c.new_project, c.kind
+        "SELECT c.old_label, c.new_label, c.old_project, c.new_project, c.kind, c.ctx
          FROM corrections_fts f JOIN corrections c ON c.id = f.rowid
          WHERE corrections_fts MATCH ?1 ORDER BY f.rank LIMIT ?2",
     )?;
@@ -2175,6 +2220,7 @@ fn corrections_matching(
             old_project: r.get(2)?,
             new_project: r.get(3)?,
             kind: r.get(4)?,
+            ctx: r.get(5)?,
         })
     })?;
     let mut out: Vec<Correction> = Vec::new();

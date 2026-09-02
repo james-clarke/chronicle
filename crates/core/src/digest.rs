@@ -6,6 +6,7 @@ use std::fmt::Write;
 use jiff::tz::TimeZone;
 
 use crate::sessionizer::{SpanDraft, SpanKind};
+use crate::storage::Placement;
 use crate::types::{ActivityEvent, ActivityKind, Correction, OpenTask};
 
 pub const MAX_TOKENS: usize = 3000;
@@ -15,11 +16,15 @@ pub fn approx_tokens(s: &str) -> usize {
     s.chars().count() / 4
 }
 
+/// `hints` are the pre-pass's provisional placements over the window; each
+/// must name a task in `open_tasks` (the worker appends missing ones) or it
+/// is left out of the digest.
 pub fn build_digest(
     spans: &[SpanDraft],
     tz: &TimeZone,
     open_tasks: &[OpenTask],
     corrections: &[Correction],
+    hints: &[Placement],
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
 ) -> String {
@@ -29,6 +34,7 @@ pub fn build_digest(
             tz,
             open_tasks,
             corrections,
+            hints,
             vcs,
             mcp_context,
             apps_cap,
@@ -38,7 +44,17 @@ pub fn build_digest(
             return out;
         }
     }
-    let mut out = render(spans, tz, open_tasks, corrections, vcs, mcp_context, 3, 24);
+    let mut out = render(
+        spans,
+        tz,
+        open_tasks,
+        corrections,
+        hints,
+        vcs,
+        mcp_context,
+        3,
+        24,
+    );
     let mut cut = (MAX_TOKENS * 4).min(out.len());
     while !out.is_char_boundary(cut) {
         cut -= 1;
@@ -53,6 +69,7 @@ fn render(
     tz: &TimeZone,
     open_tasks: &[OpenTask],
     corrections: &[Correction],
+    hints: &[Placement],
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
     apps_cap: usize,
@@ -245,11 +262,39 @@ fn render(
         }
     }
 
+    // The pre-pass's provisional placements, as minute ranges → open-task
+    // index with the rule that matched, so the model confirms or overrides a
+    // deterministic guess instead of starting cold. A hint whose task is not
+    // in the list (the worker appends them, so only a race) is skipped.
+    // Omitted when empty so hint-free digests (and their goldens) are unchanged.
+    let hint_lines: Vec<String> = hints
+        .iter()
+        .filter_map(|h| {
+            let idx = open_tasks.iter().position(|t| t.id == h.task_id)? + 1;
+            let lo = ((h.start_ts - win_start).max(0) / 60_000) as usize;
+            let hi = (((h.end_ts - win_start) + 59_999) / 60_000).clamp(0, mins as i64) as usize;
+            (hi > lo).then(|| format!("- {lo}\u{2013}{hi}m \u{2192} {idx} ({})", h.reason))
+        })
+        .collect();
+    if !hint_lines.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n## Pre-pass hints (rule-based guesses; confirm or override)"
+        );
+        for l in &hint_lines {
+            let _ = writeln!(out, "{l}");
+        }
+    }
+
     // Omitted entirely when empty so correction-free digests (and their
-    // goldens) are unchanged.
-    if !corrections.is_empty() {
+    // goldens) are unchanged. Ejects render apart from the renames: the
+    // quoted side is the work the user pulled out, the task is what it is
+    // not — a negative example, where the renames are positive ones.
+    let (ejects, renames): (Vec<&Correction>, Vec<&Correction>) =
+        corrections.iter().partition(|c| c.kind == "eject");
+    if !renames.is_empty() {
         let _ = writeln!(out, "\n## Past corrections (user renamed similar work)");
-        for c in corrections {
+        for c in renames {
             let _ = write!(out, "- \"{}\" \u{2192} \"{}\"", c.old_label, c.new_label);
             if c.old_project != c.new_project {
                 let _ = write!(
@@ -258,6 +303,22 @@ fn render(
                     c.old_project.as_deref().unwrap_or("none"),
                     c.new_project.as_deref().unwrap_or("none"),
                 );
+            }
+            out.push('\n');
+        }
+    }
+    if !ejects.is_empty() {
+        let _ = writeln!(out, "\n## Ejected (user pulled similar work out of a task)");
+        for c in ejects {
+            let work = c.ctx.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let _ = write!(
+                out,
+                "- \"{}\" \u{2717} \"{}\"",
+                clip(work.trim(), title_chars),
+                c.old_label
+            );
+            if let Some(p) = &c.old_project {
+                let _ = write!(out, " [{p}]");
             }
             out.push('\n');
         }

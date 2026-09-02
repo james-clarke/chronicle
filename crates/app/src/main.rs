@@ -445,7 +445,7 @@ fn bench(
                 .unwrap_or_default();
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], &[], None),
+                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], &[], &[], None),
                 open,
                 expect,
             ));
@@ -465,7 +465,7 @@ fn bench(
             let corrections = storage::similar_corrections(&conn, &spans, 4)?;
             cases.push((
                 format!("batch:{id}"),
-                digest::build_digest(&spans, &tz, &open, &corrections, &[], None),
+                digest::build_digest(&spans, &tz, &open, &corrections, &[], &[], None),
                 open,
                 None,
             ));
@@ -561,7 +561,18 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
     };
     let result = (|| -> anyhow::Result<usize> {
         let spans = storage::batch_spans(&conn, batch_id)?;
-        let open = storage::open_tasks(&conn, 8)?;
+        let mut open = storage::open_tasks(&conn, 8)?;
+        // Pre-pass placements over this window are hints in the prompt; a
+        // hinted task outside the open-task cap is appended so the model
+        // can link to it by ref.
+        let hints = storage::prepass_hints(&conn, batch.start_ts, batch.end_ts)?;
+        for h in &hints {
+            if !open.iter().any(|t| t.id == h.task_id)
+                && let Some(t) = storage::open_task_by_id(&conn, h.task_id)?
+            {
+                open.push(t);
+            }
+        }
         let corrections = storage::similar_corrections(&conn, &spans, 4)?;
         let tz = TimeZone::system();
         let mcp_path = config.mcp_path(data_dir);
@@ -572,6 +583,7 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
             &tz,
             &open,
             &corrections,
+            &hints,
             &activity,
             mcp_context.as_deref(),
         );
@@ -731,7 +743,8 @@ fn run_ai_job(
                 bail!("no recent focus activity to suggest from");
             }
             let tz = TimeZone::system();
-            let digest = chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], None);
+            let digest =
+                chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None);
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
         }
