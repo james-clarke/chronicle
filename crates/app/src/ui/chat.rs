@@ -520,7 +520,11 @@ impl TimelineApp {
                                 .inner_margin(egui::Margin::symmetric(10, 6))
                                 .show(ui, |ui| {
                                     ui.set_max_width(max_w);
-                                    ui.label(&msg.text);
+                                    if msg.user {
+                                        ui.label(&msg.text);
+                                    } else {
+                                        markdown(ui, &msg.text);
+                                    }
                                 });
                         });
                         ui.add_space(6.0);
@@ -542,4 +546,130 @@ impl Drop for ChatPanel {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Render the model's answer with the light markdown it tends to emit:
+/// `**bold**`, `*italic*`, `` `code` ``, `-`/`*`/`1.` list items and `#`
+/// headings. Anything else is plain text; unmatched markers stay literal.
+fn markdown(ui: &mut egui::Ui, text: &str) {
+    let base = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let width = ui.available_width();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            ui.add_space(4.0);
+            continue;
+        }
+        let heading = trimmed.starts_with('#');
+        let body = if heading {
+            trimmed.trim_start_matches('#').trim_start()
+        } else {
+            trimmed
+        };
+        let (marker, body) = list_marker(body);
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = width - if marker.is_some() { 18.0 } else { 0.0 };
+        inline(&mut job, body, &base, color, heading);
+        match marker {
+            Some(m) => {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_sized([12.0, base.size * 1.4], egui::Label::new(m));
+                    ui.add(egui::Label::new(job).wrap());
+                });
+            }
+            None => {
+                ui.add(egui::Label::new(job).wrap());
+            }
+        }
+    }
+}
+
+/// Split a leading list marker off `s`: `- `, `* `, `• ` become a bullet,
+/// `N. ` keeps its number.
+fn list_marker(s: &str) -> (Option<String>, &str) {
+    for b in ["- ", "* ", "\u{2022} "] {
+        if let Some(rest) = s.strip_prefix(b) {
+            return (Some("\u{2022}".into()), rest);
+        }
+    }
+    let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0
+        && digits <= 2
+        && let Some(rest) = s[digits..].strip_prefix(". ")
+    {
+        return (Some(s[..digits + 1].to_string()), rest);
+    }
+    (None, s)
+}
+
+/// Append `s` to `job`, toggling bold / italic / code on their markers.
+fn inline(
+    job: &mut egui::text::LayoutJob,
+    s: &str,
+    base: &egui::FontId,
+    color: egui::Color32,
+    heading: bool,
+) {
+    let medium = egui::FontId::new(base.size, egui::FontFamily::Name(theme::MEDIUM.into()));
+    let mono = egui::FontId::new(base.size * 0.92, egui::FontFamily::Monospace);
+    let (mut bold, mut italic, mut code) = (heading, false, false);
+    let mut buf = String::new();
+    let flush = |job: &mut egui::text::LayoutJob,
+                 buf: &mut String,
+                 bold: bool,
+                 italic: bool,
+                 code: bool| {
+        if buf.is_empty() {
+            return;
+        }
+        let mut fmt = egui::TextFormat {
+            font_id: if code {
+                mono.clone()
+            } else if bold {
+                medium.clone()
+            } else {
+                base.clone()
+            },
+            color,
+            italics: italic,
+            ..Default::default()
+        };
+        if code {
+            fmt.background = color.gamma_multiply(0.12);
+        }
+        job.append(buf, 0.0, fmt);
+        buf.clear();
+    };
+    let mut rest = s;
+    while !rest.is_empty() {
+        if code {
+            if let Some(r) = rest.strip_prefix('`') {
+                flush(job, &mut buf, bold, italic, code);
+                code = false;
+                rest = r;
+                continue;
+            }
+        } else if let Some(r) = rest.strip_prefix("**") {
+            flush(job, &mut buf, bold, italic, code);
+            bold = !bold;
+            rest = r;
+            continue;
+        } else if let Some(r) = rest.strip_prefix('`') {
+            flush(job, &mut buf, bold, italic, code);
+            code = true;
+            rest = r;
+            continue;
+        } else if let Some(r) = rest.strip_prefix('*') {
+            flush(job, &mut buf, bold, italic, code);
+            italic = !italic;
+            rest = r;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        buf.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    flush(job, &mut buf, bold, italic, code);
 }

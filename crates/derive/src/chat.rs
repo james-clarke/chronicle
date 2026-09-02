@@ -17,7 +17,7 @@ const SYSTEM_PROMPT: &str = include_str!("../../../prompts/chat_v1.txt");
 
 const N_CTX: u32 = 4096;
 const N_BATCH: u32 = 512;
-const MAX_GEN: usize = 512;
+const MAX_GEN: usize = 1024;
 /// Prior turns re-sent with each question (answers clipped to keep room).
 const HISTORY_TURNS: usize = 3;
 const HISTORY_ANSWER_CHARS: usize = 800;
