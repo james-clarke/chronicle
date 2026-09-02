@@ -7,6 +7,8 @@ pub mod ai_sessions;
 pub mod git;
 pub mod github;
 #[cfg(target_os = "linux")]
+pub mod mic;
+#[cfg(target_os = "linux")]
 pub mod x11;
 
 use chronicle_core::types::CaptureEvent;

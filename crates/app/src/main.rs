@@ -1915,7 +1915,33 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
 
     spawn_git_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
-    spawn_github_capture(config, tx)
+    spawn_github_capture(config, tx.clone())?;
+    spawn_mic_capture(config, tx)
+}
+
+/// Mic-in-use watcher via `pw-dump`: optional, never load-bearing.
+#[cfg(target_os = "linux")]
+fn spawn_mic_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::mic::MicProvider;
+
+    if !config.mic_capture {
+        return Ok(());
+    }
+    let pw_dump = chronicle_core::config::resolve_command("pw-dump");
+    if !pw_dump.contains('/') {
+        tracing::warn!("mic_capture = true but `pw-dump` is not on PATH");
+        return Ok(());
+    }
+    let provider = MicProvider::new(PathBuf::from(pw_dump));
+    std::thread::Builder::new()
+        .name("mic".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("mic provider exited: {e}");
+            }
+        })?;
+    Ok(())
 }
 
 /// Git poller: optional, never load-bearing — a dead thread loses git
