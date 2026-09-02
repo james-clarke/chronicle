@@ -1,8 +1,11 @@
 //! AI coding session watcher (m22): tails Claude Code transcripts under
-//! `~/.claude/projects/<project>/<session>.jsonl` and emits one `ai_session`
-//! span per transcript, refreshed as lines land. Read-only, incremental
-//! (bytes past the last seen length), never recurses (subagent transcripts
-//! live under `<session>/subagents/`), and only ever keeps the first prompt
+//! `~/.claude/projects/<project>/<session>.jsonl` and emits `ai_session`
+//! spans, refreshed as lines land. A transcript is one span until its lines
+//! pause for longer than `SESSION_GAP`; the next line then opens a new span
+//! (`<session>#2`, `#3`, …) so a chat left open all day does not read as a
+//! nine-hour session. Read-only, incremental (bytes past the last seen
+//! length), never recurses (subagent transcripts live under
+//! `<session>/subagents/`), and only ever keeps each span's first prompt
 //! clipped — never the conversation.
 
 use std::collections::HashMap;
@@ -25,6 +28,8 @@ const BOOT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 const HEAD_LINES: usize = 200;
 const TAIL_BYTES: u64 = 64 * 1024;
 const PROMPT_CHARS: usize = 120;
+/// A pause between transcript lines longer than this ends the span.
+const SESSION_GAP: Duration = Duration::from_secs(30 * 60);
 
 pub struct AiSessionProvider {
     dirs: Vec<PathBuf>,
@@ -35,19 +40,40 @@ pub struct AiSessionProvider {
 struct FileState {
     /// Bytes consumed (up to and including the last complete line).
     len: u64,
-    start: Option<SessionStart>,
-    last_ts: Option<Timestamp>,
-    /// `last_ts` as of the last emitted event.
-    sent_ts: Option<Timestamp>,
+    ident: Option<Ident>,
+    /// Spans in order; only the last one grows.
+    segments: Vec<Segment>,
+    /// The next line joins the open segment whatever the gap: first sight
+    /// skips the middle of a big transcript, and that skip is not a pause.
+    bridge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionStart {
-    ts: Timestamp,
+struct Ident {
     repo: String,
-    branch: String,
     session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    ts: Timestamp,
+    end: Timestamp,
+    /// Branch on the segment's first line.
+    branch: String,
     prompt: Option<String>,
+    /// `end` as of the last emitted event.
+    sent: Option<Timestamp>,
+}
+
+impl FileState {
+    fn ext_id(&self, index: usize) -> Option<String> {
+        let id = &self.ident.as_ref()?.session_id;
+        Some(if index == 0 {
+            id.clone()
+        } else {
+            format!("{id}#{}", index + 1)
+        })
+    }
 }
 
 /// One transcript line that carries session evidence.
@@ -106,18 +132,24 @@ impl AiSessionProvider {
                     absorb(state, &line);
                 }
             }
-            if let (Some(start), Some(last)) = (&state.start, state.last_ts)
-                && state.sent_ts != Some(last)
-            {
-                state.sent_ts = Some(last);
+            let Some(ident) = state.ident.clone() else {
+                continue;
+            };
+            for i in 0..state.segments.len() {
+                let ext_id = state.ext_id(i);
+                let seg = &mut state.segments[i];
+                if seg.sent == Some(seg.end) {
+                    continue;
+                }
+                seg.sent = Some(seg.end);
                 out.push(ActivityEvent {
-                    ts: start.ts,
-                    end_ts: Some(last),
-                    repo: start.repo.clone(),
-                    branch: start.branch.clone(),
+                    ts: seg.ts,
+                    end_ts: Some(seg.end),
+                    repo: ident.repo.clone(),
+                    branch: seg.branch.clone(),
                     kind: ActivityKind::AiSession,
-                    ext_id: Some(start.session_id.clone()),
-                    summary: start.prompt.clone(),
+                    ext_id,
+                    summary: seg.prompt.clone(),
                 });
             }
         }
@@ -177,12 +209,13 @@ fn first_sight(path: &Path, len: u64) -> FileState {
         }
         if let Some(line) = parse_line(&buf) {
             absorb(&mut state, &line);
-            if state.start.as_ref().is_some_and(|s| s.prompt.is_some()) {
+            if state.segments.first().is_some_and(|s| s.prompt.is_some()) {
                 break;
             }
         }
     }
     let tail_from = len.saturating_sub(TAIL_BYTES);
+    state.bridge = tail_from > 0;
     let (lines, consumed) = read_lines_from(path, tail_from);
     for line in lines.iter().filter_map(|l| parse_line(l)) {
         absorb(&mut state, &line);
@@ -220,30 +253,36 @@ fn read_lines_from(path: &Path, from: u64) -> (Vec<String>, u64) {
 }
 
 fn absorb(state: &mut FileState, line: &Line) {
-    match &mut state.start {
-        None => {
-            state.start = Some(SessionStart {
-                ts: line.ts,
-                repo: Path::new(&line.cwd)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                branch: line.branch.clone(),
-                session_id: line.session_id.clone(),
-                prompt: line.prompt.clone(),
-            });
-        }
-        Some(start) => {
-            if start.ts > line.ts {
-                start.ts = line.ts;
-            }
-            if start.prompt.is_none() {
-                start.prompt = line.prompt.clone();
-            }
-        }
+    if state.ident.is_none() {
+        state.ident = Some(Ident {
+            repo: Path::new(&line.cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            session_id: line.session_id.clone(),
+        });
     }
-    if state.last_ts.is_none_or(|t| t < line.ts) {
-        state.last_ts = Some(line.ts);
+    let bridge = std::mem::take(&mut state.bridge);
+    let gap = SESSION_GAP.as_millis() as i64;
+    match state.segments.last_mut() {
+        Some(seg) if bridge || line.ts.as_millisecond() - seg.end.as_millisecond() <= gap => {
+            if seg.ts > line.ts {
+                seg.ts = line.ts;
+            }
+            if seg.end < line.ts {
+                seg.end = line.ts;
+            }
+            if seg.prompt.is_none() {
+                seg.prompt = line.prompt.clone();
+            }
+        }
+        _ => state.segments.push(Segment {
+            ts: line.ts,
+            end: line.ts,
+            branch: line.branch.clone(),
+            prompt: line.prompt.clone(),
+            sent: None,
+        }),
     }
 }
 
@@ -373,13 +412,34 @@ mod tests {
             .append(true)
             .open(&path)
             .unwrap();
-        let later = ASSISTANT.replace("19:05:00", "19:40:00");
+        let later = ASSISTANT.replace("19:05:00", "19:30:00");
         write!(f, "{later}\n{{\"type\":\"assist").unwrap();
         let got = p.scan(now);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].end_ts, Some(ts("2026-09-02T19:40:00Z")));
+        assert_eq!(got[0].end_ts, Some(ts("2026-09-02T19:30:00Z")));
+        assert_eq!(got[0].ext_id.as_deref(), Some("s1"));
         writeln!(f, "ant\"}}").unwrap();
         assert!(p.scan(now).is_empty());
+
+        // A pause over SESSION_GAP opens a second span under its own ext_id,
+        // named by its first prompt and branch; the first span stands.
+        let resumed = USER
+            .replace("19:00:00", "20:15:00")
+            .replace("fix the flaky test", "now the docs")
+            .replace("ABC-1-x", "ABC-2-y");
+        writeln!(f, "{resumed}").unwrap();
+        let got = p.scan(now);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].ts, ts("2026-09-02T20:15:00Z"));
+        assert_eq!(got[0].end_ts, Some(ts("2026-09-02T20:15:00Z")));
+        assert_eq!(got[0].ext_id.as_deref(), Some("s1#2"));
+        assert_eq!(got[0].summary.as_deref(), Some("now the docs"));
+        assert_eq!(got[0].branch, "ABC-2-y");
+        writeln!(f, "{}", ASSISTANT.replace("19:05:00", "20:20:00")).unwrap();
+        let got = p.scan(now);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].ext_id.as_deref(), Some("s1#2"));
+        assert_eq!(got[0].end_ts, Some(ts("2026-09-02T20:20:00Z")));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -401,9 +461,47 @@ mod tests {
         std::fs::write(&path, &body).unwrap();
         assert!(body.len() as u64 > TAIL_BYTES);
         let state = first_sight(&path, body.len() as u64);
-        assert_eq!(state.start.unwrap().ts, ts("2026-09-02T19:00:00Z"));
-        assert_eq!(state.last_ts, Some(ts("2026-09-02T21:00:00Z")));
+        // The unread middle bridges head and tail; the 19:10 → 21:00 pause
+        // inside the tail is a real gap.
+        assert_eq!(state.segments.len(), 2, "{:?}", state.segments);
+        assert_eq!(state.segments[0].ts, ts("2026-09-02T19:00:00Z"));
+        assert_eq!(state.segments[0].end, ts("2026-09-02T19:10:00Z"));
+        assert_eq!(state.segments[1].ts, ts("2026-09-02T21:00:00Z"));
         assert_eq!(state.len, body.len() as u64);
+        assert_eq!(state.ext_id(1).as_deref(), Some("s1#2"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_sight_bridges_the_skipped_middle() {
+        let root = std::env::temp_dir().join(format!("chronicle-ai-bridge-{}", std::process::id()));
+        let project = root.join("p");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join("s1.jsonl");
+        // Head at 19:00, a big unread middle, tail lines 22:00–22:05: without
+        // the bridge the head→tail jump would look like a three-hour pause.
+        let mut body = format!("{USER}\n");
+        let filler = ASSISTANT.replace("19:05:00", "19:01:00");
+        for _ in 0..HEAD_LINES + 1_500 {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        let tail_len = body.len();
+        body.push_str(&ASSISTANT.replace("19:05:00", "22:00:00"));
+        body.push('\n');
+        body.push_str(&ASSISTANT.replace("19:05:00", "22:05:00"));
+        body.push('\n');
+        std::fs::write(&path, &body).unwrap();
+        assert!(
+            tail_len as u64 > TAIL_BYTES + 4096,
+            "middle must exceed the tail window"
+        );
+        let state = first_sight(&path, body.len() as u64);
+        assert_eq!(state.segments.len(), 2, "{:?}", state.segments);
+        assert_eq!(state.segments[0].end, ts("2026-09-02T19:01:00Z"));
+        assert_eq!(state.segments[1].ts, ts("2026-09-02T22:00:00Z"));
+        assert_eq!(state.segments[1].end, ts("2026-09-02T22:05:00Z"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
