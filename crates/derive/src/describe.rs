@@ -171,23 +171,7 @@ impl Describer {
         let mut ctx = self.model.new_context(&self.backend, ctx_params)?;
 
         let limit = N_CTX as usize - MAX_GEN - 64;
-        let mut tokens = self.tokenize(content)?;
-        if tokens.len() > limit {
-            // Same chars/4-vs-tokenizer mismatch handling as the derive
-            // runner: shrink proportionally and retokenize once.
-            let keep = content.len() * limit / tokens.len();
-            let mut cut = keep.min(content.len());
-            while !content.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            tokens = self.tokenize(&content[..cut])?;
-            if tokens.len() > limit {
-                bail!(
-                    "prompt still too long after truncation: {} tokens",
-                    tokens.len()
-                );
-            }
-        }
+        let tokens = crate::fit_prompt(content, limit, |c| self.tokenize(c))?;
 
         let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
         let last = tokens.len() - 1;

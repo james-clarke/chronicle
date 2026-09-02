@@ -5,7 +5,7 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -48,23 +48,7 @@ impl ChatModel {
         on_token: &mut dyn FnMut(&str),
     ) -> anyhow::Result<String> {
         let limit = N_CTX as usize - MAX_GEN - 64;
-        let mut tokens = self.tokenize(history, context, question)?;
-        if tokens.len() > limit {
-            // Same chars/4-vs-tokenizer mismatch handling as the derive runner:
-            // shrink the context proportionally and retokenize once.
-            let keep = context.len() * limit / tokens.len();
-            let mut cut = keep.min(context.len());
-            while !context.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            tokens = self.tokenize(history, &context[..cut], question)?;
-            if tokens.len() > limit {
-                bail!(
-                    "chat prompt still too long after truncation: {} tokens",
-                    tokens.len()
-                );
-            }
-        }
+        let tokens = crate::fit_prompt(context, limit, |c| self.tokenize(history, c, question))?;
 
         let threads = num_cpus::get_physical().saturating_sub(1).clamp(1, 8) as i32;
         let ctx_params = LlamaContextParams::default()

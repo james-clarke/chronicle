@@ -5,7 +5,7 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -42,23 +42,13 @@ pub fn infer_intervals(model_path: &Path, digest: &str) -> anyhow::Result<Vec<In
     let mut ctx = model.new_context(&backend, ctx_params)?;
 
     let limit = N_CTX as usize - MAX_GEN - 64;
-    let mut tokens = tokenize_prompt(&model, digest)?;
-    if tokens.len() > limit {
-        // Digest cap is a chars/4 heuristic; when the real tokenizer disagrees,
-        // shrink the digest proportionally and retokenize once.
-        let keep = digest.len() * limit / tokens.len();
-        let mut cut = keep.min(digest.len());
-        while !digest.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        tokens = tokenize_prompt(&model, &digest[..cut])?;
-        if tokens.len() > limit {
-            bail!(
-                "prompt still too long after truncation: {} tokens",
-                tokens.len()
-            );
-        }
-    }
+    let tokens = crate::fit_prompt(digest, limit, |d| tokenize_prompt(&model, d))?;
+    tracing::info!(
+        tokens = tokens.len(),
+        limit,
+        digest_chars = digest.len(),
+        "derive prompt"
+    );
 
     // Prompt eval, N_BATCH tokens per decode; logits only for the last token.
     let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
