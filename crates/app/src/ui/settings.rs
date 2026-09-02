@@ -22,6 +22,8 @@ pub(super) struct SettingsPanel {
     model_path: String,
     excluded_apps: String,
     excluded_titles: String,
+    distraction_patterns: String,
+    checkpoint_afk_secs: u32,
     /// As written in config.toml (`~` kept); edited by the Connections rows.
     git_repos: Vec<String>,
     connections: super::connections::Connections,
@@ -51,6 +53,8 @@ impl SettingsPanel {
             model_path: path_str(&config.model_path),
             excluded_apps: config.excluded_apps.join("\n"),
             excluded_titles: config.excluded_titles.join("\n"),
+            distraction_patterns: config.distraction_patterns.join("\n"),
+            checkpoint_afk_secs: config.checkpoint_afk_secs,
             git_repos: config.git_repos.clone(),
             connections,
             base: config,
@@ -72,6 +76,8 @@ impl SettingsPanel {
         config.model_path = opt_path(&self.model_path);
         config.excluded_apps = regex_lines(&self.excluded_apps)?;
         config.excluded_titles = regex_lines(&self.excluded_titles)?;
+        config.distraction_patterns = regex_lines(&self.distraction_patterns)?;
+        config.checkpoint_afk_secs = self.checkpoint_afk_secs;
         config.git_repos = self.git_repos.clone();
         let toml = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
         let before = toml::to_string_pretty(&self.base).map_err(|e| e.to_string())?;
@@ -142,6 +148,8 @@ impl TimelineApp {
         let mut zoom_pick: Option<f32> = None;
         let mut spans_toggle: Option<bool> = None;
         let spans_debug_now = self.spans_debug;
+        let autohide_now = self.autohide;
+        let mut autohide_toggle: Option<bool> = None;
         let conn = self.conn.as_ref();
         let Some(panel) = &mut self.settings else {
             return;
@@ -173,65 +181,6 @@ impl TimelineApp {
                             section(ui, "Connections", true);
                             panel.connections.ui(ui, conn, &mut panel.git_repos);
 
-                            section(ui, "Capture", false);
-                            egui::Grid::new("settings_capture")
-                                .num_columns(3)
-                                .show(ui, |ui| {
-                                    ui.label("afk close");
-                                    ui.add(
-                                        egui::DragValue::new(&mut panel.afk_close_secs)
-                                            .range(30..=3600),
-                                    );
-                                    ui.weak("secs");
-                                    ui.end_row();
-                                });
-                            ui.label("excluded apps (one regex per line, never stored)");
-                            ui.add(
-                                egui::TextEdit::multiline(&mut panel.excluded_apps)
-                                    .desired_rows(2)
-                                    .font(egui::TextStyle::Monospace),
-                            );
-                            ui.label("excluded titles (one regex per line)");
-                            ui.add(
-                                egui::TextEdit::multiline(&mut panel.excluded_titles)
-                                    .desired_rows(2)
-                                    .font(egui::TextStyle::Monospace),
-                            );
-
-                            section(ui, "Derivation", false);
-                            egui::Grid::new("settings_derive")
-                                .num_columns(3)
-                                .show(ui, |ui| {
-                                    ui.label("batch every");
-                                    ui.add(
-                                        egui::DragValue::new(&mut panel.batch_minutes)
-                                            .range(5..=240),
-                                    );
-                                    ui.weak("minutes");
-                                    ui.end_row();
-                                    ui.label("derive after idle");
-                                    ui.add(
-                                        egui::DragValue::new(&mut panel.derive_idle_secs)
-                                            .range(60..=3600),
-                                    );
-                                    ui.weak("secs");
-                                    ui.end_row();
-                                    ui.label("task autoclose");
-                                    ui.add(
-                                        egui::DragValue::new(&mut panel.task_autoclose_days)
-                                            .range(0..=365),
-                                    );
-                                    ui.weak("days (0 = never)");
-                                    ui.end_row();
-                                    ui.label("background under");
-                                    ui.add(
-                                        egui::DragValue::new(&mut panel.background_minutes)
-                                            .range(0..=120),
-                                    );
-                                    ui.weak("minutes (0 = off)");
-                                    ui.end_row();
-                                });
-
                             section(ui, "Model", false);
                             ui.label("model path (empty = default preset)");
                             ui.text_edit_singleline(&mut panel.model_path);
@@ -260,6 +209,85 @@ impl TimelineApp {
                                 },
                             }
 
+                            section(ui, "Capture", false);
+                            egui::Grid::new("settings_capture")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("afk close");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.afk_close_secs)
+                                            .range(30..=3600),
+                                    );
+                                    ui.weak("secs");
+                                    ui.end_row();
+                                });
+                            ui.label("excluded apps (one regex per line, never stored)");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut panel.excluded_apps)
+                                    .desired_rows(2)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            ui.label("excluded titles (one regex per line)");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut panel.excluded_titles)
+                                    .desired_rows(2)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            ui.label("distraction patterns (apps or sites, one regex per line)");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut panel.distraction_patterns)
+                                    .desired_rows(2)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+
+                            section(ui, "Derivation", false);
+                            egui::Grid::new("settings_derive")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("batch every");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.batch_minutes)
+                                            .range(5..=240),
+                                    );
+                                    ui.weak("minutes");
+                                    ui.end_row();
+                                    ui.label("derive after idle");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.derive_idle_secs)
+                                            .range(60..=3600),
+                                    );
+                                    ui.weak("secs");
+                                    ui.end_row();
+                                    ui.label("background under");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.background_minutes)
+                                            .range(0..=120),
+                                    );
+                                    ui.weak("minutes (0 = off)");
+                                    ui.end_row();
+                                });
+
+                            section(ui, "Standup & journal", false);
+                            egui::Grid::new("settings_journal")
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.label("checkpoint after idle");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.checkpoint_afk_secs)
+                                            .range(0..=14400)
+                                            .speed(60),
+                                    );
+                                    ui.weak("secs (0 = off)");
+                                    ui.end_row();
+                                    ui.label("task autoclose");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.task_autoclose_days)
+                                            .range(0..=365),
+                                    );
+                                    ui.weak("days (0 = never)");
+                                    ui.end_row();
+                                });
+
                             section(ui, "Storage & server", false);
                             egui::Grid::new("settings_storage")
                                 .num_columns(3)
@@ -281,7 +309,7 @@ impl TimelineApp {
 
                             // UI-only prefs: applied immediately, stored in
                             // db meta (not config.toml), no daemon restart.
-                            section(ui, "Appearance", false);
+                            section(ui, "Window & appearance", false);
                             ui.horizontal(|ui| {
                                 ui.label("ui scale");
                                 for (label, z) in
@@ -298,6 +326,13 @@ impl TimelineApp {
                             let mut dbg = spans_debug_now;
                             if ui.checkbox(&mut dbg, "show raw spans on home").changed() {
                                 spans_toggle = Some(dbg);
+                            }
+                            let mut hide = autohide_now;
+                            if ui
+                                .checkbox(&mut hide, "hide when focus leaves the window")
+                                .changed()
+                            {
+                                autohide_toggle = Some(hide);
                             }
 
                             ui.add_space(14.0);
@@ -342,6 +377,12 @@ impl TimelineApp {
             let value = on.then_some("1");
             let _ = chronicle_core::storage::set_meta(conn, "ui_show_spans_debug", value);
             self.spans_debug = on;
+        }
+        if let Some(on) = autohide_toggle {
+            if let Some(conn) = self.conn.as_ref() {
+                let _ = chronicle_core::storage::set_meta(conn, "ui_autohide", on.then_some("1"));
+            }
+            self.autohide = on;
         }
         if start_dl {
             self.start_model_download(ui.ctx(), chronicle_derive::model::default_preset());

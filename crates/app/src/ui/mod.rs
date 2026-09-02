@@ -1,7 +1,8 @@
 //! Tray-popup widget window, run as a `chronicle ui` child process. The daemon
 //! writes "toggle\n" to our stdin to show/hide the window; a close request
 //! hides it (the process stays alive for the next toggle). The window stays
-//! open on focus loss unless `CHRONICLE_UI_AUTOHIDE=1`.
+//! open on focus loss unless the settings toggle (meta `ui_autohide`) or
+//! `CHRONICLE_UI_AUTOHIDE=1` opts in.
 
 mod chat;
 mod connections;
@@ -94,6 +95,17 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
             let (x, y) = s.split_once(',')?;
             Some(egui::pos2(x.parse().ok()?, y.parse().ok()?))
         });
+    // Popover hide is opt-in: the settings toggle (meta `ui_autohide`) or
+    // `CHRONICLE_UI_AUTOHIDE=1` for test runs.
+    let autohide = std::env::var_os("CHRONICLE_UI_AUTOHIDE").is_some()
+        || boot_conn
+            .as_ref()
+            .and_then(|c| {
+                chronicle_core::storage::get_meta(c, "ui_autohide")
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|v| v == "1");
     drop(boot_conn);
     let composited = compositor_active();
     let pad = if composited { SHADOW_PAD } else { 0.0 };
@@ -137,7 +149,10 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                 sock_path,
                 config_path,
                 visible,
-                saved_pos,
+                BootPrefs {
+                    saved_pos,
+                    autohide,
+                },
                 composited,
             )))
         }),
@@ -425,7 +440,8 @@ struct TimelineApp {
     /// until then (the WM may map us unfocused, e.g. Openbox).
     was_focused: bool,
     /// Hide on focus loss (popover behavior). Off by default — the window
-    /// stays open until closed; `CHRONICLE_UI_AUTOHIDE=1` opts back in.
+    /// stays open until closed; the settings toggle (meta `ui_autohide`) or
+    /// `CHRONICLE_UI_AUTOHIDE=1` opts back in.
     autohide: bool,
     /// Corner/restore placement done (needs monitor size, so not at boot).
     positioned: bool,
@@ -470,6 +486,12 @@ struct ResumeRow {
     next_steps: String,
 }
 
+/// Per-user prefs read from `meta` before the window exists.
+struct BootPrefs {
+    saved_pos: Option<egui::Pos2>,
+    autohide: bool,
+}
+
 impl TimelineApp {
     fn new(
         data_dir: PathBuf,
@@ -477,7 +499,7 @@ impl TimelineApp {
         sock_path: PathBuf,
         config_path: PathBuf,
         visible: Arc<AtomicBool>,
-        saved_pos: Option<egui::Pos2>,
+        prefs: BootPrefs,
         composited: bool,
     ) -> Self {
         let tz = TimeZone::system();
@@ -535,9 +557,9 @@ impl TimelineApp {
             visible,
             started: Instant::now(),
             was_focused: false,
-            autohide: std::env::var_os("CHRONICLE_UI_AUTOHIDE").is_some(),
+            autohide: prefs.autohide,
             positioned: false,
-            saved_pos,
+            saved_pos: prefs.saved_pos,
             chat_task_request: None,
             resume: None,
             resume_checked: false,
