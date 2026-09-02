@@ -211,6 +211,19 @@ pub fn latest_vcs_event_per_repo(conn: &Connection) -> Result<Vec<ActivityEvent>
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Newest event per kind by end (span kinds) or start — the settings
+/// panel's per-collector "last seen" line.
+pub fn latest_activity_per_kind(conn: &Connection) -> Result<Vec<ActivityEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLS_V} FROM activity_events v
+         WHERE NOT EXISTS (SELECT 1 FROM activity_events w WHERE w.kind = v.kind
+                           AND (COALESCE(w.end_ts, w.ts), w.id) > (COALESCE(v.end_ts, v.ts), v.id))
+         ORDER BY v.kind"
+    ))?;
+    let rows = stmt.query_map([], activity_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Commits whose ts falls inside any of the task's intervals, oldest first.
 pub fn commits_for_task(
     conn: &Connection,

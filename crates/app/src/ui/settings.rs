@@ -26,6 +26,7 @@ pub(super) struct SettingsPanel {
     checkpoint_afk_secs: u32,
     /// As written in config.toml (`~` kept); edited by the Connections rows.
     git_repos: Vec<String>,
+    sources: super::connections::LocalSources,
     connections: super::connections::Connections,
     /// Config as loaded (or last saved); fields without widgets pass through
     /// on save and the restart hint fires only when the file changes.
@@ -56,6 +57,7 @@ impl SettingsPanel {
             distraction_patterns: config.distraction_patterns.join("\n"),
             checkpoint_afk_secs: config.checkpoint_afk_secs,
             git_repos: config.git_repos.clone(),
+            sources: super::connections::LocalSources::from_config(&config),
             connections,
             base: config,
             status: None,
@@ -79,6 +81,7 @@ impl SettingsPanel {
         config.distraction_patterns = regex_lines(&self.distraction_patterns)?;
         config.checkpoint_afk_secs = self.checkpoint_afk_secs;
         config.git_repos = self.git_repos.clone();
+        self.sources.apply(&mut config);
         let toml = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
         let before = toml::to_string_pretty(&self.base).map_err(|e| e.to_string())?;
         if toml == before {
@@ -179,7 +182,12 @@ impl TimelineApp {
                         ui.vertical(|ui| {
                             ui.set_max_width(max_w);
                             section(ui, "Connections", true);
-                            panel.connections.ui(ui, conn, &mut panel.git_repos);
+                            panel.connections.ui(
+                                ui,
+                                conn,
+                                &mut panel.git_repos,
+                                &mut panel.sources,
+                            );
 
                             section(ui, "Model", false);
                             ui.label("model path (empty = default preset)");

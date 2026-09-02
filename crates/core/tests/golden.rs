@@ -785,6 +785,15 @@ fn activity_events_upsert_and_ignore_paths() {
     let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
     assert_eq!(rows.len(), 4, "{rows:?}");
 
+    // Per-kind "last seen": the span's extended end wins over its start.
+    let per_kind = storage::latest_activity_per_kind(&conn).unwrap();
+    let sess = per_kind
+        .iter()
+        .find(|e| e.kind == ActivityKind::AiSession)
+        .unwrap();
+    assert_eq!(sess.end_ts, Some(ms_to_ts(20_000)));
+    assert_eq!(per_kind.len(), 3, "{per_kind:?}");
+
     // Git-only views never see the new kinds.
     assert!(storage::vcs_in_range(&conn, 0, 100_000).unwrap().is_empty());
     assert!(

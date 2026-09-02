@@ -1,7 +1,8 @@
 //! Settings → Connections (m21): MCP servers with an on-demand probe, git
 //! repos with resolve + last-seen status. Server edits write mcp.toml at
 //! once — the daemon loads it per call, so they apply without a restart.
-//! Git repos live in config.toml and apply on the daemon's next start.
+//! Git repos and local collector switches live in config.toml and apply on
+//! the daemon's next start.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::sync::mpsc;
 
 use chronicle_core::config::expand_home;
 use chronicle_core::storage;
-use chronicle_core::types::ActivityEvent;
+use chronicle_core::types::{ActivityEvent, ActivityKind};
 use chronicle_mcp::{ContextCall, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
@@ -332,6 +333,46 @@ fn row_status(
     }
 }
 
+/// Local collector switches (m22), mirrored from config.toml like
+/// `git_repos`. Sessions are on iff `ai_session_dirs` is non-empty; the
+/// toggle restores the default dir when switching back on.
+pub(super) struct LocalSources {
+    pub ai_session_dirs: Vec<String>,
+    pub github_prs: bool,
+    pub mic_capture: bool,
+}
+
+impl LocalSources {
+    pub(super) fn from_config(c: &chronicle_core::config::Config) -> Self {
+        Self {
+            ai_session_dirs: c.ai_session_dirs.clone(),
+            github_prs: c.github_prs,
+            mic_capture: c.mic_capture,
+        }
+    }
+
+    pub(super) fn apply(&self, c: &mut chronicle_core::config::Config) {
+        c.ai_session_dirs = self.ai_session_dirs.clone();
+        c.github_prs = self.github_prs;
+        c.mic_capture = self.mic_capture;
+    }
+}
+
+fn kind_label(k: ActivityKind) -> &'static str {
+    match k {
+        ActivityKind::AiSession => "session",
+        ActivityKind::PrAuthored => "authored",
+        ActivityKind::PrReviewed => "reviewed",
+        ActivityKind::Call => "call",
+        other => other.as_str(),
+    }
+}
+
+/// Bare command resolved on PATH (plus the user bin dirs the daemon sees)?
+fn on_path(cmd: &str) -> bool {
+    chronicle_core::config::resolve_command(cmd).contains('/')
+}
+
 enum RowAct {
     Test(String),
     Edit(String),
@@ -353,6 +394,8 @@ pub(super) struct Connections {
     last_fetch: Option<(String, Timestamp, Option<String>)>,
     /// Newest vcs event per repo basename.
     repo_last: BTreeMap<String, ActivityEvent>,
+    /// Newest event per kind (local collector rows).
+    kind_last: Vec<ActivityEvent>,
     repo_add: String,
     repo_error: Option<String>,
     repo_arm_remove: Option<usize>,
@@ -382,6 +425,9 @@ impl Connections {
             .into_iter()
             .map(|e| (e.repo.clone(), e))
             .collect();
+        let kind_last = conn
+            .and_then(|c| storage::latest_activity_per_kind(c).ok())
+            .unwrap_or_default();
         Self {
             mcp_path,
             mcp,
@@ -392,6 +438,7 @@ impl Connections {
             mcp_status: None,
             last_fetch,
             repo_last,
+            kind_last,
             repo_add: String::new(),
             repo_error: None,
             repo_arm_remove: None,
@@ -403,11 +450,15 @@ impl Connections {
         ui: &mut egui::Ui,
         conn: Option<&Connection>,
         git_repos: &mut Vec<String>,
+        sources: &mut LocalSources,
     ) {
         self.poll_probes(conn);
         self.servers_ui(ui, conn);
         ui.add_space(theme::SPACE_SM);
         self.repos_ui(ui, git_repos);
+        ui.add_space(theme::SPACE_SM);
+        self.sources_ui(ui, sources);
+        ui.weak("repo and source changes apply on the daemon's next start");
     }
 
     fn poll_probes(&mut self, conn: Option<&Connection>) {
@@ -786,7 +837,91 @@ impl Connections {
         if let Some(e) = &self.repo_error {
             ui.colored_label(palette::RED, e);
         }
-        ui.weak("repo changes apply on the daemon's next start");
+    }
+
+    /// One row per local collector: a switch, a status chip from the newest
+    /// stored event, and the tool gate the daemon applies at spawn (`gh`,
+    /// `pw-dump` on PATH) surfaced here instead of only in the log.
+    fn sources_ui(&mut self, ui: &mut egui::Ui, src: &mut LocalSources) {
+        subhead(ui, "Local sources", |_| {});
+        let width = ui.available_width();
+        let mut sessions_on = !src.ai_session_dirs.is_empty();
+        let missing_dir = src
+            .ai_session_dirs
+            .iter()
+            .find(|d| !expand_home(d).is_dir())
+            .cloned();
+        let session_detail = if sessions_on {
+            src.ai_session_dirs.join(", ")
+        } else {
+            "Claude Code transcripts under ~/.claude/projects".to_owned()
+        };
+        let mut rows: [(&str, &mut bool, Option<String>, &[ActivityKind], String); 3] = [
+            (
+                "Claude Code sessions",
+                &mut sessions_on,
+                missing_dir.map(|d| format!("no such directory: {d}")),
+                &[ActivityKind::AiSession],
+                session_detail,
+            ),
+            (
+                "GitHub pull requests",
+                &mut src.github_prs,
+                (!on_path("gh")).then(|| "gh not on PATH".to_owned()),
+                &[ActivityKind::PrAuthored, ActivityKind::PrReviewed],
+                "gh search prs, authored + reviewed, every 5 min".to_owned(),
+            ),
+            (
+                "Calls (microphone in use)",
+                &mut src.mic_capture,
+                (!on_path("pw-dump")).then(|| "pw-dump not on PATH".to_owned()),
+                &[ActivityKind::Call],
+                "pw-dump every 20 s \u{b7} each stretch becomes a call".to_owned(),
+            ),
+        ];
+        for (name, on, blocker, kinds, detail) in rows.iter_mut() {
+            let last = self
+                .kind_last
+                .iter()
+                .filter(|e| kinds.contains(&e.kind))
+                .max_by_key(|e| e.end_ts.unwrap_or(e.ts));
+            let (dot, chip, color) = match (**on, blocker.as_deref(), last) {
+                (false, _, _) => (palette::TEXT_DIM, "off".to_owned(), palette::TEXT_DIM),
+                (true, Some(why), _) => (palette::RED, why.to_owned(), palette::RED),
+                (true, None, Some(ev)) => (
+                    palette::GREEN,
+                    format!(
+                        "{} {}",
+                        kind_label(ev.kind),
+                        ago(ev.end_ts.unwrap_or(ev.ts).as_millisecond())
+                    ),
+                    palette::TEXT_DIM,
+                ),
+                (true, None, None) => (
+                    palette::AMBER,
+                    "nothing seen yet".to_owned(),
+                    palette::AMBER,
+                ),
+            };
+            theme::ListRow::new(name)
+                .emphasis()
+                .dot(dot)
+                .chip(chip, color)
+                .show(ui, width, |ui| {
+                    ui.checkbox(on, "");
+                });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                caption(ui, detail.clone(), None);
+            });
+        }
+        if sessions_on != !src.ai_session_dirs.is_empty() {
+            src.ai_session_dirs = if sessions_on {
+                chronicle_core::config::Config::default().ai_session_dirs
+            } else {
+                Vec::new()
+            };
+        }
     }
 
     fn add_repo(&mut self, git_repos: &mut Vec<String>) -> Result<(), String> {
