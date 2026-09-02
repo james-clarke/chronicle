@@ -159,9 +159,10 @@ pub(super) fn apply(ctx: &egui::Context) {
     // the chain the icon font's metrics would set every label's line height,
     // and behind Inter its glyphs are shadowed (Inter maps hundreds of
     // private-use codepoints — circled arrows and the like).
-    fonts
-        .families
-        .insert(egui::FontFamily::Name(ICONS.into()), vec!["phosphor".into()]);
+    fonts.families.insert(
+        egui::FontFamily::Name(ICONS.into()),
+        vec!["phosphor".into()],
+    );
     ctx.set_fonts(fonts);
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.style_mut_of(egui::Theme::Dark, style);
@@ -276,6 +277,15 @@ pub(super) fn series_color_for(task_id: i64) -> Color32 {
     palette::SERIES[task_id.rem_euclid(palette::SERIES.len() as i64) as usize]
 }
 
+/// Identity color for a name (app, project): hashed into the series palette
+/// so it keeps its color across days and views.
+pub(super) fn series_color_for_key(key: &str) -> Color32 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    key.hash(&mut h);
+    series_color_for((h.finish() % 1024) as i64)
+}
+
 /// Confidence bucket for an interval's task assignment.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum Band {
@@ -304,13 +314,9 @@ pub(super) fn confidence_color(band: Band) -> Option<Color32> {
     }
 }
 
-/// Section header: heading text, optional weak count, hairline underneath.
-pub(super) fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
-    section_header_with(ui, title, count, |_| {});
-}
-
-/// [`section_header`] with controls right-aligned on the header line
-/// (laid out right-to-left: add the outermost first).
+/// Section header: Heading title, optional count, hairline below; controls
+/// right-aligned on the header line (laid out right-to-left: add the
+/// outermost first).
 pub(super) fn section_header_with(
     ui: &mut egui::Ui,
     title: &str,

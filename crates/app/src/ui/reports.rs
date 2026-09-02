@@ -1,14 +1,17 @@
-//! Reports view: stacked per-day chart, insight strip, AI narrative, and
-//! per-task week totals.
+//! Reports view: stacked per-day chart, focus tiles + app share bar, AI
+//! narrative, and week totals grouped by project.
 
 use eframe::egui;
 use jiff::Zoned;
 
 use super::{Action, TimelineApp, WeekInsights, fmt_dur, theme};
+use chronicle_core::report::{ProjectTotal, RangeReport, TaskRow, UNTAGGED};
 
 impl TimelineApp {
     pub(super) fn reports_ui(&mut self, ui: &mut egui::Ui) {
         let mut pending: Option<Action> = None;
+        // Task row click: open that task's detail on its busiest day.
+        let mut jump: Option<(i64, jiff::civil::Date)> = None;
         let week_insights = &self.week_insights;
         let narrative_busy = self.narrative_job.is_some();
         let model_missing = self.model_missing;
@@ -25,211 +28,372 @@ impl TimelineApp {
                 return;
             };
             let today = Zoned::now().with_time_zone(self.tz.clone()).date();
-            let num_cell = |ui: &mut egui::Ui, ms: i64, strong: bool| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ms == 0 {
-                        ui.weak("\u{b7}");
-                    } else if strong {
-                        ui.monospace(egui::RichText::new(fmt_dur(ms)).color(theme::palette::TEXT));
-                    } else {
-                        ui.weak(egui::RichText::new(fmt_dur(ms)).monospace());
-                    }
-                });
-            };
+            let content_w = theme::content_width(ui);
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    week_chart(ui, r, &today);
+                    week_chart(ui, content_w, r, &today);
                     if let Some(wi) = week_insights {
-                        ui.add_space(theme::CARD_GAP);
-                        narrative_ui(ui, wi, narrative_busy, model_missing, &mut pending);
-                        ui.add_space(theme::CARD_GAP);
-                        insights_strip(ui, wi);
+                        ui.add_space(theme::SECTION_GAP);
+                        theme::section_header_with(ui, "Focus", None, |ui| {
+                            narrative_control(ui, wi, narrative_busy, model_missing, &mut pending);
+                        });
+                        ui.add_space(theme::SPACE_SM);
+                        if let Some(text) = &wi.narrative {
+                            narrative_card(ui, text);
+                            ui.add_space(theme::CARD_GAP);
+                        }
+                        focus_tiles(ui, content_w, wi, r);
+                        if !wi.top_apps.is_empty() {
+                            ui.add_space(theme::SPACE_SM);
+                            apps_bar(ui, content_w, wi);
+                        }
                     }
                     ui.add_space(theme::SECTION_GAP);
-                    theme::section_header(ui, "Tasks", Some(r.tasks.len()));
-                    ui.add_space(theme::SPACE_XS);
-                    // Per-day distribution lives in the chart above; rows show
-                    // week totals only (per-day cells don't fit at 400px).
-                    // Right-to-left so total and badge keep their room and the
-                    // label truncates into whatever is left.
-                    for t in &r.tasks {
-                        let color = theme::series_color_for(t.task_id);
-                        ui.horizontal(|ui| {
-                            let (dot, _) =
-                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(dot.center(), 4.0, color);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.monospace(
-                                        egui::RichText::new(fmt_dur(t.total_ms))
-                                            .color(theme::palette::TEXT),
-                                    );
-                                    if t.project != chronicle_core::report::UNTAGGED {
-                                        theme::badge(ui, &t.project, color);
-                                    }
-                                    ui.with_layout(
-                                        egui::Layout::left_to_right(egui::Align::Center),
-                                        |ui| {
-                                            theme::truncated_label(
-                                                ui,
-                                                egui::Label::new(&t.label).truncate(),
-                                                &t.label,
-                                            );
-                                        },
-                                    );
-                                },
-                            );
-                        });
-                    }
+                    theme::section_header_with(ui, "Tasks", Some(r.tasks.len()), |ui| {
+                        if r.grand_total_ms > 0 {
+                            ui.label(theme::num(fmt_dur(r.grand_total_ms)));
+                        }
+                    });
                     if r.tasks.is_empty() {
-                        ui.weak("no tasks this week");
+                        ui.add_space(theme::SECTION_GAP);
+                        theme::empty_state(
+                            ui,
+                            "nothing this week",
+                            "tasks appear once a day is analyzed",
+                        );
+                        return;
                     }
-                    ui.add_space(theme::SECTION_GAP);
-                    theme::section_header(ui, "Projects", None);
-                    ui.add_space(theme::SPACE_XS);
-                    egui::Grid::new("week_projects")
-                        .striped(true)
-                        .min_col_width(48.0)
-                        .show(ui, |ui| {
-                            for p in &r.projects {
-                                num_cell(ui, p.total_ms, false);
-                                theme::badge(ui, &p.project, theme::palette::ACCENT);
-                                ui.end_row();
-                            }
-                            num_cell(ui, r.grand_total_ms, true);
-                            ui.label(
-                                egui::RichText::new("total")
-                                    .text_style(egui::TextStyle::Heading)
-                                    .color(theme::palette::TEXT),
-                            );
-                            ui.end_row();
-                        });
+                    ui.add_space(theme::SPACE_SM);
+                    project_mix(ui, content_w, r);
+                    for p in &r.projects {
+                        ui.add_space(theme::SPACE_SM);
+                        project_group(ui, content_w, r, p, &mut jump);
+                    }
                 });
         });
+        if let Some((task_id, day)) = jump {
+            self.selected_task = Some(task_id);
+            self.day = day;
+            self.loaded_at = None;
+            self.view = super::View::Timeline;
+        }
         if let Some(action) = pending {
             self.apply_action(action);
         }
     }
 }
 
-/// AI week summary: cached text, a spinner while a job runs, or the
-/// generate/update button. Explicit trigger only — never auto-queued.
-fn narrative_ui(
+/// Focus header control: spinner while the narrative job runs, otherwise
+/// the generate/update ghost when no fresh summary is cached. Explicit
+/// trigger only — never auto-queued.
+fn narrative_control(
     ui: &mut egui::Ui,
     wi: &WeekInsights,
     busy: bool,
     model_missing: bool,
     pending: &mut Option<Action>,
 ) {
-    if let Some(text) = &wi.narrative {
-        theme::hover_card(ui, "narrative_card", |ui| {
-            ui.set_width(ui.available_width());
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(text)
-                        .text_style(egui::TextStyle::Small)
-                        .italics()
-                        .color(theme::palette::TEXT_DIM),
-                )
-                .wrap(),
-            );
-        });
-        return;
-    }
     if busy {
-        ui.horizontal(|ui| {
-            ui.add(egui::Spinner::new().size(12.0));
-            ui.weak("writing summary\u{2026}");
-        });
+        ui.weak("writing summary\u{2026}");
+        ui.add(egui::Spinner::new().size(12.0));
         return;
     }
-    if !model_missing {
-        let label = if wi.narrative_stale {
-            "update summary"
-        } else {
-            "generate summary"
-        };
-        if ui.small_button(label).clicked() {
-            *pending = Some(Action::GenerateNarrative);
-        }
+    if model_missing || wi.narrative.is_some() {
+        return;
+    }
+    let label = if wi.narrative_stale {
+        "update summary"
+    } else {
+        "generate summary"
+    };
+    if theme::ghost_button(ui, label).clicked() {
+        *pending = Some(Action::GenerateNarrative);
     }
 }
 
-/// 2×2 focus-quality stats plus a top-apps line.
-fn insights_strip(ui: &mut egui::Ui, wi: &WeekInsights) {
-    let stat = |ui: &mut egui::Ui, value: String, label: &str| {
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(value)
-                    .text_style(egui::TextStyle::Heading)
-                    .color(theme::palette::TEXT),
-            );
-            ui.label(
-                egui::RichText::new(label)
-                    .text_style(egui::TextStyle::Small)
-                    .color(theme::palette::TEXT_DIM),
-            );
-        });
-    };
-    let m = &wi.metrics;
-    let delta_text = wi
-        .delta
-        .as_ref()
-        .map(|d| {
-            let sign = if d.grand_total_delta_ms >= 0 {
-                "+"
-            } else {
-                "-"
-            };
-            format!("{sign}{}", fmt_dur(d.grand_total_delta_ms.abs()))
-        })
-        .unwrap_or_else(|| "\u{b7}".into());
-    let half = (ui.available_width() - 8.0) / 2.0;
-    egui::Grid::new("focus_stats")
-        .num_columns(2)
-        .striped(false)
-        .min_col_width(half)
-        .spacing([8.0, 8.0])
-        .show(ui, |ui| {
-            stat(ui, fmt_dur(m.longest_block_ms), "longest focus block");
-            stat(ui, fmt_dur(m.deep_work_ms), "deep work (25m+ blocks)");
-            ui.end_row();
-            stat(ui, m.switch_count.to_string(), "task switches");
-            stat(ui, delta_text, "vs prior week");
-            ui.end_row();
-        });
-    if !wi.top_apps.is_empty() {
-        ui.add_space(4.0);
-        let line = wi
-            .top_apps
-            .iter()
-            .map(|(app, ms)| format!("{app} {}", fmt_dur(*ms)))
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ");
-        let full = format!("top apps: {line}");
-        theme::truncated_label(
-            ui,
+fn narrative_card(ui: &mut egui::Ui, text: &str) {
+    theme::hover_card(ui, "narrative_card", |ui| {
+        ui.set_width(ui.available_width());
+        ui.add(
             egui::Label::new(
-                egui::RichText::new(&full)
+                egui::RichText::new(text)
                     .text_style(egui::TextStyle::Small)
+                    .italics()
                     .color(theme::palette::TEXT_DIM),
             )
-            .truncate(),
-            &full,
+            .wrap(),
         );
+    });
+}
+
+/// Six stat tiles in a 3-column grid: Display value over icon + caption.
+fn focus_tiles(ui: &mut egui::Ui, width: f32, wi: &WeekInsights, r: &RangeReport) {
+    use theme::icon;
+    let m = &wi.metrics;
+    let day_totals: Vec<i64> = (0..r.days.len())
+        .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
+        .collect();
+    let busiest = day_totals
+        .iter()
+        .enumerate()
+        .max_by_key(|&(d, &ms)| (ms, std::cmp::Reverse(d)))
+        .filter(|&(_, &ms)| ms > 0)
+        .map(|(d, _)| r.days[d].strftime("%a").to_string());
+    let (delta_icon, delta) = match &wi.delta {
+        Some(d) if d.grand_total_delta_ms > 0 => (
+            icon::TREND_UP,
+            format!("+{}", fmt_dur(d.grand_total_delta_ms)),
+        ),
+        Some(d) if d.grand_total_delta_ms < 0 => (
+            icon::TREND_DOWN,
+            format!("\u{2212}{}", fmt_dur(-d.grand_total_delta_ms)),
+        ),
+        Some(_) => (icon::EQUALS, "same".to_owned()),
+        None => (icon::EQUALS, "\u{b7}".to_owned()),
+    };
+    let dash = || "\u{b7}".to_owned();
+    let tiles: [(&str, String, &str); 6] = [
+        (icon::TIMER, fmt_dur(m.longest_block_ms), "longest block"),
+        (icon::BRAIN, fmt_dur(m.deep_work_ms), "deep work"),
+        (
+            icon::ARROWS_LEFT_RIGHT,
+            m.switch_count.to_string(),
+            "switches",
+        ),
+        (
+            icon::CLOCK_COUNTDOWN,
+            m.most_fragmented_hour
+                .map_or_else(dash, |h| format!("{h:02}:00")),
+            "fragmented hour",
+        ),
+        (icon::FIRE, busiest.unwrap_or_else(dash), "busiest day"),
+        (delta_icon, delta, "vs prior week"),
+    ];
+    const COLS: usize = 3;
+    let tile_w = (width - (COLS as f32 - 1.0) * theme::SPACE_SM) / COLS as f32;
+    for row in tiles.chunks(COLS) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
+            for (glyph, value, caption) in row {
+                tile(ui, tile_w, glyph, value, caption);
+            }
+        });
+        ui.add_space(theme::SPACE_SM);
     }
+}
+
+fn tile(ui: &mut egui::Ui, width: f32, glyph: &str, value: &str, caption: &str) {
+    const PAD: i8 = 8;
+    let inner = width - 2.0 * PAD as f32;
+    theme::card()
+        .inner_margin(egui::Margin::symmetric(PAD, 8))
+        .show(ui, |ui| {
+            // The frame inherits the tile row's horizontal layout: pin the
+            // width both ways and stack explicitly.
+            ui.set_width(inner);
+            ui.set_max_width(inner);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(value)
+                            .text_style(theme::display())
+                            .color(theme::palette::TEXT),
+                    )
+                    .truncate(),
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(
+                        theme::glyph(glyph)
+                            .text_style(theme::caption())
+                            .color(theme::palette::TEXT_DIM),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(caption)
+                                .text_style(theme::caption())
+                                .color(theme::palette::TEXT_DIM),
+                        )
+                        .truncate(),
+                    );
+                });
+            });
+        });
+}
+
+/// Top apps as shares of the week's app focus time: a segmented bar (hover
+/// a segment for the app) over a one-line legend, biggest first.
+fn apps_bar(ui: &mut egui::Ui, width: f32, wi: &WeekInsights) {
+    let total = wi.apps_total_ms.max(1) as f32;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(2), theme::palette::SURFACE_2);
+    let hover_x = resp.hover_pos().map(|p| p.x);
+    let mut hovered: Option<(&str, i64)> = None;
+    let mut x = rect.left();
+    for (app, ms) in &wi.top_apps {
+        let w = rect.width() * *ms as f32 / total;
+        let seg = egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            egui::pos2((x + w - 1.0).max(x + 1.0), rect.bottom()),
+        );
+        painter.rect_filled(
+            seg,
+            egui::CornerRadius::same(2),
+            theme::series_color_for_key(app),
+        );
+        if hover_x.is_some_and(|hx| seg.x_range().contains(hx)) {
+            hovered = Some((app, *ms));
+        }
+        x += w;
+    }
+    if let Some((app, ms)) = hovered {
+        resp.on_hover_text(format!(
+            "{app} \u{b7} {} \u{b7} {}%",
+            fmt_dur(ms),
+            (ms as f32 / total * 100.0).round()
+        ));
+    }
+    ui.add_space(theme::SPACE_XS);
+    let legend = wi
+        .top_apps
+        .iter()
+        .map(|(app, ms)| format!("{app} {}%", (*ms as f32 / total * 100.0).round()))
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    theme::truncated_label(
+        ui,
+        egui::Label::new(
+            egui::RichText::new(&legend)
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        )
+        .truncate(),
+        &legend,
+    );
+}
+
+fn project_color(project: &str) -> egui::Color32 {
+    if project == UNTAGGED {
+        theme::palette::TEXT_DIM
+    } else {
+        theme::series_color_for_key(project)
+    }
+}
+
+fn project_name(project: &str) -> &str {
+    if project == UNTAGGED {
+        "untagged"
+    } else {
+        project
+    }
+}
+
+/// Single-row project mix: the week's total split by project, biggest
+/// first; hover a segment for the project's total and share.
+fn project_mix(ui: &mut egui::Ui, width: f32, r: &RangeReport) {
+    let total = r.grand_total_ms.max(1) as f32;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(2), theme::palette::SURFACE_2);
+    let hover_x = resp.hover_pos().map(|p| p.x);
+    let mut hovered: Option<&ProjectTotal> = None;
+    let mut x = rect.left();
+    for p in &r.projects {
+        let w = rect.width() * p.total_ms as f32 / total;
+        let seg = egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            egui::pos2((x + w - 1.0).max(x + 1.0), rect.bottom()),
+        );
+        painter.rect_filled(seg, egui::CornerRadius::same(2), project_color(&p.project));
+        if hover_x.is_some_and(|hx| seg.x_range().contains(hx)) {
+            hovered = Some(p);
+        }
+        x += w;
+    }
+    if let Some(p) = hovered {
+        resp.on_hover_text(format!(
+            "{} \u{b7} {} \u{b7} {}%",
+            project_name(&p.project),
+            fmt_dur(p.total_ms),
+            (p.total_ms as f32 / total * 100.0).round()
+        ));
+    }
+}
+
+/// Project header (chip, thin share bar, share %, total in the number
+/// column) then its tasks as list rows indented [`theme::PAGE_MARGIN`];
+/// a task row click jumps to the timeline on the task's busiest day.
+fn project_group(
+    ui: &mut egui::Ui,
+    width: f32,
+    r: &RangeReport,
+    p: &ProjectTotal,
+    jump: &mut Option<(i64, jiff::civil::Date)>,
+) {
+    let color = project_color(&p.project);
+    let share = p.total_ms as f32 / r.grand_total_ms.max(1) as f32;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(width);
+            theme::badge(ui, project_name(&p.project), color);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::num_cell(ui, theme::NUM_COL, theme::num(fmt_dur(p.total_ms)));
+                ui.label(theme::num(format!("{}%", (share * 100.0).round())));
+                let (bar, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width().max(0.0), 4.0),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter();
+                painter.rect_filled(bar, egui::CornerRadius::same(2), theme::palette::SURFACE_2);
+                let fill = egui::Rect::from_min_size(
+                    bar.min,
+                    egui::vec2(
+                        (bar.width() * share).max(2.0).min(bar.width()),
+                        bar.height(),
+                    ),
+                );
+                painter.rect_filled(fill, egui::CornerRadius::same(2), color);
+            });
+        },
+    );
+    let indent = theme::PAGE_MARGIN as f32;
+    for t in r.tasks.iter().filter(|t| t.project == p.project) {
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            let resp = ui
+                .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+                    theme::ListRow::new(&t.label)
+                        .dot(theme::series_color_for(t.task_id))
+                        .num(fmt_dur(t.total_ms))
+                        .show(ui, width - indent, |_| {});
+                })
+                .response;
+            if resp.clicked() {
+                *jump = Some((t.task_id, busiest_day(r, t)));
+            }
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+        });
+    }
+}
+
+/// The day this task got the most time (earliest on ties).
+fn busiest_day(r: &RangeReport, t: &TaskRow) -> jiff::civil::Date {
+    t.by_day
+        .iter()
+        .enumerate()
+        .max_by_key(|&(d, &ms)| (ms, std::cmp::Reverse(d)))
+        .map_or(r.days[0], |(d, _)| r.days[d])
 }
 
 /// Stacked per-day bars in task identity colors; today's label accented.
 /// Day totals live in the hover tooltip (a painted max-value label clipped at
 /// the widget's top edge); the hovered day's stack lightens and lifts.
-fn week_chart(
-    ui: &mut egui::Ui,
-    r: &chronicle_core::report::RangeReport,
-    today: &jiff::civil::Date,
-) {
+fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civil::Date) {
     let day_totals: Vec<i64> = (0..r.days.len())
         .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
         .collect();
@@ -240,7 +404,7 @@ fn week_chart(
     const CHART_H: f32 = 110.0;
     const LABEL_H: f32 = 16.0;
     const LIFT: f32 = 2.0;
-    let width = ui.available_width().min(680.0);
+    let width = width.min(680.0);
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(width, CHART_H + LABEL_H + 14.0),
         egui::Sense::hover(),
@@ -308,8 +472,7 @@ fn week_chart(
                 ui.weak(fmt_dur(day_totals[d]));
             });
             // Top tasks only; a 15-task day would fill the whole widget.
-            let mut day_tasks: Vec<&chronicle_core::report::TaskRow> =
-                r.tasks.iter().filter(|t| t.by_day[d] > 0).collect();
+            let mut day_tasks: Vec<&TaskRow> = r.tasks.iter().filter(|t| t.by_day[d] > 0).collect();
             day_tasks.sort_by_key(|t| std::cmp::Reverse(t.by_day[d]));
             const TOOLTIP_ROWS: usize = 6;
             for t in day_tasks.iter().take(TOOLTIP_ROWS) {

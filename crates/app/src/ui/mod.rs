@@ -330,6 +330,8 @@ struct WeekInsights {
     range: (i64, i64),
     metrics: chronicle_core::insights::FocusMetrics,
     top_apps: Vec<(String, i64)>,
+    /// Focus time across every app in the range (share-bar denominator).
+    apps_total_ms: i64,
     delta: Option<chronicle_core::insights::Delta>,
     /// Cached narrative whose hash matches the current report.
     narrative: Option<String>,
@@ -753,7 +755,9 @@ impl TimelineApp {
         let sessions = insights::sessions_from_tasks(&tasks, lo, hi);
         let metrics = insights::focus_metrics(&sessions, &self.tz);
         let spans = storage::spans_in_range(conn, lo, hi)?;
-        let top_apps = insights::top_apps(&spans, lo, hi, 3);
+        let apps = insights::top_apps(&spans, lo, hi, usize::MAX);
+        let apps_total_ms = apps.iter().map(|(_, ms)| ms).sum();
+        let top_apps = apps.into_iter().take(3).collect();
         let delta = insights::prior_period(&r.days).and_then(|pd| {
             let plo = pd
                 .first()?
@@ -776,6 +780,7 @@ impl TimelineApp {
             range: (lo, hi),
             metrics,
             top_apps,
+            apps_total_ms,
             delta,
             narrative,
             narrative_stale,

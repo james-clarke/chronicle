@@ -617,17 +617,29 @@ fn activity_hours(
             egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom()));
         painter.rect_filled(col, egui::CornerRadius::same(2), theme::palette::SURFACE);
         let hovered = hovered_col == Some(h);
-        // Overlapping display sessions can exceed the hour: clamp at the top.
+        // Overlapping display sessions (and the 1px floor per task) can
+        // overfill the hour: scale the whole stack to the column instead of
+        // dropping whoever stacks last.
+        let heights: Vec<(usize, f32)> = order
+            .iter()
+            .enumerate()
+            .filter(|&(gi, _)| cell[gi] > 0)
+            .map(|(gi, &g)| {
+                (
+                    g,
+                    (cell[gi] as f32 / HOUR_MS as f32 * rect.height()).max(1.0),
+                )
+            })
+            .collect();
+        let sum: f32 = heights.iter().map(|&(_, h)| h).sum();
+        let scale = if sum > rect.height() {
+            rect.height() / sum
+        } else {
+            1.0
+        };
         let mut y = rect.bottom();
-        for (gi, &g) in order.iter().enumerate() {
-            if cell[gi] <= 0 {
-                continue;
-            }
-            let top =
-                (y - (cell[gi] as f32 / HOUR_MS as f32 * rect.height()).max(1.0)).max(rect.top());
-            if top >= y {
-                break;
-            }
+        for (g, h) in heights {
+            let top = y - h * scale;
             let color = theme::series_color_for(groups[g].task_id);
             painter.rect_filled(
                 egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, y)),
@@ -1274,15 +1286,6 @@ fn ms(z: &Zoned) -> i64 {
     z.timestamp().as_millisecond()
 }
 
-/// Stable per-app colour: hash into the series palette, so an app keeps
-/// its colour across sessions and days.
-fn app_color(app: &str) -> egui::Color32 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::hash::DefaultHasher::new();
-    app.hash(&mut h);
-    theme::series_color_for((h.finish() % 1024) as i64)
-}
-
 /// Session strips: time column, a strip sized against the longest session
 /// and filled with per-app focus segments (confidence as opacity; commit
 /// and journal ticks), the duration, and the whole-session "move" menu.
@@ -1334,7 +1337,11 @@ fn sessions_ui(
                     egui::pos2(x_at(a), rect.top()),
                     egui::pos2(x_at(b).max(x_at(a) + 1.0), rect.bottom()),
                 );
-                painter.rect_filled(seg, 0, app_color(&sp.app).gamma_multiply(alpha));
+                painter.rect_filled(
+                    seg,
+                    0,
+                    theme::series_color_for_key(&sp.app).gamma_multiply(alpha),
+                );
                 if hover_x.is_some_and(|x| seg.x_range().contains(x)) {
                     hover = Some(format!(
                         "{} \u{b7} {} \u{b7} {}",
