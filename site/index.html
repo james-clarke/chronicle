@@ -34,6 +34,25 @@
   </figure>
 </section>
 
+<section class="work flip feed">
+  <div class="work-shots">
+    <figure class="shot">
+      <img src="img/feed.webp" width="678" height="1062" alt="Chronicle home feed: a proposed task card named 'proposals clustering and naming' with accept and not-a-task buttons, then the day's blocks newest first, each with a state chip (provisional, fresh, unmatched), the task it sits under, its focus time and a one-line reason such as 'repo chronicle' or 'model, 91%'" loading="lazy">
+      <figcaption>The feed</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="img/feed-menu.webp" width="678" height="1062" alt="The same feed with one provisional block's menu open, offering keep, move to and eject" loading="lazy">
+      <figcaption>One block's menu</figcaption>
+    </figure>
+  </div>
+  <div class="work-text">
+    <h2>Sorted while the day is still happening. Corrected in one click.</h2>
+    <p>Every stretch of focus shows up in the feed on Home as soon as it ends, with a state and the one-line reason it sits where it does. A few plain rules run first: the branch you are on, the repo you are in, a window that matches a correction you made before. A hit files the block under that task straight away, marked provisional. When the batch closes, the model reads the whole thing and confirms or moves it, with its confidence on the row.</p>
+    <p>Stretches nothing matched stay unmatched. When a few of them share a repo or a distinctive title, they become a proposed task with a suggested name. Accept declares the task and files the stretches. Not a task parks them for the day.</p>
+    <p>Every block has a menu. Keep turns a provisional guess into your answer. Move to files it somewhere else. Eject pulls it out and is remembered as a hard no, so the rules never make that pairing again and the model is told not to.</p>
+  </div>
+</section>
+
 <section class="day">
   <h2>The day, as it happened.</h2>
   <div class="deck">
@@ -123,7 +142,7 @@ batch  09:02–11:15  5 spans · 32m on a call · 4 switches</code></pre>
     <li class="stage">
       <div class="stage-text">
         <h3>Recognises</h3>
-        <p>Before any model runs, a few plain rules take a first pass every minute. A window that looks like one you have filed before gets the same answer. Work in a project folder points at the last task in that folder. A ticket in the branch you checked out points at that ticket. These are written down as provisional, so the timeline fills in while you are still working.</p>
+        <p>Before any model runs, a few plain rules take a first pass every minute. A window that looks like one you have filed before gets the same answer. Work in a project folder points at the last task in that folder. A ticket in the branch you checked out points at that ticket. These are written down as provisional, so the feed and the timeline fill in while you are still working, each block with the rule that placed it.</p>
       </div>
       <pre class="stage-data"><code>rules  09:02–09:31  → Q3 launch brief
        reason: matches a correction you made on Tuesday

@@ -196,6 +196,8 @@ figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-alig
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+.work.flip { grid-template-columns: auto minmax(0, 1fr); }
+.work.flip .work-shots { order: -1; }
 
 .section-lede { max-width: 40em; color: var(--soft); margin: 0 0 24px; }
 
@@ -291,6 +293,8 @@ figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-alig
 @media (max-width: 760px) {
   .hero, .feature, .stage, .work { grid-template-columns: 1fr; gap: 28px; }
   .work-shots { flex-direction: column; align-items: center; }
+  .work.flip { grid-template-columns: 1fr; }
+  .work.flip .work-shots { order: 1; }
   .stage-heads { display: none; }
   .shot img { max-width: 300px; }
   section { padding: 40px 0; }
