@@ -212,8 +212,9 @@ struct TaskGroup {
     ai_pending: bool,
     /// External anchor (ticket key from `tasks.external_ref`).
     external_ref: Option<String>,
-    /// Commits landed inside this task's intervals today, oldest first.
-    commits: Vec<CommitRow>,
+    /// Activity evidence overlapping this task's intervals today (commits,
+    /// AI sessions, PR events, calls), oldest first.
+    activity: Vec<ActivityRow>,
     /// MCP-fetched context bundle as (fetched_ts, content).
     task_context: Option<(i64, String)>,
     /// A fetch_context job for this task is queued or running.
@@ -236,11 +237,15 @@ struct JournalRow {
     entry: String,
 }
 
-/// One commit shown as task evidence.
-struct CommitRow {
+/// One activity event shown as task evidence.
+struct ActivityRow {
     time: Zoned,
-    /// Subject line, or the short hash when git(1) was unavailable.
+    kind: chronicle_core::types::ActivityKind,
+    /// Subject line / first prompt / PR title / calling app; the short hash
+    /// when a commit had no subject.
     summary: String,
+    /// Span kinds only.
+    duration_ms: Option<i64>,
 }
 
 struct IntervalRow {
@@ -868,7 +873,7 @@ impl TimelineApp {
                         ai_summary: t.description.clone(),
                         ai_pending: false,
                         external_ref: t.external_ref.clone(),
-                        commits: Vec::new(),
+                        activity: Vec::new(),
                         task_context: None,
                         context_pending: false,
                         journal: Vec::new(),
@@ -915,16 +920,23 @@ impl TimelineApp {
                 }),
             }
         }
-        let mut commits: std::collections::HashMap<i64, Vec<CommitRow>> =
+        let mut activity: std::collections::HashMap<i64, Vec<ActivityRow>> =
             std::collections::HashMap::new();
-        for (task_id, c) in chronicle_core::storage::activity_in_range_by_task(conn, lo, hi)? {
-            let summary = c
-                .summary
-                .or_else(|| c.ext_id.map(|h| h.chars().take(12).collect()))
-                .unwrap_or_default();
-            commits.entry(task_id).or_default().push(CommitRow {
-                time: c.ts.to_zoned(self.tz.clone()),
+        for (task_id, a) in chronicle_core::storage::activity_in_range_by_task(conn, lo, hi)? {
+            let summary = a.summary.unwrap_or_else(|| match a.kind {
+                chronicle_core::types::ActivityKind::AiSession => {
+                    format!("session in {}@{}", a.repo, a.branch)
+                }
+                _ => a
+                    .ext_id
+                    .map(|h| h.chars().take(12).collect())
+                    .unwrap_or_default(),
+            });
+            activity.entry(task_id).or_default().push(ActivityRow {
+                time: a.ts.to_zoned(self.tz.clone()),
+                kind: a.kind,
                 summary,
+                duration_ms: a.end_ts.map(|e| e.as_millisecond() - a.ts.as_millisecond()),
             });
         }
         for group in &mut groups {
@@ -932,8 +944,8 @@ impl TimelineApp {
                 apps.sort_by_key(|a| std::cmp::Reverse(a.ms));
                 group.evidence = apps;
             }
-            if let Some(rows) = commits.remove(&group.task_id) {
-                group.commits = rows;
+            if let Some(rows) = activity.remove(&group.task_id) {
+                group.activity = rows;
             }
             if group.ai_summary.is_none() {
                 group.ai_pending =

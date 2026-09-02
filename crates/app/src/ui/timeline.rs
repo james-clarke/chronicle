@@ -1081,15 +1081,16 @@ fn detail_ui(
     }
 
     // Timestamped artefacts inside the task's day; one row shape for every
-    // kind, commits being the only collector so far.
-    if !group.commits.is_empty() {
-        detail_section(ui, "Activity", Some(group.commits.len()), |_| {});
-        for c in &group.commits {
+    // kind (commit, AI session, PR event, call).
+    if !group.activity.is_empty() {
+        detail_section(ui, "Activity", Some(group.activity.len()), |_| {});
+        for a in &group.activity {
             activity_row(
                 ui,
-                theme::icon::GIT_COMMIT,
-                &c.time.strftime("%H:%M").to_string(),
-                &c.summary,
+                activity_glyph(a.kind),
+                &a.time.strftime("%H:%M").to_string(),
+                a.duration_ms.map(super::fmt_dur).as_deref(),
+                &a.summary,
             );
         }
     }
@@ -1363,8 +1364,8 @@ fn sessions_ui(
                     );
                 }
             };
-            for c in &group.commits {
-                tick(ms(&c.time), theme::palette::TEXT);
+            for a in &group.activity {
+                tick(ms(&a.time), theme::palette::TEXT);
             }
             for j in &group.journal {
                 tick(j.ts, theme::palette::TEXT_DIM);
@@ -1397,8 +1398,19 @@ fn sessions_ui(
     }
 }
 
-/// One activity row: kind glyph, clock time, summary (truncates).
-fn activity_row(ui: &mut egui::Ui, glyph: &str, time: &str, summary: &str) {
+fn activity_glyph(kind: chronicle_core::types::ActivityKind) -> &'static str {
+    use chronicle_core::types::ActivityKind as K;
+    match kind {
+        K::Checkout | K::Commit => theme::icon::GIT_COMMIT,
+        K::AiSession => theme::icon::TERMINAL_WINDOW,
+        K::PrAuthored | K::PrReviewed => theme::icon::GIT_PULL_REQUEST,
+        K::Call => theme::icon::PHONE_CALL,
+    }
+}
+
+/// One activity row: kind glyph, clock time, optional duration, summary
+/// (truncates).
+fn activity_row(ui: &mut egui::Ui, glyph: &str, time: &str, duration: Option<&str>, summary: &str) {
     ui.horizontal(|ui| {
         ui.label(
             theme::glyph(glyph)
@@ -1406,6 +1418,13 @@ fn activity_row(ui: &mut egui::Ui, glyph: &str, time: &str, summary: &str) {
                 .color(theme::palette::TEXT_DIM),
         );
         time_col(ui, TIME_COL, time);
+        if let Some(d) = duration {
+            ui.label(
+                egui::RichText::new(d)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+            );
+        }
         ui.add(
             egui::Label::new(
                 egui::RichText::new(summary)

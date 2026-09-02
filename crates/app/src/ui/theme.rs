@@ -698,7 +698,7 @@ pub(super) fn card_header(
 /// `assets/fonts/Phosphor-subset.ttf`, rendered through [`glyph`]. This list is the
 /// subset manifest — to add one, append its codepoint here and regenerate
 /// from the full `Phosphor.ttf` (egui-phosphor 0.13.0, `res/`):
-/// `uvx --from fonttools pyftsubset Phosphor.ttf --unicodes=U+E492,… --name-IDs='*' --output-file=crates/app/assets/fonts/Phosphor-subset.ttf`
+/// `uvx --from fonttools pyftsubset Phosphor.ttf --unicodes=<every U+ below, comma-separated> --name-IDs='*' --output-file=crates/app/assets/fonts/Phosphor-subset.ttf`
 #[allow(dead_code)] // consumed progressively by the m20 chunks (tiles, activity rows, sources)
 pub(super) mod icon {
     pub const TIMER: &str = "\u{E492}";
@@ -728,6 +728,9 @@ pub(super) mod icon {
     pub const X: &str = "\u{E4F6}";
     pub const PENCIL_SIMPLE: &str = "\u{E3B4}";
     pub const GIT_BRANCH: &str = "\u{E278}";
+    pub const GIT_PULL_REQUEST: &str = "\u{E282}";
+    pub const PHONE_CALL: &str = "\u{E3BA}";
+    pub const TERMINAL_WINDOW: &str = "\u{EAE8}";
     pub const LIGHTNING: &str = "\u{E2DE}";
     pub const TARGET: &str = "\u{E47C}";
     pub const CHECK: &str = "\u{E182}";

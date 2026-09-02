@@ -278,8 +278,8 @@ fn parse_line(raw: &str) -> Option<Line> {
     })
 }
 
-/// A typed prompt: a string or the first text block. Tool results and tagged
-/// system/command payloads (`<…>`) are not prompts.
+/// A typed prompt: a string or the first text block. Tool results, tagged
+/// system/command payloads (`<…>`) and injected skill files are not prompts.
 fn prompt_text(content: &serde_json::Value) -> Option<String> {
     let text = match content {
         serde_json::Value::String(s) => s.as_str(),
@@ -291,7 +291,8 @@ fn prompt_text(content: &serde_json::Value) -> Option<String> {
         _ => return None,
     };
     let text = text.trim();
-    if text.is_empty() || text.starts_with('<') {
+    if text.is_empty() || text.starts_with('<') || text.starts_with("Base directory for this skill")
+    {
         return None;
     }
     let mut it = text.chars();
@@ -331,6 +332,8 @@ mod tests {
         assert!(parse_line(ASSISTANT).unwrap().prompt.is_none());
         let tagged = USER.replace("fix the flaky test", "<command-name>/foo</command-name>");
         assert!(parse_line(&tagged).unwrap().prompt.is_none());
+        let skill = USER.replace("fix the flaky test", "Base directory for this skill: /x");
+        assert!(parse_line(&skill).unwrap().prompt.is_none());
         let long = USER.replace("fix the flaky test", &"x".repeat(200));
         assert_eq!(
             parse_line(&long).unwrap().prompt.unwrap().chars().count(),

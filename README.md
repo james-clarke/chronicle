@@ -82,6 +82,8 @@ pub trait FocusProvider: Send { fn run(self, tx: Sender<CaptureEvent>) -> Result
 pub trait AfkProvider:  Send { fn idle_ms(&self) -> Result<u64>; }                       // polled
 ```
 
+Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(ActivityEvent)` into `activity_events`, never `events`: git (`git_repos`), Claude Code transcripts (`ai_session_dirs`, default `~/.claude/projects`, first prompt clipped to 120 chars is all that is stored), GitHub PRs via the user's `gh` (`github_prs = true`, off by default), mic-in-use via `pw-dump` (`mic_capture`, Linux). Each runs on its own thread and is never load-bearing.
+
 ## Storage
 
 SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks` (identity: label, project, open/closed, user/derived), `intervals` (time blocks, FK task+batch), `corrections` (kind: rename/reassign/merge), `chat_messages`, `meta`; FTS5 over `spans.title` + `tasks.label`. Data dir: XDG / `%APPDATA%` / `~/Library/Application Support`.
@@ -201,6 +203,7 @@ Order: **Linux polish first, then macOS → Windows.** Ports wait until the prod
 | 14 | **AI layer:** task descriptions, declare suggestions, week narratives, `ai_jobs` queue + idle-gated worker, insights (sessions, focus metrics, deltas) | descriptions appear on tasks unaided; insights strip + week narrative in UI |
 | 15 | **Git evidence + task anchors:** `vcs_events` capture (HEAD/commit polling), digest git section, deterministic ticket-key anchoring (`tasks.external_ref`), anchor chip + commit evidence in detail pane — see `m15-task-workspace.md` | work 30 min on branch `ABC-123-…` → derived task anchored `ABC-123`; its commits listed in the detail pane |
 | 16 | **Task workspace:** MCP context fetch on task add, per-batch journal entries, AFK checkpoints ("where I am / next steps"), Home resume card, task-scoped chat | add task from a Jira key, work, leave ≥ 1 h, return → resume card shows journal + grounded next steps |
+| 22 | **Activity events + local collectors:** `vcs_events` → `activity_events` (`kind`, `ext_id`, `end_ts`, per-kind dedupe); Claude Code session watcher (`ai_session_dirs`), `gh` PR poller (`github_prs`, opt-in), PipeWire mic-in-use → `call` (`mic_capture`); digest `## Activity`, timeline rows per kind — see `m22-collectors-plan.md` | a Claude session on a ticketed branch shows under its task within 20 s with a growing duration; a PR update and a call land as rows and reach the journal digest |
 | 17 | **macOS port:** capture, AX onboarding + degraded app-only mode, tray, LaunchAgent, `metal`; ad-hoc sign + documented right-click-open | M1–M16 acceptance re-run on macOS |
 | 18 | **Windows port:** capture thread, tray, HKCU autostart, power guard, WTS lock | same re-run on Windows |
 | 19 | Packaging: Linux `.desktop` + tarball/AppImage; macOS `.app`; Windows installer | clean install on all three |
