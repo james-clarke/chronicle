@@ -11,7 +11,7 @@
 
 <header class="top">
   <a class="brand" href="#">Chronicle</a>
-  <a class="top-link" href="#feedback">Feedback</a>
+  <a class="top-link" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Feedback</a>
 </header>
 
 <main>
@@ -20,7 +20,7 @@
   <div class="hero-text">
     <h1>Track everything, lose nothing.</h1>
     <div class="cta">
-      <a class="btn primary" href="#feedback">Tell me what you think</a>
+      <a class="btn primary" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Tell me what you think</a>
       <span class="btn disabled" aria-disabled="true">Download</span>
     </div>
   </div>
@@ -90,57 +90,13 @@
 
 <section class="how">
   <h2>How it works</h2>
-  <p class="section-lede">Chronicle is built close to the operating system, in Rust, with no browser engine and no server. Every step below happens on your machine.</p>
   <ol class="steps">
-    <li>
-      <span class="step-n">1</span>
-      <h3>Capture</h3>
-      <p>A small background process notices which window is in front and when you step away. Any app counts: browser, documents, mail, design tools, terminal.</p>
-      <p class="tech">Native OS hooks · X11 today, macOS Accessibility and Win32 events next · idle detection</p>
-    </li>
-    <li>
-      <span class="step-n">2</span>
-      <h3>Derive</h3>
-      <p>A language model running inside the app groups that activity into tasks and writes a plain-English line for each one.</p>
-      <p class="tech">Qwen3 1.7B, embedded via llama.cpp · runs on CPU · downloaded once, then offline</p>
-    </li>
-    <li>
-      <span class="step-n">3</span>
-      <h3>Correct</h3>
-      <p>Move a block, rename a task, merge two that are really one. Every correction feeds the next pass, so it gets better at reading your day.</p>
-      <p class="tech">Corrections stored as anchors · the next derivation reads them</p>
-    </li>
-    <li>
-      <span class="step-n">4</span>
-      <h3>Use</h3>
-      <p>Standup draft each morning, a weekly report, a card per task, and a chat that answers from your own history.</p>
-      <p class="tech">Standup, reports and chat all read the same local database</p>
-    </li>
+    <li><strong>Capture.</strong> A small background process notices which window is in front and when you step away. Any app counts.</li>
+    <li><strong>Derive.</strong> A language model running inside the app groups that activity into tasks and writes a line for each.</li>
+    <li><strong>Correct.</strong> Move a block, rename a task, merge two that are really one. Corrections feed the next pass.</li>
+    <li><strong>Use.</strong> Standup draft each morning, a weekly report, a card per task, a chat that answers from your own history.</li>
   </ol>
-  <div class="facts">
-    <div class="fact">
-      <h3>Native, not a web page in a box</h3>
-      <p>One binary written in Rust. No Electron, no web view, no runtime to install.</p>
-    </div>
-    <div class="fact">
-      <h3>The model lives in the app</h3>
-      <p>Inference runs in-process on your CPU. No API key, no usage meter, no waiting on someone else's server.</p>
-    </div>
-    <div class="fact">
-      <h3>Your history is one file</h3>
-      <p>A SQLite database in your home folder with full-text search built in. Back it up, move it, or delete it. It's yours.</p>
-    </div>
-    <div class="fact">
-      <h3>Nothing phones home</h3>
-      <p>No account, no sync, no telemetry, no crash reports. The only network calls are to connections you add yourself.</p>
-    </div>
-  </div>
-</section>
-
-<section class="feedback" id="feedback">
-  <h2>Tell me what you think</h2>
-  <p>Would this be useful to you? What would it need? I read every reply.</p>
-  <a class="btn primary" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">james.clarke@callplaybook.com</a>
+  <p class="section-lede">Written in Rust, one binary, no browser engine, no server. The model and your history live on your machine.</p>
 </section>
 
 </main>
