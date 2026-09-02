@@ -428,6 +428,9 @@ struct TimelineApp {
     pending_declare_description: Option<String>,
     spans: Vec<SpanRow>,
     groups: Vec<TaskGroup>,
+    /// The shown day's activity overlapping no task (m22): calls between
+    /// tasks, PRs reviewed in a gap. Oldest first.
+    unplaced: Vec<ActivityRow>,
     open_tasks: Vec<OpenRow>,
     closed_tasks: Vec<OpenRow>,
     /// The shown day's feed (m24): newest blocks first, intervals of any
@@ -450,6 +453,8 @@ struct TimelineApp {
     show_spans: bool,
     /// Timeline's background strip is expanded (session-local).
     show_background: bool,
+    /// Timeline's unplaced-activity strip is expanded (session-local).
+    show_unplaced: bool,
     /// Timeline chart mode (meta `ui_band_mode`).
     band_mode: timeline::BandMode,
     /// Meta flag `ui_show_spans_debug`: raw spans list visible on Home.
@@ -584,6 +589,7 @@ impl TimelineApp {
             pending_declare_description: None,
             spans: Vec::new(),
             groups: Vec::new(),
+            unplaced: Vec::new(),
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
             feed: Vec::new(),
@@ -595,6 +601,7 @@ impl TimelineApp {
             show_closed: false,
             show_spans: false,
             show_background: false,
+            show_unplaced: false,
             band_mode: timeline::BandMode::default(),
             spans_debug: false,
             filter: String::new(),
@@ -675,15 +682,17 @@ impl TimelineApp {
         self.loaded_at = Some(Instant::now());
         match self.load_spans().and_then(|spans| {
             let groups = self.load_groups()?;
+            let unplaced = self.load_unplaced()?;
             let open = self.load_open()?;
             let closed = self.load_closed()?;
             let feed = self.load_feed()?;
             let proposals = self.load_proposals()?;
-            Ok((spans, groups, open, closed, feed, proposals))
+            Ok((spans, groups, unplaced, open, closed, feed, proposals))
         }) {
-            Ok((spans, groups, open, closed, (feed, unassigned_ms), proposals)) => {
+            Ok((spans, groups, unplaced, open, closed, (feed, unassigned_ms), proposals)) => {
                 self.spans = spans;
                 self.groups = groups;
+                self.unplaced = unplaced;
                 self.open_tasks = open;
                 self.closed_tasks = closed;
                 self.set_feed(feed);
@@ -987,21 +996,10 @@ impl TimelineApp {
         let mut activity: std::collections::HashMap<i64, Vec<ActivityRow>> =
             std::collections::HashMap::new();
         for (task_id, a) in chronicle_core::storage::activity_in_range_by_task(conn, lo, hi)? {
-            let summary = a.summary.unwrap_or_else(|| match a.kind {
-                chronicle_core::types::ActivityKind::AiSession => {
-                    format!("session in {}@{}", a.repo, a.branch)
-                }
-                _ => a
-                    .ext_id
-                    .map(|h| h.chars().take(12).collect())
-                    .unwrap_or_default(),
-            });
-            activity.entry(task_id).or_default().push(ActivityRow {
-                time: a.ts.to_zoned(self.tz.clone()),
-                kind: a.kind,
-                summary,
-                duration_ms: a.end_ts.map(|e| e.as_millisecond() - a.ts.as_millisecond()),
-            });
+            activity
+                .entry(task_id)
+                .or_default()
+                .push(self.activity_row(a));
         }
         for group in &mut groups {
             if let Some(mut apps) = evidence.remove(&group.task_id) {
@@ -1055,6 +1053,35 @@ impl TimelineApp {
             }
         }
         Ok(groups)
+    }
+
+    fn activity_row(&self, a: chronicle_core::types::ActivityEvent) -> ActivityRow {
+        let summary = a.summary.unwrap_or_else(|| match a.kind {
+            chronicle_core::types::ActivityKind::AiSession => {
+                format!("session in {}@{}", a.repo, a.branch)
+            }
+            _ => a
+                .ext_id
+                .map(|h| h.chars().take(12).collect())
+                .unwrap_or_default(),
+        });
+        ActivityRow {
+            time: a.ts.to_zoned(self.tz.clone()),
+            kind: a.kind,
+            summary,
+            duration_ms: a.end_ts.map(|e| e.as_millisecond() - a.ts.as_millisecond()),
+        }
+    }
+
+    fn load_unplaced(&mut self) -> anyhow::Result<Vec<ActivityRow>> {
+        let (lo, hi) = self.day_range_ms()?;
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        Ok(
+            chronicle_core::storage::activity_unplaced_in_range(conn, lo, hi)?
+                .into_iter()
+                .map(|a| self.activity_row(a))
+                .collect(),
+        )
     }
 
     fn load_open(&mut self) -> anyhow::Result<Vec<OpenRow>> {

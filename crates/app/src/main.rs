@@ -597,10 +597,11 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         match regex::Regex::new(&config.ticket_regex) {
             Ok(re) => {
                 let prior = storage::branch_state_before(&conn, batch.start_ts)?;
-                // Git kinds only: a session's `gitBranch` is not vcs activity.
+                // Git kinds plus PR markers (title carries the key): a
+                // session's `gitBranch` is not vcs activity.
                 let vcs: Vec<_> = activity
                     .iter()
-                    .filter(|e| e.kind.is_vcs())
+                    .filter(|e| e.kind.is_vcs() || e.kind.is_pr())
                     .cloned()
                     .collect();
                 for (task_id, key) in

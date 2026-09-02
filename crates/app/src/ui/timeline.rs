@@ -126,6 +126,8 @@ impl TimelineApp {
             let merge_pick = &mut self.merge_pick;
             let selected_task = &mut self.selected_task;
             let show_background = &mut self.show_background;
+            let show_unplaced = &mut self.show_unplaced;
+            let unplaced = &self.unplaced;
             let band_mode = self.band_mode;
             // Foreground and background together, interval order restored,
             // for the activity band (the band stays honest).
@@ -221,6 +223,31 @@ impl TimelineApp {
                                 {
                                     *merge_pick = None;
                                 }
+                            }
+                        });
+                    }
+                    // Activity no task claims (m22): a call between tasks,
+                    // a PR reviewed in a gap. Same row shape as the
+                    // detail pane's Activity section.
+                    if !unplaced.is_empty() && q.is_empty() {
+                        ui.add_space(2.0);
+                        theme::disclosure_header(
+                            ui,
+                            show_unplaced,
+                            "unplaced activity",
+                            Some(unplaced.len()),
+                        )
+                        .on_hover_text("calls, PRs and sessions overlapping no task");
+                        theme::fade_body(ui, "unplaced_body", *show_unplaced, |ui| {
+                            ui.add_space(4.0);
+                            for a in unplaced {
+                                activity_row(
+                                    ui,
+                                    activity_glyph(a.kind),
+                                    &a.time.strftime("%H:%M").to_string(),
+                                    a.duration_ms.map(super::fmt_dur).as_deref(),
+                                    &a.summary,
+                                );
                             }
                         });
                     }

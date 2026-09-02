@@ -834,6 +834,10 @@ fn activity_events_upsert_and_ignore_paths() {
         1,
         "point events outside intervals stay out: {by_task:?}"
     );
+    // …and surface as unplaced; the overlapped session does not.
+    let unplaced = storage::activity_unplaced_in_range(&conn, 0, 100_000).unwrap();
+    assert_eq!(unplaced.len(), 3, "{unplaced:?}");
+    assert!(unplaced.iter().all(|e| e.kind.is_pr()));
 
     // Repo signal: a task whose project names another repo never inherits a
     // session that merely overlapped it in time; case-insensitive project

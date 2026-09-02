@@ -88,9 +88,14 @@ impl ActivityKind {
         Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
 
-    /// Git kinds: the only ones anchoring and the repo rows look at.
+    /// Git kinds: the only ones the repo rows and branch coverage look at.
     pub fn is_vcs(self) -> bool {
         matches!(self, ActivityKind::Checkout | ActivityKind::Commit)
+    }
+
+    /// PR markers: their title carries the ticket key, not a branch.
+    pub fn is_pr(self) -> bool {
+        matches!(self, ActivityKind::PrAuthored | ActivityKind::PrReviewed)
     }
 
     pub fn dedupe(self) -> Dedupe {

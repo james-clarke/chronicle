@@ -1,8 +1,12 @@
 //! Deterministic task anchoring (m15): the branch active for the majority of
 //! a task's interval time names the task's `external_ref` (ticket key
-//! extracted from the branch name), gated on actual in-window vcs activity
-//! on that branch near the task's intervals. No LLM involved; anchoring
-//! never overwrites an existing ref (enforced in storage).
+//! extracted from the branch name), gated on actual in-window activity on
+//! that key near the task's intervals — a checkout or commit on the branch,
+//! or a PR event whose title carries the key (m22). A task with no branch
+//! majority still anchors when exactly one key appears in PR titles inside
+//! its intervals (reviewing someone's ACME-123 PR from `main`). No LLM
+//! involved; anchoring never overwrites an existing ref (enforced in
+//! storage).
 
 use std::collections::HashMap;
 
@@ -13,10 +17,12 @@ use crate::types::{ActivityEvent, ActivityKind};
 /// `intervals` are `(task_id, start_ms, end_ms)` as returned by
 /// [`crate::storage::store_derivation`]. `prior` is the latest checkout per
 /// repo before the window ([`crate::storage::branch_state_before`]);
-/// `in_window` the vcs events inside it. Returns `(task_id, ticket_key)` for
-/// tasks where one key's branch time covers > 50% of the task's interval
-/// time AND an in-window vcs event on that branch lands inside the task's
-/// intervals (parked branches never anchor by presence alone).
+/// `in_window` the vcs and PR events inside it. Returns `(task_id,
+/// ticket_key)` for tasks where one key's branch time covers > 50% of the
+/// task's interval time AND an in-window event on that key (vcs on the
+/// branch, or a PR titled with it) lands inside the task's intervals
+/// (parked branches never anchor by presence alone); failing a branch
+/// majority, the single key named by PR events inside the intervals.
 pub fn anchor_tasks(
     intervals: &[(i64, i64, i64)],
     prior: &[ActivityEvent],
@@ -83,14 +89,27 @@ pub fn anchor_tasks(
     // commit-after-switch-away (commit trails the last).
     const ACTIVITY_GRACE_MS: i64 = 10 * 60 * 1000;
     let mut active: std::collections::HashSet<(i64, &str)> = std::collections::HashSet::new();
+    // Keys PR titles name inside each task's intervals — the fallback
+    // anchor for tasks with no branch majority.
+    let mut pr_keys: HashMap<i64, std::collections::BTreeSet<&str>> = HashMap::new();
     for e in in_window {
-        let Some(m) = ticket_re.find(&e.branch) else {
+        let key = if e.kind.is_pr() {
+            e.summary.as_deref().and_then(|s| ticket_re.find(s))
+        } else if e.kind.is_vcs() {
+            ticket_re.find(&e.branch)
+        } else {
+            None
+        };
+        let Some(m) = key else {
             continue;
         };
         let t = e.ts.as_millisecond();
         for &(task, lo, hi) in intervals {
             if t >= lo - ACTIVITY_GRACE_MS && t < hi + ACTIVITY_GRACE_MS {
                 active.insert((task, m.as_str()));
+                if e.kind.is_pr() {
+                    pr_keys.entry(task).or_default().insert(m.as_str());
+                }
             }
         }
     }
@@ -101,6 +120,11 @@ pub fn anchor_tasks(
         .filter(|&(task, (_, key))| active.contains(&(task, key)))
         .map(|(task, (_, key))| (task, key.to_owned()))
         .collect();
+    for (task, keys) in pr_keys {
+        if keys.len() == 1 && !out.iter().any(|(t, _)| *t == task) {
+            out.push((task, (*keys.iter().next().unwrap()).to_owned()));
+        }
+    }
     out.sort();
     out
 }
@@ -134,8 +158,62 @@ mod tests {
         }
     }
 
+    fn pr(ts_ms: i64, repo: &str, title: &str) -> ActivityEvent {
+        ActivityEvent {
+            ts: ms_to_ts(ts_ms),
+            repo: repo.into(),
+            branch: String::new(),
+            kind: ActivityKind::PrReviewed,
+            ext_id: Some("url".into()),
+            end_ts: None,
+            summary: Some(title.into()),
+        }
+    }
+
     fn re() -> Regex {
         Regex::new("[A-Z][A-Z0-9]+-[0-9]+").unwrap()
+    }
+
+    #[test]
+    fn pr_title_inside_interval_gates_parked_branch() {
+        // Pushing PRs on a long-lived ticketed branch is activity on it.
+        let prior = [checkout(0, "app", "ABC-123-sending-plans")];
+        let inwin = [pr(30_000, "app", "#7 ABC-123 send plans \u{b7} open")];
+        let got = anchor_tasks(&[(1, 1_000, 61_000)], &prior, &inwin, &re());
+        assert_eq!(got, vec![(1, "ABC-123".to_owned())]);
+    }
+
+    #[test]
+    fn single_pr_key_anchors_without_a_branch() {
+        // Reviewing from `main`: no branch majority, one key in PR titles.
+        let prior = [checkout(0, "app", "main")];
+        let inwin = [
+            pr(30_000, "app", "#7 DEF-4 fix login"),
+            pr(40_000, "app", "#8 DEF-4 fix login again"),
+        ];
+        let got = anchor_tasks(&[(1, 1_000, 61_000)], &prior, &inwin, &re());
+        assert_eq!(got, vec![(1, "DEF-4".to_owned())]);
+    }
+
+    #[test]
+    fn competing_pr_keys_anchor_nothing() {
+        let inwin = [
+            pr(30_000, "app", "#7 DEF-4 fix login"),
+            pr(40_000, "app", "#8 DEF-5 other"),
+        ];
+        let got = anchor_tasks(&[(1, 1_000, 61_000)], &[], &inwin, &re());
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn pr_key_never_overrides_a_branch_majority() {
+        let prior = [checkout(0, "app", "ABC-1-x")];
+        let inwin = [
+            commit(30_000, "app", "ABC-1-x"),
+            pr(40_000, "app", "#8 DEF-5 review"),
+        ];
+        let got = anchor_tasks(&[(1, 1_000, 61_000)], &prior, &inwin, &re());
+        assert_eq!(got, vec![(1, "ABC-1".to_owned())]);
     }
 
     #[test]

@@ -253,6 +253,25 @@ pub fn activity_in_range_by_task(
     activity_by_task(conn, lo, hi, None, "v.kind != 'checkout'")
 }
 
+/// Non-checkout events inside `[lo, hi)` overlapping no interval at all —
+/// the timeline's "unplaced" strip (a call taken between tasks, a PR
+/// reviewed during a gap), oldest first.
+pub fn activity_unplaced_in_range(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLS_V} FROM activity_events v
+         WHERE v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
+           AND NOT EXISTS (SELECT 1 FROM intervals i
+                           WHERE v.ts < i.end_ts AND COALESCE(v.end_ts, v.ts) >= i.start_ts)
+         ORDER BY v.ts, v.id"
+    ))?;
+    let rows = stmt.query_map([lo, hi], activity_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Every kind overlapping one task's intervals inside `[lo, hi)` — the
 /// journal's activity lines.
 pub fn activity_for_task_in_range(
