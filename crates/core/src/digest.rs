@@ -9,7 +9,13 @@ use crate::sessionizer::{SpanDraft, SpanKind};
 use crate::storage::Placement;
 use crate::types::{ActivityEvent, ActivityKind, Correction, OpenTask};
 
-pub const MAX_TOKENS: usize = 3000;
+/// Digest budget in `approx_tokens`. The derive runner has 4096 − 900 gen −
+/// 64 = 3132 tokens for the whole prompt and the instruction text alone
+/// takes ~1250 (measured 2026-09-02: a 7.3k-char digest tokenized to 2964
+/// with it), so the digest has ~1850 real tokens; 1800 here lets the render
+/// ladder shorten titles and app lists instead of the runner cutting the
+/// tail, where the open tasks, hints and corrections live.
+pub const MAX_TOKENS: usize = 1800;
 
 /// Rough heuristic; the real tokenizer lives in the derive worker.
 pub fn approx_tokens(s: &str) -> usize {
