@@ -126,6 +126,7 @@ impl TimelineApp {
             let merge_pick = &mut self.merge_pick;
             let selected_task = &mut self.selected_task;
             let show_background = &mut self.show_background;
+            let band_mode = self.band_mode;
             // Foreground and background together, interval order restored,
             // for the activity band (the band stays honest).
             let mut band_vis: Vec<usize> = group_vis.iter().chain(&bg_vis).copied().collect();
@@ -156,7 +157,9 @@ impl TimelineApp {
                 .show(ui, |ui| {
                     today_header(ui, groups, spans);
                     if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
-                        activity_band(ui, content_w, groups, &band_vis, lo, hi, day_start);
+                        activity_chart(
+                            ui, content_w, groups, &band_vis, lo, hi, day_start, band_mode,
+                        );
                     }
                     ui.add_space(4.0);
                     for &g in &group_vis {
@@ -280,80 +283,138 @@ fn today_header(ui: &mut egui::Ui, groups: &[TaskGroup], spans: &[SpanRow]) {
     });
 }
 
-/// Horizontal day strip: one colored segment per display session (task
-/// identity color), background showing through = away. Hour labels below.
-fn activity_band(
-    ui: &mut egui::Ui,
-    width: f32,
-    groups: &[TaskGroup],
-    vis: &[usize],
-    lo: i64,
-    hi: i64,
-    day_start: &Zoned,
-) {
-    const HOUR_MS: i64 = 3_600_000;
-    // (clamped start, clamped end, group index, session index).
-    let mut segments: Vec<(i64, i64, usize, usize)> = Vec::new();
-    let (mut act_lo, mut act_hi) = (i64::MAX, i64::MIN);
-    for &g in vis {
-        for (si, s) in groups[g].sessions.iter().enumerate() {
-            let s_lo = s.start.timestamp().as_millisecond().max(lo);
-            let s_hi = s.end.timestamp().as_millisecond().min(hi);
-            if s_hi <= s_lo {
-                continue;
-            }
-            act_lo = act_lo.min(s_lo);
-            act_hi = act_hi.max(s_hi);
-            segments.push((s_lo, s_hi, g, si));
+/// Day chart mode: the flat activity band, one lane per task, or per-hour
+/// stacks. Cycled from the day bar; remembered in meta `ui_band_mode`.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub(super) enum BandMode {
+    #[default]
+    Band,
+    Lanes,
+    Hours,
+}
+
+impl BandMode {
+    pub(super) fn next(self) -> Self {
+        match self {
+            Self::Band => Self::Lanes,
+            Self::Lanes => Self::Hours,
+            Self::Hours => Self::Band,
         }
     }
-    if segments.is_empty() {
-        return;
-    }
-    // Pad the shown range out to whole local hours.
-    let band_lo = lo + (act_lo - lo) / HOUR_MS * HOUR_MS;
-    let band_hi = (lo + (act_hi - lo + HOUR_MS - 1) / HOUR_MS * HOUR_MS).min(hi);
-    let span = (band_hi - band_lo).max(1) as f32;
 
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
-    // Pointer x → ms, the inverse of the segment placement below, so the
-    // tooltip always describes the segment actually under the cursor.
-    let hover_ms = resp
-        .hover_pos()
-        .map(|p| band_lo + ((p.x - rect.left()) / rect.width() * span) as i64);
-    let hovered_seg = hover_ms.and_then(|ms| {
-        segments
-            .iter()
-            .position(|&(s_lo, s_hi, _, _)| ms >= s_lo && ms < s_hi)
-    });
-    let painter = ui.painter();
-    painter.rect_filled(rect, egui::CornerRadius::same(7), theme::palette::SURFACE);
-    for (i, (s_lo, s_hi, g, _)) in segments.iter().enumerate() {
-        let x0 = rect.left() + (s_lo - band_lo) as f32 / span * rect.width();
-        let x1 = rect.left() + (s_hi - band_lo) as f32 / span * rect.width();
-        let hovered = hovered_seg == Some(i);
-        // Hovered segment brightens and grows into the band's 3px padding.
-        let grow = 3.0
-            * ui.ctx()
-                .animate_bool_with_time(resp.id.with(i), hovered, 0.08);
-        let seg = egui::Rect::from_min_max(
-            egui::pos2(x0, rect.top() + 4.0 - grow),
-            egui::pos2(x1.max(x0 + 2.0), rect.bottom() - 4.0 + grow),
-        );
-        let color = theme::series_color_for(groups[*g].task_id);
-        let color = if hovered {
-            color.gamma_multiply(1.2)
-        } else {
-            color
-        };
-        painter.rect_filled(seg, egui::CornerRadius::same(3), color);
+    /// Meta value and toggle label.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Band => "band",
+            Self::Lanes => "lanes",
+            Self::Hours => "hours",
+        }
     }
-    if let Some(i) = hovered_seg {
-        let (s_lo, s_hi, g, si) = segments[i];
-        let group = &groups[g];
-        let s = &group.sessions[si];
-        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-        resp.on_hover_ui_at_pointer(|ui| {
+
+    pub(super) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "band" => Some(Self::Band),
+            "lanes" => Some(Self::Lanes),
+            "hours" => Some(Self::Hours),
+            _ => None,
+        }
+    }
+}
+
+const HOUR_MS: i64 = 3_600_000;
+const LANE_H: f32 = 12.0;
+const LANE_GAP: f32 = 2.0;
+/// Lane label column, gap to the axis included.
+const LANE_LABEL_W: f32 = 84.0;
+const HOURS_H: f32 = 40.0;
+
+/// One display session clamped to the shown day.
+#[derive(Clone, Copy)]
+struct Segment {
+    lo: i64,
+    hi: i64,
+    group: usize,
+    session: usize,
+}
+
+/// Segments of the visible groups plus the shown range padded out to whole
+/// local hours. Sorted by start: a shorter session nested inside another
+/// task's merged one paints on top, and adjacent pairs give the switches.
+struct DayChart {
+    segments: Vec<Segment>,
+    lo: i64,
+    hi: i64,
+}
+
+impl DayChart {
+    fn new(groups: &[TaskGroup], vis: &[usize], lo: i64, hi: i64) -> Option<Self> {
+        let mut segments: Vec<Segment> = Vec::new();
+        let (mut act_lo, mut act_hi) = (i64::MAX, i64::MIN);
+        for &g in vis {
+            for (si, s) in groups[g].sessions.iter().enumerate() {
+                let s_lo = ms(&s.start).max(lo);
+                let s_hi = ms(&s.end).min(hi);
+                if s_hi <= s_lo {
+                    continue;
+                }
+                act_lo = act_lo.min(s_lo);
+                act_hi = act_hi.max(s_hi);
+                segments.push(Segment {
+                    lo: s_lo,
+                    hi: s_hi,
+                    group: g,
+                    session: si,
+                });
+            }
+        }
+        if segments.is_empty() {
+            return None;
+        }
+        segments.sort_by_key(|s| (s.lo, s.hi));
+        Some(Self {
+            segments,
+            lo: lo + (act_lo - lo) / HOUR_MS * HOUR_MS,
+            hi: (lo + (act_hi - lo + HOUR_MS - 1) / HOUR_MS * HOUR_MS).min(hi),
+        })
+    }
+
+    fn span(&self) -> f32 {
+        (self.hi - self.lo).max(1) as f32
+    }
+
+    /// x of instant `t` on an axis given as (left, width).
+    fn x_at(&self, axis: (f32, f32), t: i64) -> f32 {
+        axis.0 + (t - self.lo) as f32 / self.span() * axis.1
+    }
+
+    /// Inverse of [`x_at`](Self::x_at), so a tooltip always describes the
+    /// segment actually under the cursor.
+    fn ms_at(&self, axis: (f32, f32), x: f32) -> i64 {
+        self.lo + ((x - axis.0) / axis.1 * self.span()) as i64
+    }
+
+    /// Topmost (last-painted) segment covering `t` that passes `pred`.
+    fn seg_at(&self, t: i64, pred: impl Fn(&Segment) -> bool) -> Option<usize> {
+        self.segments
+            .iter()
+            .rposition(|s| t >= s.lo && t < s.hi && pred(s))
+    }
+}
+
+fn seg_color(groups: &[TaskGroup], seg: &Segment, hovered: bool) -> egui::Color32 {
+    let color = theme::series_color_for(groups[seg.group].task_id);
+    if hovered {
+        color.gamma_multiply(1.2)
+    } else {
+        color
+    }
+}
+
+fn segment_tooltip(resp: egui::Response, groups: &[TaskGroup], seg: &Segment) {
+    let group = &groups[seg.group];
+    let s = &group.sessions[seg.session];
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_ui_at_pointer(|ui| {
             ui.set_max_width(220.0);
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
@@ -368,36 +429,325 @@ fn activity_band(
                 "{}\u{2013}{} \u{b7} {}",
                 s.start.strftime("%H:%M"),
                 s.end.strftime("%H:%M"),
-                fmt_dur(s_hi - s_lo)
+                fmt_dur(seg.hi - seg.lo)
             ));
         });
-    }
+}
 
-    // Hour tick labels, thinned to at most ~6.
-    let hours = ((band_hi - band_lo) / HOUR_MS).max(1);
-    let step = (hours + 5) / 6;
-    let (label_rect, _) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
+/// The day's chart in `mode`, hour labels under its time axis, and (lanes,
+/// hours) the switch caption. Nothing when no session touches the day.
+#[allow(clippy::too_many_arguments)]
+fn activity_chart(
+    ui: &mut egui::Ui,
+    width: f32,
+    groups: &[TaskGroup],
+    vis: &[usize],
+    lo: i64,
+    hi: i64,
+    day_start: &Zoned,
+    mode: BandMode,
+) {
+    let Some(chart) = DayChart::new(groups, vis, lo, hi) else {
+        return;
+    };
+    // (offset from the row's left edge, width) of the time axis.
+    let axis = match mode {
+        BandMode::Band => activity_band(ui, width, groups, &chart),
+        BandMode::Lanes => activity_lanes(ui, width, groups, &chart),
+        BandMode::Hours => activity_hours(ui, width, groups, &chart, day_start),
+    };
+    hour_labels(ui, width, axis, &chart, lo, day_start);
+    if mode != BandMode::Band {
+        switch_caption(ui, groups, &chart, day_start);
+    }
+}
+
+/// Horizontal day strip: one colored segment per display session (task
+/// identity color), background showing through = away.
+fn activity_band(
+    ui: &mut egui::Ui,
+    width: f32,
+    groups: &[TaskGroup],
+    chart: &DayChart,
+) -> (f32, f32) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
+    let axis = (rect.left(), rect.width());
+    let hovered_seg = resp
+        .hover_pos()
+        .and_then(|p| chart.seg_at(chart.ms_at(axis, p.x), |_| true));
     let painter = ui.painter();
-    let first_hour = (band_lo - lo) / HOUR_MS;
+    painter.rect_filled(rect, egui::CornerRadius::same(7), theme::palette::SURFACE);
+    for (i, seg) in chart.segments.iter().enumerate() {
+        let x0 = chart.x_at(axis, seg.lo);
+        let x1 = chart.x_at(axis, seg.hi);
+        let hovered = hovered_seg == Some(i);
+        // Hovered segment brightens and grows into the band's 3px padding.
+        let grow = 3.0
+            * ui.ctx()
+                .animate_bool_with_time(resp.id.with(i), hovered, 0.08);
+        let block = egui::Rect::from_min_max(
+            egui::pos2(x0, rect.top() + 4.0 - grow),
+            egui::pos2(x1.max(x0 + 2.0), rect.bottom() - 4.0 + grow),
+        );
+        painter.rect_filled(
+            block,
+            egui::CornerRadius::same(3),
+            seg_color(groups, seg, hovered),
+        );
+    }
+    if let Some(i) = hovered_seg {
+        segment_tooltip(resp, groups, &chart.segments[i]);
+    }
+    (0.0, rect.width())
+}
+
+/// One 12pt lane per task in order of first appearance (background scraps
+/// share the last lane, each block still in its own task colour), blocks
+/// at session times, a 1px tick across every lane where the task changes.
+fn activity_lanes(
+    ui: &mut egui::Ui,
+    width: f32,
+    groups: &[TaskGroup],
+    chart: &DayChart,
+) -> (f32, f32) {
+    let lane_key = |seg: &Segment| (!groups[seg.group].background).then_some(seg.group);
+    let mut lanes: Vec<Option<usize>> = Vec::new();
+    for seg in &chart.segments {
+        let key = lane_key(seg);
+        if key.is_some() && !lanes.contains(&key) {
+            lanes.push(key);
+        }
+    }
+    if chart.segments.iter().any(|s| lane_key(s).is_none()) {
+        lanes.push(None);
+    }
+    let lane_of = |seg: &Segment| lanes.iter().position(|&k| k == lane_key(seg)).unwrap_or(0);
+    let n = lanes.len();
+    let h = n as f32 * LANE_H + (n - 1) as f32 * LANE_GAP;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    let axis = (
+        rect.left() + LANE_LABEL_W,
+        (rect.width() - LANE_LABEL_W).max(1.0),
+    );
+    let lane_top = |l: usize| rect.top() + l as f32 * (LANE_H + LANE_GAP);
+    let hovered_seg = resp.hover_pos().and_then(|p| {
+        let l = (((p.y - rect.top()) / (LANE_H + LANE_GAP)) as usize).min(n - 1);
+        chart.seg_at(chart.ms_at(axis, p.x), |s| lane_of(s) == l)
+    });
+    let painter = ui.painter();
+    let font = theme::caption().resolve(ui.style());
+    for (l, key) in lanes.iter().enumerate() {
+        let lane =
+            egui::Rect::from_min_size(egui::pos2(axis.0, lane_top(l)), egui::vec2(axis.1, LANE_H));
+        painter.rect_filled(lane, egui::CornerRadius::same(3), theme::palette::SURFACE);
+        let label = key.map_or("background", |g| groups[g].label.as_str());
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            label.to_owned(),
+            font.clone(),
+            theme::palette::TEXT_DIM,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(LANE_LABEL_W - 8.0);
+        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+        let y = lane.center().y - galley.size().y / 2.0;
+        painter.galley(egui::pos2(rect.left(), y), galley, theme::palette::TEXT_DIM);
+    }
+    // Switch ticks under the blocks: task-identity transitions between
+    // adjacent sessions, the same count the caption reports.
+    let tick = egui::Stroke::new(1.0, theme::palette::TEXT_DIM.gamma_multiply(0.35));
+    for pair in chart.segments.windows(2) {
+        if pair[0].group != pair[1].group {
+            painter.vline(chart.x_at(axis, pair[1].lo), rect.y_range(), tick);
+        }
+    }
+    for (i, seg) in chart.segments.iter().enumerate() {
+        let top = lane_top(lane_of(seg));
+        let x0 = chart.x_at(axis, seg.lo);
+        let x1 = chart.x_at(axis, seg.hi).max(x0 + 2.0);
+        let block = egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, top + LANE_H));
+        let hovered = hovered_seg == Some(i);
+        painter.rect_filled(
+            block,
+            egui::CornerRadius::same(3),
+            seg_color(groups, seg, hovered),
+        );
+    }
+    if let Some(i) = hovered_seg {
+        segment_tooltip(resp, groups, &chart.segments[i]);
+    }
+    (LANE_LABEL_W, axis.1)
+}
+
+/// One column per clock hour, task time stacked bottom-up in the lanes'
+/// order; hover a column for its breakdown.
+fn activity_hours(
+    ui: &mut egui::Ui,
+    width: f32,
+    groups: &[TaskGroup],
+    chart: &DayChart,
+    day_start: &Zoned,
+) -> (f32, f32) {
+    let hours = ((chart.hi - chart.lo + HOUR_MS - 1) / HOUR_MS).max(1) as usize;
+    let mut order: Vec<usize> = Vec::new();
+    for seg in &chart.segments {
+        if !order.contains(&seg.group) {
+            order.push(seg.group);
+        }
+    }
+    // cells[hour][order index] = ms of that task inside that hour.
+    let mut cells: Vec<Vec<i64>> = vec![vec![0; order.len()]; hours];
+    for seg in &chart.segments {
+        let gi = order.iter().position(|&g| g == seg.group).unwrap_or(0);
+        let first = ((seg.lo - chart.lo) / HOUR_MS).max(0) as usize;
+        let last = (((seg.hi - 1 - chart.lo) / HOUR_MS) as usize).min(hours - 1);
+        for (h, cell) in cells.iter_mut().enumerate().take(last + 1).skip(first) {
+            let h_lo = chart.lo + h as i64 * HOUR_MS;
+            cell[gi] += seg.hi.min(h_lo + HOUR_MS) - seg.lo.max(h_lo);
+        }
+    }
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, HOURS_H), egui::Sense::hover());
+    let col_w = rect.width() / hours as f32;
+    let hovered_col = resp
+        .hover_pos()
+        .map(|p| (((p.x - rect.left()) / col_w).max(0.0) as usize).min(hours - 1));
+    let painter = ui.painter();
+    for (h, cell) in cells.iter().enumerate() {
+        let x0 = rect.left() + h as f32 * col_w + 1.0;
+        let x1 = (rect.left() + (h + 1) as f32 * col_w - 1.0).max(x0 + 1.0);
+        let col =
+            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom()));
+        painter.rect_filled(col, egui::CornerRadius::same(2), theme::palette::SURFACE);
+        let hovered = hovered_col == Some(h);
+        // Overlapping display sessions can exceed the hour: clamp at the top.
+        let mut y = rect.bottom();
+        for (gi, &g) in order.iter().enumerate() {
+            if cell[gi] <= 0 {
+                continue;
+            }
+            let top =
+                (y - (cell[gi] as f32 / HOUR_MS as f32 * rect.height()).max(1.0)).max(rect.top());
+            if top >= y {
+                break;
+            }
+            let color = theme::series_color_for(groups[g].task_id);
+            painter.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, y)),
+                0,
+                if hovered {
+                    color.gamma_multiply(1.2)
+                } else {
+                    color
+                },
+            );
+            y = top;
+        }
+    }
+    if let Some(h) = hovered_col {
+        let mut rows: Vec<(usize, i64)> = order
+            .iter()
+            .enumerate()
+            .filter(|&(gi, _)| cells[h][gi] > 0)
+            .map(|(gi, &g)| (g, cells[h][gi]))
+            .collect();
+        if !rows.is_empty() {
+            rows.sort_by_key(|&(_, m)| std::cmp::Reverse(m));
+            let total: i64 = rows.iter().map(|&(_, m)| m).sum();
+            let h_lo = chart.lo + h as i64 * HOUR_MS;
+            let tz = day_start.time_zone().clone();
+            let clock = |t: i64| {
+                chronicle_core::types::ms_to_ts(t)
+                    .to_zoned(tz.clone())
+                    .strftime("%H:%M")
+                    .to_string()
+            };
+            resp.on_hover_ui_at_pointer(|ui| {
+                ui.set_max_width(220.0);
+                ui.weak(format!(
+                    "{}\u{2013}{} \u{b7} {}",
+                    clock(h_lo),
+                    clock(h_lo + HOUR_MS),
+                    fmt_dur(total)
+                ));
+                for &(g, m) in rows.iter().take(4) {
+                    ui.horizontal(|ui| {
+                        let (dot, _) =
+                            ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                        ui.painter().circle_filled(
+                            dot.center(),
+                            3.0,
+                            theme::series_color_for(groups[g].task_id),
+                        );
+                        ui.add(egui::Label::new(&groups[g].label).truncate());
+                        ui.label(theme::num(fmt_dur(m)));
+                    });
+                }
+            });
+        }
+    }
+    (0.0, rect.width())
+}
+
+/// Hour tick labels under a chart's time axis, thinned to at most ~6.
+fn hour_labels(
+    ui: &mut egui::Ui,
+    width: f32,
+    (offset, axis_w): (f32, f32),
+    chart: &DayChart,
+    day_lo: i64,
+    day_start: &Zoned,
+) {
+    let hours = ((chart.hi - chart.lo) / HOUR_MS).max(1);
+    let step = (hours + 5) / 6;
+    let (row, _) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::hover());
+    let axis = (row.left() + offset, axis_w);
+    let painter = ui.painter();
+    let first_hour = (chart.lo - day_lo) / HOUR_MS;
     // Too narrow for even one label: clamp below would panic (min > max).
-    let (label_min, label_max) = (label_rect.left() + 14.0, label_rect.right() - 14.0);
+    let (label_min, label_max) = (axis.0 + 14.0, axis.0 + axis.1 - 14.0);
     if label_min > label_max {
         return;
     }
     for k in (0..=hours).step_by(step as usize) {
-        let ms = band_lo + k * HOUR_MS;
         let Ok(z) = day_start.checked_add((first_hour + k).hours()) else {
             continue;
         };
-        let x = label_rect.left() + (ms - band_lo) as f32 / span * label_rect.width();
+        let x = chart.x_at(axis, chart.lo + k * HOUR_MS);
         painter.text(
-            egui::pos2(x.clamp(label_min, label_max), label_rect.top()),
+            egui::pos2(x.clamp(label_min, label_max), row.top()),
             egui::Align2::CENTER_TOP,
             z.strftime("%H:%M").to_string(),
             theme::caption().resolve(ui.style()),
             theme::palette::TEXT_DIM,
         );
     }
+}
+
+/// "N switches · fragmented hour HH:00" over the day's display sessions —
+/// the same fold the reports use, so the numbers agree.
+fn switch_caption(ui: &mut egui::Ui, groups: &[TaskGroup], chart: &DayChart, day_start: &Zoned) {
+    let sessions: Vec<chronicle_core::insights::Session> = chart
+        .segments
+        .iter()
+        .map(|s| chronicle_core::insights::Session {
+            task_id: groups[s.group].task_id,
+            start_ms: s.lo,
+            end_ms: s.hi,
+        })
+        .collect();
+    let m = chronicle_core::insights::focus_metrics(&sessions, day_start.time_zone());
+    let mut text = match m.switch_count {
+        0 => "no switches".to_owned(),
+        1 => "1 switch".to_owned(),
+        n => format!("{n} switches"),
+    };
+    if let Some(h) = m.most_fragmented_hour {
+        text.push_str(&format!(" \u{b7} fragmented hour {h:02}:00"));
+    }
+    ui.add_space(2.0);
+    ui.label(
+        egui::RichText::new(text)
+            .text_style(theme::caption())
+            .color(theme::palette::TEXT_DIM),
+    );
 }
 
 /// One task card: identity dot + label + duration, then project pill, time
@@ -968,8 +1318,7 @@ fn sessions_ui(
                 ),
             );
             let w = (strip_max * dur as f32 / longest as f32).max(4.0);
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(w, STRIP_H), egui::Sense::hover());
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, STRIP_H), egui::Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, egui::CornerRadius::same(3), theme::palette::SURFACE_2);
             let alpha = 0.45 + 0.55 * s.confidence.clamp(0.0, 1.0) as f32;
@@ -987,14 +1336,22 @@ fn sessions_ui(
                 );
                 painter.rect_filled(seg, 0, app_color(&sp.app).gamma_multiply(alpha));
                 if hover_x.is_some_and(|x| seg.x_range().contains(x)) {
-                    hover = Some(format!("{} \u{b7} {} \u{b7} {}", sp.app, sp.title, fmt_dur(b - a)));
+                    hover = Some(format!(
+                        "{} \u{b7} {} \u{b7} {}",
+                        sp.app,
+                        sp.title,
+                        fmt_dur(b - a)
+                    ));
                 }
             }
             let tick = |t: i64, color: egui::Color32| {
                 if (lo..=hi).contains(&t) {
                     let x = x_at(t);
                     painter.line_segment(
-                        [egui::pos2(x, rect.top() - 2.0), egui::pos2(x, rect.bottom() + 2.0)],
+                        [
+                            egui::pos2(x, rect.top() - 2.0),
+                            egui::pos2(x, rect.bottom() + 2.0),
+                        ],
                         egui::Stroke::new(1.0, color),
                     );
                 }
@@ -1006,7 +1363,11 @@ fn sessions_ui(
                 tick(j.ts, theme::palette::TEXT_DIM);
             }
             resp.on_hover_text(hover.unwrap_or_else(|| {
-                format!("{} \u{b7} confidence {:.0}%", fmt_dur(dur), s.confidence * 100.0)
+                format!(
+                    "{} \u{b7} confidence {:.0}%",
+                    fmt_dur(dur),
+                    s.confidence * 100.0
+                )
             }));
             ui.label(theme::num(fmt_dur(dur)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

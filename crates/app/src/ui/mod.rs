@@ -378,6 +378,8 @@ struct TimelineApp {
     show_spans: bool,
     /// Timeline's background strip is expanded (session-local).
     show_background: bool,
+    /// Timeline chart mode (meta `ui_band_mode`).
+    band_mode: timeline::BandMode,
     /// Meta flag `ui_show_spans_debug`: raw spans list visible on Home.
     spans_debug: bool,
     /// Case-insensitive substring filter over the day's rows.
@@ -506,6 +508,7 @@ impl TimelineApp {
             show_closed: false,
             show_spans: false,
             show_background: false,
+            band_mode: timeline::BandMode::default(),
             spans_debug: false,
             filter: String::new(),
             new_label: String::new(),
@@ -657,6 +660,11 @@ impl TimelineApp {
                 .ok()
                 .flatten()
                 .is_some();
+            self.band_mode = chronicle_core::storage::get_meta(conn, "ui_band_mode")
+                .ok()
+                .flatten()
+                .and_then(|s| timeline::BandMode::parse(&s))
+                .unwrap_or_default();
         }
         let model_path = chronicle_core::config::Config::load(&self.config_path)
             .ok()
@@ -1581,6 +1589,27 @@ impl TimelineApp {
                                                 .color(theme::palette::TEXT),
                                             )
                                             .truncate(),
+                                        );
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // Chart mode cycles band → lanes → hours.
+                                                if theme::ghost_button(ui, self.band_mode.as_str())
+                                                    .on_hover_text(
+                                                        "chart: band \u{b7} lanes \u{b7} hours",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.band_mode = self.band_mode.next();
+                                                    if let Some(conn) = self.conn.as_ref() {
+                                                        let _ = chronicle_core::storage::set_meta(
+                                                            conn,
+                                                            "ui_band_mode",
+                                                            Some(self.band_mode.as_str()),
+                                                        );
+                                                    }
+                                                }
+                                            },
                                         );
                                     }
                                     View::Reports => {
