@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResponse};
 use rmcp::transport::TokioChildProcess;
@@ -18,6 +19,9 @@ use tokio::process::Command;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Spawn + handshake + tools/list for the settings "test" button. Looser
+/// than `CONNECT_TIMEOUT`: `uvx`-style launchers cold-start slowly.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 /// ~800 tokens by the digest's chars/4 heuristic.
 const MAX_CONTEXT_CHARS: usize = 800 * 4;
 /// Task context is a standalone document the user reads (and chat injects),
@@ -103,6 +107,14 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
         if calls.is_empty() {
             continue;
         }
+        if !server.enabled {
+            tracing::debug!(
+                "mcp server {}: disabled, skipping {} call(s)",
+                server.name,
+                calls.len()
+            );
+            continue;
+        }
         let mut client = match tokio::time::timeout(CONNECT_TIMEOUT, connect(server)).await {
             Ok(Ok(client)) => client,
             Ok(Err(e)) => {
@@ -134,6 +146,57 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
     out
 }
 
+/// What a live server said about itself — the settings panel's "test"
+/// verdict and the `mcp-check` per-server line.
+#[derive(Debug, Clone)]
+pub struct ServerProbe {
+    pub server_name: String,
+    pub server_version: String,
+    pub tools: Vec<String>,
+    pub elapsed: Duration,
+}
+
+/// Spawn `server`, complete the handshake, list its tools, shut it down.
+/// Blocking, on its own current-thread runtime like the gatherers. The
+/// error chain is the user's diagnostic (spawn failure names the command).
+pub fn probe_server(server: &ServerConfig) -> anyhow::Result<ServerProbe> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("mcp runtime")?;
+    rt.block_on(async {
+        let start = std::time::Instant::now();
+        let (server_name, server_version, tools) =
+            tokio::time::timeout(PROBE_TIMEOUT, probe(server))
+                .await
+                .map_err(|_| anyhow::anyhow!("timed out after {}s", PROBE_TIMEOUT.as_secs()))??;
+        Ok(ServerProbe {
+            server_name,
+            server_version,
+            tools,
+            elapsed: start.elapsed(),
+        })
+    })
+}
+
+async fn probe(server: &ServerConfig) -> anyhow::Result<(String, String, Vec<String>)> {
+    let mut client = connect(server).await?;
+    let (name, version) = client
+        .peer_info()
+        .and_then(|info| {
+            info.server_info
+                .as_ref()
+                .map(|s| (s.name.clone(), s.version.clone()))
+        })
+        .unwrap_or_default();
+    let tools = client.list_all_tools().await.context("tools/list")?;
+    let names = tools.into_iter().map(|t| t.name.into_owned()).collect();
+    if let Err(e) = client.close().await {
+        tracing::debug!("mcp server {}: close: {e}", server.name);
+    }
+    Ok((name, version, names))
+}
+
 async fn connect(
     server: &ServerConfig,
 ) -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
@@ -142,8 +205,9 @@ async fn connect(
     // Server stderr must not leak into the derive worker's (quiet) stderr.
     let (transport, _stderr) = TokioChildProcess::builder(cmd)
         .stderr(Stdio::null())
-        .spawn()?;
-    Ok(().serve(transport).await?)
+        .spawn()
+        .with_context(|| format!("spawn {}", server.command))?;
+    Ok(().serve(transport).await.context("handshake")?)
 }
 
 async fn run_call(

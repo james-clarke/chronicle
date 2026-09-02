@@ -564,10 +564,7 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let open = storage::open_tasks(&conn, 8)?;
         let corrections = storage::similar_corrections(&conn, &spans, 4)?;
         let tz = TimeZone::system();
-        let mcp_path = config
-            .mcp_config
-            .clone()
-            .unwrap_or_else(|| data_dir.join("mcp.toml"));
+        let mcp_path = config.mcp_path(&data_dir);
         let mcp_context = chronicle_mcp::gather_context(&mcp_path);
         let vcs = storage::vcs_in_range(&conn, batch.start_ts, batch.end_ts)?;
         let digest = chronicle_core::digest::build_digest(
@@ -685,10 +682,7 @@ fn run_ai_job(
         let Some(ext_ref) = ext_ref else {
             bail!("task {task_id} has no external_ref")
         };
-        let mcp_path = config
-            .mcp_config
-            .clone()
-            .unwrap_or_else(|| data_dir.join("mcp.toml"));
+        let mcp_path = config.mcp_path(&data_dir);
         let Some(content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref) else {
             bail!("no fetch_calls configured or every call failed")
         };
@@ -2063,11 +2057,29 @@ fn init_logging(data_dir: &Path) -> anyhow::Result<tracing_appender::non_blockin
 fn mcp_check(data_dir: &Path) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
     let config = Config::load(&data_dir.join("config.toml"))?;
-    let path = config
-        .mcp_config
-        .clone()
-        .unwrap_or_else(|| data_dir.join("mcp.toml"));
+    let path = config.mcp_path(data_dir);
     println!("mcp config: {}", path.display());
+    let mcp = chronicle_mcp::McpConfig::load(&path)?;
+    if mcp.servers.is_empty() {
+        println!("no servers configured");
+    }
+    for server in &mcp.servers {
+        if !server.enabled {
+            println!("{}: disabled", server.name);
+            continue;
+        }
+        match chronicle_mcp::probe_server(server) {
+            Ok(p) => println!(
+                "{}: ok \u{2014} {} {} \u{b7} {} tools \u{b7} {:.1}s",
+                server.name,
+                p.server_name,
+                p.server_version,
+                p.tools.len(),
+                p.elapsed.as_secs_f32()
+            ),
+            Err(e) => println!("{}: FAILED \u{2014} {e:#}", server.name),
+        }
+    }
     match chronicle_mcp::gather_context(&path) {
         Some(ctx) => println!("\n## Workspace context\n{ctx}"),
         None => println!(

@@ -111,4 +111,12 @@ impl Config {
         }
         Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
     }
+
+    /// The MCP allowlist file: `mcp_config` when set, else `mcp.toml` beside
+    /// config.toml in the data dir.
+    pub fn mcp_path(&self, data_dir: &Path) -> PathBuf {
+        self.mcp_config
+            .clone()
+            .unwrap_or_else(|| data_dir.join("mcp.toml"))
+    }
 }
