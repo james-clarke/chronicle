@@ -5,7 +5,7 @@
 use eframe::egui;
 
 use super::timeline::{matches_filter, merge_item, merge_picker};
-use super::{Action, OpenRow, SpanRow, StandupRow, TimelineApp, fmt_dur, theme};
+use super::{Action, FeedBlock, OpenRow, SpanRow, StandupRow, TimelineApp, fmt_dur, theme};
 
 impl TimelineApp {
     /// "Where you left off" card: newest checkpoint since the last UI open.
@@ -143,10 +143,15 @@ impl TimelineApp {
                 matches_filter(&q, &t.label, t.project.as_deref())
             })
             .collect();
-        let unassigned_vis: Vec<usize> = (0..self.unassigned.len())
-            .filter(|&u| {
-                let r = &self.unassigned[u];
-                matches_filter(&q, &r.title, Some(&r.app))
+        let feed_vis: Vec<usize> = (0..self.feed.len())
+            .filter(|&f| {
+                let b = &self.feed[f];
+                b.claim
+                    .as_ref()
+                    .is_some_and(|c| matches_filter(&q, &c.label, c.project.as_deref()))
+                    || b.lines
+                        .iter()
+                        .any(|(app, title, _)| matches_filter(&q, title, Some(app)))
             })
             .collect();
         let span_vis: Vec<usize> = (0..self.spans.len())
@@ -183,7 +188,10 @@ impl TimelineApp {
                     }
                     let open_tasks = &self.open_tasks;
                     let closed_tasks = &self.closed_tasks;
-                    let unassigned = &self.unassigned;
+                    let feed = &self.feed;
+                    let feed_seen = &self.feed_seen;
+                    let feed_ejected = &self.feed_ejected;
+                    let tz = &self.tz;
                     let unassigned_ms = self.unassigned_ms;
                     let show_closed = &mut self.show_closed;
                     let show_spans = &mut self.show_spans;
@@ -343,40 +351,42 @@ impl TimelineApp {
                         });
                     }
 
-                    // Focus time no task claims, largest clusters first; the
-                    // header carries the day's whole unassigned total.
-                    if !unassigned_vis.is_empty() {
+                    // The feed: the day's blocks newest first, each with who
+                    // placed it and why; the header carries the day's whole
+                    // unassigned total.
+                    if !feed_vis.is_empty() || unassigned_ms > 0 {
                         ui.add_space(theme::SECTION_GAP);
-                        theme::section_header_with(ui, "Unassigned", None, |ui| {
+                        theme::section_header_with(ui, "Feed", None, |ui| {
                             if theme::ghost_button(ui, "organize")
                                 .on_hover_text("assign the day's unassigned time to tasks")
                                 .clicked()
                             {
                                 open_triage = true;
                             }
-                            ui.label(theme::num(fmt_dur(unassigned_ms)));
+                            ui.label(theme::num(fmt_dur(unassigned_ms)))
+                                .on_hover_text("unassigned today");
                         });
                         ui.add_space(theme::SPACE_XS);
-                        for &u in &unassigned_vis {
-                            let r = &unassigned[u];
-                            let mut row = if r.title.is_empty() {
-                                theme::ListRow::new(&r.app)
-                            } else {
-                                theme::ListRow::new(&r.title)
-                                    .chip(r.app.as_str(), theme::palette::TEXT_DIM)
-                            };
-                            row = row.num(fmt_dur(r.ms));
-                            row.show(ui, content_w, |ui| {
-                                if theme::ghost_button(ui, "declare")
-                                    .on_hover_text("start a task from this")
-                                    .clicked()
-                                {
-                                    *new_label = if r.title.is_empty() {
-                                        r.app.clone()
-                                    } else {
-                                        r.title.clone()
-                                    };
-                                }
+                        for &f in &feed_vis {
+                            let block = &feed[f];
+                            let age = feed_seen
+                                .get(&super::feed_key(block))
+                                .map_or(1.0, |t| t.elapsed().as_secs_f32() / super::FEED_FADE_SECS);
+                            if age < 1.0 {
+                                ui.ctx().request_repaint();
+                            }
+                            ui.scope(|ui| {
+                                ui.multiply_opacity(age.clamp(0.0, 1.0));
+                                feed_row(
+                                    ui,
+                                    content_w,
+                                    tz,
+                                    block,
+                                    feed_ejected.get(&block.start_ts).map(String::as_str),
+                                    &candidates,
+                                    new_label,
+                                    &mut pending,
+                                );
                             });
                         }
                     }
@@ -416,6 +426,155 @@ fn task_row<'a>(task: &'a OpenRow, color: egui::Color32) -> theme::ListRow<'a> {
         row = row.chip("declared", theme::palette::TEXT_DIM);
     }
     row
+}
+
+/// One feed block: a task row (identity dot, label, app chip, a
+/// "provisional" chip for pre-pass rows) or a run row (top title, app chip,
+/// state chip), the focus time, and a menu of what the user can do with it;
+/// then a Small line with the block's span and the one-line reason it sits
+/// where it does.
+#[allow(clippy::too_many_arguments)]
+fn feed_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    tz: &jiff::tz::TimeZone,
+    block: &FeedBlock,
+    ejected_from: Option<&str>,
+    candidates: &[(i64, String)],
+    new_label: &mut String,
+    pending: &mut Option<Action>,
+) {
+    let top = block.lines.first();
+    let app = top.map(|l| l.0.as_str()).unwrap_or("");
+    let top_title = top
+        .map(|l| {
+            if l.1.is_empty() {
+                l.0.as_str()
+            } else {
+                l.1.as_str()
+            }
+        })
+        .unwrap_or("");
+    let (title, reason): (&str, String) = match &block.claim {
+        Some(c) => {
+            let reason = match c.source.as_str() {
+                "prepass" => c.reason.clone().unwrap_or_else(|| "pre-pass".to_owned()),
+                "user" => match &c.reason {
+                    Some(r) => format!("you kept it \u{b7} {r}"),
+                    None => "you".to_owned(),
+                },
+                _ => format!("model, {:.0}%", c.confidence * 100.0),
+            };
+            (c.label.as_str(), reason)
+        }
+        None => {
+            let reason = match ejected_from {
+                Some(label) => format!("ejected from {label}"),
+                None if block.derived => "derive left it".to_owned(),
+                None => "no batch yet".to_owned(),
+            };
+            (top_title, reason)
+        }
+    };
+    let mut row = theme::ListRow::new(title).num(fmt_dur(block.ms));
+    match &block.claim {
+        Some(c) => {
+            row = row.dot(theme::series_color_for(c.task_id));
+            if c.source == "prepass" {
+                row = row.chip("provisional", theme::palette::AMBER);
+            }
+        }
+        None => {
+            if !app.is_empty() && app != title {
+                row = row.chip(app, theme::palette::TEXT_DIM);
+            }
+            let state = if ejected_from.is_some() {
+                "ejected"
+            } else if block.derived {
+                "unmatched"
+            } else {
+                "fresh"
+            };
+            row = row.chip(state, theme::palette::TEXT_DIM);
+        }
+    }
+    row.show(ui, width, |ui| {
+        ui.menu_button("\u{2026}", |ui| match &block.claim {
+            Some(c) => {
+                if c.source == "prepass" && ui.button("keep").clicked() {
+                    *pending = Some(Action::KeepBlock(c.interval_id));
+                    ui.close();
+                }
+                ui.menu_button("move to", |ui| {
+                    for (task_id, label) in candidates.iter().filter(|(id, _)| *id != c.task_id) {
+                        if ui.button(label).clicked() {
+                            *pending = Some(Action::ReassignSession {
+                                interval_ids: vec![c.interval_id],
+                                to_task: *task_id,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+                if ui.button("eject").clicked() {
+                    *pending = Some(Action::EjectBlock {
+                        interval_id: c.interval_id,
+                        start_ts: block.start_ts,
+                        end_ts: block.end_ts,
+                        label: c.label.clone(),
+                    });
+                    ui.close();
+                }
+            }
+            None => {
+                if ui.button("declare").clicked() {
+                    *new_label = top_title.to_owned();
+                    ui.close();
+                }
+                ui.menu_button("assign to", |ui| {
+                    for (task_id, label) in candidates {
+                        if ui.button(label).clicked() {
+                            *pending = Some(Action::AssignRuns {
+                                runs: vec![(block.start_ts, block.end_ts)],
+                                to_task: *task_id,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
+    });
+    let fmt = |ms: i64| {
+        chronicle_core::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .strftime("%H:%M")
+            .to_string()
+    };
+    let mut sub = format!(
+        "{}\u{2013}{} \u{b7} {reason}",
+        fmt(block.start_ts),
+        fmt(block.end_ts)
+    );
+    if block.claim.is_some() && !top_title.is_empty() {
+        sub.push_str(" \u{b7} ");
+        if !app.is_empty() && app != top_title {
+            sub.push_str(app);
+            sub.push_str(": ");
+        }
+        sub.push_str(top_title);
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(sub)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+            )
+            .truncate(),
+        );
+    });
 }
 
 /// "2026-09-01" → "Mon 1 Sep"; the raw string when it doesn't parse.

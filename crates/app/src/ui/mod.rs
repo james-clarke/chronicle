@@ -14,6 +14,7 @@ mod theme;
 mod timeline;
 mod triage;
 
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,6 +26,8 @@ use jiff::civil;
 use jiff::tz::TimeZone;
 use jiff::{ToSpan, Zoned};
 use rusqlite::Connection;
+
+use chronicle_core::storage::FeedBlock;
 
 use chat::ChatPanel;
 use onboarding::ModelDownload;
@@ -185,12 +188,20 @@ struct SpanRow {
     kind: String,
 }
 
-/// Focus time no interval covers, clustered by app + title for Home's
-/// "Unassigned" list.
-struct UnassignedRow {
-    app: String,
-    title: String,
-    ms: i64,
+/// A feed block's identity across reloads: `(true, interval id)` or
+/// `(false, run start)`.
+type FeedKey = (bool, i64);
+
+/// How long a newly arrived feed block fades in.
+const FEED_FADE_SECS: f32 = 0.35;
+/// Newest blocks the Home feed lists.
+const FEED_CAP: usize = 12;
+
+fn feed_key(block: &FeedBlock) -> FeedKey {
+    match &block.claim {
+        Some(c) => (true, c.interval_id),
+        None => (false, block.start_ts),
+    }
 }
 
 /// One task identity with its intervals for the shown day (grouped timeline).
@@ -334,6 +345,15 @@ enum Action {
         runs: Vec<(i64, i64)>,
         label: String,
     },
+    /// Confirm a provisional feed block (m24): its interval becomes a user row.
+    KeepBlock(i64),
+    /// Pull a feed block out of its task ('eject' correction).
+    EjectBlock {
+        interval_id: i64,
+        start_ts: i64,
+        end_ts: i64,
+        label: String,
+    },
 }
 
 /// In-flight inline edit of a workspace artifact in the detail pane.
@@ -402,10 +422,18 @@ struct TimelineApp {
     groups: Vec<TaskGroup>,
     open_tasks: Vec<OpenRow>,
     closed_tasks: Vec<OpenRow>,
-    /// Largest unassigned clusters of the shown day, and the day's whole
-    /// unassigned total.
-    unassigned: Vec<UnassignedRow>,
+    /// The shown day's feed (m24): newest blocks first, intervals of any
+    /// source and unassigned runs alike; plus the day's whole unassigned
+    /// total.
+    feed: Vec<FeedBlock>,
     unassigned_ms: i64,
+    /// When each feed block was first seen (drives the arrival fade).
+    feed_seen: HashMap<FeedKey, Instant>,
+    /// First feed load done: later arrivals fade in, the initial page doesn't.
+    feed_primed: bool,
+    /// Blocks ejected this session, by start → the task's label (the row
+    /// says where it came from until something re-claims it).
+    feed_ejected: HashMap<i64, String>,
     /// "recently closed" expander state.
     show_closed: bool,
     /// Raw spans section expander state (collapsed by default; debug-grade).
@@ -548,8 +576,11 @@ impl TimelineApp {
             groups: Vec::new(),
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
-            unassigned: Vec::new(),
+            feed: Vec::new(),
             unassigned_ms: 0,
+            feed_seen: HashMap::new(),
+            feed_primed: false,
+            feed_ejected: HashMap::new(),
             show_closed: false,
             show_spans: false,
             show_background: false,
@@ -635,15 +666,15 @@ impl TimelineApp {
             let groups = self.load_groups()?;
             let open = self.load_open()?;
             let closed = self.load_closed()?;
-            let unassigned = self.load_unassigned()?;
-            Ok((spans, groups, open, closed, unassigned))
+            let feed = self.load_feed()?;
+            Ok((spans, groups, open, closed, feed))
         }) {
-            Ok((spans, groups, open, closed, (unassigned, unassigned_ms))) => {
+            Ok((spans, groups, open, closed, (feed, unassigned_ms))) => {
                 self.spans = spans;
                 self.groups = groups;
                 self.open_tasks = open;
                 self.closed_tasks = closed;
-                self.unassigned = unassigned;
+                self.set_feed(feed);
                 self.unassigned_ms = unassigned_ms;
                 self.error = None;
             }
@@ -1027,41 +1058,56 @@ impl TimelineApp {
             .collect())
     }
 
-    /// Focus spans of the shown day that no interval overlaps (the derive
-    /// pass left them unclaimed), clustered by app + title, largest first:
-    /// the top 8 clusters and the whole-day total. Same day membership as
-    /// [`Self::load_spans`] (starts in the day, end clamped to it), so an
-    /// overnight span counts where the timeline counts it.
-    fn load_unassigned(&mut self) -> anyhow::Result<(Vec<UnassignedRow>, i64)> {
+    /// The shown day's feed plus its whole unassigned total. Same day
+    /// membership as [`Self::load_spans`] (starts in the day, end clamped to
+    /// it), so an overnight span counts where the timeline counts it.
+    fn load_feed(&mut self) -> anyhow::Result<(Vec<FeedBlock>, i64)> {
         let (lo, hi) = self.day_range_ms()?;
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
-        let mut stmt = conn.prepare(
-            "SELECT app, title, SUM(MIN(end_ts, ?2) - start_ts) AS ms
-             FROM spans s
+        let feed = chronicle_core::storage::feed_blocks(
+            conn,
+            lo,
+            hi,
+            chronicle_core::prepass::RUN_GAP_MS,
+            FEED_CAP,
+        )?;
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(MIN(end_ts, ?2) - start_ts), 0) FROM spans s
              WHERE kind = 'focus' AND start_ts >= ?1 AND start_ts < ?2
                AND NOT EXISTS (
                    SELECT 1 FROM intervals i
-                   WHERE i.start_ts < s.end_ts AND i.end_ts > s.start_ts)
-             GROUP BY app, title
-             ORDER BY ms DESC",
+                   WHERE i.start_ts < s.end_ts AND i.end_ts > s.start_ts)",
+            [lo, hi],
+            |r| r.get(0),
         )?;
-        let rows = stmt.query_map([lo, hi], |row| {
-            Ok(UnassignedRow {
-                app: row.get(0)?,
-                title: row.get(1)?,
-                ms: row.get(2)?,
-            })
-        })?;
-        let mut total = 0;
-        let mut top = Vec::new();
-        for row in rows {
-            let row = row?;
-            total += row.ms;
-            if top.len() < 8 {
-                top.push(row);
-            }
+        Ok((feed, total))
+    }
+
+    /// Swap in a freshly loaded feed: blocks not seen before start their
+    /// arrival fade (except on the first load), departed ones are forgotten.
+    fn set_feed(&mut self, feed: Vec<FeedBlock>) {
+        let now = Instant::now();
+        let arrived = if self.feed_primed {
+            now
+        } else {
+            now.checked_sub(Duration::from_secs_f32(FEED_FADE_SECS))
+                .unwrap_or(now)
+        };
+        let keys: Vec<FeedKey> = feed.iter().map(feed_key).collect();
+        self.feed_seen.retain(|k, _| keys.contains(k));
+        for k in keys {
+            self.feed_seen.entry(k).or_insert(arrived);
         }
-        Ok((top, total))
+        // A claimed block is no longer "ejected"; an unclaimed one keeps its
+        // note until it leaves the day.
+        let starts: Vec<i64> = feed
+            .iter()
+            .filter(|b| b.claim.is_none())
+            .map(|b| b.start_ts)
+            .collect();
+        self.feed_ejected.retain(|s, _| starts.contains(s));
+        self.feed = feed;
+        self.feed_primed = true;
     }
 
     fn load_closed(&mut self) -> anyhow::Result<Vec<OpenRow>> {
@@ -1088,6 +1134,27 @@ impl TimelineApp {
         let result = match action {
             Action::AssignRuns { runs, to_task } => {
                 assign_runs(conn, now, &runs, to_task, &mut claimed)
+            }
+            Action::KeepBlock(interval_id) => {
+                chronicle_core::storage::keep_interval(conn, now, interval_id)
+            }
+            Action::EjectBlock {
+                interval_id,
+                start_ts,
+                end_ts,
+                label,
+            } => {
+                let ejected = chronicle_core::storage::split_interval(
+                    conn,
+                    now,
+                    interval_id,
+                    start_ts,
+                    end_ts,
+                );
+                if ejected.is_ok() {
+                    self.feed_ejected.insert(start_ts, label);
+                }
+                ejected.map(|_| ())
             }
             Action::AssignRunsNew { runs, label } => {
                 match chronicle_core::storage::insert_user_task(conn, now, &label, None) {

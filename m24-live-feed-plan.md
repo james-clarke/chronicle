@@ -1,6 +1,6 @@
 # M24 — Live feed ("the brain at work")
 
-Status: **in progress** (2026-09-02). Chunks 1–2 landed: `intervals.source` (migration 011), `split_interval` + `eject` corrections, `suggest_correction` skips ejected tasks; nullable `intervals.batch_id` + `reason` (migration 012), `prepass` module on a 60 s daemon timer (`prepass_secs`), derive replaces provisional rows and clips around user rows; chunks 3–5 open. Decisions recorded at the end, build order final.
+Status: **in progress** (2026-09-02). Chunks 1–3 landed: `intervals.source` (migration 011), `split_interval` + `eject` corrections, `suggest_correction` skips ejected tasks; nullable `intervals.batch_id` + `reason` (migration 012), `prepass` module on a 60 s daemon timer (`prepass_secs`), derive replaces provisional rows and clips around user rows; Home's Unassigned section is now the feed (`storage::feed_blocks`, newest 12 blocks of the day with state chip + reason line, `…` menu: keep / move to / eject on claimed blocks, declare / assign to on runs, arrival fade, `keep_interval` turns a provisional row into a user row plus an `assign` correction); chunks 4–5 open. Decisions recorded at the end, build order final.
 
 ## Context
 

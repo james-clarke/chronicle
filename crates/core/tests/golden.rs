@@ -1607,3 +1607,173 @@ fn eject_splits_interval_and_blocks_suggestion() {
         .unwrap();
     assert_eq!(source, "user");
 }
+
+#[test]
+fn feed_lists_blocks_newest_first_and_keep_survives_derive() {
+    use chronicle_core::prepass;
+    use chronicle_core::storage;
+    use chronicle_core::types::{NewInterval, TaskSlot, ms_to_ts};
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m24_feed.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    let config = Config::default();
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, source, created_ts, external_ref) VALUES ('Sending plans', 'pb', 'open', 'user', 0, 'ACME-7')",
+        [],
+    )
+    .unwrap();
+    let ticket = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, source, created_ts) VALUES ('Board triage', NULL, 'open', 'user', 0)",
+        [],
+    )
+    .unwrap();
+    let board = conn.last_insert_rowid();
+    // An older derived batch covering a model interval, then an unmatched
+    // run, then the live tail with a ticketed-branch run.
+    conn.execute(
+        "INSERT INTO batches (start_ts, end_ts, status) VALUES (0, 600000, 'done')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source) VALUES (?1, 1, 100000, 200000, 0.8, 'derived')",
+        [board],
+    )
+    .unwrap();
+    storage::insert_activity_event(
+        &conn,
+        &chronicle_core::types::ActivityEvent {
+            ts: ms_to_ts(1_000_000),
+            end_ts: None,
+            repo: "pb".into(),
+            branch: "ACME-7-fix".into(),
+            kind: chronicle_core::types::ActivityKind::Checkout,
+            ext_id: None,
+            summary: None,
+        },
+    )
+    .unwrap();
+    let spans = [
+        (100_000, 150_000, "Firefox", "Jira board", 1),
+        (150_000, 200_000, "Slack", "triage", 1),
+        (300_000, 400_000, "Zoom", "standup", 1),
+        (1_000_000, 1_100_000, "Code", "pb — plans.rs", 0),
+    ];
+    for (s, e, app, title, batch) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, 'focus', NULLIF(?5, 0))",
+            rusqlite::params![s, e, app, title, batch],
+        )
+        .unwrap();
+    }
+    prepass::run(&mut conn, &config, ms_to_ts(1_500_000)).unwrap();
+
+    let feed = storage::feed_blocks(&conn, 0, 2_000_000, prepass::RUN_GAP_MS, 12).unwrap();
+    let summary: Vec<(i64, i64, Option<(&str, &str)>, bool, &str)> = feed
+        .iter()
+        .map(|b| {
+            (
+                b.start_ts,
+                b.ms,
+                b.claim
+                    .as_ref()
+                    .map(|c| (c.source.as_str(), c.reason.as_deref().unwrap_or(""))),
+                b.derived,
+                b.lines[0].1.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                1_000_000,
+                100_000,
+                Some(("prepass", "branch ACME-7")),
+                false,
+                "pb — plans.rs"
+            ),
+            (300_000, 100_000, None, true, "standup"),
+            (100_000, 100_000, Some(("derived", "")), false, "Jira board"),
+        ]
+    );
+    assert_eq!(feed[2].lines.len(), 2);
+    // Cap keeps the newest.
+    assert_eq!(
+        storage::feed_blocks(&conn, 0, 2_000_000, prepass::RUN_GAP_MS, 1)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Keep the provisional block: a user row with a teaching correction,
+    // and the next pre-pass leaves it alone.
+    let id = feed[0].claim.as_ref().unwrap().interval_id;
+    storage::keep_interval(&mut conn, ms_to_ts(1_600_000), id).unwrap();
+    let (source, confidence, reason): (String, f64, Option<String>) = conn
+        .query_row(
+            "SELECT source, confidence, reason FROM intervals WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (source.as_str(), confidence, reason.as_deref()),
+        ("user", 1.0, Some("branch ACME-7"))
+    );
+    let (kind, new_label, ctx): (String, String, String) = conn
+        .query_row(
+            "SELECT kind, new_label, ctx FROM corrections WHERE interval_id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (kind.as_str(), new_label.as_str()),
+        ("assign", "Sending plans")
+    );
+    assert!(ctx.contains("plans.rs"), "{ctx}");
+    assert!(
+        prepass::run(&mut conn, &config, ms_to_ts(1_700_000))
+            .unwrap()
+            .is_empty()
+    );
+    // Derive over the tail: the kept row survives, the model is clipped.
+    conn.execute(
+        "INSERT INTO batches (start_ts, end_ts, status) VALUES (600000, 1200000, 'running')",
+        [],
+    )
+    .unwrap();
+    let batch = conn.last_insert_rowid();
+    storage::attach_tail_intervals(&conn).unwrap();
+    let stored = storage::store_derivation(
+        &mut conn,
+        batch,
+        &[TaskSlot::Existing(board)],
+        &[NewInterval {
+            slot: 0,
+            start_ts: ms_to_ts(900_000),
+            end_ts: ms_to_ts(1_200_000),
+            confidence: 0.7,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        stored,
+        vec![(board, 900_000, 1_000_000), (board, 1_100_000, 1_200_000)]
+    );
+    let feed = storage::feed_blocks(&conn, 0, 2_000_000, prepass::RUN_GAP_MS, 12).unwrap();
+    let kept = feed.iter().find(|b| b.start_ts == 1_000_000).unwrap();
+    assert_eq!(
+        (
+            kept.claim.as_ref().unwrap().task_id,
+            kept.claim.as_ref().unwrap().source.as_str()
+        ),
+        (ticket, "user")
+    );
+    assert_eq!(feed.len(), 5);
+}

@@ -1892,6 +1892,145 @@ pub fn latest_done_batch_end(conn: &Connection) -> Result<Option<i64>, StorageEr
     )?)
 }
 
+/// App/title lines kept per feed block.
+pub const FEED_LINES: usize = 3;
+
+/// Who placed a feed block: the interval covering it plus its task.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeedClaim {
+    pub interval_id: i64,
+    pub task_id: i64,
+    pub label: String,
+    pub project: Option<String>,
+    /// `derived` | `user` | `prepass`.
+    pub source: String,
+    pub confidence: f64,
+    /// The pre-pass rule that matched (`prepass` rows; kept on a `keep`).
+    pub reason: Option<String>,
+}
+
+/// One block of the Home feed (m24): an interval of any source, or an
+/// unassigned run no interval covers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeedBlock {
+    pub start_ts: i64,
+    pub end_ts: i64,
+    /// Focus ms inside the block.
+    pub ms: i64,
+    /// `(app, title, ms)`, largest first, at most [`FEED_LINES`].
+    pub lines: Vec<(String, String, i64)>,
+    /// None = unassigned run.
+    pub claim: Option<FeedClaim>,
+    /// Run only: a derived batch already covers its start (derive ran and
+    /// left it) rather than still waiting for one.
+    pub derived: bool,
+}
+
+/// The feed over `[lo, hi)`: every interval starting inside it (any source)
+/// plus the unassigned runs (gap < `gap_ms` folds), newest first, at most
+/// `cap` blocks. An interval's lines are the focus spans it overlaps.
+pub fn feed_blocks(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+    gap_ms: i64,
+    cap: usize,
+) -> Result<Vec<FeedBlock>, StorageError> {
+    let mut blocks = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT i.id, i.task_id, t.label, t.project, i.start_ts, MIN(i.end_ts, ?2),
+                i.confidence, i.source, i.reason
+         FROM intervals i JOIN tasks t ON t.id = i.task_id
+         WHERE i.start_ts >= ?1 AND i.start_ts < ?2
+         ORDER BY i.start_ts DESC, i.id DESC LIMIT ?3",
+    )?;
+    let mut lines_stmt = conn.prepare(
+        "SELECT app, title, SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)) AS ms FROM spans
+         WHERE kind='focus' AND start_ts < ?2 AND end_ts > ?1
+         GROUP BY app, title ORDER BY ms DESC",
+    )?;
+    let mut rows = stmt.query(params![lo, hi, cap as i64])?;
+    while let Some(row) = rows.next()? {
+        let (start_ts, end_ts): (i64, i64) = (row.get(4)?, row.get(5)?);
+        let claim = FeedClaim {
+            interval_id: row.get(0)?,
+            task_id: row.get(1)?,
+            label: row.get(2)?,
+            project: row.get(3)?,
+            source: row.get(7)?,
+            confidence: row.get(6)?,
+            reason: row.get(8)?,
+        };
+        let mut ms = 0;
+        let mut lines = Vec::new();
+        let mut spans = lines_stmt.query([start_ts, end_ts])?;
+        while let Some(span) = spans.next()? {
+            let line: (String, String, i64) = (span.get(0)?, span.get(1)?, span.get(2)?);
+            ms += line.2;
+            if lines.len() < FEED_LINES {
+                lines.push(line);
+            }
+        }
+        blocks.push(FeedBlock {
+            start_ts,
+            end_ts,
+            ms,
+            lines,
+            claim: Some(claim),
+            derived: false,
+        });
+    }
+    let derived_to = latest_done_batch_end(conn)?.unwrap_or(i64::MIN);
+    for run in unassigned_runs(conn, lo, hi, gap_ms)? {
+        let mut lines = run.lines;
+        lines.truncate(FEED_LINES);
+        blocks.push(FeedBlock {
+            start_ts: run.start_ts,
+            end_ts: run.end_ts,
+            ms: run.ms,
+            lines,
+            claim: None,
+            derived: run.start_ts < derived_to,
+        });
+    }
+    blocks.sort_by(|a, b| b.start_ts.cmp(&a.start_ts));
+    blocks.truncate(cap);
+    Ok(blocks)
+}
+
+/// Confirm a provisional interval ('assign' correction): it becomes a
+/// confidence-1.0 user row (derive never replaces those) and its app/title
+/// mix teaches future placements like a hand assign does.
+pub fn keep_interval(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    interval_id: i64,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    let (task_id, start_ts, end_ts): (i64, i64, i64) = tx.query_row(
+        "SELECT task_id, start_ts, end_ts FROM intervals WHERE id=?1",
+        [interval_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    tx.execute(
+        "UPDATE intervals SET source='user', confidence=1.0 WHERE id=?1",
+        [interval_id],
+    )?;
+    let (label, project): (String, Option<String>) = tx.query_row(
+        "SELECT label, project FROM tasks WHERE id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let ctx = span_ctx(&tx, start_ts, end_ts)?;
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
+         VALUES (?1, ?2, '(unassigned)', ?3, NULL, ?4, ?5, 'assign', ?6)",
+        params![ts_to_ms(ts), task_id, label, project, ctx, interval_id],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Fold one task into another ('merge' correction): every interval moves to
 /// the target, the source closes (a derived source nothing else references is
 /// removed). The source's span context plus its label → target label pair
