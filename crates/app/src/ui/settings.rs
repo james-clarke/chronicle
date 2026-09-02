@@ -127,7 +127,7 @@ impl TimelineApp {
         let Some(panel) = &mut self.settings else {
             return;
         };
-        egui::CentralPanel::default().show(ui, |ui| {
+        theme::page().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("Settings")
@@ -270,7 +270,7 @@ impl TimelineApp {
                                     [("compact", 0.9f32), ("default", 1.0), ("comfortable", 1.15)]
                                 {
                                     let active = (ui.ctx().zoom_factor() - z).abs() < 0.01;
-                                    if ui.selectable_label(active, label).clicked() && !active {
+                                    if theme::selectable(ui, active, label).clicked() && !active {
                                         ui.ctx().set_zoom_factor(z);
                                         zoom_pick = Some(z);
                                     }

@@ -45,16 +45,14 @@ impl TimelineApp {
                     if narrow {
                         // Actions pinned to the widget's bottom edge; the
                         // bottom panel must be added before the CentralPanel.
-                        let frame = egui::Frame::new()
-                            .fill(theme::palette::SURFACE)
-                            .inner_margin(egui::Margin::symmetric(12, 8));
+                        let frame = theme::page_frame().fill(theme::palette::SURFACE);
                         egui::Panel::bottom("task_detail_actions")
                             .frame(frame)
                             .show(ui, |ui| {
                                 ui.multiply_opacity(detail_t);
                                 detail_actions(ui, group, edit, &candidates, &mut pending);
                             });
-                        egui::CentralPanel::default().show(ui, |ui| {
+                        theme::page().show(ui, |ui| {
                             ui.multiply_opacity(detail_t);
                             egui::ScrollArea::vertical()
                                 .auto_shrink(false)
@@ -108,7 +106,7 @@ impl TimelineApp {
                 None => self.selected_task = None,
             }
         }
-        egui::CentralPanel::default().show(ui, |ui| {
+        theme::page().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }

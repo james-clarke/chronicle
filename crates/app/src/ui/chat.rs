@@ -300,9 +300,7 @@ impl TimelineApp {
                     .map(|t| t.to_zoned(tz.clone()).strftime("%-d %b").to_string())
                     .unwrap_or_default();
                 let current = *id == chat.conversation_id;
-                if ui
-                    .selectable_label(current, format!("{date} \u{b7} {head}"))
-                    .clicked()
+                if theme::selectable(ui, current, format!("{date} \u{b7} {head}")).clicked()
                 {
                     let scope = conversation_scope(conn, *id);
                     chat.switch_conversation(Some(conn), *id, scope);
@@ -335,7 +333,7 @@ impl TimelineApp {
         self.chat_take_task_request(ui.ctx());
         self.chat_ensure(ui.ctx());
         let Some(chat) = &mut self.chat else {
-            egui::CentralPanel::default().show(ui, |ui| {
+            theme::page().show(ui, |ui| {
                 ui.add_space(ui.available_height() * 0.35);
                 theme::empty_state(ui, "chat unavailable", "");
                 if let Some(error) = &self.error {
@@ -349,7 +347,9 @@ impl TimelineApp {
         chat.drain_events();
         let mut start_dl = false;
         let mut clear_scope = false;
-        egui::Panel::bottom("chat_input").show(ui, |ui| {
+        egui::Panel::bottom("chat_input")
+            .frame(theme::page_frame())
+            .show(ui, |ui| {
             if let Some((_, label)) = &chat.task_scope {
                 ui.horizontal(|ui| {
                     theme::badge(ui, &format!("scoped to {label}"), theme::palette::ACCENT);
@@ -414,7 +414,7 @@ impl TimelineApp {
                 }
             });
         });
-        egui::CentralPanel::default().show(ui, |ui| {
+        theme::page().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .stick_to_bottom(true)

@@ -12,7 +12,7 @@ impl TimelineApp {
         let week_insights = &self.week_insights;
         let narrative_busy = self.narrative_job.is_some();
         let model_missing = self.model_missing;
-        egui::CentralPanel::default().show(ui, |ui| {
+        theme::page().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }

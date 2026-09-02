@@ -282,9 +282,12 @@ impl TimelineApp {
                     } else {
                         "low-RAM \u{b7} ~1.1 GiB"
                     };
-                    if ui
-                        .selectable_label(self.preset_pick == i, format!("{} ({hint})", spec.name))
-                        .clicked()
+                    if theme::selectable(
+                        ui,
+                        self.preset_pick == i,
+                        format!("{} ({hint})", spec.name),
+                    )
+                    .clicked()
                     {
                         self.preset_pick = i;
                     }

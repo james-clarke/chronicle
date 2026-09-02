@@ -161,7 +161,7 @@ impl TimelineApp {
         let candidates = self.merge_candidates();
 
         let mut pending: Option<Action> = None;
-        egui::CentralPanel::default().show(ui, |ui| {
+        theme::page().show(ui, |ui| {
             self.model_card_ui(ui);
             self.service_card_ui(ui);
             self.resume_card_ui(ui);

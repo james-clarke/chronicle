@@ -1409,7 +1409,7 @@ impl TimelineApp {
                                         (View::Reports, "reports"),
                                         (View::Chat, "chat"),
                                     ] {
-                                        if ui.selectable_label(self.view == view, label).clicked()
+                                        if theme::selectable(ui, self.view == view, label).clicked()
                                             && self.view != view
                                         {
                                             if self.view == View::Chat {
@@ -1549,12 +1549,13 @@ impl TimelineApp {
                             });
                         }
                     });
-                // Hand off to the WM only once the pointer actually moves
-                // while held: StartDrag on the bare press gave the pointer
-                // away instantly, so the release never reached egui and any
-                // bar click that grazed the background sense went dead
-                // (buttons "needed a double click").
-                if bar.response.dragged() && bar.response.drag_delta() != egui::Vec2::ZERO {
+                // Hand off to the WM only once egui itself calls the press a
+                // drag (6pt moved or 0.8s held). The bar is the drag target
+                // from the press down even over a button (buttons only sense
+                // clicks), so gating on any movement let a 1px jitter mid-
+                // click give the pointer to the WM: the release never came
+                // back and the button "needed a double click".
+                if bar.response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             });
