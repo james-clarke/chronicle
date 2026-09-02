@@ -1673,7 +1673,8 @@ fn feed_lists_blocks_newest_first_and_keep_survives_derive() {
     prepass::run(&mut conn, &config, ms_to_ts(1_500_000)).unwrap();
 
     let feed = storage::feed_blocks(&conn, 0, 2_000_000, prepass::RUN_GAP_MS, 12).unwrap();
-    let summary: Vec<(i64, i64, Option<(&str, &str)>, bool, &str)> = feed
+    type Row<'a> = (i64, i64, Option<(&'a str, &'a str)>, bool, &'a str);
+    let summary: Vec<Row> = feed
         .iter()
         .map(|b| {
             (
@@ -1776,4 +1777,181 @@ fn feed_lists_blocks_newest_first_and_keep_survives_derive() {
         (ticket, "user")
     );
     assert_eq!(feed.len(), 5);
+}
+
+#[test]
+fn proposals_cluster_name_accept_and_dismiss() {
+    use chronicle_core::proposals;
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m24_proposals.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    // "Claude" is in most titles of the day: not distinctive. A and B share
+    // "roadmap"; C is a lone 12-minute tab; D is too short to propose; E
+    // and F link by repo only.
+    let spans = [
+        (0, 60_000, "Terminator", "Claude Code — chronicle"),
+        (600_000, 1_020_000, "Firefox", "Notion roadmap doc — Claude"),
+        (1_500_000, 1_800_000, "Firefox", "Roadmap sync notes"),
+        (2_400_000, 3_120_000, "Firefox", "YouTube — Claude"),
+        (4_000_000, 4_060_000, "Zoom", "standup"),
+        (5_000_000, 5_360_000, "Code", "lib.rs — Claude"),
+        (6_000_000, 6_300_000, "Code", "main.rs"),
+    ];
+    for (s, e, app, title) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, 'focus', NULL)",
+            rusqlite::params![s, e, app, title],
+        )
+        .unwrap();
+    }
+    // The first span is already claimed.
+    conn.execute(
+        "INSERT INTO tasks (label, status, source, created_ts) VALUES ('Chronicle', 'open', 'user', 0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source) VALUES (1, NULL, 0, 60000, 1.0, 'user')",
+        [],
+    )
+    .unwrap();
+    for (ts, end) in [(5_000_000, 5_360_000), (6_000_000, 6_300_000)] {
+        storage::insert_activity_event(
+            &conn,
+            &chronicle_core::types::ActivityEvent {
+                ts: ms_to_ts(ts),
+                end_ts: Some(ms_to_ts(end)),
+                repo: "pb".into(),
+                branch: "main".into(),
+                kind: chronicle_core::types::ActivityKind::AiSession,
+                ext_id: None,
+                summary: None,
+            },
+        )
+        .unwrap();
+    }
+
+    let heads = proposals::refresh(&mut conn, ms_to_ts(7_000_000)).unwrap();
+    assert_eq!(heads, vec![600_000, 2_400_000, 5_000_000]);
+    let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
+    type Row<'a> = (i64, i64, usize, Option<&'a str>, bool, &'a str);
+    let summary: Vec<Row> = open
+        .iter()
+        .map(|p| {
+            (
+                p.start_ts,
+                p.ms,
+                p.runs.len(),
+                p.project.as_deref(),
+                p.naming,
+                p.lines[0].1.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (5_000_000, 660_000, 2, Some("pb"), true, "lib.rs — Claude"),
+            (2_400_000, 720_000, 1, None, true, "YouTube — Claude"),
+            (
+                600_000,
+                720_000,
+                2,
+                None,
+                true,
+                "Notion roadmap doc — Claude"
+            ),
+        ]
+    );
+    // One naming job per proposal, bounded to the cluster.
+    let jobs: Vec<(String, String)> = conn
+        .prepare("SELECT kind, payload FROM ai_jobs ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(
+        jobs[0],
+        (
+            "suggest_task".to_owned(),
+            "{\"lo\":600000,\"hi\":1800000}".to_owned()
+        )
+    );
+    // Same tick again: no new jobs, rows rewritten in place.
+    proposals::refresh(&mut conn, ms_to_ts(7_100_000)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM ai_jobs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 3);
+    // The roadmap job lands: the name is copied in.
+    conn.execute(
+        "UPDATE ai_jobs SET status='done', result='{\"label\":\"Roadmap review\",\"project\":\"planning\",\"description\":\"Reading the roadmap.\"}' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_200_000)).unwrap();
+    let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
+    let roadmap = open.iter().find(|p| p.start_ts == 600_000).unwrap();
+    assert_eq!(
+        (
+            roadmap.label.as_deref(),
+            roadmap.project.as_deref(),
+            roadmap.naming
+        ),
+        (Some("Roadmap review"), Some("planning"), false)
+    );
+    // Dismiss YouTube: it stays out on later ticks.
+    let yt = open.iter().find(|p| p.start_ts == 2_400_000).unwrap().id;
+    proposals::dismiss(&conn, yt).unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_300_000)).unwrap();
+    let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
+    assert_eq!(open.len(), 2);
+    assert!(open.iter().all(|p| p.start_ts != 2_400_000));
+    // Accept the roadmap: a declared task with the description, both runs
+    // claimed, and the proposal leaves the feed.
+    let (task_id, claimed) =
+        proposals::accept(&mut conn, ms_to_ts(7_400_000), roadmap.id, "Roadmap review").unwrap();
+    assert_eq!(claimed, 720_000);
+    let (label, project, source, description): (String, Option<String>, String, Option<String>) =
+        conn.query_row(
+            "SELECT label, project, source, description FROM tasks WHERE id=?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            label.as_str(),
+            project.as_deref(),
+            source.as_str(),
+            description.as_deref()
+        ),
+        (
+            "Roadmap review",
+            Some("planning"),
+            "user",
+            Some("Reading the roadmap.")
+        )
+    );
+    proposals::refresh(&mut conn, ms_to_ts(7_500_000)).unwrap();
+    let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].start_ts, 5_000_000);
+    // A pre-pass claim on a cluster's head drops its row; what is left of
+    // the cluster (5 min) is under the threshold, so nothing replaces it.
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason) VALUES (1, NULL, 5000000, 5360000, 0.5, 'prepass', 'repo pb')",
+        [],
+    )
+    .unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_600_000)).unwrap();
+    let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
+    assert!(open.is_empty(), "{open:?}");
 }

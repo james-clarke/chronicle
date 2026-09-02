@@ -35,6 +35,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/010_activity_events.sql")),
         M::up(include_str!("../migrations/011_interval_source.sql")),
         M::up(include_str!("../migrations/012_interval_tail.sql")),
+        M::up(include_str!("../migrations/013_proposals.sql")),
     ])
 });
 
@@ -1993,7 +1994,7 @@ pub fn feed_blocks(
             derived: run.start_ts < derived_to,
         });
     }
-    blocks.sort_by(|a, b| b.start_ts.cmp(&a.start_ts));
+    blocks.sort_by_key(|b| std::cmp::Reverse(b.start_ts));
     blocks.truncate(cap);
     Ok(blocks)
 }

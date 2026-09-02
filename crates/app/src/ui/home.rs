@@ -5,7 +5,9 @@
 use eframe::egui;
 
 use super::timeline::{matches_filter, merge_item, merge_picker};
-use super::{Action, FeedBlock, OpenRow, SpanRow, StandupRow, TimelineApp, fmt_dur, theme};
+use super::{
+    Action, FeedBlock, OpenRow, Proposal, SpanRow, StandupRow, TimelineApp, fmt_dur, theme,
+};
 
 impl TimelineApp {
     /// "Where you left off" card: newest checkpoint since the last UI open.
@@ -189,6 +191,7 @@ impl TimelineApp {
                     let open_tasks = &self.open_tasks;
                     let closed_tasks = &self.closed_tasks;
                     let feed = &self.feed;
+                    let proposals = &self.proposals;
                     let feed_seen = &self.feed_seen;
                     let feed_ejected = &self.feed_ejected;
                     let tz = &self.tz;
@@ -354,7 +357,7 @@ impl TimelineApp {
                     // The feed: the day's blocks newest first, each with who
                     // placed it and why; the header carries the day's whole
                     // unassigned total.
-                    if !feed_vis.is_empty() || unassigned_ms > 0 {
+                    if !feed_vis.is_empty() || !proposals.is_empty() || unassigned_ms > 0 {
                         ui.add_space(theme::SECTION_GAP);
                         theme::section_header_with(ui, "Feed", None, |ui| {
                             if theme::ghost_button(ui, "organize")
@@ -367,6 +370,9 @@ impl TimelineApp {
                                 .on_hover_text("unassigned today");
                         });
                         ui.add_space(theme::SPACE_XS);
+                        for p in proposals {
+                            proposal_card(ui, tz, p, &mut pending);
+                        }
                         for &f in &feed_vis {
                             let block = &feed[f];
                             let age = feed_seen
@@ -426,6 +432,114 @@ fn task_row<'a>(task: &'a OpenRow, color: egui::Color32) -> theme::ListRow<'a> {
         row = row.chip("declared", theme::palette::TEXT_DIM);
     }
     row
+}
+
+/// A proposed task: the cluster's suggested label (a spinner while the
+/// naming job runs, the top title when there is no name), project chip,
+/// span + focus time, its app/title lines, and accept / not a task.
+fn proposal_card(
+    ui: &mut egui::Ui,
+    tz: &jiff::tz::TimeZone,
+    p: &Proposal,
+    pending: &mut Option<Action>,
+) {
+    let fmt = |ms: i64| {
+        chronicle_core::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .strftime("%H:%M")
+            .to_string()
+    };
+    let fallback = p
+        .lines
+        .first()
+        .map(|l| {
+            if l.1.is_empty() {
+                l.0.clone()
+            } else {
+                l.1.clone()
+            }
+        })
+        .unwrap_or_else(|| "unnamed".to_owned());
+    let label = p.label.clone().unwrap_or_else(|| fallback.clone());
+    egui::Frame::new()
+        .fill(theme::palette::ACCENT.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(
+            1.0,
+            theme::palette::ACCENT.gamma_multiply(0.35),
+        ))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("proposed task")
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::ACCENT),
+                );
+                if p.naming && p.label.is_none() {
+                    ui.add(egui::Spinner::new().size(10.0));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(theme::num(fmt_dur(p.ms)));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}\u{2013}{} \u{b7} {} stretch{}",
+                            fmt(p.start_ts),
+                            fmt(p.end_ts),
+                            p.runs.len(),
+                            if p.runs.len() == 1 { "" } else { "es" }
+                        ))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                    );
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&label)
+                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                            .color(theme::palette::TEXT),
+                    )
+                    .truncate(),
+                );
+                if let Some(project) = &p.project {
+                    theme::badge(ui, project, theme::palette::ACCENT);
+                }
+            });
+            for (app, title, ms) in p.lines.iter().take(2) {
+                let line = if title.is_empty() {
+                    format!("{} \u{b7} {app}", fmt_dur(*ms))
+                } else {
+                    format!("{} \u{b7} {app}: {title}", fmt_dur(*ms))
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(line)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                    )
+                    .truncate(),
+                );
+            }
+            ui.add_space(theme::SPACE_XS);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "accept")
+                    .on_hover_text("declare this task and assign the stretches to it")
+                    .clicked()
+                {
+                    *pending = Some(Action::AcceptProposal {
+                        id: p.id,
+                        label: label.clone(),
+                    });
+                }
+                if theme::ghost_button(ui, "not a task").clicked() {
+                    *pending = Some(Action::DismissProposal(p.id));
+                }
+            });
+        });
+    ui.add_space(theme::SPACE_XS);
 }
 
 /// One feed block: a task row (identity dot, label, app chip, a

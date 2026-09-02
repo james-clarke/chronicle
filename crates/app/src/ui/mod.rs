@@ -27,6 +27,7 @@ use jiff::tz::TimeZone;
 use jiff::{ToSpan, Zoned};
 use rusqlite::Connection;
 
+use chronicle_core::proposals::Proposal;
 use chronicle_core::storage::FeedBlock;
 
 use chat::ChatPanel;
@@ -345,6 +346,13 @@ enum Action {
         runs: Vec<(i64, i64)>,
         label: String,
     },
+    /// Declare a proposed task under `label` and claim its runs.
+    AcceptProposal {
+        id: i64,
+        label: String,
+    },
+    /// "Not a task": park the proposal for the day.
+    DismissProposal(i64),
     /// Confirm a provisional feed block (m24): its interval becomes a user row.
     KeepBlock(i64),
     /// Pull a feed block out of its task ('eject' correction).
@@ -427,6 +435,8 @@ struct TimelineApp {
     /// total.
     feed: Vec<FeedBlock>,
     unassigned_ms: i64,
+    /// Open proposed tasks of the shown day (m24), newest first.
+    proposals: Vec<Proposal>,
     /// When each feed block was first seen (drives the arrival fade).
     feed_seen: HashMap<FeedKey, Instant>,
     /// First feed load done: later arrivals fade in, the initial page doesn't.
@@ -578,6 +588,7 @@ impl TimelineApp {
             closed_tasks: Vec::new(),
             feed: Vec::new(),
             unassigned_ms: 0,
+            proposals: Vec::new(),
             feed_seen: HashMap::new(),
             feed_primed: false,
             feed_ejected: HashMap::new(),
@@ -667,15 +678,17 @@ impl TimelineApp {
             let open = self.load_open()?;
             let closed = self.load_closed()?;
             let feed = self.load_feed()?;
-            Ok((spans, groups, open, closed, feed))
+            let proposals = self.load_proposals()?;
+            Ok((spans, groups, open, closed, feed, proposals))
         }) {
-            Ok((spans, groups, open, closed, (feed, unassigned_ms))) => {
+            Ok((spans, groups, open, closed, (feed, unassigned_ms), proposals)) => {
                 self.spans = spans;
                 self.groups = groups;
                 self.open_tasks = open;
                 self.closed_tasks = closed;
                 self.set_feed(feed);
                 self.unassigned_ms = unassigned_ms;
+                self.proposals = proposals;
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -1083,6 +1096,12 @@ impl TimelineApp {
         Ok((feed, total))
     }
 
+    fn load_proposals(&mut self) -> anyhow::Result<Vec<Proposal>> {
+        let (lo, hi) = self.day_range_ms()?;
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        Ok(chronicle_core::proposals::open_proposals(conn, lo, hi)?)
+    }
+
     /// Swap in a freshly loaded feed: blocks not seen before start their
     /// arrival fade (except on the first load), departed ones are forgotten.
     fn set_feed(&mut self, feed: Vec<FeedBlock>) {
@@ -1135,6 +1154,10 @@ impl TimelineApp {
             Action::AssignRuns { runs, to_task } => {
                 assign_runs(conn, now, &runs, to_task, &mut claimed)
             }
+            Action::AcceptProposal { id, label } => {
+                chronicle_core::proposals::accept(conn, now, id, &label).map(|_| ())
+            }
+            Action::DismissProposal(id) => chronicle_core::proposals::dismiss(conn, id),
             Action::KeepBlock(interval_id) => {
                 chronicle_core::storage::keep_interval(conn, now, interval_id)
             }

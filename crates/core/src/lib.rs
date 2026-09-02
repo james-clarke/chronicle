@@ -6,6 +6,7 @@ pub mod eval;
 pub mod insights;
 pub mod merge;
 pub mod prepass;
+pub mod proposals;
 pub mod report;
 pub mod sessionizer;
 pub mod storage;

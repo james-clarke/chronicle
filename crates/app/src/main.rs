@@ -716,9 +716,13 @@ fn run_ai_job(
             Ok(desc)
         }
         "suggest_task" => {
+            // A proposal names its own cluster (explicit bounds); the Home
+            // "suggest" button looks back from now.
             let lookback_min = payload["lookback_min"].as_i64().unwrap_or(15);
-            let hi = Timestamp::now().as_millisecond();
-            let lo = hi - lookback_min * 60_000;
+            let hi = payload["hi"]
+                .as_i64()
+                .unwrap_or_else(|| Timestamp::now().as_millisecond());
+            let lo = payload["lo"].as_i64().unwrap_or(hi - lookback_min * 60_000);
             let spans = storage::spans_in_range(conn, lo, hi)?;
             if spans
                 .iter()
@@ -1526,6 +1530,9 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                         }
                         Ok(_) => {}
                         Err(e) => tracing::error!("pre-pass failed: {e}"),
+                    }
+                    if let Err(e) = chronicle_core::proposals::refresh(&mut conn, now) {
+                        tracing::error!("proposals refresh failed: {e}");
                     }
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
