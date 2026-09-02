@@ -127,7 +127,8 @@ fn narrative_card(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// Six stat tiles in a 3-column grid: Display value over icon + caption.
+/// Six stat tiles, three (two when narrow) across: Display value over icon +
+/// caption.
 fn focus_tiles(ui: &mut egui::Ui, width: f32, wi: &WeekInsights, r: &RangeReport) {
     use theme::icon;
     let m = &wi.metrics;
@@ -170,9 +171,11 @@ fn focus_tiles(ui: &mut egui::Ui, width: f32, wi: &WeekInsights, r: &RangeReport
         (icon::FIRE, busiest.unwrap_or_else(dash), "busiest day"),
         (delta_icon, delta, "vs prior week"),
     ];
-    const COLS: usize = 3;
-    let tile_w = (width - (COLS as f32 - 1.0) * theme::SPACE_SM) / COLS as f32;
-    for row in tiles.chunks(COLS) {
+    // Zoom 1.15 leaves ~348pt of window: Display values no longer fit
+    // three across, so reflow to two.
+    let cols = if width < 360.0 { 2 } else { 3 };
+    let tile_w = (width - (cols as f32 - 1.0) * theme::SPACE_SM) / cols as f32;
+    for row in tiles.chunks(cols) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::SPACE_SM;
             for (glyph, value, caption) in row {
