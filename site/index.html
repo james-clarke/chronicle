@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chronicle — your day, reconstructed</title>
+  <title>Chronicle — your workday, written down for you</title>
   <meta name="description" content="Chronicle runs in the background and groups your window activity, terminal work and commits into the tasks you were actually doing. Standup draft, timeline, reports and chat, all from one file on your own disk. No account, no server, no telemetry.">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -18,7 +18,7 @@
 
 <section class="hero">
   <div class="hero-text">
-    <h1>Your day, reconstructed. Work stored on disk, and nowhere else.</h1>
+    <h1>Your workday, written down for you. Kept on your machine, and nowhere else.</h1>
     <p class="lede">Chronicle runs quietly in the background. An algorithm groups your window activity, terminal work and commits into the tasks you were actually doing, then writes your standup, timeline and reports from that.</p>
     <ul class="nos" aria-label="What Chronicle does not have">
       <li>No account</li>
@@ -52,21 +52,22 @@
   </div>
 </section>
 
-<section class="feature">
-  <figure class="shot">
-    <img src="img/task.webp" width="678" height="1062" alt="Chronicle task card: description, every session that fed the task with its activity strip, and where the time went by app" loading="lazy">
-  </figure>
-  <div class="feature-text">
-    <h2>Each task, broken down.</h2>
-    <p>A closer look at what you did and how you did it. Timestamps, application usage, every session that went into it and a short summary, laid out for you. There whenever you need it.</p>
+<section class="work">
+  <div class="work-text">
+    <h2>Each task, broken down. Each week, added up.</h2>
+    <p>Open any task for a closer look at what you did and how you did it: timestamps, the apps you were in, every session that went into it and a short summary. There whenever you need it.</p>
+    <p>The week rolls the same detail up. Deep work, longest stretch, how often you switched, how it compares with last week, and every task grouped by project with its share of the hours. No spreadsheet, no filling anything in.</p>
   </div>
-</section>
-
-<section class="reports">
-  <h2>Quick, easy reports.</h2>
-  <figure class="shot report-shot">
-    <img src="img/reports.webp" width="678" height="1062" alt="Chronicle weekly report: per-day stacked bars, focus statistics, app share, and tasks grouped by project" loading="lazy">
-  </figure>
+  <div class="work-shots">
+    <figure class="shot">
+      <img src="img/task.webp" width="678" height="1062" alt="Chronicle task card: description, every session that fed the task with its activity strip, and where the time went by app" loading="lazy">
+      <figcaption>One task</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="img/reports.webp" width="678" height="1062" alt="Chronicle weekly report: per-day stacked bars, focus statistics, app share, and tasks grouped by project" loading="lazy">
+      <figcaption>The week</figcaption>
+    </figure>
+  </div>
 </section>
 
 <section class="feature">
@@ -75,78 +76,85 @@
   </figure>
   <div class="feature-text">
     <h2>Ask your own history.</h2>
-    <p>The chat is a language model running inside the app: Qwen3 4B, quantised to 4 bits, loaded through llama.cpp and run on your CPU. It is 2.4 GB on disk, downloaded once on first run, and stays loaded between questions so the second answer is quicker than the first.</p>
-    <p>It knows nothing about you except what is in the database. When you ask a question, Chronicle works out the time range you mean ("this morning", "last Tuesday") and pulls the tasks and activity from that window. If there is no time in the question it runs a full-text search over your tasks and sessions instead and takes the twelve best matches. That text goes into the prompt, and the model writes an answer from it and nothing else.</p>
-    <p>The question, the context and the answer stay inside one process. There is no request to make, so there is nothing to intercept.</p>
+    <p>Questions you cannot answer from memory. What was I doing Tuesday afternoon before the call? How much of this month went to the launch? What did I finish last week? Ask in plain words and get an answer with times attached, taken from what your computer actually saw.</p>
+    <p>The model that answers runs inside the app, on your CPU. It is 2.4 GB on disk, downloaded once on first run, and stays loaded between questions so the second answer is quicker than the first. It knows nothing about you except what is in the database.</p>
+    <p>When you ask, Chronicle works out the time range you mean and pulls the tasks and activity from that window. If there is no time in the question it searches your tasks and sessions for the best matches instead. That text goes into the prompt, and the model writes an answer from it and nothing else. The question, the context and the answer stay inside one process.</p>
   </div>
 </section>
 
 <section class="brain">
   <h2>What it sees</h2>
-  <p class="section-lede">How a morning turns into a task. Left is what happens at each step. Right is the same morning's actual data as it moves through.</p>
+  <p class="section-lede">A morning, from the first window to the standup line. Six steps, and the same morning's data at each one.</p>
+
+  <div class="stage-heads" aria-hidden="true">
+    <span>What happens</span>
+    <span>What it looks like inside</span>
+  </div>
 
   <ol class="stages">
 
     <li class="stage">
       <div class="stage-text">
         <h3>Sees</h3>
-        <p>A small background process notices which window is in front and when you step away. It records the app name, the window title and the process id, and nothing else: no keystrokes, no screenshots, no clipboard. Alongside that, it watches the git repos you list for checkouts and commits, reads the timestamps of your Claude Code sessions, and notices when the microphone opens.</p>
-        <span class="tech">X11 active window and title · idle from XScreenSaver · git and mic polled every 20 s</span>
+        <p>A small background process notices which window is in front and when you step away. It keeps the name of the app and the title of the window: the document, the sheet, the tab, the call. That is the whole record. No keystrokes, no screenshots, no clipboard.</p>
+        <p>Where it can, it also picks up the things that say what the work was: a call starting, a project folder you are working in, a ticket number in a tab.</p>
       </div>
-      <pre class="stage-data"><code>09:51:07  focus   Google-chrome  ACME-11501 club team builder · Jira
-09:58:40  focus   Terminator     ~/dev/contoso — git checkout
-09:58:52  git     contoso         checkout ACME-11501
-10:14:03  focus   Sublime_merge  contoso · 3 conflicts
-10:31:20  claude  ~/dev/contoso   session on ACME-11501</code></pre>
+      <pre class="stage-data"><code>09:02:14  focus  Chrome   Q3 launch brief – Google Docs
+09:31:40  focus  Slack    #launch-planning
+09:40:05  focus  Zoom     Launch sync
+09:40:11  call   microphone on
+10:12:22  focus  Chrome   LAUNCH-241 Landing page copy – Jira
+10:40:10  focus  Figma    Landing page v2</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Groups</h3>
-        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Thirty minutes away closes the batch.</p>
-        <span class="tech">title similarity ≥ 0.8 keeps a span · &lt; 5 s = context switching · 30 min away closes a batch</span>
+        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Half an hour away closes the batch.</p>
       </div>
-      <pre class="stage-data"><code>span  09:51–09:58  Google-chrome   ACME-11501 … · Jira
-span  09:58–10:14  Terminator      ~/dev/contoso
-span  10:14–10:31  Sublime_merge   contoso · 3 conflicts
-span  10:31–11:05  Terminator      ~/dev/contoso
-batch 09:51–11:05  4 spans · 0 away · 3 switches</code></pre>
+      <pre class="stage-data"><code>span   09:02–09:31  Chrome   Q3 launch brief – Google Docs
+span   09:31–09:40  Slack    #launch-planning
+span   09:40–10:12  Zoom     Launch sync · on a call
+span   10:12–10:40  Chrome   LAUNCH-241 Landing page copy – Jira
+span   10:40–11:15  Figma    Landing page v2
+batch  09:02–11:15  5 spans · 32m on a call · 4 switches</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Recognises</h3>
-        <p>Before any model runs, a set of plain rules takes a first pass every minute. A ticket key in a title or a branch name points at that ticket's task. A repo points at the task you last worked on in it. Something you have corrected before gets the same answer again. These are written as provisional, so the timeline fills in while you are still working.</p>
-        <span class="tech">every 60 s · branch → ticket · repo → last active task · past corrections via FTS5 · confidence 0.5, source = prepass</span>
+        <p>Before any model runs, a few plain rules take a first pass every minute. A window that looks like one you have filed before gets the same answer. Work in a project folder points at the last task in that folder. A ticket in the branch you checked out points at that ticket. These are written down as provisional, so the timeline fills in while you are still working.</p>
       </div>
-      <pre class="stage-data"><code>prepass  09:51–11:05  → ACME-11501
-         reason: branch ACME-11501 matches anchor task
-         confidence 0.50  provisional</code></pre>
+      <pre class="stage-data"><code>rules  09:02–09:31  → Q3 launch brief
+       reason: matches a correction you made on Tuesday
+               "Chrome · Q3 launch brief" → Q3 launch brief
+       confidence 0.50  provisional
+
+       09:31–11:15  no rule matched · waiting for the model</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Thinks</h3>
-        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, git and session activity, and a minute-by-minute line of what was in front. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with tasks, each with a time range. The answer is constrained to a fixed shape, so it cannot wander. Those replace the provisional rows.</p>
-        <span class="tech">digest ≤ 3000 tokens · Qwen3 4B Q4_K_M via llama.cpp, in-process, CPU · grammar-constrained JSON · 4096-token window</span>
+        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, calls and other activity, and a minute-by-minute line of what was in front. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with tasks, each with a time range. The answer has to fit a fixed shape, so it cannot wander. Those replace the provisional rows.</p>
       </div>
-      <pre class="stage-data"><code>digest  apps      Terminator 50m · Sublime_merge 17m · Chrome 7m
-        activity  checkout ACME-11501 · claude session contoso
-        context   ACME-11501 club team builder (Jira)
+      <pre class="stage-data"><code>digest  apps     Chrome 57m · Figma 35m · Zoom 32m · Slack 9m
+        call     09:40–10:12
+        context  LAUNCH-241 Landing page copy (Jira)
 
-model   { "task": "reviewing and testing club team builder",
-          "project": "contoso", "ticket": "ACME-11501",
-          "start": "09:51", "end": "11:05" }
+model   { "task": "landing page copy and launch brief",
+          "project": "Q3 launch", "ticket": "LAUNCH-241",
+          "start": "09:02", "end": "11:15" }
+        { "task": "launch sync", "project": "Q3 launch",
+          "start": "09:40", "end": "10:12" }
 
-stored  09:51–11:05  reviewing and testing club team builder
-        confidence 0.90  source = derived</code></pre>
+stored  2 tasks · confidence 0.90</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Learns</h3>
-        <p>It will be wrong sometimes. When you rename, move or throw out a block, the correction is stored with the context it was made in: the app and the window title. The next pass reads those first. Throwing a block out of a task is remembered as a hard no, so the same guess is not made again. Loose time gets folded into runs you can assign in one go, with the task pre-filled from what you did last time.</p>
-        <span class="tech">corrections table + FTS5 · rename / reassign / eject · read by the rules and the model on the next pass</span>
+        <p>It will be wrong sometimes. When you rename, move or throw out a block, the correction is stored with the context it was made in: the app and the window title. The next pass reads those first. Throwing a block out of a task is remembered as a hard no, so the same guess is not made again. Loose time gets folded into runs you can file in one go, with the task pre-filled from what you did last time.</p>
       </div>
       <figure class="stage-shot">
         <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
@@ -157,14 +165,13 @@ stored  09:51–11:05  reviewing and testing club team builder
     <li class="stage">
       <div class="stage-text">
         <h3>Writes</h3>
-        <p>The standup draft, the timeline, the task cards, the reports and the chat all read the same table of intervals. Nothing is computed twice and nothing is stored anywhere else.</p>
-        <span class="tech">one SQLite file · ~/.local/share/chronicle/chronicle.db</span>
+        <p>The standup draft, the timeline, the task cards, the reports and the chat all read the same table. Nothing is worked out twice and nothing is stored anywhere else.</p>
       </div>
-      <pre class="stage-data"><code>standup   reviewed and tested the club team builder
-          (ACME-11501, 1h14m)
-timeline  09:51 ────────────── 11:05  club team builder
-report    contoso · ACME-11501 · 1.23 h
-chat      "what did I do before lunch?" → same rows</code></pre>
+      <pre class="stage-data"><code>standup   Yesterday: landing page copy and the launch brief
+          (LAUNCH-241, 2h13m) · launch sync (32m)
+timeline  09:02 ──────────────── 11:15  Q3 launch
+report    Q3 launch · LAUNCH-241 · 2.2 h
+chat      "what did I do before the launch sync?" → same rows</code></pre>
     </li>
 
   </ol>
@@ -172,29 +179,42 @@ chat      "what did I do before lunch?" → same rows</code></pre>
 
 <section class="leaves">
   <h2>What leaves your machine</h2>
-  <p class="section-lede">Every row is a fact about the code as it is today. It gets a new row when a new source lands.</p>
-  <div class="table-wrap">
-  <table>
-    <thead><tr><th>What</th><th>Where it lives</th><th>Network</th></tr></thead>
-    <tbody>
-      <tr><td>Focus events, tasks, corrections, chat</td><td><code>~/.local/share/chronicle/chronicle.db</code> (SQLite, FTS5)</td><td>none</td></tr>
-      <tr><td>The model</td><td><code>~/.local/share/chronicle/models/</code>, 2.4 GB</td><td>one download from Hugging Face, first run</td></tr>
-      <tr><td>Standup, reports, chat answers</td><td>generated in-process from that file</td><td>none</td></tr>
-      <tr><td>Git activity</td><td>read from the <code>.git</code> of folders you list</td><td>none</td></tr>
-      <tr><td>Claude Code sessions</td><td>read from <code>~/.claude/projects</code>: timestamps, folder, branch</td><td>none</td></tr>
-      <tr><td>Calls</td><td>PipeWire says whether a mic is open. Not audio.</td><td>none</td></tr>
-      <tr><td>Pull requests</td><td>the <code>gh</code> CLI, only when you turn it on</td><td>GitHub, with your token</td></tr>
-      <tr><td>Browser tab titles</td><td>optional, from the stock ActivityWatch extension</td><td>loopback only, <code>127.0.0.1:5600</code></td></tr>
-      <tr><td>Ticket tracker, calendar</td><td>MCP servers you add in Settings</td><td>that server, when a task asks</td></tr>
-    </tbody>
-  </table>
+  <p class="section-lede">Almost nothing. This is the whole list, and it is a fact about the code as it is today.</p>
+
+  <div class="boundary">
+    <div class="inside">
+      <h3><span class="dot green"></span>Stays on your machine</h3>
+      <ul>
+        <li><strong>Everything it records.</strong> Window titles, tasks, corrections, chat. One SQLite file: <code>~/.local/share/chronicle/chronicle.db</code></li>
+        <li><strong>Everything it writes.</strong> Standup, reports, task cards, chat answers. Generated in-process from that file.</li>
+        <li><strong>The model.</strong> 2.4 GB on disk, runs on your CPU.</li>
+        <li><strong>What it reads locally.</strong> Project folders you list. Claude Code session times. Whether the mic is open, never the audio.</li>
+        <li><strong>Browser tab titles</strong>, if you want them, arrive over loopback from the stock ActivityWatch extension. <code>127.0.0.1</code> only.</li>
+      </ul>
+    </div>
+    <div class="outside">
+      <h3><span class="dot amber"></span>Goes out</h3>
+      <ul>
+        <li><strong>One download.</strong> The model, from Hugging Face, on first run. Never again.</li>
+        <li><strong>Only if you connect them.</strong> A ticket tracker or calendar you add in Settings is asked when a task needs it. GitHub pull requests, with your own token, if you switch them on.</li>
+      </ul>
+    </div>
   </div>
-  <p class="verify"><strong>Check for yourself.</strong> While Chronicle is running, <code>ss -tnp | grep chronicle</code> shows one listener on 127.0.0.1. <code>tcpdump -i any -w chronicle.pcap</code> records nothing after the model download. Or pull the cable. Everything keeps working.</p>
-  <dl class="numbers">
-    <div><dt>52 MB</dt><dd>one binary, no runtime, no browser engine</dd></div>
-    <div><dt>1.6 MB</dt><dd>database after eleven days of my own use, 8,236 focus events</dd></div>
-    <div><dt>2.4 GB</dt><dd>the model, on disk, on the CPU</dd></div>
-  </dl>
+
+  <div class="proof">
+    <div class="verify">
+      <h3>Check for yourself</h3>
+      <p>While Chronicle is running:</p>
+      <pre><code>ss -tnp | grep chronicle        # one listener, on 127.0.0.1
+tcpdump -i any -w chronicle.pcap # nothing after the model download</code></pre>
+      <p>Or pull the cable. Everything keeps working.</p>
+    </div>
+    <dl class="numbers">
+      <div><dt>52 MB</dt><dd>one binary, no runtime, no browser engine</dd></div>
+      <div><dt>1.6 MB</dt><dd>database after eleven days of use, 8,236 focus events</dd></div>
+      <div><dt>2.4 GB</dt><dd>the model, on disk, on the CPU</dd></div>
+    </dl>
+  </div>
 </section>
 
 </main>
