@@ -1158,3 +1158,221 @@ fn unassigned_runs_fold_and_assign_claims_per_batch() {
         storage::assign_unassigned(&mut conn, ms_to_ts(71_000), 50_000, 60_000, task).unwrap();
     assert_eq!(none, 0);
 }
+
+#[test]
+fn eject_splits_interval_and_blocks_suggestion() {
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m24_eject.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO batches (start_ts, end_ts, status) VALUES (0, 100000, 'done')",
+        [],
+    )
+    .unwrap();
+    let spans = [
+        (10_000, 20_000, "Code", "chronicle — storage.rs"),
+        (20_000, 30_000, "Firefox", "Jira ACME-7 board"),
+        (30_000, 60_000, "Code", "chronicle — digest.rs"),
+    ];
+    for (s, e, app, title) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, 'focus', 1)",
+            rusqlite::params![s, e, app, title],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, created_ts) VALUES ('Chronicle', 'chronicle', 'open', 0)",
+        [],
+    )
+    .unwrap();
+    let task = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, 1, 10000, 60000, 0.9)",
+        [task],
+    )
+    .unwrap();
+    let interval = conn.last_insert_rowid();
+    let source: String = conn
+        .query_row(
+            "SELECT source FROM intervals WHERE id=?1",
+            [interval],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(source, "derived", "migration default");
+
+    // A block outside the interval ejects nothing and logs nothing.
+    let none =
+        storage::split_interval(&mut conn, ms_to_ts(70_000), interval, 60_000, 70_000).unwrap();
+    assert_eq!(none, 0);
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM corrections", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // Middle block out: left piece keeps the id, right piece is a new row of
+    // the same task/batch/confidence/source, the block is unassigned again.
+    let ejected =
+        storage::split_interval(&mut conn, ms_to_ts(70_000), interval, 20_000, 30_000).unwrap();
+    assert_eq!(ejected, 10_000);
+    let pieces: Vec<(i64, i64, i64, f64, String)> = conn
+        .prepare("SELECT id, start_ts, end_ts, confidence, source FROM intervals WHERE task_id=?1 ORDER BY start_ts")
+        .unwrap()
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(pieces.len(), 2, "{pieces:?}");
+    assert_eq!(
+        (
+            pieces[0].0,
+            pieces[0].1,
+            pieces[0].2,
+            pieces[0].3,
+            pieces[0].4.as_str()
+        ),
+        (interval, 10_000, 20_000, 0.9, "derived")
+    );
+    assert_eq!(
+        (pieces[1].1, pieces[1].2, pieces[1].3, pieces[1].4.as_str()),
+        (30_000, 60_000, 0.9, "derived")
+    );
+    assert_ne!(pieces[1].0, interval);
+    let runs = storage::unassigned_runs(&conn, 0, 100_000, 1_000).unwrap();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!((runs[0].start_ts, runs[0].end_ts), (20_000, 30_000));
+    let (kind, old_label, new_label, old_project, interval_id, ctx): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT kind, old_label, new_label, old_project, interval_id, ctx FROM corrections WHERE task_id=?1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (
+            kind.as_str(),
+            old_label.as_str(),
+            new_label.as_str(),
+            old_project.as_deref(),
+            interval_id
+        ),
+        (
+            "eject",
+            "Chronicle",
+            "(unassigned)",
+            Some("chronicle"),
+            Some(interval)
+        )
+    );
+    assert_eq!(
+        ctx, "Firefox Jira ACME-7 board\n",
+        "only the block's spans"
+    );
+
+    // The eject is a negative: even after the user assigns similar work to
+    // the task elsewhere, that text no longer suggests it, and the digest's
+    // few-shot set keeps only the positive.
+    conn.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
+         VALUES (1, ?1, '(unassigned)', 'Chronicle', NULL, 'chronicle', 'Firefox Jira ACME-7 board', 'assign')",
+        [task],
+    )
+    .unwrap();
+    assert!(
+        storage::suggest_correction(&conn, "Firefox Jira ACME-7 board")
+            .unwrap()
+            .is_none(),
+        "ejected task must not be suggested"
+    );
+    let spans = storage::spans_in_range(&conn, 20_000, 30_000).unwrap();
+    let few_shot = storage::similar_corrections(&conn, &spans, 4).unwrap();
+    assert_eq!(few_shot.len(), 1, "{few_shot:?}");
+    assert_eq!(few_shot[0].kind, "assign");
+    // A different task with the same evidence is still suggested.
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, created_ts) VALUES ('Board triage', NULL, 'open', 0)",
+        [],
+    )
+    .unwrap();
+    let other = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind)
+         VALUES (2, ?1, '(unassigned)', 'Board triage', 'Firefox Jira ACME-7 board', 'assign')",
+        [other],
+    )
+    .unwrap();
+    assert_eq!(
+        storage::suggest_correction(&conn, "Firefox Jira ACME-7 board")
+            .unwrap()
+            .map(|c| c.new_label)
+            .as_deref(),
+        Some("Board triage")
+    );
+
+    // Ejecting a whole interval removes the row (references cleared) and a
+    // derived task left with nothing is gone; a user task stays.
+    conn.execute(
+        "INSERT INTO tasks (label, status, source, created_ts) VALUES ('Derived only', 'open', 'derived', 0)",
+        [],
+    )
+    .unwrap();
+    let derived = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source) VALUES (?1, 1, 60000, 70000, 0.8, 'prepass')",
+        [derived],
+    )
+    .unwrap();
+    let whole = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind, interval_id)
+         VALUES (3, ?1, 'x', 'Derived only', '', 'rename', ?2)",
+        rusqlite::params![derived, whole],
+    )
+    .unwrap();
+    let ejected = storage::split_interval(&mut conn, ms_to_ts(80_000), whole, 0, 100_000).unwrap();
+    assert_eq!(ejected, 10_000);
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM intervals WHERE id=?1", [whole], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0);
+    let refs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM corrections WHERE interval_id=?1",
+            [whole],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(refs, 0, "dangling interval refs cleared");
+    let alive: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tasks WHERE id=?1", [derived], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(alive, 1, "a task with corrections is kept for its history");
+
+    // Reassign by hand marks the moved interval as the user's.
+    storage::reassign_intervals(&mut conn, ms_to_ts(90_000), &[interval], other).unwrap();
+    let source: String = conn
+        .query_row(
+            "SELECT source FROM intervals WHERE id=?1",
+            [interval],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(source, "user");
+}

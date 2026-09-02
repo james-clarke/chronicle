@@ -163,6 +163,9 @@ pub struct Correction {
     pub new_label: String,
     pub old_project: Option<String>,
     pub new_project: Option<String>,
+    /// 'rename' | 'reassign' | 'assign' | 'merge' | 'eject' | …; an eject's
+    /// old_* is the task the work was pulled from, new_label '(unassigned)'.
+    pub kind: String,
 }
 
 /// The model's interval JSON (derive v3), parsed. Lives in core (not the

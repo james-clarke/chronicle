@@ -33,6 +33,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/008_task_workspace.sql")),
         M::up(include_str!("../migrations/009_standup_drafts.sql")),
         M::up(include_str!("../migrations/010_activity_events.sql")),
+        M::up(include_str!("../migrations/011_interval_source.sql")),
     ])
 });
 
@@ -1527,7 +1528,7 @@ pub fn reassign_intervals(
             ],
         )?;
         tx.execute(
-            "UPDATE intervals SET task_id=?1 WHERE id=?2",
+            "UPDATE intervals SET task_id=?1, source='user' WHERE id=?2",
             params![to_task, interval_id],
         )?;
     }
@@ -1663,8 +1664,8 @@ pub fn assign_unassigned(
             continue;
         }
         tx.execute(
-            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
-             VALUES (?1, ?2, ?3, ?4, 1.0)",
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source)
+             VALUES (?1, ?2, ?3, ?4, 1.0, 'user')",
             params![to_task, batch, s, e],
         )?;
         first_interval.get_or_insert(tx.last_insert_rowid());
@@ -1685,6 +1686,84 @@ pub fn assign_unassigned(
     }
     tx.commit()?;
     Ok(claimed)
+}
+
+/// Pull `[start_ts, end_ts)` out of an interval ('eject' correction): the
+/// interval shrinks to what lies outside the block (the surviving left piece
+/// keeps the id; a right remainder becomes a new row of the same task,
+/// batch, confidence and source), the block's app/title mix is stored as a
+/// negative for that task, and a derived task left with no time is removed.
+/// Returns the ms ejected (0 when the block misses the interval).
+pub fn split_interval(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    interval_id: i64,
+    start_ts: i64,
+    end_ts: i64,
+) -> Result<i64, StorageError> {
+    let tx = conn.transaction()?;
+    let (task_id, batch_id, lo, hi, confidence, source): (i64, i64, i64, i64, f64, String) = tx
+        .query_row(
+            "SELECT task_id, batch_id, start_ts, end_ts, confidence, source
+             FROM intervals WHERE id=?1",
+            [interval_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?;
+    let s = start_ts.max(lo);
+    let e = end_ts.min(hi);
+    if e <= s {
+        return Ok(0);
+    }
+    let survivor = if s > lo {
+        tx.execute(
+            "UPDATE intervals SET end_ts=?1 WHERE id=?2",
+            params![s, interval_id],
+        )?;
+        if e < hi {
+            tx.execute(
+                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![task_id, batch_id, e, hi, confidence, source],
+            )?;
+        }
+        Some(interval_id)
+    } else if e < hi {
+        tx.execute(
+            "UPDATE intervals SET start_ts=?1 WHERE id=?2",
+            params![e, interval_id],
+        )?;
+        Some(interval_id)
+    } else {
+        tx.execute(
+            "UPDATE corrections SET interval_id=NULL WHERE interval_id=?1",
+            [interval_id],
+        )?;
+        tx.execute("DELETE FROM intervals WHERE id=?1", [interval_id])?;
+        None
+    };
+    let (label, project): (String, Option<String>) = tx.query_row(
+        "SELECT label, project FROM tasks WHERE id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let ctx = span_ctx(&tx, s, e)?;
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
+         VALUES (?1, ?2, ?3, '(unassigned)', ?4, NULL, ?5, 'eject', ?6)",
+        params![ts_to_ms(ts), task_id, label, project, ctx, survivor],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    Ok(e - s)
 }
 
 /// Fold one task into another ('merge' correction): every interval moves to
@@ -1743,7 +1822,10 @@ pub fn similar_corrections(
     spans: &[SpanDraft],
     k: usize,
 ) -> Result<Vec<Correction>, StorageError> {
-    corrections_matching(conn, &fts_or_query(spans), k)
+    Ok(corrections_matching(conn, &fts_or_query(spans), k)?
+        .into_iter()
+        .filter(|c| c.kind != "eject")
+        .collect())
 }
 
 /// Best past correction for free text (an unassigned run's app/title mix):
@@ -1752,10 +1834,30 @@ pub fn similar_corrections(
 /// app name) carry no signal and are dropped first, so a run only gets a
 /// suggestion when something distinctive about it matched. Small corpora
 /// keep every term: with a handful of rows, frequency says nothing yet.
+/// A task the user ejected similar work from (an 'eject' correction in the
+/// same match set) is never suggested, whatever its rank.
 pub fn suggest_correction(
     conn: &Connection,
     text: &str,
 ) -> Result<Option<Correction>, StorageError> {
+    let ranked = corrections_matching(conn, &distinctive_fts_query(conn, text)?, 16)?;
+    let ejected: Vec<(&str, Option<&str>)> = ranked
+        .iter()
+        .filter(|c| c.kind == "eject")
+        .map(|c| (c.old_label.as_str(), c.old_project.as_deref()))
+        .collect();
+    Ok(ranked
+        .iter()
+        .find(|c| {
+            c.kind != "eject"
+                && !ejected.contains(&(c.new_label.as_str(), c.new_project.as_deref()))
+        })
+        .cloned())
+}
+
+/// OR-of-terms FTS5 query from free text with the corpus-common terms
+/// pruned (see `suggest_correction`).
+fn distinctive_fts_query(conn: &Connection, text: &str) -> Result<String, StorageError> {
     let mut terms = Vec::new();
     push_fts_terms(text, &mut terms);
     terms.truncate(32);
@@ -1772,14 +1874,14 @@ pub fn suggest_correction(
         }
         terms = kept;
     }
-    Ok(corrections_matching(conn, &join_fts_terms(terms), 1)?.pop())
+    Ok(join_fts_terms(terms))
 }
 
 /// Corrections needed before term frequency prunes the suggestion query.
 const IDF_MIN_ROWS: i64 = 4;
 
-/// Top-k corrections for an FTS query, bm25-ranked, deduped by resulting
-/// label + project.
+/// Top-k corrections for an FTS query, bm25-ranked, deduped by kind +
+/// resulting label + project.
 fn corrections_matching(
     conn: &Connection,
     query: &str,
@@ -1789,7 +1891,7 @@ fn corrections_matching(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT c.old_label, c.new_label, c.old_project, c.new_project
+        "SELECT c.old_label, c.new_label, c.old_project, c.new_project, c.kind
          FROM corrections_fts f JOIN corrections c ON c.id = f.rowid
          WHERE corrections_fts MATCH ?1 ORDER BY f.rank LIMIT ?2",
     )?;
@@ -1799,15 +1901,15 @@ fn corrections_matching(
             new_label: r.get(1)?,
             old_project: r.get(2)?,
             new_project: r.get(3)?,
+            kind: r.get(4)?,
         })
     })?;
     let mut out: Vec<Correction> = Vec::new();
     for c in rows {
         let c = c?;
-        if out
-            .iter()
-            .any(|o| o.new_label == c.new_label && o.new_project == c.new_project)
-        {
+        if out.iter().any(|o| {
+            o.kind == c.kind && o.new_label == c.new_label && o.new_project == c.new_project
+        }) {
             continue;
         }
         out.push(c);
@@ -2216,6 +2318,75 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "{table} exists and starts empty");
         }
+    }
+
+    #[test]
+    fn migration_011_marks_m23_assigns_as_user() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let upto_010 = rusqlite_migration::Migrations::new(
+            (1..=10)
+                .map(|n| match n {
+                    1 => rusqlite_migration::M::up(include_str!("../migrations/001_schema.sql")),
+                    2 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/002_corrections_fts.sql"
+                    )),
+                    3 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/003_spans_url_meta.sql"
+                    )),
+                    4 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/004_task_identity.sql"
+                    )),
+                    5 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/005_chat_conversations.sql"
+                    )),
+                    6 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/006_task_descriptions.sql"
+                    )),
+                    7 => {
+                        rusqlite_migration::M::up(include_str!("../migrations/007_vcs_events.sql"))
+                    }
+                    8 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/008_task_workspace.sql"
+                    )),
+                    9 => rusqlite_migration::M::up(include_str!(
+                        "../migrations/009_standup_drafts.sql"
+                    )),
+                    _ => rusqlite_migration::M::up(include_str!(
+                        "../migrations/010_activity_events.sql"
+                    )),
+                })
+                .collect(),
+        );
+        upto_010.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done'), (2, 100, 200, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts) VALUES
+               (1, 'assigned', 'open', 'user', 0), (2, 'derived', 'open', 'derived', 0);
+             -- 1: the assign's recorded interval; 2: same assign, second batch;
+             -- 3: model 1.0 on a task never assigned; 4: model 0.9 on the assigned task.
+             INSERT INTO intervals (id, task_id, batch_id, start_ts, end_ts, confidence) VALUES
+               (1, 1, 1, 0, 50, 1.0), (2, 1, 2, 100, 150, 1.0), (3, 2, 1, 50, 100, 1.0), (4, 1, 2, 150, 200, 0.9);
+             INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind, interval_id)
+               VALUES (0, 1, '(unassigned)', 'assigned', '', 'assign', 1);",
+        )
+        .unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let sources: Vec<(i64, String)> = conn
+            .prepare("SELECT id, source FROM intervals ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            sources,
+            vec![
+                (1, "user".into()),
+                (2, "user".into()),
+                (3, "derived".into()),
+                (4, "derived".into())
+            ]
+        );
     }
 
     #[test]
