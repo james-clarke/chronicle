@@ -177,46 +177,6 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
   </ol>
 </section>
 
-<section class="leaves">
-  <h2>What leaves your machine</h2>
-  <p class="section-lede">Almost nothing. This is the whole list, and it is a fact about the code as it is today.</p>
-
-  <div class="boundary">
-    <div class="inside">
-      <h3><span class="dot green"></span>Stays on your machine</h3>
-      <ul>
-        <li><strong>Everything it records.</strong> Window titles, tasks, corrections, chat. One SQLite file: <code>~/.local/share/chronicle/chronicle.db</code></li>
-        <li><strong>Everything it writes.</strong> Standup, reports, task cards, chat answers. Generated in-process from that file.</li>
-        <li><strong>The model.</strong> 2.4 GB on disk, runs on your CPU.</li>
-        <li><strong>What it reads locally.</strong> Project folders you list. Claude Code session times. Whether the mic is open, never the audio.</li>
-        <li><strong>Browser tab titles</strong>, if you want them, arrive over loopback from the stock ActivityWatch extension. <code>127.0.0.1</code> only.</li>
-      </ul>
-    </div>
-    <div class="outside">
-      <h3><span class="dot amber"></span>Goes out</h3>
-      <ul>
-        <li><strong>One download.</strong> The model, from Hugging Face, on first run. Never again.</li>
-        <li><strong>Only if you connect them.</strong> A ticket tracker or calendar you add in Settings is asked when a task needs it. GitHub pull requests, with your own token, if you switch them on.</li>
-      </ul>
-    </div>
-  </div>
-
-  <div class="proof">
-    <div class="verify">
-      <h3>Check for yourself</h3>
-      <p>While Chronicle is running:</p>
-      <pre><code>ss -tnp | grep chronicle        # one listener, on 127.0.0.1
-tcpdump -i any -w chronicle.pcap # nothing after the model download</code></pre>
-      <p>Or pull the cable. Everything keeps working.</p>
-    </div>
-    <dl class="numbers">
-      <div><dt>52 MB</dt><dd>one binary, no runtime, no browser engine</dd></div>
-      <div><dt>1.6 MB</dt><dd>database after eleven days of use, 8,236 focus events</dd></div>
-      <div><dt>2.4 GB</dt><dd>the model, on disk, on the CPU</dd></div>
-    </dl>
-  </div>
-</section>
-
 </main>
 
 </body>
