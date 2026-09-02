@@ -3,47 +3,49 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chronicle — your day, reconstructed from window titles</title>
-  <meta name="description" content="Chronicle watches which window is in front, groups that into tasks with a model that runs inside the app, and keeps all of it in one SQLite file on your machine. Standup draft, timeline, weekly report, local chat. No account, no server, no telemetry.">
+  <title>Chronicle — your day, reconstructed</title>
+  <meta name="description" content="Chronicle runs in the background and groups your window activity, terminal work and commits into the tasks you were actually doing. Standup draft, timeline, reports and chat, all from one file on your own disk. No account, no server, no telemetry.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header class="top">
-  <a class="brand" href="#">Chronicle</a>
-  <a class="top-link" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Email me</a>
+  <a class="brand" href="#"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>chronicle</a>
+  <a class="top-link" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Get in touch</a>
 </header>
 
 <main>
 
 <section class="hero">
   <div class="hero-text">
-    <h1>Your day, reconstructed from window titles. On your disk, nowhere else.</h1>
-    <p class="lede">Chronicle watches which window is in front, groups that into tasks with a model that runs inside the app, and keeps all of it in one SQLite file in your home folder.</p>
-    <p class="no-list">No account. No server. No telemetry. No cloud model. No screenshots. No keylogging.</p>
-    <div class="cta">
-      <a class="btn primary" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Email me</a>
-      <span class="status">Linux (X11) today. macOS and Windows next. Ask for a build.</span>
-    </div>
+    <h1>Your day, reconstructed. Work stored on disk, and nowhere else.</h1>
+    <p class="lede">Chronicle runs quietly in the background. An algorithm groups your window activity, terminal work and commits into the tasks you were actually doing, then writes your standup, timeline and reports from that.</p>
+    <ul class="nos" aria-label="What Chronicle does not have">
+      <li>No account</li>
+      <li>No server</li>
+      <li>No telemetry</li>
+      <li>No cloud model</li>
+      <li>No screenshots</li>
+      <li>No keylogging</li>
+    </ul>
   </div>
   <figure class="shot hero-shot">
     <img src="img/home.webp" width="678" height="1062" alt="Chronicle home: a standup draft for Tuesday written from the previous day's activity, naming ticket ACME-11342 and the render pipeline work, above the two tasks currently being worked on">
   </figure>
 </section>
 
-<section class="charts-section">
+<section class="day">
   <h2>The day, as it happened.</h2>
-  <p>Wednesday: 7h03m focused, 1h07m away, 24 switches, 12:00 is the hour that fragments. Focus events are grouped into blocks and each block is matched to a task, declared or inferred.</p>
-  <div class="charts">
-    <figure class="shot">
+  <div class="deck">
+    <figure class="card c1">
       <img src="img/timeline-band.webp" width="678" height="1062" alt="Chronicle timeline, band view: one strip across the day showing focused, away and switching periods, above the day's tasks with their time ranges and apps" loading="lazy">
       <figcaption>Band</figcaption>
     </figure>
-    <figure class="shot">
+    <figure class="card c2">
       <img src="img/timeline-lanes.webp" width="678" height="1062" alt="Chronicle timeline, lanes view: one horizontal lane per task showing when each was active through the day" loading="lazy">
       <figcaption>Lanes</figcaption>
     </figure>
-    <figure class="shot">
+    <figure class="card c3">
       <img src="img/timeline-hours.webp" width="678" height="1062" alt="Chronicle timeline, hours view: a stacked bar per hour showing which tasks filled it" loading="lazy">
       <figcaption>Hours</figcaption>
     </figure>
@@ -55,19 +57,16 @@
     <img src="img/task.webp" width="678" height="1062" alt="Chronicle task card: description, every session that fed the task with its activity strip, and where the time went by app" loading="lazy">
   </figure>
   <div class="feature-text">
-    <h2>Every task, one card.</h2>
-    <p>Open any block for its summary, every session that went into it, and where the time went. Ask about it, rename it, close it.</p>
+    <h2>Each task, broken down.</h2>
+    <p>A closer look at what you did and how you did it. Timestamps, application usage, every session that went into it and a short summary, laid out for you. There whenever you need it.</p>
   </div>
 </section>
 
-<section class="feature reverse">
-  <figure class="shot">
+<section class="reports">
+  <h2>Quick, easy reports.</h2>
+  <figure class="shot report-shot">
     <img src="img/reports.webp" width="678" height="1062" alt="Chronicle weekly report: per-day stacked bars, focus statistics, app share, and tasks grouped by project" loading="lazy">
   </figure>
-  <div class="feature-text">
-    <h2>The week, without a spreadsheet.</h2>
-    <p>This week so far: longest block 1h40m, deep work 7h58m, 66 switches, down 1h01m on last week. Tasks grouped by project with their share of the hours.</p>
-  </div>
 </section>
 
 <section class="feature">
@@ -76,39 +75,99 @@
   </figure>
   <div class="feature-text">
     <h2>Ask your own history.</h2>
-    <p>"What did I work on this morning?" Answered by the model on your machine, reading the database on your machine. The question never leaves either.</p>
+    <p>The chat is a language model running inside the app: Qwen3 4B, quantised to 4 bits, loaded through llama.cpp and run on your CPU. It is 2.4 GB on disk, downloaded once on first run, and stays loaded between questions so the second answer is quicker than the first.</p>
+    <p>It knows nothing about you except what is in the database. When you ask a question, Chronicle works out the time range you mean ("this morning", "last Tuesday") and pulls the tasks and activity from that window. If there is no time in the question it runs a full-text search over your tasks and sessions instead and takes the twelve best matches. That text goes into the prompt, and the model writes an answer from it and nothing else.</p>
+    <p>The question, the context and the answer stay inside one process. There is no request to make, so there is nothing to intercept.</p>
   </div>
 </section>
 
-<section class="how">
+<section class="brain">
   <h2>What it sees</h2>
-  <p class="section-lede">Three focus events in, one task out. This is the whole mechanism, from a real morning.</p>
-  <pre class="pipeline"><code>09:51:07  Google-chrome   ACME-11501 Test Basketball club team builder · Jira
-09:58:40  Terminator      ~/dev/contoso — git checkout ACME-11501
-10:14:03  Sublime_merge   contoso · 3 conflicts
-                          ↓ derive
-task      reviewing and testing club team builder   ACME-11501 · contoso   09:51–11:05</code></pre>
-  <ol class="steps">
-    <li><strong>Capture.</strong> A small background process notices which window is in front and when you step away. It records the app name, the window title and the process id. That is the whole record: no keystrokes, no screenshots, no clipboard.<span class="tech">X11 <code>_NET_ACTIVE_WINDOW</code> and window titles · idle from XScreenSaver</span></li>
-    <li><strong>Derive.</strong> A language model running inside the app groups that activity into tasks and writes a line for each.<span class="tech">Qwen3 1.7B, Q4_K_M, via llama.cpp, in-process on the CPU · downloaded once, then never again</span></li>
-    <li><strong>Correct.</strong> It guesses. You fix it in bulk, and it learns from the fix. Rename, move, merge; corrections are stored and the next pass reads them.<span class="tech">Home › Unassigned › organize folds a day's loose time into runs and pre-fills the task from past corrections</span></li>
-    <li><strong>Use.</strong> Standup draft each morning, a weekly report, a card per task, a chat that answers from your own history.<span class="tech">All four read the same file</span></li>
-  </ol>
-  <figure class="shot how-shot">
-    <img src="img/triage.webp" width="678" height="1062" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
-    <figcaption>Organize: the day's unassigned time, one run at a time, with the task pre-filled from what you did last time.</figcaption>
-  </figure>
-</section>
+  <p class="section-lede">How a morning turns into a task. Left is what happens at each step. Right is the same morning's actual data as it moves through.</p>
 
-<section class="feature reverse sources">
-  <figure class="shot">
-    <img src="img/connections.webp" width="678" height="1062" alt="Chronicle settings, Connections: a Jira MCP server with 63 tools, two watched git repos, and local sources for Claude Code sessions, GitHub pull requests and calls" loading="lazy">
-  </figure>
-  <div class="feature-text">
-    <h2>Sources</h2>
-    <p><strong>On this machine:</strong> git repos you list, Claude Code session transcripts, whether the microphone is open. Each one becomes evidence on the timeline and in the digest.</p>
-    <p><strong>Servers you add:</strong> a ticket tracker over MCP. A ticket key in a window title becomes a task with its real name and context attached. Jira today; GitHub, Google Calendar and CalDAV presets next.</p>
-  </div>
+  <ol class="stages">
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Sees</h3>
+        <p>A small background process notices which window is in front and when you step away. It records the app name, the window title and the process id, and nothing else: no keystrokes, no screenshots, no clipboard. Alongside that, it watches the git repos you list for checkouts and commits, reads the timestamps of your Claude Code sessions, and notices when the microphone opens.</p>
+        <span class="tech">X11 active window and title · idle from XScreenSaver · git and mic polled every 20 s</span>
+      </div>
+      <pre class="stage-data"><code>09:51:07  focus   Google-chrome  ACME-11501 club team builder · Jira
+09:58:40  focus   Terminator     ~/dev/contoso — git checkout
+09:58:52  git     contoso         checkout ACME-11501
+10:14:03  focus   Sublime_merge  contoso · 3 conflicts
+10:31:20  claude  ~/dev/contoso   session on ACME-11501</code></pre>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Groups</h3>
+        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Thirty minutes away closes the batch.</p>
+        <span class="tech">title similarity ≥ 0.8 keeps a span · &lt; 5 s = context switching · 30 min away closes a batch</span>
+      </div>
+      <pre class="stage-data"><code>span  09:51–09:58  Google-chrome   ACME-11501 … · Jira
+span  09:58–10:14  Terminator      ~/dev/contoso
+span  10:14–10:31  Sublime_merge   contoso · 3 conflicts
+span  10:31–11:05  Terminator      ~/dev/contoso
+batch 09:51–11:05  4 spans · 0 away · 3 switches</code></pre>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Recognises</h3>
+        <p>Before any model runs, a set of plain rules takes a first pass every minute. A ticket key in a title or a branch name points at that ticket's task. A repo points at the task you last worked on in it. Something you have corrected before gets the same answer again. These are written as provisional, so the timeline fills in while you are still working.</p>
+        <span class="tech">every 60 s · branch → ticket · repo → last active task · past corrections via FTS5 · confidence 0.5, source = prepass</span>
+      </div>
+      <pre class="stage-data"><code>prepass  09:51–11:05  → ACME-11501
+         reason: branch ACME-11501 matches anchor task
+         confidence 0.50  provisional</code></pre>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Thinks</h3>
+        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, git and session activity, and a minute-by-minute line of what was in front. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with tasks, each with a time range. The answer is constrained to a fixed shape, so it cannot wander. Those replace the provisional rows.</p>
+        <span class="tech">digest ≤ 3000 tokens · Qwen3 4B Q4_K_M via llama.cpp, in-process, CPU · grammar-constrained JSON · 4096-token window</span>
+      </div>
+      <pre class="stage-data"><code>digest  apps      Terminator 50m · Sublime_merge 17m · Chrome 7m
+        activity  checkout ACME-11501 · claude session contoso
+        context   ACME-11501 club team builder (Jira)
+
+model   { "task": "reviewing and testing club team builder",
+          "project": "contoso", "ticket": "ACME-11501",
+          "start": "09:51", "end": "11:05" }
+
+stored  09:51–11:05  reviewing and testing club team builder
+        confidence 0.90  source = derived</code></pre>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Learns</h3>
+        <p>It will be wrong sometimes. When you rename, move or throw out a block, the correction is stored with the context it was made in: the app and the window title. The next pass reads those first. Throwing a block out of a task is remembered as a hard no, so the same guess is not made again. Loose time gets folded into runs you can assign in one go, with the task pre-filled from what you did last time.</p>
+        <span class="tech">corrections table + FTS5 · rename / reassign / eject · read by the rules and the model on the next pass</span>
+      </div>
+      <figure class="stage-shot">
+        <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
+        <figcaption>Organize: unassigned time, one run at a time, task pre-filled.</figcaption>
+      </figure>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Writes</h3>
+        <p>The standup draft, the timeline, the task cards, the reports and the chat all read the same table of intervals. Nothing is computed twice and nothing is stored anywhere else.</p>
+        <span class="tech">one SQLite file · ~/.local/share/chronicle/chronicle.db</span>
+      </div>
+      <pre class="stage-data"><code>standup   reviewed and tested the club team builder
+          (ACME-11501, 1h14m)
+timeline  09:51 ────────────── 11:05  club team builder
+report    contoso · ACME-11501 · 1.23 h
+chat      "what did I do before lunch?" → same rows</code></pre>
+    </li>
+
+  </ol>
 </section>
 
 <section class="leaves">
@@ -119,7 +178,7 @@ task      reviewing and testing club team builder   ACME-11501 · contoso   09:5
     <thead><tr><th>What</th><th>Where it lives</th><th>Network</th></tr></thead>
     <tbody>
       <tr><td>Focus events, tasks, corrections, chat</td><td><code>~/.local/share/chronicle/chronicle.db</code> (SQLite, FTS5)</td><td>none</td></tr>
-      <tr><td>The model</td><td><code>~/.local/share/chronicle/models/</code>, 1.1 GB</td><td>one download from Hugging Face, first run</td></tr>
+      <tr><td>The model</td><td><code>~/.local/share/chronicle/models/</code>, 2.4 GB</td><td>one download from Hugging Face, first run</td></tr>
       <tr><td>Standup, reports, chat answers</td><td>generated in-process from that file</td><td>none</td></tr>
       <tr><td>Git activity</td><td>read from the <code>.git</code> of folders you list</td><td>none</td></tr>
       <tr><td>Claude Code sessions</td><td>read from <code>~/.claude/projects</code>: timestamps, folder, branch</td><td>none</td></tr>
@@ -127,7 +186,6 @@ task      reviewing and testing club team builder   ACME-11501 · contoso   09:5
       <tr><td>Pull requests</td><td>the <code>gh</code> CLI, only when you turn it on</td><td>GitHub, with your token</td></tr>
       <tr><td>Browser tab titles</td><td>optional, from the stock ActivityWatch extension</td><td>loopback only, <code>127.0.0.1:5600</code></td></tr>
       <tr><td>Ticket tracker, calendar</td><td>MCP servers you add in Settings</td><td>that server, when a task asks</td></tr>
-      <tr><td>Feedback</td><td>your mail client</td><td>when you hit send</td></tr>
     </tbody>
   </table>
   </div>
@@ -135,24 +193,11 @@ task      reviewing and testing club team builder   ACME-11501 · contoso   09:5
   <dl class="numbers">
     <div><dt>52 MB</dt><dd>one binary, no runtime, no browser engine</dd></div>
     <div><dt>1.6 MB</dt><dd>database after eleven days of my own use, 8,236 focus events</dd></div>
-    <div><dt>1.1 GB</dt><dd>the model, on disk, on the CPU</dd></div>
+    <div><dt>2.4 GB</dt><dd>the model, on disk, on the CPU</dd></div>
   </dl>
 </section>
 
-<section class="note">
-  <h2>From the developer</h2>
-  <p>I built this because my standup was a guess and my timesheet was fiction. It is one person's project. There is no company behind it and no plan for one that involves your data: there is no server to send it to.</p>
-  <p>It runs on my Linux machine every day. macOS and Windows capture are written against the native APIs but not shipped yet. Task grouping is a best guess and you will correct it, which is why correcting is two clicks. The standup draft is a first pass from real events; redraft is one.</p>
-  <p>If it would be useful to you, or if it would need something else first, tell me. I read every reply.</p>
-  <p class="sig">James Clarke · <a href="mailto:james.clarke@callplaybook.com?subject=Chronicle">james.clarke@callplaybook.com</a></p>
-</section>
-
 </main>
-
-<footer>
-  <span>This page: static HTML, no scripts, no cookies, no analytics, no fonts fetched.</span>
-  <span>© 2026 · all rights reserved</span>
-</footer>
 
 </body>
 </html>
