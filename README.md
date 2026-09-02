@@ -118,7 +118,7 @@ SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks` (identity: label, pro
 
 ## MCP context
 
-stdio transport only. TOML config with explicit allowlisted `context_calls` (tool + `args_json`), no dynamic tool selection in v1. At derive time: run allowlisted calls, 10 s timeout, truncate ≤ ~800 tokens, inject as `## Workspace context`. Failures non-fatal. Config lives at the `mcp_config` path from `config.toml`, default `<data_dir>/mcp.toml`; missing file = MCP off.
+stdio transport only. TOML config with explicit allowlisted `context_calls` (tool + `args_json`), no dynamic tool selection in v1. At derive time: run allowlisted calls, 10 s timeout, truncate ≤ ~800 tokens, inject as `## Workspace context`. Failures non-fatal. Config lives at the `mcp_config` path from `config.toml`, default `<data_dir>/mcp.toml`; missing file = MCP off. Since m21 the Settings › Connections section edits this file (server list, `enabled`, env; presets add the allowlist entries) and writes it back atomically at mode 0600 — hand comments are lost on save; the daemon loads it per call, so edits apply without a restart.
 
 ```toml
 [[servers]]
@@ -154,7 +154,7 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 - **Task actions:** rename (header edit) → `rename` correction; per-interval "move" → `reassign` correction; task-level "merge into" (m10) → `merge` correction folding all intervals into the target. Corrections are teaching data: their span context is FTS-retrieved into future digests. Split deferred.
 - **Chat panel:** dockable right.
 - **Onboarding:** model download progress, autostart opt-in, macOS AX flow.
-- **Settings:** batch length, idle threshold, exclusions, model path/choice, MCP config path, port.
+- **Settings:** connections (MCP servers with a test button and presets, watched git repos with last-seen status), batch length, idle threshold, exclusions, model path/choice, port.
 
 ## Running as a service (Linux)
 
