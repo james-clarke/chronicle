@@ -34,6 +34,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/009_standup_drafts.sql")),
         M::up(include_str!("../migrations/010_activity_events.sql")),
         M::up(include_str!("../migrations/011_interval_source.sql")),
+        M::up(include_str!("../migrations/012_interval_tail.sql")),
     ])
 });
 
@@ -390,8 +391,22 @@ pub fn replace_tail(
             ],
         )?;
     }
+    attach_tail_intervals(&tx)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Intervals placed over the live tail (NULL batch) take the batch their
+/// start now falls in, so derive replaces pre-pass rows batch by batch and
+/// journals see user rows. Called whenever batches are created.
+pub fn attach_tail_intervals(conn: &Connection) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "UPDATE intervals SET batch_id = (SELECT id FROM batches b
+             WHERE b.start_ts <= intervals.start_ts AND b.end_ts > intervals.start_ts)
+         WHERE batch_id IS NULL AND EXISTS (SELECT 1 FROM batches b
+             WHERE b.start_ts <= intervals.start_ts AND b.end_ts > intervals.start_ts)",
+        [],
+    )?)
 }
 
 #[derive(Debug, Clone)]
@@ -678,7 +693,7 @@ pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, Sto
          AND id NOT IN (SELECT task_id FROM corrections) LIMIT ?2)",
         "DELETE FROM batches WHERE id IN (SELECT id FROM batches WHERE end_ts < ?1 \
          AND id NOT IN (SELECT batch_id FROM spans WHERE batch_id IS NOT NULL) \
-         AND id NOT IN (SELECT batch_id FROM intervals) LIMIT ?2)",
+         AND id NOT IN (SELECT batch_id FROM intervals WHERE batch_id IS NOT NULL) LIMIT ?2)",
         "DELETE FROM chat_messages WHERE id IN (SELECT id FROM chat_messages WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM conversations WHERE id IN (SELECT id FROM conversations WHERE created_ts < ?1 \
          AND id NOT IN (SELECT conversation_id FROM chat_messages WHERE conversation_id IS NOT NULL) \
@@ -1367,7 +1382,24 @@ pub fn store_derivation(
     intervals: &[NewInterval],
 ) -> Result<Vec<(i64, i64, i64)>, StorageError> {
     let tx = conn.transaction()?;
-    tx.execute("DELETE FROM intervals WHERE batch_id=?1", [batch_id])?;
+    let (batch_lo, batch_hi): (i64, i64) = tx.query_row(
+        "SELECT start_ts, end_ts FROM batches WHERE id=?1",
+        [batch_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    // The model's answer replaces the batch's earlier derived rows and the
+    // pre-pass's provisional ones (attached, or still over the tail with a
+    // start inside the batch); what the user placed by hand stays and the
+    // model's intervals are clipped around it.
+    tx.execute(
+        "DELETE FROM intervals WHERE source <> 'user'
+           AND (batch_id=?1 OR (batch_id IS NULL AND start_ts >= ?2 AND start_ts < ?3))",
+        params![batch_id, batch_lo, batch_hi],
+    )?;
+    let user_rows: Vec<(i64, i64)> = tx
+        .prepare("SELECT start_ts, end_ts FROM intervals WHERE source='user' AND start_ts < ?2 AND end_ts > ?1 ORDER BY start_ts")?
+        .query_map([batch_lo, batch_hi], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
     let mut ids: Vec<Option<i64>> = Vec::with_capacity(slots.len());
     for (i, slot) in slots.iter().enumerate() {
         match slot {
@@ -1397,23 +1429,38 @@ pub fn store_derivation(
         let Some(Some(task_id)) = ids.get(iv.slot) else {
             continue;
         };
-        tx.execute(
-            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                task_id,
-                batch_id,
-                ts_to_ms(iv.start_ts),
-                ts_to_ms(iv.end_ts),
-                iv.confidence
-            ],
-        )?;
-        stored.push((*task_id, ts_to_ms(iv.start_ts), ts_to_ms(iv.end_ts)));
+        for (s, e) in subtract_ranges(ts_to_ms(iv.start_ts), ts_to_ms(iv.end_ts), &user_rows) {
+            tx.execute(
+                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![task_id, batch_id, s, e, iv.confidence],
+            )?;
+            stored.push((*task_id, s, e));
+        }
     }
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.execute("UPDATE batches SET status='done' WHERE id=?1", [batch_id])?;
     tx.commit()?;
     Ok(stored)
+}
+
+/// `[lo, hi)` minus the sorted `blockers`, as the non-empty pieces left.
+fn subtract_ranges(lo: i64, hi: i64, blockers: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    let mut cur = lo;
+    for &(s, e) in blockers {
+        if e <= cur || s >= hi {
+            continue;
+        }
+        if s > cur {
+            out.push((cur, s));
+        }
+        cur = cur.max(e);
+    }
+    if cur < hi {
+        out.push((cur, hi));
+    }
+    out
 }
 
 /// Focus spans overlapping any of the task's intervals, as "app title" lines.
@@ -1621,8 +1668,8 @@ pub fn unassigned_runs(
 /// ('assign' correction): one confidence-1.0 interval per batch the spans
 /// fall in (intervals are batch-scoped), so the time shows under the task on
 /// every surface and the run's app/title mix teaches future derivations.
-/// Spans not yet batched (the live tail) are left for the next derive.
-/// Returns the ms claimed.
+/// Spans not yet batched (the live tail) get a batch-less interval that
+/// attaches when their batch closes. Returns the ms claimed.
 pub fn assign_unassigned(
     conn: &mut Connection,
     ts: jiff::Timestamp,
@@ -1633,12 +1680,12 @@ pub fn assign_unassigned(
     let tx = conn.transaction()?;
     // batch_id → bounds of its unassigned spans. A span's own batch_id wins;
     // an unbatched span takes the batch its start falls in.
-    let mut per_batch: Vec<(i64, i64, i64)> = Vec::new();
+    let mut per_batch: Vec<(Option<i64>, i64, i64)> = Vec::new();
     {
         let mut stmt = tx.prepare(
-            "SELECT b.id, s.start_ts, s.end_ts FROM spans s
-             JOIN batches b ON b.id = COALESCE(s.batch_id,
-                 (SELECT id FROM batches WHERE start_ts <= s.start_ts AND end_ts > s.start_ts))
+            "SELECT COALESCE(s.batch_id,
+                 (SELECT id FROM batches WHERE start_ts <= s.start_ts AND end_ts > s.start_ts)),
+                 s.start_ts, s.end_ts FROM spans s
              WHERE s.kind='focus' AND s.start_ts >= ?1 AND s.start_ts < ?2
                AND NOT EXISTS (SELECT 1 FROM intervals i
                                WHERE i.start_ts < s.end_ts AND i.end_ts > s.start_ts)
@@ -1646,7 +1693,7 @@ pub fn assign_unassigned(
         )?;
         let mut rows = stmt.query([start_ts, end_ts])?;
         while let Some(row) = rows.next()? {
-            let (batch, s, e): (i64, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+            let (batch, s, e): (Option<i64>, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
             let e = e.min(end_ts);
             match per_batch.iter_mut().find(|p| p.0 == batch) {
                 Some(p) => {
@@ -1702,8 +1749,8 @@ pub fn split_interval(
     end_ts: i64,
 ) -> Result<i64, StorageError> {
     let tx = conn.transaction()?;
-    let (task_id, batch_id, lo, hi, confidence, source): (i64, i64, i64, i64, f64, String) = tx
-        .query_row(
+    let (task_id, batch_id, lo, hi, confidence, source): (i64, Option<i64>, i64, i64, f64, String) =
+        tx.query_row(
             "SELECT task_id, batch_id, start_ts, end_ts, confidence, source
              FROM intervals WHERE id=?1",
             [interval_id],
@@ -1764,6 +1811,85 @@ pub fn split_interval(
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
     Ok(e - s)
+}
+
+/// One pre-pass placement: a run's `[start_ts, end_ts)` under a task, with
+/// the one-line rule that matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    pub task_id: i64,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub reason: String,
+}
+
+/// Drop the pre-pass's provisional intervals starting inside `[lo, hi)`
+/// (the pre-pass re-reads the window every tick).
+pub fn clear_prepass(conn: &Connection, lo: i64, hi: i64) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "DELETE FROM intervals WHERE source='prepass' AND start_ts >= ?1 AND start_ts < ?2",
+        [lo, hi],
+    )?)
+}
+
+/// One provisional interval: confidence 0.5, source 'prepass', attached to
+/// the batch its start falls in (NULL over the tail).
+pub fn insert_prepass(conn: &Connection, p: &Placement) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason)
+         VALUES (?1, (SELECT id FROM batches WHERE start_ts <= ?2 AND end_ts > ?2),
+                 ?2, ?3, 0.5, 'prepass', ?4)",
+        params![p.task_id, p.start_ts, p.end_ts, p.reason],
+    )?;
+    Ok(())
+}
+
+/// The open task anchored to `key` (`tasks.external_ref`), if any.
+pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT id, label, project, source='user' FROM tasks
+             WHERE status='open' AND external_ref=?1 ORDER BY id LIMIT 1",
+            [key],
+            |r| {
+                Ok(OpenTask {
+                    id: r.get(0)?,
+                    label: r.get(1)?,
+                    project: r.get(2)?,
+                    declared: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Distinct repos with activity overlapping `[lo, hi)` — a run's repo signal.
+pub fn repos_active_in(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT repo FROM activity_events
+         WHERE repo != '' AND ts < ?2 AND COALESCE(end_ts, ts) >= ?1 ORDER BY repo",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// End of the task's latest interval (its last activity), if any.
+pub fn task_last_end(conn: &Connection, task_id: i64) -> Result<Option<i64>, StorageError> {
+    Ok(conn.query_row(
+        "SELECT MAX(end_ts) FROM intervals WHERE task_id=?1",
+        [task_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// End of the newest derived batch: where the pre-pass window opens.
+pub fn latest_done_batch_end(conn: &Connection) -> Result<Option<i64>, StorageError> {
+    Ok(conn.query_row(
+        "SELECT MAX(end_ts) FROM batches WHERE status='done'",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Fold one task into another ('merge' correction): every interval moves to
@@ -1840,7 +1966,7 @@ pub fn suggest_correction(
     conn: &Connection,
     text: &str,
 ) -> Result<Option<Correction>, StorageError> {
-    let ranked = corrections_matching(conn, &distinctive_fts_query(conn, text)?, 16)?;
+    let ranked = correction_hints(conn, text)?;
     let ejected: Vec<(&str, Option<&str>)> = ranked
         .iter()
         .filter(|c| c.kind == "eject")
@@ -1853,6 +1979,13 @@ pub fn suggest_correction(
                 && !ejected.contains(&(c.new_label.as_str(), c.new_project.as_deref()))
         })
         .cloned())
+}
+
+/// Every past correction whose context matches the text's distinctive
+/// terms, best first, ejects included — the pre-pass reads the ejects as
+/// "never this task for work like this".
+pub fn correction_hints(conn: &Connection, text: &str) -> Result<Vec<Correction>, StorageError> {
+    corrections_matching(conn, &distinctive_fts_query(conn, text)?, 16)
 }
 
 /// OR-of-terms FTS5 query from free text with the corpus-common terms
@@ -2320,44 +2453,34 @@ mod tests {
         }
     }
 
+    /// The bundled migrations up to and including `n` (1-based).
+    fn migrations_upto(n: usize) -> rusqlite_migration::Migrations<'static> {
+        let all = [
+            include_str!("../migrations/001_schema.sql"),
+            include_str!("../migrations/002_corrections_fts.sql"),
+            include_str!("../migrations/003_spans_url_meta.sql"),
+            include_str!("../migrations/004_task_identity.sql"),
+            include_str!("../migrations/005_chat_conversations.sql"),
+            include_str!("../migrations/006_task_descriptions.sql"),
+            include_str!("../migrations/007_vcs_events.sql"),
+            include_str!("../migrations/008_task_workspace.sql"),
+            include_str!("../migrations/009_standup_drafts.sql"),
+            include_str!("../migrations/010_activity_events.sql"),
+            include_str!("../migrations/011_interval_source.sql"),
+        ];
+        rusqlite_migration::Migrations::new(
+            all[..n]
+                .iter()
+                .map(|m| rusqlite_migration::M::up(m))
+                .collect(),
+        )
+    }
+
     #[test]
     fn migration_011_marks_m23_assigns_as_user() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let upto_010 = rusqlite_migration::Migrations::new(
-            (1..=10)
-                .map(|n| match n {
-                    1 => rusqlite_migration::M::up(include_str!("../migrations/001_schema.sql")),
-                    2 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/002_corrections_fts.sql"
-                    )),
-                    3 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/003_spans_url_meta.sql"
-                    )),
-                    4 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/004_task_identity.sql"
-                    )),
-                    5 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/005_chat_conversations.sql"
-                    )),
-                    6 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/006_task_descriptions.sql"
-                    )),
-                    7 => {
-                        rusqlite_migration::M::up(include_str!("../migrations/007_vcs_events.sql"))
-                    }
-                    8 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/008_task_workspace.sql"
-                    )),
-                    9 => rusqlite_migration::M::up(include_str!(
-                        "../migrations/009_standup_drafts.sql"
-                    )),
-                    _ => rusqlite_migration::M::up(include_str!(
-                        "../migrations/010_activity_events.sql"
-                    )),
-                })
-                .collect(),
-        );
-        upto_010.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        migrations_upto(10).to_latest(&mut conn).unwrap();
         conn.execute_batch(
             "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done'), (2, 100, 200, 'done');
              INSERT INTO tasks (id, label, status, source, created_ts) VALUES
@@ -2387,6 +2510,54 @@ mod tests {
                 (4, "derived".into())
             ]
         );
+    }
+
+    #[test]
+    fn migration_012_rebuild_keeps_ids_refs_and_allows_tail_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        migrations_upto(11).to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts) VALUES (1, 't', 'open', 'user', 0);
+             INSERT INTO intervals (id, task_id, batch_id, start_ts, end_ts, confidence, source)
+               VALUES (5, 1, 1, 0, 50, 1.0, 'user');
+             INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind, interval_id)
+               VALUES (0, 1, '(unassigned)', 't', '', 'assign', 5);",
+        )
+        .unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let (id, batch, source, reason): (i64, Option<i64>, String, Option<String>) = conn
+            .query_row(
+                "SELECT id, batch_id, source, reason FROM intervals",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (id, batch, source.as_str(), reason),
+            (5, Some(1), "user", None)
+        );
+        // The correction's ref still binds: the row cannot be deleted under it.
+        assert!(
+            conn.execute("DELETE FROM intervals WHERE id=5", [])
+                .is_err()
+        );
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason)
+             VALUES (1, NULL, 200, 300, 0.5, 'prepass', 'branch X-1')",
+            [],
+        )
+        .unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM intervals WHERE batch_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

@@ -1473,6 +1473,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     // queued checkpoints, cleared when the user comes back.
     let mut checkpointed_idle: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
+    let mut last_prepass = Instant::now();
     let exit_reason = 'daemon: loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
         crossbeam_channel::select! {
@@ -1514,6 +1515,18 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                 let now = Timestamp::now();
                 if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
                     tracing::error!("sessionize refresh failed: {e}");
+                }
+                if config.prepass_secs > 0
+                    && last_prepass.elapsed() >= Duration::from_secs(u64::from(config.prepass_secs))
+                {
+                    last_prepass = Instant::now();
+                    match chronicle_core::prepass::run(&mut conn, &config, now) {
+                        Ok(placed) if !placed.is_empty() => {
+                            tracing::debug!(n = placed.len(), "pre-pass placed runs");
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("pre-pass failed: {e}"),
+                    }
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);

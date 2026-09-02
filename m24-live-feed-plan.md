@@ -1,6 +1,6 @@
 # M24 — Live feed ("the brain at work")
 
-Status: **in progress** (2026-09-02). Chunk 1 (storage) landed: `intervals.source` (migration 011), `split_interval` + `eject` corrections, `suggest_correction` skips ejected tasks; chunks 2–5 open. Decisions recorded at the end, build order final.
+Status: **in progress** (2026-09-02). Chunks 1–2 landed: `intervals.source` (migration 011), `split_interval` + `eject` corrections, `suggest_correction` skips ejected tasks; nullable `intervals.batch_id` + `reason` (migration 012), `prepass` module on a 60 s daemon timer (`prepass_secs`), derive replaces provisional rows and clips around user rows; chunks 3–5 open. Decisions recorded at the end, build order final.
 
 ## Context
 

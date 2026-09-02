@@ -1160,6 +1160,237 @@ fn unassigned_runs_fold_and_assign_claims_per_batch() {
 }
 
 #[test]
+fn prepass_places_runs_and_derive_keeps_user_rows() {
+    use chronicle_core::prepass;
+    use chronicle_core::storage;
+    use chronicle_core::types::{ActivityEvent, ActivityKind, NewInterval, TaskSlot, ms_to_ts};
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m24_prepass.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    let config = Config::default();
+    let task = |conn: &rusqlite::Connection,
+                label: &str,
+                project: Option<&str>,
+                source: &str,
+                ext: Option<&str>| {
+        conn.execute(
+            "INSERT INTO tasks (label, project, status, source, created_ts, external_ref) VALUES (?1, ?2, 'open', ?3, 0, ?4)",
+            rusqlite::params![label, project, source, ext],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let ticket = task(&conn, "Sending plans", Some("pb"), "user", Some("ACME-7"));
+    let chron_old = task(
+        &conn,
+        "Chronicle timeline",
+        Some("chronicle"),
+        "derived",
+        None,
+    );
+    let chron_new = task(&conn, "Chronicle feed", Some("chronicle"), "derived", None);
+    let board = task(&conn, "Board triage", None, "user", None);
+    // Recency decides between two open tasks on one repo.
+    for (t, end) in [(chron_old, 50_000), (chron_new, 90_000)] {
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, NULL, ?2, ?3, 0.9)",
+            rusqlite::params![t, end - 10_000, end],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind)
+         VALUES (1, ?1, '(unassigned)', 'Board triage', 'Firefox Jira board ACME', 'assign')",
+        [board],
+    )
+    .unwrap();
+    let event = |ts: i64,
+                 end: Option<i64>,
+                 repo: &str,
+                 branch: &str,
+                 kind: ActivityKind,
+                 ext: Option<&str>| ActivityEvent {
+        ts: ms_to_ts(ts),
+        end_ts: end.map(ms_to_ts),
+        repo: repo.into(),
+        branch: branch.into(),
+        kind,
+        ext_id: ext.map(str::to_owned),
+        summary: None,
+    };
+    storage::insert_activity_event(
+        &conn,
+        &event(
+            100_000,
+            None,
+            "pb",
+            "ACME-7-fix",
+            ActivityKind::Checkout,
+            None,
+        ),
+    )
+    .unwrap();
+    storage::insert_activity_event(
+        &conn,
+        &event(
+            1_020_000,
+            Some(1_080_000),
+            "chronicle",
+            "main",
+            ActivityKind::AiSession,
+            Some("s1"),
+        ),
+    )
+    .unwrap();
+    // A: ticketed branch; B: chronicle session; C: past correction;
+    // D: too short to settle; E: nothing matches.
+    let spans = [
+        (100_000, 200_000, "Code", "pb — plans.rs"),
+        (1_000_000, 1_100_000, "Code", "chronicle — feed.rs"),
+        (1_600_000, 1_700_000, "Firefox", "Jira board ACME"),
+        (2_200_000, 2_230_000, "Code", "pb — plans.rs"),
+        (2_800_000, 2_900_000, "Zoom", "standup"),
+    ];
+    for (s, e, app, title) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, 'focus', NULL)",
+            rusqlite::params![s, e, app, title],
+        )
+        .unwrap();
+    }
+
+    let placed = prepass::run(&mut conn, &config, ms_to_ts(3_500_000)).unwrap();
+    let got: Vec<(i64, i64, i64, &str)> = placed
+        .iter()
+        .map(|p| (p.task_id, p.start_ts, p.end_ts, p.reason.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (ticket, 100_000, 200_000, "branch ACME-7"),
+            (chron_new, 1_000_000, 1_100_000, "repo chronicle"),
+            (board, 1_600_000, 1_700_000, "past correction"),
+        ]
+    );
+    type Row = (i64, Option<i64>, i64, f64, String, Option<String>);
+    let rows = |conn: &rusqlite::Connection| -> Vec<Row> {
+        conn.prepare("SELECT task_id, batch_id, start_ts, confidence, source, reason FROM intervals WHERE start_ts >= 100000 ORDER BY start_ts")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let first = rows(&conn);
+    assert_eq!(first.len(), 3, "{first:?}");
+    assert_eq!(
+        (
+            first[0].1,
+            first[0].3,
+            first[0].4.as_str(),
+            first[0].5.as_deref()
+        ),
+        (None, 0.5, "prepass", Some("branch ACME-7"))
+    );
+    // Same tick again: rewritten in place, no duplicates.
+    prepass::run(&mut conn, &config, ms_to_ts(3_500_000)).unwrap();
+    assert_eq!(rows(&conn), first);
+
+    // Eject B from its task: the next pre-pass leaves B alone (hard
+    // negative), the other placements stand.
+    let b_id: i64 = conn
+        .query_row("SELECT id FROM intervals WHERE start_ts=1000000", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        storage::split_interval(&mut conn, ms_to_ts(3_600_000), b_id, 1_000_000, 1_100_000)
+            .unwrap(),
+        100_000
+    );
+    // The eject names one task: the repo rule falls through to the other
+    // open chronicle task rather than giving up on the block.
+    let placed = prepass::run(&mut conn, &config, ms_to_ts(3_700_000)).unwrap();
+    let b = placed.iter().find(|p| p.start_ts == 1_000_000).unwrap();
+    assert_eq!(
+        (b.task_id, b.reason.as_str()),
+        (chron_old, "repo chronicle")
+    );
+    // The user moves B under the ticket by hand: a user row over the tail.
+    let b_id: i64 = conn
+        .query_row("SELECT id FROM intervals WHERE start_ts=1000000", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    storage::reassign_intervals(&mut conn, ms_to_ts(3_800_000), &[b_id], ticket).unwrap();
+    let (b_batch, b_source): (Option<i64>, String) = conn
+        .query_row(
+            "SELECT batch_id, source FROM intervals WHERE start_ts=1000000",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((b_batch, b_source.as_str()), (None, "user"));
+
+    // The sessionizer closes a batch over A–C: tail rows attach to it.
+    conn.execute(
+        "INSERT INTO batches (start_ts, end_ts, status) VALUES (0, 2000000, 'pending')",
+        [],
+    )
+    .unwrap();
+    let batch = conn.last_insert_rowid();
+    assert_eq!(storage::attach_tail_intervals(&conn).unwrap(), 5);
+    // Derive claims the whole batch for one task: pre-pass rows go, the
+    // user's B survives and the model's interval is clipped around it.
+    conn.execute("UPDATE batches SET status='running' WHERE id=?1", [batch])
+        .unwrap();
+    let stored = storage::store_derivation(
+        &mut conn,
+        batch,
+        &[TaskSlot::Existing(chron_new)],
+        &[NewInterval {
+            slot: 0,
+            start_ts: ms_to_ts(100_000),
+            end_ts: ms_to_ts(2_000_000),
+            confidence: 0.8,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        stored,
+        vec![
+            (chron_new, 100_000, 1_000_000),
+            (chron_new, 1_100_000, 2_000_000)
+        ]
+    );
+    let after = rows(&conn);
+    let summary: Vec<(i64, i64, &str)> = after.iter().map(|r| (r.0, r.2, r.4.as_str())).collect();
+    assert_eq!(
+        summary,
+        vec![
+            (chron_new, 100_000, "derived"),
+            (ticket, 1_000_000, "user"),
+            (chron_new, 1_100_000, "derived"),
+        ]
+    );
+    // The window now opens after the derived batch: E is still unmatched
+    // and nothing older is touched.
+    assert_eq!(
+        storage::latest_done_batch_end(&conn).unwrap(),
+        Some(2_000_000)
+    );
+    assert!(
+        prepass::run(&mut conn, &config, ms_to_ts(3_900_000))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(rows(&conn).len(), 3);
+}
+
+#[test]
 fn eject_splits_interval_and_blocks_suggestion() {
     use chronicle_core::storage;
     use chronicle_core::types::ms_to_ts;
