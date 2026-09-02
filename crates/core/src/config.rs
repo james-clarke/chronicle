@@ -52,6 +52,10 @@ pub struct Config {
     /// Repo paths polled for branch/commit evidence (`~` expanded).
     /// Empty = git capture off.
     pub git_repos: Vec<String>,
+    /// Directories of AI coding transcripts watched for `ai_session`
+    /// evidence (`<dir>/<project>/*.jsonl`, Claude Code layout; `~`
+    /// expanded). Empty = off.
+    pub ai_session_dirs: Vec<String>,
     /// Full-match-anywhere regex extracting a ticket key from branch names,
     /// used to anchor derived tasks (`tasks.external_ref`).
     pub ticket_regex: String,
@@ -95,6 +99,7 @@ impl Default for Config {
             distraction_patterns: Vec::new(),
             background_minutes: 10,
             git_repos: Vec::new(),
+            ai_session_dirs: vec!["~/.claude/projects".into()],
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
             model_path: None,

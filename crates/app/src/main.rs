@@ -1913,7 +1913,8 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
         .name("afk".into())
         .spawn(move || afk_loop(afk, gtx, threshold_ms))?;
 
-    spawn_git_capture(config, tx)
+    spawn_git_capture(config, tx.clone())?;
+    spawn_ai_sessions_capture(config, tx)
 }
 
 /// Git poller: optional, never load-bearing — a dead thread loses git
@@ -1939,6 +1940,33 @@ fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Resul
         .spawn(move || {
             if let Err(e) = git.run(tx) {
                 tracing::error!("git provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// AI session watcher: optional, never load-bearing — same contract as git.
+fn spawn_ai_sessions_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::ai_sessions::AiSessionProvider;
+
+    let dirs: Vec<PathBuf> = config
+        .ai_session_dirs
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let watcher = AiSessionProvider::new(&dirs);
+    if watcher.is_empty() {
+        if !dirs.is_empty() {
+            tracing::warn!("ai_session_dirs configured but none is a directory");
+        }
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("ai-sessions".into())
+        .spawn(move || {
+            if let Err(e) = watcher.run(tx) {
+                tracing::error!("ai session provider exited: {e}");
             }
         })?;
     Ok(())
