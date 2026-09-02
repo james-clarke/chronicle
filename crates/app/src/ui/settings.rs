@@ -9,7 +9,8 @@ use super::{TimelineApp, theme};
 /// Editable view of config.toml. Numbers bind directly; list/path fields are
 /// edited as text and parsed on save. Saving rewrites the whole file (hand
 /// comments are lost); the daemon reads config at startup, so changes apply
-/// on its next restart.
+/// on its next restart. MCP servers live in mcp.toml and are written by the
+/// Connections section as they are edited (see `connections.rs`).
 pub(super) struct SettingsPanel {
     batch_minutes: u32,
     afk_close_secs: u32,
@@ -19,18 +20,26 @@ pub(super) struct SettingsPanel {
     background_minutes: u32,
     port: u16,
     model_path: String,
-    mcp_config: String,
     excluded_apps: String,
     excluded_titles: String,
-    /// Config as loaded; fields without widgets pass through on save.
+    /// As written in config.toml (`~` kept); edited by the Connections rows.
+    git_repos: Vec<String>,
+    connections: super::connections::Connections,
+    /// Config as loaded (or last saved); fields without widgets pass through
+    /// on save and the restart hint fires only when the file changes.
     base: chronicle_core::config::Config,
     status: Option<Result<String, String>>,
 }
 
 impl SettingsPanel {
-    fn load(config_path: &Path) -> Result<Self, String> {
+    fn load(
+        config_path: &Path,
+        data_dir: &Path,
+        conn: Option<&rusqlite::Connection>,
+    ) -> Result<Self, String> {
         let config =
             chronicle_core::config::Config::load(config_path).map_err(|e| e.to_string())?;
+        let connections = super::connections::Connections::load(config.mcp_path(data_dir), conn);
         Ok(Self {
             batch_minutes: config.batch_minutes,
             afk_close_secs: config.afk_close_secs,
@@ -40,15 +49,18 @@ impl SettingsPanel {
             background_minutes: config.background_minutes,
             port: config.port,
             model_path: path_str(&config.model_path),
-            mcp_config: path_str(&config.mcp_config),
             excluded_apps: config.excluded_apps.join("\n"),
             excluded_titles: config.excluded_titles.join("\n"),
+            git_repos: config.git_repos.clone(),
+            connections,
             base: config,
             status: None,
         })
     }
 
-    fn save(&self, config_path: &Path) -> Result<(), String> {
+    /// Ok(true) = written (daemon restart needed); Ok(false) = nothing
+    /// differed from the file as loaded.
+    fn save(&mut self, config_path: &Path) -> Result<bool, String> {
         let mut config = self.base.clone();
         config.batch_minutes = self.batch_minutes;
         config.afk_close_secs = self.afk_close_secs;
@@ -58,11 +70,17 @@ impl SettingsPanel {
         config.background_minutes = self.background_minutes;
         config.port = self.port;
         config.model_path = opt_path(&self.model_path);
-        config.mcp_config = opt_path(&self.mcp_config);
         config.excluded_apps = regex_lines(&self.excluded_apps)?;
         config.excluded_titles = regex_lines(&self.excluded_titles)?;
+        config.git_repos = self.git_repos.clone();
         let toml = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
-        std::fs::write(config_path, toml).map_err(|e| e.to_string())
+        let before = toml::to_string_pretty(&self.base).map_err(|e| e.to_string())?;
+        if toml == before {
+            return Ok(false);
+        }
+        std::fs::write(config_path, toml).map_err(|e| e.to_string())?;
+        self.base = config;
+        Ok(true)
     }
 }
 
@@ -106,7 +124,7 @@ impl TimelineApp {
             self.settings = None;
             return;
         }
-        match SettingsPanel::load(&self.config_path) {
+        match SettingsPanel::load(&self.config_path, &self.data_dir, self.conn.as_ref()) {
             Ok(panel) => self.settings = Some(panel),
             Err(e) => self.error = Some(format!("config load failed: {e}")),
         }
@@ -124,6 +142,7 @@ impl TimelineApp {
         let mut zoom_pick: Option<f32> = None;
         let mut spans_toggle: Option<bool> = None;
         let spans_debug_now = self.spans_debug;
+        let conn = self.conn.as_ref();
         let Some(panel) = &mut self.settings else {
             return;
         };
@@ -151,7 +170,10 @@ impl TimelineApp {
                         ui.add_space(pad);
                         ui.vertical(|ui| {
                             ui.set_max_width(max_w);
-                            section(ui, "Capture", true);
+                            section(ui, "Connections", true);
+                            panel.connections.ui(ui, conn, &mut panel.git_repos);
+
+                            section(ui, "Capture", false);
                             egui::Grid::new("settings_capture")
                                 .num_columns(3)
                                 .show(ui, |ui| {
@@ -257,10 +279,6 @@ impl TimelineApp {
                                     ui.end_row();
                                 });
 
-                            section(ui, "Integrations", false);
-                            ui.label("mcp config path (empty = mcp.toml in data dir)");
-                            ui.text_edit_singleline(&mut panel.mcp_config);
-
                             // UI-only prefs: applied immediately, stored in
                             // db meta (not config.toml), no daemon restart.
                             section(ui, "Appearance", false);
@@ -286,9 +304,10 @@ impl TimelineApp {
                             ui.horizontal(|ui| {
                                 if theme::primary_button(ui, "save").clicked() {
                                     panel.status = Some(match panel.save(&config_path) {
-                                        Ok(()) => {
+                                        Ok(true) => {
                                             Ok("saved \u{2014} restart daemon to apply".into())
                                         }
+                                        Ok(false) => Ok("no changes".into()),
                                         Err(e) => Err(e),
                                     });
                                 }

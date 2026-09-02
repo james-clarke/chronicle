@@ -4,6 +4,7 @@
 //! open on focus loss unless `CHRONICLE_UI_AUTOHIDE=1`.
 
 mod chat;
+mod connections;
 mod home;
 mod onboarding;
 mod reports;
@@ -1274,6 +1275,11 @@ impl TimelineApp {
             // older builds made on every chat-view open.
             let _ = chronicle_core::storage::delete_empty_conversations(&conn);
             self.conn = Some(conn);
+            // `CHRONICLE_UI_VIEW=settings` opens the takeover once the DB is
+            // up (visual-test loop; Connections reads status from it).
+            if std::env::var("CHRONICLE_UI_VIEW").as_deref() == Ok("settings") {
+                self.toggle_settings();
+            }
         }
         let (lo, hi) = self.day_range_ms()?;
         let conn = self.conn.as_ref().expect("connection opened above");

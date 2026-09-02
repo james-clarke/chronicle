@@ -1418,7 +1418,7 @@ fn activity_row(ui: &mut egui::Ui, glyph: &str, time: &str, summary: &str) {
 }
 
 /// "just now" / "12m ago" / "2h ago" / "3d ago".
-fn ago(ts_ms: i64) -> String {
+pub(super) fn ago(ts_ms: i64) -> String {
     let mins = (jiff::Timestamp::now().as_millisecond() - ts_ms).max(0) / 60_000;
     if mins < 1 {
         "just now".to_owned()
