@@ -323,7 +323,11 @@ impl TimelineApp {
                     if !closed_vis.is_empty() {
                         ui.add_space(theme::SECTION_GAP);
                         theme::card_header(ui, "Recently closed", Some(&mut *show_closed), |ui| {
-                            theme::badge(ui, &closed_vis.len().to_string(), theme::palette::TEXT_DIM);
+                            theme::badge(
+                                ui,
+                                &closed_vis.len().to_string(),
+                                theme::palette::TEXT_DIM,
+                            );
                         });
                         theme::fade_body(ui, "recently_closed_body", *show_closed, |ui| {
                             for &c in &closed_vis {
@@ -453,9 +457,10 @@ fn standup_block(para: &[&str], labels: &[&str]) -> StandupBlock {
     if let Some(rest) = first.strip_prefix("Task:") {
         label = Some(rest.trim().to_owned());
         lines.remove(0);
-    } else if let Some(l) = labels.iter().find(|l| {
-        first.is_char_boundary(l.len()) && first[..l.len()].eq_ignore_ascii_case(l)
-    }) {
+    } else if let Some(l) = labels
+        .iter()
+        .find(|l| first.is_char_boundary(l.len()) && first[..l.len()].eq_ignore_ascii_case(l))
+    {
         label = Some(first[..l.len()].to_owned());
         let rest = first[l.len()..]
             .trim_start_matches([':', '-', '\u{2013}', '\u{2014}', ' '])

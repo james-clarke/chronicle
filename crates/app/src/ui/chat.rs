@@ -300,8 +300,7 @@ impl TimelineApp {
                     .map(|t| t.to_zoned(tz.clone()).strftime("%-d %b").to_string())
                     .unwrap_or_default();
                 let current = *id == chat.conversation_id;
-                if theme::selectable(ui, current, format!("{date} \u{b7} {head}")).clicked()
-                {
+                if theme::selectable(ui, current, format!("{date} \u{b7} {head}")).clicked() {
                     let scope = conversation_scope(conn, *id);
                     chat.switch_conversation(Some(conn), *id, scope);
                     ui.close();
@@ -350,70 +349,72 @@ impl TimelineApp {
         egui::Panel::bottom("chat_input")
             .frame(theme::page_frame())
             .show(ui, |ui| {
-            if let Some((_, label)) = &chat.task_scope {
-                ui.horizontal(|ui| {
-                    theme::badge(ui, &format!("scoped to {label}"), theme::palette::ACCENT);
-                    if theme::ghost_button(ui, "\u{d7}")
-                        .on_hover_text("back to general chat")
-                        .clicked()
-                    {
-                        clear_scope = true;
-                    }
-                });
-            }
-            if let Some(error) = &chat.error {
-                egui::Frame::new()
-                    .fill(theme::palette::RED.gamma_multiply(0.12))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        theme::palette::RED.gamma_multiply(0.4),
-                    ))
-                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(
-                            egui::RichText::new("Chat unavailable")
-                                .family(egui::FontFamily::Name(theme::MEDIUM.into()))
-                                .color(theme::palette::RED),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(error)
-                                    .text_style(egui::TextStyle::Small)
-                                    .color(theme::palette::TEXT_DIM),
-                            )
-                            .wrap(),
-                        );
-                        if error.contains("no model") && ui.small_button("download model").clicked()
+                if let Some((_, label)) = &chat.task_scope {
+                    ui.horizontal(|ui| {
+                        theme::badge(ui, &format!("scoped to {label}"), theme::palette::ACCENT);
+                        if theme::ghost_button(ui, "\u{d7}")
+                            .on_hover_text("back to general chat")
+                            .clicked()
                         {
-                            start_dl = true;
+                            clear_scope = true;
                         }
                     });
-            }
-            ui.horizontal(|ui| {
-                let can_send = !chat.busy && !chat.warming;
-                let send_clicked = ui
-                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let clicked = theme::primary_button_enabled(ui, can_send, "send").clicked();
-                        let edit = ui.add_sized(
-                            ui.available_size(),
-                            egui::TextEdit::singleline(&mut chat.input)
-                                .hint_text("ask about your day"),
-                        );
-                        let entered =
-                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if clicked || entered {
-                            edit.request_focus();
-                        }
-                        clicked || entered
-                    })
-                    .inner;
-                if send_clicked && can_send {
-                    chat.send_question();
                 }
+                if let Some(error) = &chat.error {
+                    egui::Frame::new()
+                        .fill(theme::palette::RED.gamma_multiply(0.12))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            theme::palette::RED.gamma_multiply(0.4),
+                        ))
+                        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new("Chat unavailable")
+                                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                                    .color(theme::palette::RED),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(error)
+                                        .text_style(egui::TextStyle::Small)
+                                        .color(theme::palette::TEXT_DIM),
+                                )
+                                .wrap(),
+                            );
+                            if error.contains("no model")
+                                && ui.small_button("download model").clicked()
+                            {
+                                start_dl = true;
+                            }
+                        });
+                }
+                ui.horizontal(|ui| {
+                    let can_send = !chat.busy && !chat.warming;
+                    let send_clicked = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let clicked =
+                                theme::primary_button_enabled(ui, can_send, "send").clicked();
+                            let edit = ui.add_sized(
+                                ui.available_size(),
+                                egui::TextEdit::singleline(&mut chat.input)
+                                    .hint_text("ask about your day"),
+                            );
+                            let entered =
+                                edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if clicked || entered {
+                                edit.request_focus();
+                            }
+                            clicked || entered
+                        })
+                        .inner;
+                    if send_clicked && can_send {
+                        chat.send_question();
+                    }
+                });
             });
-        });
         theme::page().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
