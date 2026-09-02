@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chronicle — your workday, written down for you</title>
+  <title>Chronicle — your day, written down</title>
   <meta name="description" content="Chronicle runs in the background and groups your window activity, terminal work and commits into the tasks you were actually doing. Standup draft, timeline, reports and chat, all from one file on your own disk. No account, no server, no telemetry.">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -18,7 +18,7 @@
 
 <section class="hero">
   <div class="hero-text">
-    <h1>Your workday, written down for you. Kept on your machine, and nowhere else.</h1>
+    <h1>Your day, written down. Nowhere but your machine.</h1>
     <p class="lede">Chronicle runs quietly in the background. An algorithm groups your window activity, terminal work and commits into the tasks you were actually doing, then writes your standup, timeline and reports from that.</p>
     <ul class="nos" aria-label="What Chronicle does not have">
       <li>No account</li>
@@ -34,22 +34,13 @@
   </figure>
 </section>
 
-<section class="work flip feed">
-  <div class="work-shots">
-    <figure class="shot">
-      <img src="img/feed.webp" width="678" height="1062" alt="Chronicle home feed: a proposed task card named 'proposals clustering and naming' with accept and not-a-task buttons, then the day's blocks newest first, each with a state chip (provisional, fresh, unmatched), the task it sits under, its focus time and a one-line reason such as 'repo chronicle' or 'model, 91%'" loading="lazy">
-      <figcaption>The feed</figcaption>
-    </figure>
-    <figure class="shot">
-      <img src="img/feed-menu.webp" width="678" height="1062" alt="The same feed with one provisional block's menu open, offering keep, move to and eject" loading="lazy">
-      <figcaption>One block's menu</figcaption>
-    </figure>
-  </div>
-  <div class="work-text">
-    <h2>Sorted while the day is still happening. Corrected in one click.</h2>
-    <p>Every stretch of focus shows up in the feed on Home as soon as it ends, with a state and the one-line reason it sits where it does. A few plain rules run first: the branch you are on, the repo you are in, a window that matches a correction you made before. A hit files the block under that task straight away, marked provisional. When the batch closes, the model reads the whole thing and confirms or moves it, with its confidence on the row.</p>
-    <p>Stretches nothing matched stay unmatched. When a few of them share a repo or a distinctive title, they become a proposed task with a suggested name. Accept declares the task and files the stretches. Not a task parks them for the day.</p>
-    <p>Every block has a menu. Keep turns a provisional guess into your answer. Move to files it somewhere else. Eject pulls it out and is remembered as a hard no, so the rules never make that pairing again and the model is told not to.</p>
+<section class="feature feed">
+  <figure class="shot">
+    <img src="img/feed.webp" width="678" height="1062" alt="Chronicle home feed: a proposed task card with accept and not-a-task buttons, then the day's blocks newest first, each with a state chip (provisional, fresh, unmatched), the task it sits under, its focus time and a one-line reason such as 'repo chronicle' or 'model, 91%'" loading="lazy">
+  </figure>
+  <div class="feature-text">
+    <h2>Sorted as it happens.</h2>
+    <p>Every stretch of focus lands in the feed the moment it ends: the task it sits under, and why. Rules place it first, the model confirms later. Stretches that match nothing become a proposed task. Keep, move or eject any block. Eject is remembered as a hard no.</p>
   </div>
 </section>
 
