@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: chronicle-site
+    runtime: static
+    staticPublishPath: ./site
+    buildCommand: ""
+    buildFilter:
+      paths:
+        - site/**
+        - render.yaml
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chronicle — know what you actually worked on</title>
+  <meta name="description" content="Chronicle is a local-first activity tracker. It watches window focus on your machine and a small local model turns it into a timeline of tasks, a standup draft, and a weekly report. Nothing leaves your computer.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="#">Chronicle</a>
+  <span class="pill">early preview · Linux only</span>
+  <a class="top-link" href="#feedback">Feedback</a>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="hero-text">
+    <h1>Know what you actually worked on.</h1>
+    <p class="lede">
+      Chronicle watches which window has focus on your machine. A small model running on the same machine turns that
+      into a timeline of tasks, a standup draft each morning, and a weekly report. Nothing leaves your computer.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#feedback">Tell me what you think</a>
+      <span class="btn disabled" aria-disabled="true">Download</span>
+    </div>
+    <p class="cta-note">No download yet. It opens when Linux, macOS and Windows all work properly. Right now it's Linux (X11) only.</p>
+  </div>
+  <figure class="shot hero-shot">
+    <img src="img/home.webp" width="678" height="1062" alt="Chronicle home view: a 'where you left off' card, this morning's standup draft, and the list of tasks being worked on">
+  </figure>
+</section>
+
+<section class="honest">
+  <p>
+    <strong>A note on what you're looking at.</strong> Every screenshot on this page is my own machine, taken today, unedited.
+    Those are my real tasks, my real Jira keys, my real repos. I've used Chronicle every working day for the last few weeks
+    and it's already the thing I open first in the morning. It is early and rough in places. I'm putting it in front of
+    people now because I want to know whether it would be useful to you, and what it would need to be.
+  </p>
+</section>
+
+<section class="feature">
+  <figure class="shot">
+    <img src="img/timeline.webp" width="678" height="1062" alt="Chronicle timeline for one day: focused time, an activity band, and task blocks with durations and one-line summaries" loading="lazy">
+  </figure>
+  <div class="feature-text">
+    <h2>A day, as it happened.</h2>
+    <p>
+      Focus events get grouped into blocks. Each block is matched to a task you declared, or to one Chronicle inferred
+      from window titles, branch names and Jira keys. Every block is correctable: reassign it, split it, rename it.
+    </p>
+    <p>
+      The band at the top is the shape of the day: focused, away, switching. That number at the top left is time actually
+      spent on something, not hours the laptop was open.
+    </p>
+  </div>
+</section>
+
+<section class="feature reverse">
+  <figure class="shot">
+    <img src="img/reports.webp" width="678" height="1062" alt="Chronicle weekly report: per-day stacked bars, focus statistics, app share, and tasks grouped by project" loading="lazy">
+  </figure>
+  <div class="feature-text">
+    <h2>The week, without a spreadsheet.</h2>
+    <p>
+      Longest block, deep-work total, context switches, the hour that fragments most, how this week compares to last.
+      Tasks roll up by project with real durations. A one-click summary drafts the narrative for you.
+    </p>
+  </div>
+</section>
+
+<section class="feature">
+  <figure class="shot">
+    <img src="img/chat.webp" width="678" height="1062" alt="Chronicle chat: the question 'what did I work on this morning?' answered by the local model with a list of tasks and time ranges" loading="lazy">
+  </figure>
+  <div class="feature-text">
+    <h2>Ask your own history.</h2>
+    <p>
+      "What did I work on this morning?" "How long did the merge take?" The answer comes from the model on your machine,
+      reading your local database. No API key, no account, nothing uploaded.
+    </p>
+    <p class="small">
+      It is a 1.7B-parameter model on a CPU. Answers take a while and are sometimes wrong. They are also grounded in
+      what actually happened, which turns out to matter more.
+    </p>
+  </div>
+</section>
+
+<section class="feature reverse">
+  <figure class="shot">
+    <img src="img/connections.webp" width="678" height="900" alt="Chronicle settings, Connections: a Jira MCP server with 63 tools connected, and a list of git repositories with their last commit or checkout" loading="lazy">
+  </figure>
+  <div class="feature-text">
+    <h2>It knows your repos and your tickets.</h2>
+    <p>
+      Point it at the git repositories you work in and it picks up commits, checkouts and branch names as they happen.
+      Connect Jira over MCP and a ticket key in a window title becomes a task with its real title and context attached.
+    </p>
+    <p class="small">
+      Connections are the only thing that ever talks to a network, and only to the servers you configured.
+    </p>
+  </div>
+</section>
+
+<section class="how">
+  <h2>How it works</h2>
+  <ol>
+    <li><strong>Capture.</strong> A tiny daemon records which window has focus and when you go idle. That is the whole input.</li>
+    <li><strong>Derive.</strong> A local model (Qwen3 1.7B via llama.cpp) groups focus events into tasks and writes one-line descriptions.</li>
+    <li><strong>Correct.</strong> You fix what it got wrong in the timeline. The corrections feed the next derivation.</li>
+    <li><strong>Use.</strong> Standup draft in the morning, report on Friday, chat whenever.</li>
+  </ol>
+</section>
+
+<section class="privacy">
+  <h2>Where your data lives</h2>
+  <p>
+    One SQLite file in your home directory. The model runs in-process. There is no account, no sync, no telemetry, no
+    crash reporting, and no analytics on this page either. If you want it gone, delete one folder.
+  </p>
+</section>
+
+<section class="download" id="download">
+  <h2>Download</h2>
+  <p>
+    Not yet. Chronicle currently runs on Linux with X11. macOS and Windows capture are in progress, and I don't want to
+    hand anyone a build until all three work the way the Linux one does.
+  </p>
+  <p>
+    If you want to be told when that happens, or you want to try the Linux build early, say so below.
+  </p>
+</section>
+
+<section class="feedback" id="feedback">
+  <h2>Tell me what you think</h2>
+  <p>
+    Would this be useful to you? What would it need? What would stop you from running it? I read every reply.
+  </p>
+  <a class="btn primary" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">james.clarke@callplaybook.com</a>
+</section>
+
+</main>
+
+<footer>
+  <span>Chronicle · built by James Clarke</span>
+  <span>© 2026 · all rights reserved</span>
+</footer>
+
+</body>
+</html>
