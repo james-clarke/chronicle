@@ -917,10 +917,10 @@ impl TimelineApp {
         }
         let mut commits: std::collections::HashMap<i64, Vec<CommitRow>> =
             std::collections::HashMap::new();
-        for (task_id, c) in chronicle_core::storage::commits_in_range(conn, lo, hi)? {
+        for (task_id, c) in chronicle_core::storage::activity_in_range_by_task(conn, lo, hi)? {
             let summary = c
                 .summary
-                .or_else(|| c.commit_id.map(|h| h.chars().take(12).collect()))
+                .or_else(|| c.ext_id.map(|h| h.chars().take(12).collect()))
                 .unwrap_or_default();
             commits.entry(task_id).or_default().push(CommitRow {
                 time: c.ts.to_zoned(self.tz.clone()),

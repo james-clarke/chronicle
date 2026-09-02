@@ -19,32 +19,86 @@ pub struct UrlEvent {
     pub url: String,
 }
 
-/// A git observation from the repo poller (m15). Stored in `vcs_events`,
-/// never in `events` — these are point markers, not focus time.
+/// A point or span marker from a local collector (m15 git, m22 the rest).
+/// Stored in `activity_events`, never in `events` — evidence, not focus time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VcsEvent {
+pub struct ActivityEvent {
     pub ts: Timestamp,
-    /// Repo directory name (short), not the full path.
+    /// Span-like kinds only (AI session, call): last seen / hung up.
+    pub end_ts: Option<Timestamp>,
+    /// Short scope name: repo directory basename, cwd basename, PR repo
+    /// name; empty when the kind has none.
     pub repo: String,
+    /// Empty when the kind has none.
     pub branch: String,
-    pub kind: VcsKind,
-    /// Commit kind only.
-    pub commit_id: Option<String>,
-    /// Commit subject line; None when git(1) was unavailable.
+    pub kind: ActivityKind,
+    /// Per-kind external identity and dedupe key: commit hash, session id,
+    /// PR url, `call:<start ms>`.
+    pub ext_id: Option<String>,
+    /// Commit subject, first prompt, PR title, calling app.
     pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VcsKind {
+pub enum ActivityKind {
     Checkout,
     Commit,
+    AiSession,
+    PrAuthored,
+    PrReviewed,
+    Call,
 }
 
-impl VcsKind {
+/// How a repeated observation of the same `ext_id` is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dedupe {
+    /// Checkout: dropped when it matches the repo's latest stored checkout.
+    LatestCheckout,
+    /// Every observation is a row.
+    None,
+    /// One row per `(kind, ext_id)`; a repeat refreshes `end_ts` (and fills
+    /// an empty summary).
+    Upsert,
+    /// One row per `(kind, ext_id, ts)`; repeats are ignored.
+    Ignore,
+}
+
+impl ActivityKind {
+    pub const ALL: [ActivityKind; 6] = [
+        ActivityKind::Checkout,
+        ActivityKind::Commit,
+        ActivityKind::AiSession,
+        ActivityKind::PrAuthored,
+        ActivityKind::PrReviewed,
+        ActivityKind::Call,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
-            VcsKind::Checkout => "checkout",
-            VcsKind::Commit => "commit",
+            ActivityKind::Checkout => "checkout",
+            ActivityKind::Commit => "commit",
+            ActivityKind::AiSession => "ai_session",
+            ActivityKind::PrAuthored => "pr_authored",
+            ActivityKind::PrReviewed => "pr_reviewed",
+            ActivityKind::Call => "call",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// Git kinds: the only ones anchoring and the repo rows look at.
+    pub fn is_vcs(self) -> bool {
+        matches!(self, ActivityKind::Checkout | ActivityKind::Commit)
+    }
+
+    pub fn dedupe(self) -> Dedupe {
+        match self {
+            ActivityKind::Checkout => Dedupe::LatestCheckout,
+            ActivityKind::Commit => Dedupe::None,
+            ActivityKind::AiSession | ActivityKind::Call => Dedupe::Upsert,
+            ActivityKind::PrAuthored | ActivityKind::PrReviewed => Dedupe::Ignore,
         }
     }
 }
@@ -54,7 +108,7 @@ pub enum CaptureEvent {
     Focus(FocusEvent),
     TitleChanged(FocusEvent),
     Url(UrlEvent),
-    Vcs(VcsEvent),
+    Activity(ActivityEvent),
     Afk { idle: bool, ts: Timestamp },
 }
 

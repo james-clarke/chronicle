@@ -7,8 +7,8 @@ use rusqlite_migration::{M, Migrations};
 
 use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
 use crate::types::{
-    CaptureEvent, Correction, Event, FocusEvent, NewInterval, OpenTask, Task, TaskSlot, VcsEvent,
-    VcsKind, ms_to_ts, ts_to_ms,
+    ActivityEvent, ActivityKind, CaptureEvent, Correction, Dedupe, Event, FocusEvent, NewInterval,
+    OpenTask, Task, TaskSlot, ms_to_ts, ts_to_ms,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +32,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/007_vcs_events.sql")),
         M::up(include_str!("../migrations/008_task_workspace.sql")),
         M::up(include_str!("../migrations/009_standup_drafts.sql")),
+        M::up(include_str!("../migrations/010_activity_events.sql")),
     ])
 });
 
@@ -78,135 +79,168 @@ pub fn insert_event(conn: &Connection, event: &CaptureEvent) -> Result<(), Stora
             )?;
             Ok(())
         }
-        CaptureEvent::Vcs(e) => insert_vcs_event(conn, e),
+        CaptureEvent::Activity(e) => insert_activity_event(conn, e),
     }
 }
 
-/// A checkout matching the repo's latest stored checkout is dropped: the
-/// poller re-announces its state on daemon start, and replays must not stack
-/// duplicate branch markers.
-pub fn insert_vcs_event(conn: &Connection, e: &VcsEvent) -> Result<(), StorageError> {
-    if e.kind == VcsKind::Checkout {
-        use rusqlite::OptionalExtension;
-        let last: Option<String> = conn
-            .query_row(
-                "SELECT branch FROM vcs_events WHERE repo=?1 AND kind='checkout'
-                 ORDER BY ts DESC, id DESC LIMIT 1",
-                params![e.repo],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if last.as_deref() == Some(e.branch.as_str()) {
-            return Ok(());
+/// Stores one observation per the kind's [`Dedupe`] rule: a checkout
+/// matching the repo's latest stored checkout is dropped (the poller
+/// re-announces its state on daemon start, and replays must not stack
+/// duplicate branch markers); span kinds upsert on `(kind, ext_id)`; PR
+/// markers are one row per `(kind, ext_id, ts)`.
+pub fn insert_activity_event(conn: &Connection, e: &ActivityEvent) -> Result<(), StorageError> {
+    use rusqlite::OptionalExtension;
+    match e.kind.dedupe() {
+        Dedupe::LatestCheckout => {
+            let last: Option<String> = conn
+                .query_row(
+                    "SELECT branch FROM activity_events WHERE repo=?1 AND kind='checkout'
+                     ORDER BY ts DESC, id DESC LIMIT 1",
+                    params![e.repo],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if last.as_deref() == Some(e.branch.as_str()) {
+                return Ok(());
+            }
         }
+        Dedupe::Upsert => {
+            if let Some(ext) = &e.ext_id {
+                let n = conn.execute(
+                    "UPDATE activity_events SET end_ts=?3,
+                            summary=COALESCE(NULLIF(summary, ''), ?4)
+                     WHERE kind=?1 AND ext_id=?2",
+                    params![e.kind.as_str(), ext, e.end_ts.map(ts_to_ms), e.summary],
+                )?;
+                if n > 0 {
+                    return Ok(());
+                }
+            }
+        }
+        Dedupe::None | Dedupe::Ignore => {}
     }
     conn.execute(
-        "INSERT INTO vcs_events (ts, repo, branch, kind, commit_id, summary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR IGNORE INTO activity_events
+             (ts, end_ts, repo, branch, kind, ext_id, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             ts_to_ms(e.ts),
+            e.end_ts.map(ts_to_ms),
             e.repo,
             e.branch,
             e.kind.as_str(),
-            e.commit_id,
+            e.ext_id,
             e.summary
         ],
     )?;
     Ok(())
 }
 
-fn vcs_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VcsEvent> {
-    let kind: String = r.get(3)?;
-    Ok(VcsEvent {
-        ts: ms_to_ts(r.get(0)?),
-        repo: r.get(1)?,
-        branch: r.get(2)?,
-        kind: if kind == "commit" {
-            VcsKind::Commit
-        } else {
-            VcsKind::Checkout
-        },
-        commit_id: r.get(4)?,
-        summary: r.get(5)?,
+fn activity_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityEvent> {
+    activity_from_row_at(r, 0)
+}
+
+fn activity_from_row_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<ActivityEvent> {
+    let kind: String = r.get(at + 4)?;
+    Ok(ActivityEvent {
+        ts: ms_to_ts(r.get(at)?),
+        end_ts: r.get::<_, Option<i64>>(at + 1)?.map(ms_to_ts),
+        repo: r.get(at + 2)?,
+        branch: r.get(at + 3)?,
+        kind: ActivityKind::parse(&kind).unwrap_or(ActivityKind::Checkout),
+        ext_id: r.get(at + 5)?,
+        summary: r.get(at + 6)?,
     })
 }
 
-const VCS_COLS: &str = "ts, repo, branch, kind, commit_id, summary";
+const ACTIVITY_COLS: &str = "ts, end_ts, repo, branch, kind, ext_id, summary";
+const ACTIVITY_COLS_V: &str = "v.ts, v.end_ts, v.repo, v.branch, v.kind, v.ext_id, v.summary";
+const VCS_KINDS: &str = "kind IN ('checkout','commit')";
 
-pub fn vcs_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<VcsEvent>, StorageError> {
+/// Every kind inside `[lo, hi)` by start ts — the digest's activity section.
+pub fn activity_in_range(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {VCS_COLS} FROM vcs_events WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id"
+        "SELECT {ACTIVITY_COLS} FROM activity_events
+         WHERE ts >= ?1 AND ts < ?2 ORDER BY ts, id"
     ))?;
-    let rows = stmt.query_map([lo, hi], vcs_from_row)?;
+    let rows = stmt.query_map([lo, hi], activity_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Git kinds only inside `[lo, hi)` — anchoring's in-window evidence.
+pub fn vcs_in_range(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLS} FROM activity_events
+         WHERE {VCS_KINDS} AND ts >= ?1 AND ts < ?2 ORDER BY ts, id"
+    ))?;
+    let rows = stmt.query_map([lo, hi], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Latest checkout per repo strictly before `lo` — the branch state a window
 /// opens under, for repos with no checkout inside it.
-pub fn branch_state_before(conn: &Connection, lo: i64) -> Result<Vec<VcsEvent>, StorageError> {
+pub fn branch_state_before(conn: &Connection, lo: i64) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {VCS_COLS} FROM vcs_events
+        "SELECT {ACTIVITY_COLS} FROM activity_events
          WHERE kind='checkout' AND ts < ?1
-           AND id IN (SELECT MAX(id) FROM vcs_events
+           AND id IN (SELECT MAX(id) FROM activity_events
                       WHERE kind='checkout' AND ts < ?1 GROUP BY repo)"
     ))?;
-    let rows = stmt.query_map([lo], vcs_from_row)?;
+    let rows = stmt.query_map([lo], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Newest event per repo, any kind — the settings panel's per-repo "last
-/// seen" line. Ordered by repo name.
-pub fn latest_vcs_event_per_repo(conn: &Connection) -> Result<Vec<VcsEvent>, StorageError> {
+/// Newest git event per repo — the settings panel's per-repo "last seen"
+/// line. Ordered by repo name.
+pub fn latest_vcs_event_per_repo(conn: &Connection) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {VCS_COLS} FROM vcs_events
-         WHERE id IN (SELECT MAX(id) FROM vcs_events GROUP BY repo)
+        "SELECT {ACTIVITY_COLS} FROM activity_events
+         WHERE id IN (SELECT MAX(id) FROM activity_events WHERE {VCS_KINDS} GROUP BY repo)
          ORDER BY repo"
     ))?;
-    let rows = stmt.query_map([], vcs_from_row)?;
+    let rows = stmt.query_map([], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Commits whose ts falls inside any of the task's intervals, oldest first.
-pub fn commits_for_task(conn: &Connection, task_id: i64) -> Result<Vec<VcsEvent>, StorageError> {
+pub fn commits_for_task(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT DISTINCT {VCS_COLS} FROM vcs_events v
+        "SELECT DISTINCT {ACTIVITY_COLS_V} FROM activity_events v
          JOIN intervals i ON i.task_id=?1 AND v.ts >= i.start_ts AND v.ts < i.end_ts
          WHERE v.kind='commit' ORDER BY v.ts"
     ))?;
-    let rows = stmt.query_map([task_id], vcs_from_row)?;
+    let rows = stmt.query_map([task_id], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Commits inside any task interval overlapping `[lo, hi)`, keyed by task,
-/// oldest first per task (one range query for the whole timeline day).
-pub fn commits_in_range(
+/// Non-checkout events overlapping any task interval that overlaps
+/// `[lo, hi)`, keyed by task, oldest first per task (one range query for the
+/// whole timeline day). A span kind overlaps every interval it covers; a
+/// point kind the one it lands in.
+pub fn activity_in_range_by_task(
     conn: &Connection,
     lo: i64,
     hi: i64,
-) -> Result<Vec<(i64, VcsEvent)>, StorageError> {
+) -> Result<Vec<(i64, ActivityEvent)>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT DISTINCT i.task_id, {VCS_COLS} FROM vcs_events v
-         JOIN intervals i ON v.ts >= i.start_ts AND v.ts < i.end_ts
-         WHERE v.kind='commit' AND v.ts >= ?1 AND v.ts < ?2
+        "SELECT DISTINCT i.task_id, {ACTIVITY_COLS_V} FROM activity_events v
+         JOIN intervals i ON v.ts < i.end_ts AND COALESCE(v.end_ts, v.ts) >= i.start_ts
+         WHERE v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
          ORDER BY i.task_id, v.ts"
     ))?;
     let rows = stmt.query_map([lo, hi], |r| {
-        let kind: String = r.get(4)?;
-        Ok((
-            r.get::<_, i64>(0)?,
-            VcsEvent {
-                ts: ms_to_ts(r.get(1)?),
-                repo: r.get(2)?,
-                branch: r.get(3)?,
-                kind: if kind == "commit" {
-                    VcsKind::Commit
-                } else {
-                    VcsKind::Checkout
-                },
-                commit_id: r.get(5)?,
-                summary: r.get(6)?,
-            },
-        ))
+        Ok((r.get::<_, i64>(0)?, activity_from_row_at(r, 1)?))
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
@@ -574,7 +608,7 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
 pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
     const STMTS: [&str; 10] = [
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
-        "DELETE FROM vcs_events WHERE id IN (SELECT id FROM vcs_events WHERE ts < ?1 LIMIT ?2)",
+        "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
         "DELETE FROM intervals WHERE id IN (SELECT id FROM intervals WHERE end_ts < ?1 \
          AND id NOT IN (SELECT interval_id FROM corrections WHERE interval_id IS NOT NULL) \
@@ -1953,28 +1987,31 @@ mod tests {
 
     #[test]
     fn latest_vcs_event_per_repo_picks_newest_of_each() {
-        use crate::types::{VcsEvent, VcsKind};
+        use crate::types::{ActivityEvent, ActivityKind};
         let mut conn = Connection::open_in_memory().unwrap();
         super::MIGRATIONS.to_latest(&mut conn).unwrap();
-        let ev = |ms: i64, repo: &str, kind: VcsKind, branch: &str| {
-            let commit_id = matches!(kind, VcsKind::Commit).then(|| "abc".to_owned());
-            VcsEvent {
+        let ev = |ms: i64, repo: &str, kind: ActivityKind, branch: &str| {
+            let ext_id = matches!(kind, ActivityKind::Commit).then(|| "abc".to_owned());
+            ActivityEvent {
                 ts: crate::types::ms_to_ts(ms),
                 repo: repo.into(),
                 branch: branch.into(),
                 kind,
-                commit_id,
+                ext_id,
+                end_ts: None,
                 summary: None,
             }
         };
         assert!(super::latest_vcs_event_per_repo(&conn).unwrap().is_empty());
-        super::insert_vcs_event(&conn, &ev(1_000, "a", VcsKind::Checkout, "main")).unwrap();
-        super::insert_vcs_event(&conn, &ev(2_000, "b", VcsKind::Checkout, "feat")).unwrap();
-        super::insert_vcs_event(&conn, &ev(3_000, "a", VcsKind::Commit, "main")).unwrap();
+        super::insert_activity_event(&conn, &ev(1_000, "a", ActivityKind::Checkout, "main"))
+            .unwrap();
+        super::insert_activity_event(&conn, &ev(2_000, "b", ActivityKind::Checkout, "feat"))
+            .unwrap();
+        super::insert_activity_event(&conn, &ev(3_000, "a", ActivityKind::Commit, "main")).unwrap();
         let latest = super::latest_vcs_event_per_repo(&conn).unwrap();
         assert_eq!(latest.len(), 2);
         assert_eq!(latest[0].repo, "a");
-        assert!(matches!(latest[0].kind, VcsKind::Commit));
+        assert!(matches!(latest[0].kind, ActivityKind::Commit));
         assert_eq!(latest[0].ts, crate::types::ms_to_ts(3_000));
         assert_eq!(
             (latest[1].repo.as_str(), latest[1].branch.as_str()),

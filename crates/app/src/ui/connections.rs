@@ -9,7 +9,7 @@ use std::sync::mpsc;
 
 use chronicle_core::config::expand_home;
 use chronicle_core::storage;
-use chronicle_core::types::VcsEvent;
+use chronicle_core::types::ActivityEvent;
 use chronicle_mcp::{ContextCall, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
@@ -373,7 +373,7 @@ pub(super) struct Connections {
     /// Newest `fetch_context` job: (status, created, error).
     last_fetch: Option<(String, Timestamp, Option<String>)>,
     /// Newest vcs event per repo basename.
-    repo_last: BTreeMap<String, VcsEvent>,
+    repo_last: BTreeMap<String, ActivityEvent>,
     repo_add: String,
     repo_error: Option<String>,
     repo_arm_remove: Option<usize>,

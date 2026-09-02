@@ -1,4 +1,4 @@
-//! Git repo poller (m15): emits `VcsEvent`s for branch checkouts and new
+//! Git repo poller (m15): emits `ActivityEvent`s for branch checkouts and new
 //! commits. Reads `.git/HEAD` and ref files directly every poll (two tiny
 //! reads per repo); shells out to git(1) only when a new commit needs its
 //! subject line. No hooks installed, nothing written to the repo.
@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chronicle_core::types::{CaptureEvent, VcsEvent, VcsKind};
+use chronicle_core::types::{ActivityEvent, ActivityKind, CaptureEvent};
 use crossbeam_channel::Sender;
 use jiff::Timestamp;
 
@@ -68,7 +68,7 @@ impl FocusProvider for GitProvider {
             repo.state = read_state(&repo.git_dir);
             if let Some(s) = &repo.state
                 && tx
-                    .send(CaptureEvent::Vcs(checkout_event(&repo.name, s)))
+                    .send(CaptureEvent::Activity(checkout_event(&repo.name, s)))
                     .is_err()
             {
                 return Ok(());
@@ -83,17 +83,17 @@ impl FocusProvider for GitProvider {
                     continue;
                 };
                 let event = match event.kind {
-                    VcsKind::Commit => VcsEvent {
+                    ActivityKind::Commit => ActivityEvent {
                         summary: commit_subject(
                             &repo.work_dir,
-                            event.commit_id.as_deref().unwrap_or("HEAD"),
+                            event.ext_id.as_deref().unwrap_or("HEAD"),
                         ),
                         ..event
                     },
-                    VcsKind::Checkout => event,
+                    _ => event,
                 };
                 repo.state = new;
-                if tx.send(CaptureEvent::Vcs(event)).is_err() {
+                if tx.send(CaptureEvent::Activity(event)).is_err() {
                     return Ok(());
                 }
             }
@@ -101,29 +101,35 @@ impl FocusProvider for GitProvider {
     }
 }
 
-fn checkout_event(name: &str, s: &RepoState) -> VcsEvent {
-    VcsEvent {
+fn checkout_event(name: &str, s: &RepoState) -> ActivityEvent {
+    ActivityEvent {
         ts: Timestamp::now(),
         repo: name.to_owned(),
         branch: s.branch.clone(),
-        kind: VcsKind::Checkout,
-        commit_id: None,
+        kind: ActivityKind::Checkout,
+        ext_id: None,
+        end_ts: None,
         summary: None,
     }
 }
 
 /// Branch change → checkout; same branch with a moved head → commit. A branch
 /// switch swallows the simultaneous head move — the checkout is the story.
-fn diff_state(old: Option<&RepoState>, new: Option<&RepoState>, name: &str) -> Option<VcsEvent> {
+fn diff_state(
+    old: Option<&RepoState>,
+    new: Option<&RepoState>,
+    name: &str,
+) -> Option<ActivityEvent> {
     let new = new?;
     match old {
         Some(o) if o.branch != new.branch => Some(checkout_event(name, new)),
-        Some(o) if o.head != new.head && new.head.is_some() => Some(VcsEvent {
+        Some(o) if o.head != new.head && new.head.is_some() => Some(ActivityEvent {
             ts: Timestamp::now(),
             repo: name.to_owned(),
             branch: new.branch.clone(),
-            kind: VcsKind::Commit,
-            commit_id: new.head.clone(),
+            kind: ActivityKind::Commit,
+            ext_id: new.head.clone(),
+            end_ts: None,
             summary: None,
         }),
         Some(_) => None,
@@ -269,15 +275,15 @@ mod tests {
         };
         assert!(diff_state(Some(&a), Some(&a), "r").is_none());
         let sw = diff_state(Some(&a), Some(&b), "r").unwrap();
-        assert_eq!(sw.kind, VcsKind::Checkout);
+        assert_eq!(sw.kind, ActivityKind::Checkout);
         assert_eq!(sw.branch, "ABC-1-x");
         let cm = diff_state(Some(&b), Some(&c), "r").unwrap();
-        assert_eq!(cm.kind, VcsKind::Commit);
-        assert_eq!(cm.commit_id.as_deref(), Some("bbb"));
+        assert_eq!(cm.kind, ActivityKind::Commit);
+        assert_eq!(cm.ext_id.as_deref(), Some("bbb"));
         // Branch switch swallows the simultaneous head move.
         assert_eq!(
             diff_state(Some(&a), Some(&c), "r").unwrap().kind,
-            VcsKind::Checkout
+            ActivityKind::Checkout
         );
     }
 }

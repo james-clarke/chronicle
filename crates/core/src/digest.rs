@@ -6,7 +6,7 @@ use std::fmt::Write;
 use jiff::tz::TimeZone;
 
 use crate::sessionizer::{SpanDraft, SpanKind};
-use crate::types::{Correction, OpenTask, VcsEvent, VcsKind};
+use crate::types::{ActivityEvent, ActivityKind, Correction, OpenTask};
 
 pub const MAX_TOKENS: usize = 3000;
 
@@ -20,7 +20,7 @@ pub fn build_digest(
     tz: &TimeZone,
     open_tasks: &[OpenTask],
     corrections: &[Correction],
-    vcs: &[VcsEvent],
+    vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
 ) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
@@ -53,7 +53,7 @@ fn render(
     tz: &TimeZone,
     open_tasks: &[OpenTask],
     corrections: &[Correction],
-    vcs: &[VcsEvent],
+    vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
     apps_cap: usize,
     title_chars: usize,
@@ -130,12 +130,13 @@ fn render(
         }
     }
 
-    // Branch names and commit subjects are the strongest task-identity signal
-    // in the window. Last 10 inside it; omitted when empty so git-less
-    // digests (and their goldens) are unchanged.
+    // Branch names, commit subjects, AI sessions, PR events and calls are
+    // the strongest task-identity signal in the window. Last 10 inside it;
+    // omitted when empty so evidence-less digests (and their goldens) are
+    // unchanged.
     let win_lo = first.start.as_millisecond();
     let win_hi = last.end.as_millisecond();
-    let in_window: Vec<&VcsEvent> = vcs
+    let in_window: Vec<&ActivityEvent> = vcs
         .iter()
         .filter(|v| {
             let ms = v.ts.as_millisecond();
@@ -143,22 +144,10 @@ fn render(
         })
         .collect();
     if !in_window.is_empty() {
-        let _ = writeln!(out, "\n## Git activity");
+        let _ = writeln!(out, "\n## Activity");
         let skip = in_window.len().saturating_sub(10);
         for v in &in_window[skip..] {
-            let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
-            match v.kind {
-                VcsKind::Checkout => {
-                    let _ = writeln!(out, "- {hm} checkout {} \u{2192} {}", v.repo, v.branch);
-                }
-                VcsKind::Commit => {
-                    let _ = write!(out, "- {hm} commit {}", v.repo);
-                    if let Some(s) = &v.summary {
-                        let _ = write!(out, " \"{}\"", clip(s, title_chars));
-                    }
-                    let _ = writeln!(out, " [{}]", v.branch);
-                }
-            }
+            let _ = writeln!(out, "{}", activity_line(v, tz, title_chars));
         }
     }
 
@@ -292,6 +281,66 @@ pub(crate) fn site_key(url: &str) -> String {
     match path.split(['/', '?', '#']).next().filter(|s| !s.is_empty()) {
         Some(seg) => format!("{host}/{seg}"),
         None => host.to_owned(),
+    }
+}
+
+/// One digest/journal line for an activity event: `- HH:MM <kind> …`.
+pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> String {
+    let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
+    let dur = v
+        .end_ts
+        .map(|e| fmt_dur(e.as_millisecond() - v.ts.as_millisecond()))
+        .unwrap_or_default();
+    let summary = v.summary.as_deref().map(|s| clip(s, title_chars));
+    match v.kind {
+        ActivityKind::Checkout => {
+            format!("- {hm} checkout {} \u{2192} {}", v.repo, v.branch)
+        }
+        ActivityKind::Commit => {
+            let mut line = format!("- {hm} commit {}", v.repo);
+            if let Some(s) = summary {
+                let _ = write!(line, " \"{s}\"");
+            }
+            let _ = write!(line, " [{}]", v.branch);
+            line
+        }
+        ActivityKind::AiSession => {
+            let mut line = format!("- {hm} claude {}", v.repo);
+            if !v.branch.is_empty() {
+                let _ = write!(line, "@{}", v.branch);
+            }
+            if !dur.is_empty() {
+                let _ = write!(line, " {dur}");
+            }
+            if let Some(s) = summary {
+                let _ = write!(line, " \"{s}\"");
+            }
+            line
+        }
+        ActivityKind::PrAuthored | ActivityKind::PrReviewed => {
+            let what = if v.kind == ActivityKind::PrAuthored {
+                "PR authored"
+            } else {
+                "PR reviewed"
+            };
+            let mut line = format!("- {hm} {what} {}", v.repo);
+            if let Some(s) = summary {
+                let _ = write!(line, " {s}");
+            }
+            line
+        }
+        ActivityKind::Call => {
+            let mut line = format!("- {hm} call");
+            if !dur.is_empty() {
+                let _ = write!(line, " {dur}");
+            } else {
+                line.push_str(" (ongoing)");
+            }
+            if let Some(s) = summary {
+                let _ = write!(line, " ({s})");
+            }
+            line
+        }
     }
 }
 

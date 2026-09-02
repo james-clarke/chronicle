@@ -634,7 +634,7 @@ fn chat_context_includes_project_totals() {
 
 #[test]
 fn digest_git_activity_section() {
-    use chronicle_core::types::{VcsEvent, VcsKind, ms_to_ts, ts_to_ms};
+    use chronicle_core::types::{ActivityEvent, ActivityKind, ms_to_ts, ts_to_ms};
 
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
@@ -642,25 +642,27 @@ fn digest_git_activity_section() {
     let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], None);
     let t0 = ts_to_ms(current.first().unwrap().start);
     let vcs = [
-        VcsEvent {
+        ActivityEvent {
             ts: ms_to_ts(t0 + 60_000),
             repo: "app".into(),
             branch: "ABC-123-sending-plans".into(),
-            kind: VcsKind::Checkout,
-            commit_id: None,
+            kind: ActivityKind::Checkout,
+            ext_id: None,
+            end_ts: None,
             summary: None,
         },
-        VcsEvent {
+        ActivityEvent {
             ts: ms_to_ts(t0 + 120_000),
             repo: "app".into(),
             branch: "ABC-123-sending-plans".into(),
-            kind: VcsKind::Commit,
-            commit_id: Some("abc123".into()),
+            kind: ActivityKind::Commit,
+            ext_id: Some("abc123".into()),
+            end_ts: None,
             summary: Some("feat: plan model".into()),
         },
     ];
     let with = build_digest(current, &TimeZone::UTC, &[], &[], &vcs, None);
-    assert!(with.contains("## Git activity"), "digest: {with}");
+    assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("checkout app \u{2192} ABC-123-sending-plans"),
         "digest: {with}"
@@ -670,7 +672,7 @@ fn digest_git_activity_section() {
         "digest: {with}"
     );
     // Out-of-window events must not add the section (goldens stay git-free).
-    let outside = [VcsEvent {
+    let outside = [ActivityEvent {
         ts: ms_to_ts(t0 - 3_600_000),
         ..vcs[0].clone()
     }];
@@ -681,9 +683,152 @@ fn digest_git_activity_section() {
 }
 
 #[test]
+fn digest_activity_section_mixed_kinds() {
+    use chronicle_core::types::{ActivityEvent, ActivityKind, ms_to_ts, ts_to_ms};
+
+    let (spans, config) = day1();
+    let batches = assign_batches(&spans, &config);
+    let current = &spans[batches[0].spans.clone()];
+    let t0 = ts_to_ms(current.first().unwrap().start);
+    let ev =
+        |kind, off: i64, dur: Option<i64>, repo: &str, branch: &str, summary: &str| ActivityEvent {
+            ts: ms_to_ts(t0 + off),
+            end_ts: dur.map(|d| ms_to_ts(t0 + off + d)),
+            repo: repo.into(),
+            branch: branch.into(),
+            kind,
+            ext_id: Some(format!("{off}")),
+            summary: Some(summary.into()),
+        };
+    let activity = [
+        ev(
+            ActivityKind::AiSession,
+            60_000,
+            Some(23 * 60_000),
+            "app",
+            "ABC-123-x",
+            "fix the flaky test",
+        ),
+        ev(
+            ActivityKind::PrAuthored,
+            120_000,
+            None,
+            "app",
+            "",
+            "#40 ABC-123: ship it · open",
+        ),
+        ev(
+            ActivityKind::Call,
+            180_000,
+            Some(32 * 60_000),
+            "",
+            "",
+            "Firefox",
+        ),
+        ev(ActivityKind::Call, 240_000, None, "", "", "Firefox"),
+    ];
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &activity, None);
+    assert!(with.contains("## Activity"), "digest: {with}");
+    assert!(
+        with.contains("claude app@ABC-123-x 23m00s \"fix the flaky test\""),
+        "digest: {with}"
+    );
+    assert!(
+        with.contains("PR authored app #40 ABC-123: ship it · open"),
+        "digest: {with}"
+    );
+    assert!(with.contains("call 32m00s (Firefox)"), "digest: {with}");
+    assert!(with.contains("call (ongoing) (Firefox)"), "digest: {with}");
+}
+
+#[test]
+fn activity_events_upsert_and_ignore_paths() {
+    use chronicle_core::storage;
+    use chronicle_core::types::{ActivityEvent, ActivityKind, ms_to_ts};
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m22_activity.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let conn = storage::open(&db).unwrap();
+    let ev = |kind, ts: i64, end: Option<i64>, ext: &str, summary: Option<&str>| ActivityEvent {
+        ts: ms_to_ts(ts),
+        end_ts: end.map(ms_to_ts),
+        repo: "app".into(),
+        branch: "main".into(),
+        kind,
+        ext_id: Some(ext.into()),
+        summary: summary.map(Into::into),
+    };
+
+    // Span kinds: one row per ext_id, end_ts follows, empty summary fills in.
+    let s = ActivityKind::AiSession;
+    storage::insert_activity_event(&conn, &ev(s, 1_000, Some(1_000), "sess", None)).unwrap();
+    storage::insert_activity_event(&conn, &ev(s, 1_000, Some(9_000), "sess", Some("hi"))).unwrap();
+    storage::insert_activity_event(&conn, &ev(s, 1_000, Some(20_000), "sess", Some("later")))
+        .unwrap();
+    let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].end_ts, Some(ms_to_ts(20_000)));
+    assert_eq!(rows[0].summary.as_deref(), Some("hi"));
+
+    // PR kinds: one row per (kind, ext_id, ts); a bumped ts is a new marker.
+    let p = ActivityKind::PrAuthored;
+    storage::insert_activity_event(&conn, &ev(p, 2_000, None, "url", Some("#1"))).unwrap();
+    storage::insert_activity_event(&conn, &ev(p, 2_000, None, "url", Some("#1"))).unwrap();
+    storage::insert_activity_event(&conn, &ev(p, 3_000, None, "url", Some("#1"))).unwrap();
+    storage::insert_activity_event(
+        &conn,
+        &ev(ActivityKind::PrReviewed, 3_000, None, "url", None),
+    )
+    .unwrap();
+    let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
+    assert_eq!(rows.len(), 4, "{rows:?}");
+
+    // Git-only views never see the new kinds.
+    assert!(storage::vcs_in_range(&conn, 0, 100_000).unwrap().is_empty());
+    assert!(
+        storage::latest_vcs_event_per_repo(&conn)
+            .unwrap()
+            .is_empty()
+    );
+
+    // A span overlaps every interval it covers, a point only its own.
+    conn.execute(
+        "INSERT INTO batches (start_ts, end_ts, status) VALUES (0, 100000, 'done')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tasks (label, status, created_ts) VALUES ('a', 'open', 0)",
+        [],
+    )
+    .unwrap();
+    let task = conn.last_insert_rowid();
+    for (lo, hi) in [(0, 1_500), (5_000, 6_000), (50_000, 60_000)] {
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, 1, ?2, ?3, 1.0)",
+            rusqlite::params![task, lo, hi],
+        )
+        .unwrap();
+    }
+    let by_task = storage::activity_in_range_by_task(&conn, 0, 100_000).unwrap();
+    let sessions = by_task
+        .iter()
+        .filter(|(_, e)| e.kind == ActivityKind::AiSession)
+        .count();
+    assert_eq!(sessions, 1, "session row is DISTINCT per task: {by_task:?}");
+    assert_eq!(
+        by_task.len(),
+        1,
+        "point events outside intervals stay out: {by_task:?}"
+    );
+}
+
+#[test]
 fn vcs_events_store_dedupe_and_anchor_guard() {
     use chronicle_core::storage;
-    use chronicle_core::types::{NewInterval, TaskSlot, VcsEvent, VcsKind, ms_to_ts};
+    use chronicle_core::types::{ActivityEvent, ActivityKind, NewInterval, TaskSlot, ms_to_ts};
 
     let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m15_vcs.db");
     for suffix in ["", "-wal", "-shm"] {
@@ -691,27 +836,29 @@ fn vcs_events_store_dedupe_and_anchor_guard() {
     }
     let mut conn = storage::open(&db).unwrap();
 
-    let checkout = |ts: i64, branch: &str| VcsEvent {
+    let checkout = |ts: i64, branch: &str| ActivityEvent {
         ts: ms_to_ts(ts),
         repo: "app".into(),
         branch: branch.into(),
-        kind: VcsKind::Checkout,
-        commit_id: None,
+        kind: ActivityKind::Checkout,
+        ext_id: None,
+        end_ts: None,
         summary: None,
     };
-    storage::insert_vcs_event(&conn, &checkout(1_000, "main")).unwrap();
+    storage::insert_activity_event(&conn, &checkout(1_000, "main")).unwrap();
     // Re-announced state on daemon restart must not stack a duplicate.
-    storage::insert_vcs_event(&conn, &checkout(2_000, "main")).unwrap();
-    storage::insert_vcs_event(&conn, &checkout(3_000, "ABC-1-x")).unwrap();
-    let commit = VcsEvent {
+    storage::insert_activity_event(&conn, &checkout(2_000, "main")).unwrap();
+    storage::insert_activity_event(&conn, &checkout(3_000, "ABC-1-x")).unwrap();
+    let commit = ActivityEvent {
         ts: ms_to_ts(4_000),
         repo: "app".into(),
         branch: "ABC-1-x".into(),
-        kind: VcsKind::Commit,
-        commit_id: Some("abc".into()),
+        kind: ActivityKind::Commit,
+        ext_id: Some("abc".into()),
+        end_ts: None,
         summary: Some("feat: x".into()),
     };
-    storage::insert_vcs_event(&conn, &commit).unwrap();
+    storage::insert_activity_event(&conn, &commit).unwrap();
     let all = storage::vcs_in_range(&conn, 0, 10_000).unwrap();
     assert_eq!(all.len(), 3, "duplicate checkout must be dropped");
 

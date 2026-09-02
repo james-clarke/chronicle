@@ -566,13 +566,13 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let tz = TimeZone::system();
         let mcp_path = config.mcp_path(data_dir);
         let mcp_context = chronicle_mcp::gather_context(&mcp_path);
-        let vcs = storage::vcs_in_range(&conn, batch.start_ts, batch.end_ts)?;
+        let activity = storage::activity_in_range(&conn, batch.start_ts, batch.end_ts)?;
         let digest = chronicle_core::digest::build_digest(
             &spans,
             &tz,
             &open,
             &corrections,
-            &vcs,
+            &activity,
             mcp_context.as_deref(),
         );
         let raw = chronicle_derive::infer_intervals(&model_path, &digest)?;
@@ -585,6 +585,12 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         match regex::Regex::new(&config.ticket_regex) {
             Ok(re) => {
                 let prior = storage::branch_state_before(&conn, batch.start_ts)?;
+                // Git kinds only: a session's `gitBranch` is not vcs activity.
+                let vcs: Vec<_> = activity
+                    .iter()
+                    .filter(|e| e.kind.is_vcs())
+                    .cloned()
+                    .collect();
                 for (task_id, key) in
                     chronicle_core::anchor::anchor_tasks(&stored, &prior, &vcs, &re)
                 {
@@ -752,19 +758,13 @@ fn run_ai_job(
                 .unwrap_or_default();
             let tz = TimeZone::system();
             let mut git = String::new();
-            for v in storage::vcs_in_range(conn, lo, hi)? {
+            for v in storage::activity_in_range(conn, lo, hi)? {
                 use std::fmt::Write as _;
-                let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
-                match v.kind {
-                    chronicle_core::types::VcsKind::Checkout => {
-                        let _ = writeln!(git, "- {hm} checkout {} \u{2192} {}", v.repo, v.branch);
-                    }
-                    chronicle_core::types::VcsKind::Commit => {
-                        let subject = v.summary.as_deref().unwrap_or("");
-                        let _ =
-                            writeln!(git, "- {hm} commit {} \"{subject}\" [{}]", v.repo, v.branch);
-                    }
-                }
+                let _ = writeln!(
+                    git,
+                    "{}",
+                    chronicle_core::digest::activity_line(&v, &tz, 120)
+                );
             }
             let entry =
                 describer.journal_entry(&label, project.as_deref(), &context, &git, &evidence)?;
@@ -2024,7 +2024,7 @@ impl Filters {
         let (app, title, url) = match event {
             CaptureEvent::Focus(e) | CaptureEvent::TitleChanged(e) => (&e.app, &e.title, None),
             CaptureEvent::Url(e) => (&e.app, &e.title, Some(&e.url)),
-            CaptureEvent::Vcs(_) | CaptureEvent::Afk { .. } => return false,
+            CaptureEvent::Activity(_) | CaptureEvent::Afk { .. } => return false,
         };
         self.apps.iter().any(|r| r.is_match(app))
             || self

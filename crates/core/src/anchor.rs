@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 
-use crate::types::{VcsEvent, VcsKind};
+use crate::types::{ActivityEvent, ActivityKind};
 
 /// `intervals` are `(task_id, start_ms, end_ms)` as returned by
 /// [`crate::storage::store_derivation`]. `prior` is the latest checkout per
@@ -19,20 +19,23 @@ use crate::types::{VcsEvent, VcsKind};
 /// intervals (parked branches never anchor by presence alone).
 pub fn anchor_tasks(
     intervals: &[(i64, i64, i64)],
-    prior: &[VcsEvent],
-    in_window: &[VcsEvent],
+    prior: &[ActivityEvent],
+    in_window: &[ActivityEvent],
     ticket_re: &Regex,
 ) -> Vec<(i64, String)> {
     // Per-repo checkout timeline: a branch is active from its checkout until
     // the same repo's next checkout. Prior state is active from the start.
     let mut repos: HashMap<&str, Vec<(i64, &str)>> = HashMap::new();
-    for e in prior.iter().filter(|e| e.kind == VcsKind::Checkout) {
+    for e in prior.iter().filter(|e| e.kind == ActivityKind::Checkout) {
         repos
             .entry(e.repo.as_str())
             .or_default()
             .push((i64::MIN, e.branch.as_str()));
     }
-    for e in in_window.iter().filter(|e| e.kind == VcsKind::Checkout) {
+    for e in in_window
+        .iter()
+        .filter(|e| e.kind == ActivityKind::Checkout)
+    {
         repos
             .entry(e.repo.as_str())
             .or_default()
@@ -107,24 +110,26 @@ mod tests {
     use super::*;
     use crate::types::ms_to_ts;
 
-    fn checkout(ts_ms: i64, repo: &str, branch: &str) -> VcsEvent {
-        VcsEvent {
+    fn checkout(ts_ms: i64, repo: &str, branch: &str) -> ActivityEvent {
+        ActivityEvent {
             ts: ms_to_ts(ts_ms),
             repo: repo.into(),
             branch: branch.into(),
-            kind: VcsKind::Checkout,
-            commit_id: None,
+            kind: ActivityKind::Checkout,
+            ext_id: None,
+            end_ts: None,
             summary: None,
         }
     }
 
-    fn commit(ts_ms: i64, repo: &str, branch: &str) -> VcsEvent {
-        VcsEvent {
+    fn commit(ts_ms: i64, repo: &str, branch: &str) -> ActivityEvent {
+        ActivityEvent {
             ts: ms_to_ts(ts_ms),
             repo: repo.into(),
             branch: branch.into(),
-            kind: VcsKind::Commit,
-            commit_id: Some("deadbeef".into()),
+            kind: ActivityKind::Commit,
+            ext_id: Some("deadbeef".into()),
+            end_ts: None,
             summary: Some("x".into()),
         }
     }
