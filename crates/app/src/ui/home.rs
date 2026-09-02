@@ -1,10 +1,11 @@
-//! Home view: input dashboard — declare a task, manage open and recently
-//! closed tasks, and the raw-spans debug list.
+//! Home view: input dashboard — the standup draft, declare a task, manage
+//! open and recently closed tasks, unassigned activity (and the raw-spans
+//! debug list).
 
 use eframe::egui;
 
 use super::timeline::{matches_filter, merge_menu};
-use super::{Action, OpenRow, SpanRow, TimelineApp, fmt_dur, theme};
+use super::{Action, OpenRow, SpanRow, StandupRow, TimelineApp, fmt_dur, theme};
 
 impl TimelineApp {
     /// "Where you left off" card: newest checkpoint since the last UI open.
@@ -63,8 +64,9 @@ impl TimelineApp {
         }
     }
 
-    /// Standup card: yesterday's drafted update, a spinner while drafting,
-    /// or a lone draft button. Returns true when (re)drafting was clicked.
+    /// Standup card: yesterday's draft as one block per task (label line,
+    /// prose, the next step lifted out), a spinner while drafting, or a lone
+    /// draft button. Returns true when (re)drafting was clicked.
     fn standup_card_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut generate = false;
         if self.standup.is_none() && self.standup_job.is_none() {
@@ -80,45 +82,34 @@ impl TimelineApp {
             ui.add_space(4.0);
             return generate;
         }
+        let title = match &self.standup {
+            Some(s) => format!("Standup \u{b7} {}", standup_day(&s.day)),
+            None => "Standup".to_owned(),
+        };
+        let model_missing = self.model_missing;
+        let drafting = self.standup_job.is_some();
+        let mut open = self.standup_open;
         theme::hover_card(ui, "standup_card", |ui| {
-            let day = self
-                .standup
-                .as_ref()
-                .map(|s| format!("Standup \u{b7} {}", s.day))
-                .unwrap_or_else(|| "Standup".to_owned());
-            let mut open = self.standup_open;
-            theme::disclosure_header(ui, &mut open, &day, None);
-            self.standup_open = open;
-            theme::fade_body(ui, "standup_body", self.standup_open, |ui| {
-                if self.standup_job.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new().size(12.0));
-                        ui.weak("drafting from yesterday's journals\u{2026}");
-                    });
-                } else if let Some(standup) = &self.standup {
-                    // Long drafts (7-task fallback days) otherwise push the
-                    // whole task list off a 640px window.
-                    egui::ScrollArea::vertical()
-                        .id_salt("standup_draft")
-                        .max_height(220.0)
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&standup.content)
-                                        .text_style(egui::TextStyle::Small)
-                                        .color(theme::palette::TEXT),
-                                )
-                                .wrap(),
-                            );
-                        });
-                    ui.add_space(4.0);
-                    if !self.model_missing && ui.small_button("redraft").clicked() {
-                        generate = true;
-                    }
-                    self.standup_error_ui(ui);
+            // Redraft lives on the header line so the body's height never
+            // depends on it (the old bottom-row button made the text jump).
+            theme::card_header(ui, &title, Some(&mut open), |ui| {
+                if drafting {
+                    ui.add(egui::Spinner::new().size(12.0));
+                } else if !model_missing && theme::ghost_button(ui, "redraft").clicked() {
+                    generate = true;
                 }
             });
+            theme::fade_body(ui, "standup_body", open, |ui| {
+                ui.add_space(theme::SPACE_XS);
+                if drafting {
+                    ui.weak("drafting from yesterday's journals\u{2026}");
+                } else if let Some(standup) = &self.standup {
+                    standup_body_ui(ui, standup, &self.open_tasks, &self.closed_tasks);
+                }
+                self.standup_error_ui(ui);
+            });
         });
+        self.standup_open = open;
         ui.add_space(theme::CARD_GAP);
         generate
     }
@@ -152,6 +143,12 @@ impl TimelineApp {
                 matches_filter(&q, &t.label, t.project.as_deref())
             })
             .collect();
+        let unassigned_vis: Vec<usize> = (0..self.unassigned.len())
+            .filter(|&u| {
+                let r = &self.unassigned[u];
+                matches_filter(&q, &r.title, Some(&r.app))
+            })
+            .collect();
         let span_vis: Vec<usize> = (0..self.spans.len())
             .filter(|&s| {
                 let sp = &self.spans[s];
@@ -162,12 +159,6 @@ impl TimelineApp {
 
         let mut pending: Option<Action> = None;
         theme::page().show(ui, |ui| {
-            self.model_card_ui(ui);
-            self.service_card_ui(ui);
-            self.resume_card_ui(ui);
-            if self.standup_card_ui(ui) {
-                pending = Some(Action::GenerateStandup);
-            }
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
             }
@@ -175,76 +166,40 @@ impl TimelineApp {
                 ui.colored_label(ui.visuals().error_fg_color, error);
                 return;
             }
-            let open_tasks = &self.open_tasks;
-            let closed_tasks = &self.closed_tasks;
-            let show_closed = &mut self.show_closed;
-            let show_spans = &mut self.show_spans;
-            let spans_debug = self.spans_debug;
-            let spans = &self.spans;
-            let new_label = &mut self.new_label;
-            let new_project = &mut self.new_project;
-            let suggestion = &self.suggestion;
-            let model_missing = self.model_missing;
+            // The whole page scrolls (cards included): a long standup draft
+            // grows its card instead of pushing the task list off-window.
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    theme::section_header(ui, "Working on", None);
-                    ui.add_space(6.0);
-                    // One column plan shared by the declare row and every task row,
-                    // so the whole section reads as a single aligned table.
-                    // Every column is a fixed-width `cell` — including the
-                    // action column — so Grid can never auto-widen past 400px.
-                    let label_w = (theme::content_width(ui)
-                        - PROJECT_COL
-                        - STATUS_COL
-                        - ACTION_COL
-                        - 3.0 * 8.0)
-                        .max(120.0);
-                    egui::Grid::new("working_on")
-                        .num_columns(4)
-                        .striped(true)
-                        .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::singleline(new_label)
-                                    .desired_width(label_w)
-                                    .hint_text("declare a task\u{2026}"),
-                            );
-                            ui.add(
-                                egui::TextEdit::singleline(new_project)
-                                    .desired_width(PROJECT_COL)
-                                    .hint_text("project"),
-                            );
-                            ui.label("");
-                            cell(ui, ACTION_COL, |ui| {
-                                if theme::primary_button(ui, "add").clicked() {
-                                    pending = Some(Action::Declare);
-                                }
-                            });
-                            ui.end_row();
-                            for &o in &open_vis {
-                                let t = &open_tasks[o];
-                                task_cells(ui, t, label_w, true);
-                                cell(ui, ACTION_COL, |ui| {
-                                    ui.menu_button("\u{2026}", |ui| {
-                                        if ui.button("close").clicked() {
-                                            pending = Some(Action::Close(t.task_id));
-                                            ui.close();
-                                        }
-                                        merge_menu(ui, t.task_id, &candidates, &mut pending);
-                                    });
-                                });
-                                ui.end_row();
-                            }
-                        });
-                    // AI declare-suggestion: button → spinner → dismissible
-                    // chip whose "use" pre-fills the declare inputs.
-                    if !model_missing {
-                        ui.add_space(4.0);
+                    // Pinned once; every row below sizes from this (see
+                    // theme::content_width).
+                    let content_w = theme::content_width(ui);
+                    self.model_card_ui(ui);
+                    self.service_card_ui(ui);
+                    self.resume_card_ui(ui);
+                    if self.standup_card_ui(ui) {
+                        pending = Some(Action::GenerateStandup);
+                    }
+                    let open_tasks = &self.open_tasks;
+                    let closed_tasks = &self.closed_tasks;
+                    let unassigned = &self.unassigned;
+                    let unassigned_ms = self.unassigned_ms;
+                    let show_closed = &mut self.show_closed;
+                    let show_spans = &mut self.show_spans;
+                    let spans_debug = self.spans_debug;
+                    let spans = &self.spans;
+                    let new_label = &mut self.new_label;
+                    let new_project = &mut self.new_project;
+                    let suggestion = &self.suggestion;
+                    let model_missing = self.model_missing;
+
+                    theme::section_header_with(ui, "Working on", None, |ui| {
+                        if model_missing {
+                            return;
+                        }
                         match suggestion {
                             None => {
-                                if ui
-                                    .small_button("suggest")
+                                if theme::ghost_button(ui, "suggest")
                                     .on_hover_text("suggest a task from the last 15 minutes")
                                     .clicked()
                                 {
@@ -252,96 +207,159 @@ impl TimelineApp {
                                 }
                             }
                             Some(super::SuggestionState::Pending(_)) => {
-                                ui.horizontal(|ui| {
-                                    ui.add(egui::Spinner::new().size(12.0));
-                                    ui.weak("reading the last 15 minutes\u{2026}");
-                                });
+                                ui.add(egui::Spinner::new().size(12.0));
                             }
-                            Some(super::SuggestionState::Failed(msg)) => {
-                                ui.horizontal(|ui| {
-                                    ui.weak(msg.as_str());
-                                    if ui.small_button("\u{d7}").clicked() {
-                                        pending = Some(Action::DismissSuggestion);
-                                    }
-                                });
-                            }
-                            Some(super::SuggestionState::Ready(s)) => {
-                                egui::Frame::new()
-                                    .fill(theme::palette::ACCENT.gamma_multiply(0.10))
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        theme::palette::ACCENT.gamma_multiply(0.35),
-                                    ))
-                                    .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
-                                    .inner_margin(egui::Margin::same(8))
-                                    .show(ui, |ui| {
-                                        ui.set_width(ui.available_width());
-                                        ui.horizontal(|ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(&s.label)
-                                                        .color(theme::palette::TEXT),
-                                                )
-                                                .truncate(),
-                                            );
-                                            if let Some(p) = &s.project {
-                                                theme::badge(ui, p, theme::palette::ACCENT);
-                                            }
-                                        });
-                                        if let Some(d) = &s.description {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(d)
-                                                        .text_style(egui::TextStyle::Small)
-                                                        .color(theme::palette::TEXT_DIM),
-                                                )
-                                                .wrap(),
-                                            );
-                                        }
-                                        ui.horizontal(|ui| {
-                                            if ui.small_button("use").clicked() {
-                                                pending = Some(Action::UseSuggestion);
-                                            }
-                                            if ui.small_button("dismiss").clicked() {
-                                                pending = Some(Action::DismissSuggestion);
-                                            }
-                                        });
-                                    });
-                            }
+                            _ => {}
                         }
+                    });
+                    ui.add_space(theme::SPACE_SM);
+                    // Declare row: label input fills, project fixed, add pinned.
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if theme::primary_button(ui, "add").clicked() {
+                                pending = Some(Action::Declare);
+                            }
+                            ui.add(
+                                egui::TextEdit::singleline(new_project)
+                                    .desired_width(PROJECT_COL)
+                                    .hint_text("project"),
+                            );
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(new_label)
+                                            .desired_width(ui.available_width())
+                                            .hint_text("declare a task\u{2026}"),
+                                    );
+                                },
+                            );
+                        });
+                    });
+                    for &o in &open_vis {
+                        let t = &open_tasks[o];
+                        let color = theme::series_color_for(t.task_id);
+                        task_row(t, color).emphasis().show(ui, content_w, |ui| {
+                            ui.menu_button("\u{2026}", |ui| {
+                                if ui.button("close").clicked() {
+                                    pending = Some(Action::Close(t.task_id));
+                                    ui.close();
+                                }
+                                merge_menu(ui, t.task_id, &candidates, &mut pending);
+                            });
+                        });
+                    }
+                    // AI declare-suggestion outcome: a dismissible chip whose
+                    // "use" pre-fills the declare inputs, or the failure.
+                    match suggestion {
+                        Some(super::SuggestionState::Failed(msg)) => {
+                            ui.horizontal(|ui| {
+                                ui.weak(msg.as_str());
+                                if ui.small_button("\u{d7}").clicked() {
+                                    pending = Some(Action::DismissSuggestion);
+                                }
+                            });
+                        }
+                        Some(super::SuggestionState::Ready(s)) => {
+                            ui.add_space(theme::SPACE_XS);
+                            egui::Frame::new()
+                                .fill(theme::palette::ACCENT.gamma_multiply(0.10))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    theme::palette::ACCENT.gamma_multiply(0.35),
+                                ))
+                                .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&s.label)
+                                                    .color(theme::palette::TEXT),
+                                            )
+                                            .truncate(),
+                                        );
+                                        if let Some(p) = &s.project {
+                                            theme::badge(ui, p, theme::palette::ACCENT);
+                                        }
+                                    });
+                                    if let Some(d) = &s.description {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(d)
+                                                    .text_style(egui::TextStyle::Small)
+                                                    .color(theme::palette::TEXT_DIM),
+                                            )
+                                            .wrap(),
+                                        );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("use").clicked() {
+                                            pending = Some(Action::UseSuggestion);
+                                        }
+                                        if ui.small_button("dismiss").clicked() {
+                                            pending = Some(Action::DismissSuggestion);
+                                        }
+                                    });
+                                });
+                        }
+                        _ => {}
                     }
 
                     if !closed_vis.is_empty() {
-                        ui.add_space(theme::SPACE_XS);
-                        theme::disclosure_header(
-                            ui,
-                            show_closed,
-                            "recently closed",
-                            Some(closed_vis.len()),
-                        );
+                        ui.add_space(theme::SECTION_GAP);
+                        theme::card_header(ui, "Recently closed", Some(&mut *show_closed), |ui| {
+                            theme::badge(ui, &closed_vis.len().to_string(), theme::palette::TEXT_DIM);
+                        });
                         theme::fade_body(ui, "recently_closed_body", *show_closed, |ui| {
-                            egui::Grid::new("recently_closed")
-                                .num_columns(4)
-                                .striped(true)
-                                .spacing([8.0, 6.0])
-                                .show(ui, |ui| {
-                                    for &c in &closed_vis {
-                                        let t = &closed_tasks[c];
-                                        task_cells(ui, t, label_w, false);
-                                        cell(ui, ACTION_COL, |ui| {
-                                            if ui.small_button("reopen").clicked() {
-                                                pending = Some(Action::Reopen(t.task_id));
-                                            }
-                                        });
-                                        ui.end_row();
+                            for &c in &closed_vis {
+                                let t = &closed_tasks[c];
+                                let color = theme::series_color_for(t.task_id);
+                                task_row(t, color).show(ui, content_w, |ui| {
+                                    if theme::ghost_button(ui, "reopen").clicked() {
+                                        pending = Some(Action::Reopen(t.task_id));
                                     }
                                 });
+                            }
                         });
+                    }
+
+                    // Focus time no task claims, largest clusters first; the
+                    // header carries the day's whole unassigned total.
+                    if !unassigned_vis.is_empty() {
+                        ui.add_space(theme::SECTION_GAP);
+                        theme::section_header_with(ui, "Unassigned", None, |ui| {
+                            ui.label(theme::num(fmt_dur(unassigned_ms)));
+                        });
+                        ui.add_space(theme::SPACE_XS);
+                        for &u in &unassigned_vis {
+                            let r = &unassigned[u];
+                            let mut row = if r.title.is_empty() {
+                                theme::ListRow::new(&r.app)
+                            } else {
+                                theme::ListRow::new(&r.title)
+                                    .chip(r.app.as_str(), theme::palette::TEXT_DIM)
+                            };
+                            row = row.num(fmt_dur(r.ms));
+                            row.show(ui, content_w, |ui| {
+                                if theme::ghost_button(ui, "declare")
+                                    .on_hover_text("start a task from this")
+                                    .clicked()
+                                {
+                                    *new_label = if r.title.is_empty() {
+                                        r.app.clone()
+                                    } else {
+                                        r.title.clone()
+                                    };
+                                }
+                            });
+                        }
                     }
 
                     // Debug-grade raw spans; hidden unless enabled in settings.
                     if spans_debug {
-                        ui.add_space(theme::SPACE_XS);
+                        ui.add_space(theme::SECTION_GAP);
                         theme::disclosure_header(ui, show_spans, "Spans", Some(span_vis.len()));
                         theme::fade_body(ui, "spans_body", *show_spans, |ui| {
                             for &s in &span_vis {
@@ -357,43 +375,170 @@ impl TimelineApp {
     }
 }
 
-/// Fixed column widths shared by both task grids (and the declare row), so
-/// badges line up regardless of label length.
-const PROJECT_COL: f32 = 84.0;
-const STATUS_COL: f32 = 64.0;
-/// Widest 4th-column content across both grids ("reopen" small button).
-const ACTION_COL: f32 = 56.0;
-const ROW_H: f32 = 20.0;
+/// Project input width on the declare row.
+const PROJECT_COL: f32 = 110.0;
 
-/// Left-aligned fixed-width cell; contents clip rather than widen the column.
-fn cell(ui: &mut egui::Ui, w: f32, add: impl FnOnce(&mut egui::Ui)) {
-    ui.allocate_ui_with_layout(
-        egui::vec2(w, ROW_H),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.set_max_width(w);
-            add(ui);
-        },
-    );
+/// Task row: identity dot, label, project chip in the task's color, the
+/// "declared" chip.
+fn task_row<'a>(task: &'a OpenRow, color: egui::Color32) -> theme::ListRow<'a> {
+    let mut row = theme::ListRow::new(&task.label).dot(color);
+    if let Some(project) = &task.project {
+        row = row.chip(project.as_str(), color);
+    }
+    if task.declared {
+        row = row.chip("declared", theme::palette::TEXT_DIM);
+    }
+    row
 }
 
-/// The three data cells of a task row: label, project badge, declared badge.
-fn task_cells(ui: &mut egui::Ui, task: &OpenRow, label_w: f32, strong: bool) {
-    cell(ui, label_w, |ui| {
-        let text = egui::RichText::new(&task.label);
-        let text = if strong { text.strong() } else { text };
-        theme::truncated_label(ui, egui::Label::new(text).truncate(), &task.label);
-    });
-    cell(ui, PROJECT_COL, |ui| {
-        if let Some(project) = &task.project {
-            theme::badge(ui, project, theme::palette::ACCENT);
+/// "2026-09-01" → "Mon 1 Sep"; the raw string when it doesn't parse.
+fn standup_day(iso: &str) -> String {
+    iso.parse::<jiff::civil::Date>()
+        .map(|d| d.strftime("%a %-d %b").to_string())
+        .unwrap_or_else(|_| iso.to_owned())
+}
+
+/// One paragraph of the draft, split for display.
+struct StandupBlock {
+    /// The task's label when the paragraph opens with one.
+    label: Option<String>,
+    /// Remaining lines, in order (fallback drafts are bullet lines).
+    lines: Vec<String>,
+    /// The lifted-out "Next steps:" / "Next:" sentence.
+    next: Option<String>,
+    /// Preamble rather than a task (the journal-free fallback's first line).
+    meta: bool,
+}
+
+/// Split a draft into per-task blocks. Paragraphs are blank-line separated
+/// (prompt rule and fallback alike); a paragraph opens with the task's label
+/// (LLM drafts) or a `Task:` line (fallback); a `Next steps:` / `Next:`
+/// sentence is lifted out of the prose. `labels` are the known task labels,
+/// matched longest first so "foo bar" wins over "foo".
+fn standup_blocks(content: &str, labels: &[&str]) -> Vec<StandupBlock> {
+    let mut labels: Vec<&str> = labels.iter().copied().filter(|l| !l.is_empty()).collect();
+    labels.sort_by_key(|l| std::cmp::Reverse(l.len()));
+    let mut blocks = Vec::new();
+    let mut para: Vec<&str> = Vec::new();
+    for line in content.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if !para.is_empty() {
+                blocks.push(standup_block(&para, &labels));
+                para.clear();
+            }
+        } else {
+            para.push(line.trim());
         }
-    });
-    cell(ui, STATUS_COL, |ui| {
-        if task.declared {
-            theme::badge(ui, "declared", theme::palette::TEXT_DIM);
+    }
+    blocks
+}
+
+fn standup_block(para: &[&str], labels: &[&str]) -> StandupBlock {
+    let mut lines: Vec<String> = para.iter().map(|l| (*l).to_owned()).collect();
+    let first = lines[0].clone();
+    let mut label = None;
+    if let Some(rest) = first.strip_prefix("Task:") {
+        label = Some(rest.trim().to_owned());
+        lines.remove(0);
+    } else if let Some(l) = labels.iter().find(|l| {
+        first.is_char_boundary(l.len()) && first[..l.len()].eq_ignore_ascii_case(l)
+    }) {
+        label = Some(first[..l.len()].to_owned());
+        let rest = first[l.len()..]
+            .trim_start_matches([':', '-', '\u{2013}', '\u{2014}', ' '])
+            .to_owned();
+        if rest.is_empty() {
+            lines.remove(0);
+        } else {
+            lines[0] = rest;
         }
-    });
+    }
+    let meta = label.is_none() && first.starts_with("No journal entries");
+    let mut next = None;
+    for i in 0..lines.len() {
+        if let Some((start, end)) = next_marker(&lines[i]) {
+            next = Some(lines[i][end..].trim().to_owned());
+            let before = lines[i][..start].trim_end().to_owned();
+            if before.is_empty() {
+                lines.remove(i);
+            } else {
+                lines[i] = before;
+            }
+            break;
+        }
+    }
+    StandupBlock {
+        label,
+        lines,
+        next,
+        meta,
+    }
+}
+
+/// Byte range of the first "Next steps:" / "Next step:" / "Next:" marker.
+fn next_marker(line: &str) -> Option<(usize, usize)> {
+    let lower = line.to_ascii_lowercase();
+    ["next steps:", "next step:", "next:"]
+        .iter()
+        .filter_map(|m| lower.find(m).map(|i| (i, i + m.len())))
+        .min_by_key(|(i, _)| *i)
+}
+
+/// The draft as blocks: label line (Medium), prose lines, then the next
+/// step indented behind a caret; 8pt between blocks.
+fn standup_body_ui(ui: &mut egui::Ui, standup: &StandupRow, open: &[OpenRow], closed: &[OpenRow]) {
+    let labels: Vec<&str> = open
+        .iter()
+        .chain(closed)
+        .map(|t| t.label.as_str())
+        .collect();
+    for (i, block) in standup_blocks(&standup.content, &labels).iter().enumerate() {
+        if i > 0 {
+            ui.add_space(theme::SPACE_SM);
+        }
+        if block.meta {
+            for line in &block.lines {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(line)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+            }
+            continue;
+        }
+        if let Some(label) = &block.label {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(label)
+                        .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                        .color(theme::palette::TEXT),
+                )
+                .wrap(),
+            );
+        }
+        for line in &block.lines {
+            ui.add(egui::Label::new(egui::RichText::new(line).color(theme::palette::TEXT)).wrap());
+        }
+        if let Some(next) = &block.next {
+            ui.horizontal(|ui| {
+                ui.add_space(theme::SPACE_SM);
+                ui.label(
+                    theme::glyph(theme::icon::CARET_RIGHT)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("Next: {next}")).color(theme::palette::TEXT),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+    }
 }
 
 fn span_row(ui: &mut egui::Ui, span: &SpanRow) {

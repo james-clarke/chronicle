@@ -32,6 +32,14 @@ pub(super) mod palette {
 
 /// Proportional family with Inter Medium first; for headings and emphasis.
 pub(super) const MEDIUM: &str = "inter-medium";
+/// Family holding only the Phosphor subset; render its glyphs via [`glyph`].
+pub(super) const ICONS: &str = "phosphor";
+
+/// A Phosphor [`icon`] as text in the icon family; chain `.text_style` /
+/// `.color` as for any label (size follows the text style).
+pub(super) fn glyph(icon: &str) -> egui::RichText {
+    egui::RichText::new(icon).family(egui::FontFamily::Name(ICONS.into()))
+}
 
 /// Corner radii: SM inputs/buttons/badges/chips, MD cards and menus.
 pub(super) const RADIUS_SM: u8 = 6;
@@ -141,15 +149,19 @@ pub(super) fn apply(ctx: &egui::Context) {
         .get_mut(&egui::FontFamily::Proportional)
         .expect("default proportional family");
     proportional.insert(0, "inter".into());
-    // Icon glyphs are private-use codepoints Inter lacks, so they fall
-    // through to Phosphor before egui's own fallbacks.
-    proportional.insert(1, "phosphor".into());
     // Medium falls back to the same chain so arrows/emoji keep rendering.
     let mut medium_chain = proportional.clone();
     medium_chain[0] = MEDIUM.into();
     fonts
         .families
         .insert(egui::FontFamily::Name(MEDIUM.into()), medium_chain);
+    // Icons are their own family, never a proportional fallback: first in
+    // the chain the icon font's metrics would set every label's line height,
+    // and behind Inter its glyphs are shadowed (Inter maps hundreds of
+    // private-use codepoints — circled arrows and the like).
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(ICONS.into()), vec!["phosphor".into()]);
     ctx.set_fonts(fonts);
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.style_mut_of(egui::Theme::Dark, style);
@@ -294,6 +306,17 @@ pub(super) fn confidence_color(band: Band) -> Option<Color32> {
 
 /// Section header: heading text, optional weak count, hairline underneath.
 pub(super) fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize>) {
+    section_header_with(ui, title, count, |_| {});
+}
+
+/// [`section_header`] with controls right-aligned on the header line
+/// (laid out right-to-left: add the outermost first).
+pub(super) fn section_header_with(
+    ui: &mut egui::Ui,
+    title: &str,
+    count: Option<usize>,
+    trailing: impl FnOnce(&mut egui::Ui),
+) {
     let resp = ui
         .horizontal(|ui| {
             ui.label(
@@ -304,6 +327,7 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str, count: Option<usize
             if let Some(n) = count {
                 ui.weak(format!("\u{b7} {n}"));
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
         })
         .response;
     ui.painter().hline(
@@ -642,7 +666,7 @@ pub(super) fn card_header(
                         palette::TEXT_DIM
                     };
                     ui.label(
-                        egui::RichText::new(caret)
+                        glyph(caret)
                             .text_style(egui::TextStyle::Heading)
                             .color(color),
                     );
@@ -665,8 +689,7 @@ pub(super) fn card_header(
 }
 
 /// Phosphor Regular (icons v2.1.0) glyphs in the bundled subset
-/// `assets/fonts/Phosphor-subset.ttf`; the font sits in the proportional
-/// fallback chain, so a glyph renders inside any label. This list is the
+/// `assets/fonts/Phosphor-subset.ttf`, rendered through [`glyph`]. This list is the
 /// subset manifest — to add one, append its codepoint here and regenerate
 /// from the full `Phosphor.ttf` (egui-phosphor 0.13.0, `res/`):
 /// `uvx --from fonttools pyftsubset Phosphor.ttf --unicodes=U+E492,… --name-IDs='*' --output-file=crates/app/assets/fonts/Phosphor-subset.ttf`

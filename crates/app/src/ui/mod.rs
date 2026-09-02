@@ -168,6 +168,14 @@ struct SpanRow {
     kind: String,
 }
 
+/// Focus time no interval covers, clustered by app + title for Home's
+/// "Unassigned" list.
+struct UnassignedRow {
+    app: String,
+    title: String,
+    ms: i64,
+}
+
 /// One task identity with its intervals for the shown day (grouped timeline).
 struct TaskGroup {
     task_id: i64,
@@ -351,6 +359,10 @@ struct TimelineApp {
     groups: Vec<TaskGroup>,
     open_tasks: Vec<OpenRow>,
     closed_tasks: Vec<OpenRow>,
+    /// Largest unassigned clusters of the shown day, and the day's whole
+    /// unassigned total.
+    unassigned: Vec<UnassignedRow>,
+    unassigned_ms: i64,
     /// "recently closed" expander state.
     show_closed: bool,
     /// Raw spans section expander state (collapsed by default; debug-grade).
@@ -478,6 +490,8 @@ impl TimelineApp {
             groups: Vec::new(),
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
+            unassigned: Vec::new(),
+            unassigned_ms: 0,
             show_closed: false,
             show_spans: false,
             show_background: false,
@@ -559,13 +573,16 @@ impl TimelineApp {
             let groups = self.load_groups()?;
             let open = self.load_open()?;
             let closed = self.load_closed()?;
-            Ok((spans, groups, open, closed))
+            let unassigned = self.load_unassigned()?;
+            Ok((spans, groups, open, closed, unassigned))
         }) {
-            Ok((spans, groups, open, closed)) => {
+            Ok((spans, groups, open, closed, (unassigned, unassigned_ms))) => {
                 self.spans = spans;
                 self.groups = groups;
                 self.open_tasks = open;
                 self.closed_tasks = closed;
+                self.unassigned = unassigned;
+                self.unassigned_ms = unassigned_ms;
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -926,6 +943,43 @@ impl TimelineApp {
                 declared: t.declared,
             })
             .collect())
+    }
+
+    /// Focus spans of the shown day that no interval overlaps (the derive
+    /// pass left them unclaimed), clustered by app + title, largest first:
+    /// the top 8 clusters and the whole-day total. Same day membership as
+    /// [`Self::load_spans`] (starts in the day, end clamped to it), so an
+    /// overnight span counts where the timeline counts it.
+    fn load_unassigned(&mut self) -> anyhow::Result<(Vec<UnassignedRow>, i64)> {
+        let (lo, hi) = self.day_range_ms()?;
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        let mut stmt = conn.prepare(
+            "SELECT app, title, SUM(MIN(end_ts, ?2) - start_ts) AS ms
+             FROM spans s
+             WHERE kind = 'focus' AND start_ts >= ?1 AND start_ts < ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM intervals i
+                   WHERE i.start_ts < s.end_ts AND i.end_ts > s.start_ts)
+             GROUP BY app, title
+             ORDER BY ms DESC",
+        )?;
+        let rows = stmt.query_map([lo, hi], |row| {
+            Ok(UnassignedRow {
+                app: row.get(0)?,
+                title: row.get(1)?,
+                ms: row.get(2)?,
+            })
+        })?;
+        let mut total = 0;
+        let mut top = Vec::new();
+        for row in rows {
+            let row = row?;
+            total += row.ms;
+            if top.len() < 8 {
+                top.push(row);
+            }
+        }
+        Ok((top, total))
     }
 
     fn load_closed(&mut self) -> anyhow::Result<Vec<OpenRow>> {
