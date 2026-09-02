@@ -437,7 +437,8 @@ pub(super) fn disclosure_header(
 
 /// Add a truncating label; when it actually elides, hovering shows `full`.
 pub(super) fn truncated_label(ui: &mut egui::Ui, label: egui::Label, full: &str) -> egui::Response {
-    let resp = ui.add(label);
+    // egui shows its own tooltip for elided text; ours below is the only one.
+    let resp = ui.add(label.show_tooltip_when_elided(false));
     if resp
         .intrinsic_size()
         .is_some_and(|s| s.x > resp.rect.width() + 0.5)

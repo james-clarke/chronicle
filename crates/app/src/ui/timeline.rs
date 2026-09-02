@@ -322,6 +322,8 @@ impl BandMode {
 }
 
 const HOUR_MS: i64 = 3_600_000;
+/// Band-mode strip height (centred in the shared chart height).
+const BAND_H: f32 = 22.0;
 const LANE_H: f32 = 12.0;
 const LANE_GAP: f32 = 2.0;
 /// Lane label column, gap to the axis included.
@@ -450,16 +452,43 @@ fn activity_chart(
     let Some(chart) = DayChart::new(groups, vis, lo, hi) else {
         return;
     };
+    // One height for every mode (the tallest of the three on this day), so
+    // switching modes never shifts the cards below; the switch caption shows
+    // in every mode for the same reason.
+    let chart_h = HOURS_H.max(lanes_height(lane_count(groups, &chart)));
     // (offset from the row's left edge, width) of the time axis.
     let axis = match mode {
-        BandMode::Band => activity_band(ui, width, groups, &chart),
-        BandMode::Lanes => activity_lanes(ui, width, groups, &chart),
-        BandMode::Hours => activity_hours(ui, width, groups, &chart, day_start),
+        BandMode::Band => activity_band(ui, width, chart_h, groups, &chart),
+        BandMode::Lanes => activity_lanes(ui, width, chart_h, groups, &chart),
+        BandMode::Hours => activity_hours(ui, width, chart_h, groups, &chart, day_start),
     };
     hour_labels(ui, width, axis, &chart, lo, day_start);
-    if mode != BandMode::Band {
-        switch_caption(ui, groups, &chart, day_start);
+    switch_caption(ui, groups, &chart, day_start);
+}
+
+/// Lanes in first-appearance order: one per foreground task plus a shared
+/// one when any background scrap is on the chart.
+fn lane_list(groups: &[TaskGroup], chart: &DayChart) -> Vec<Option<usize>> {
+    let lane_key = |seg: &Segment| (!groups[seg.group].background).then_some(seg.group);
+    let mut lanes: Vec<Option<usize>> = Vec::new();
+    for seg in &chart.segments {
+        let key = lane_key(seg);
+        if key.is_some() && !lanes.contains(&key) {
+            lanes.push(key);
+        }
     }
+    if chart.segments.iter().any(|s| lane_key(s).is_none()) {
+        lanes.push(None);
+    }
+    lanes
+}
+
+fn lane_count(groups: &[TaskGroup], chart: &DayChart) -> usize {
+    lane_list(groups, chart).len().max(1)
+}
+
+fn lanes_height(n: usize) -> f32 {
+    n as f32 * LANE_H + (n.saturating_sub(1)) as f32 * LANE_GAP
 }
 
 /// Horizontal day strip: one colored segment per display session (task
@@ -467,10 +496,12 @@ fn activity_chart(
 fn activity_band(
     ui: &mut egui::Ui,
     width: f32,
+    chart_h: f32,
     groups: &[TaskGroup],
     chart: &DayChart,
 ) -> (f32, f32) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
+    let (row, resp) = ui.allocate_exact_size(egui::vec2(width, chart_h), egui::Sense::hover());
+    let rect = egui::Rect::from_center_size(row.center(), egui::vec2(width, BAND_H));
     let axis = (rect.left(), rect.width());
     let hovered_seg = resp
         .hover_pos()
@@ -507,31 +538,24 @@ fn activity_band(
 fn activity_lanes(
     ui: &mut egui::Ui,
     width: f32,
+    chart_h: f32,
     groups: &[TaskGroup],
     chart: &DayChart,
 ) -> (f32, f32) {
     let lane_key = |seg: &Segment| (!groups[seg.group].background).then_some(seg.group);
-    let mut lanes: Vec<Option<usize>> = Vec::new();
-    for seg in &chart.segments {
-        let key = lane_key(seg);
-        if key.is_some() && !lanes.contains(&key) {
-            lanes.push(key);
-        }
-    }
-    if chart.segments.iter().any(|s| lane_key(s).is_none()) {
-        lanes.push(None);
-    }
+    let lanes = lane_list(groups, chart);
     let lane_of = |seg: &Segment| lanes.iter().position(|&k| k == lane_key(seg)).unwrap_or(0);
     let n = lanes.len();
-    let h = n as f32 * LANE_H + (n - 1) as f32 * LANE_GAP;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::hover());
+    let h = lanes_height(n);
+    let (row, resp) = ui.allocate_exact_size(egui::vec2(width, chart_h), egui::Sense::hover());
+    let rect = egui::Rect::from_center_size(row.center(), egui::vec2(width, h));
     let axis = (
         rect.left() + LANE_LABEL_W,
         (rect.width() - LANE_LABEL_W).max(1.0),
     );
     let lane_top = |l: usize| rect.top() + l as f32 * (LANE_H + LANE_GAP);
     let hovered_seg = resp.hover_pos().and_then(|p| {
-        let l = (((p.y - rect.top()) / (LANE_H + LANE_GAP)) as usize).min(n - 1);
+        let l = (((p.y - rect.top()).max(0.0) / (LANE_H + LANE_GAP)) as usize).min(n - 1);
         chart.seg_at(chart.ms_at(axis, p.x), |s| lane_of(s) == l)
     });
     let painter = ui.painter();
@@ -582,6 +606,7 @@ fn activity_lanes(
 fn activity_hours(
     ui: &mut egui::Ui,
     width: f32,
+    chart_h: f32,
     groups: &[TaskGroup],
     chart: &DayChart,
     day_start: &Zoned,
@@ -604,7 +629,7 @@ fn activity_hours(
             cell[gi] += seg.hi.min(h_lo + HOUR_MS) - seg.lo.max(h_lo);
         }
     }
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, HOURS_H), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, chart_h), egui::Sense::hover());
     let col_w = rect.width() / hours as f32;
     let hovered_col = resp
         .hover_pos()
@@ -889,8 +914,7 @@ fn card_frame(
                     confidence_dot(ui, group);
                 });
             ui.horizontal(|ui| {
-                // Indented to the title's x (dot + gap); chips 4pt apart.
-                ui.add_space(14.0);
+                // Flush with the dot, chips 4pt apart.
                 ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
                 if let Some(project) = &group.project {
                     theme::badge(ui, project, color);

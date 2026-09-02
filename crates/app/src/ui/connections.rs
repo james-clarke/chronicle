@@ -381,6 +381,20 @@ fn caption(ui: &mut egui::Ui, text: String, color: Option<egui::Color32>) -> egu
     ui.add(egui::Label::new(rich).truncate())
 }
 
+/// Caption whose hover shows `hover` (a full error) instead of egui's own
+/// elided-text tooltip — one tooltip, not two.
+fn caption_hover(ui: &mut egui::Ui, text: String, color: egui::Color32, hover: String) {
+    let rich = egui::RichText::new(text)
+        .text_style(theme::caption())
+        .color(color);
+    ui.add(
+        egui::Label::new(rich)
+            .truncate()
+            .show_tooltip_when_elided(false),
+    )
+    .on_hover_text(hover);
+}
+
 /// Status dot + chip for a server row.
 fn row_status(
     server: &ServerConfig,
@@ -752,12 +766,12 @@ impl Connections {
                         Some(Probe::Done(rec)) => {
                             let err = rec.error.clone().unwrap_or_default();
                             let first = err.lines().next().unwrap_or("").to_owned();
-                            caption(
+                            caption_hover(
                                 ui,
                                 format!("failed {}: {first}", ago(rec.ts_ms)),
-                                Some(palette::RED),
-                            )
-                            .on_hover_text(err);
+                                palette::RED,
+                                err,
+                            );
                         }
                         _ => {}
                     }
@@ -794,15 +808,15 @@ impl Connections {
                 Some((status, ts, err)) if status == "failed" => {
                     let err = err.clone().unwrap_or_default();
                     let first = err.lines().next().unwrap_or("").to_owned();
-                    caption(
+                    caption_hover(
                         ui,
                         format!(
                             "last context fetch failed {}: {first}",
                             ago(ts.as_millisecond())
                         ),
-                        Some(palette::RED),
-                    )
-                    .on_hover_text(err);
+                        palette::RED,
+                        err,
+                    );
                 }
                 Some((status, ts, _)) => {
                     caption(
