@@ -352,7 +352,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut p = AiSessionProvider::new(&[root.clone()]);
+        let mut p = AiSessionProvider::new(std::slice::from_ref(&root));
         let now = SystemTime::now();
         let got = p.scan(now);
         assert_eq!(got.len(), 1, "{got:?}");

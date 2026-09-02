@@ -791,6 +791,8 @@ dependencies = [
  "chronicle-core",
  "crossbeam-channel",
  "jiff",
+ "serde_json",
+ "tracing",
  "x11rb 0.14.0",
 ]
 

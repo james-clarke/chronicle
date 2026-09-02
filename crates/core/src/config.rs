@@ -56,6 +56,9 @@ pub struct Config {
     /// evidence (`<dir>/<project>/*.jsonl`, Claude Code layout; `~`
     /// expanded). Empty = off.
     pub ai_session_dirs: Vec<String>,
+    /// Poll `gh search prs` for the user's authored/reviewed PRs (needs
+    /// `gh auth login`; off by default).
+    pub github_prs: bool,
     /// Full-match-anywhere regex extracting a ticket key from branch names,
     /// used to anchor derived tasks (`tasks.external_ref`).
     pub ticket_regex: String,
@@ -100,6 +103,7 @@ impl Default for Config {
             background_minutes: 10,
             git_repos: Vec::new(),
             ai_session_dirs: vec!["~/.claude/projects".into()],
+            github_prs: false,
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
             model_path: None,
@@ -133,6 +137,28 @@ pub fn expand_home(path: &str) -> PathBuf {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(path),
     }
+}
+
+/// Bare command → absolute path from PATH plus the usual user bin dirs. The
+/// daemon's PATH under systemd is minimal, so a bare `uvx` or `gh` that works
+/// in a terminal fails there; resolving up front sidesteps that. Unresolved
+/// commands pass through unchanged.
+pub fn resolve_command(cmd: &str) -> String {
+    if cmd.contains('/') {
+        return cmd.to_owned();
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".cargo/bin"));
+    }
+    dirs.into_iter()
+        .map(|d| d.join(cmd))
+        .find(|p| p.is_file())
+        .map_or_else(|| cmd.to_owned(), |p| p.display().to_string())
 }
 
 #[cfg(test)]

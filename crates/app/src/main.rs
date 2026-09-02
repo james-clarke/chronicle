@@ -1914,7 +1914,8 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
         .spawn(move || afk_loop(afk, gtx, threshold_ms))?;
 
     spawn_git_capture(config, tx.clone())?;
-    spawn_ai_sessions_capture(config, tx)
+    spawn_ai_sessions_capture(config, tx.clone())?;
+    spawn_github_capture(config, tx)
 }
 
 /// Git poller: optional, never load-bearing — a dead thread loses git
@@ -1967,6 +1968,30 @@ fn spawn_ai_sessions_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyho
         .spawn(move || {
             if let Err(e) = watcher.run(tx) {
                 tracing::error!("ai session provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// PR poller via the user's `gh`: opt-in, never load-bearing.
+fn spawn_github_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::github::GitHubProvider;
+
+    if !config.github_prs {
+        return Ok(());
+    }
+    let gh = chronicle_core::config::resolve_command("gh");
+    if !gh.contains('/') {
+        tracing::warn!("github_prs = true but `gh` is not on PATH");
+        return Ok(());
+    }
+    let provider = GitHubProvider::new(PathBuf::from(gh));
+    std::thread::Builder::new()
+        .name("github".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("github provider exited: {e}");
             }
         })?;
     Ok(())

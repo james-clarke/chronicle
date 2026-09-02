@@ -78,27 +78,6 @@ fn preset_calls(spec: &[(&str, &str)]) -> Vec<ContextCall> {
         .collect()
 }
 
-/// Bare command → absolute path from PATH plus the usual user bin dirs. The
-/// daemon's PATH under systemd is minimal, so a bare `uvx` that works in a
-/// terminal fails there; storing the resolved path sidesteps that.
-fn resolve_command(cmd: &str) -> String {
-    if cmd.contains('/') {
-        return cmd.to_owned();
-    }
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        dirs.push(home.join(".local/bin"));
-        dirs.push(home.join(".cargo/bin"));
-    }
-    dirs.into_iter()
-        .map(|d| d.join(cmd))
-        .find(|p| p.is_file())
-        .map_or_else(|| cmd.to_owned(), |p| p.display().to_string())
-}
-
 fn is_secret(key: &str) -> bool {
     let k = key.to_ascii_uppercase();
     ["TOKEN", "SECRET", "PASSWORD", "KEY"]
@@ -157,7 +136,7 @@ impl ServerForm {
         Self {
             original: None,
             name: p.name.to_owned(),
-            command: resolve_command(p.command),
+            command: chronicle_core::config::resolve_command(p.command),
             args: p.args.join("\n"),
             env: p
                 .env
