@@ -836,7 +836,7 @@ fn activity_events_upsert_and_ignore_paths() {
     // Repo signal: a task whose project names another repo never inherits a
     // session that merely overlapped it in time; case-insensitive project
     // match, a branch carrying the external_ref, and repo-less rows attach.
-    let mut task_with = |project: Option<&str>, ext: Option<&str>| {
+    let task_with = |project: Option<&str>, ext: Option<&str>| {
         conn.execute(
             "INSERT INTO tasks (label, project, external_ref, status, created_ts)
              VALUES ('t', ?1, ?2, 'open', 0)",
@@ -985,4 +985,176 @@ fn vcs_events_store_dedupe_and_anchor_guard() {
     let commits = storage::commits_for_task(&conn, task_id).unwrap();
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].summary.as_deref(), Some("feat: x"));
+}
+
+#[test]
+fn unassigned_runs_fold_and_assign_claims_per_batch() {
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m23_triage.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    for (lo, hi) in [(0, 10_000), (10_000, 100_000)] {
+        conn.execute(
+            "INSERT INTO batches (start_ts, end_ts, status) VALUES (?1, ?2, 'done')",
+            rusqlite::params![lo, hi],
+        )
+        .unwrap();
+    }
+    // Run A straddles the batch edge (spans 1: 8000-9500, 2: 9600-12000);
+    // run B starts after a long gap and is unbatched (resolved by start ts);
+    // a covered span and an afk span stay out.
+    let spans = [
+        (
+            8_000,
+            9_500,
+            "Code",
+            "chronicle — main.rs",
+            "focus",
+            Some(1),
+        ),
+        (
+            9_600,
+            12_000,
+            "Code",
+            "chronicle — storage.rs",
+            "focus",
+            Some(2),
+        ),
+        (12_000, 12_500, "Firefox", "afk", "afk", Some(2)),
+        (40_000, 45_000, "Firefox", "ACME-1 review", "focus", None),
+        (51_000, 52_000, "Slack", "covered", "focus", Some(2)),
+    ];
+    for (s, e, app, title, kind, batch) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![s, e, app, title, kind, batch],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, created_ts) VALUES ('Chronicle triage', 'chronicle', 'open', 0)",
+        [],
+    )
+    .unwrap();
+    let task = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, 2, 50000, 60000, 0.9)",
+        [task],
+    )
+    .unwrap();
+
+    let runs = storage::unassigned_runs(&conn, 0, 100_000, 10_000).unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(
+        (runs[0].start_ts, runs[0].end_ts, runs[0].ms),
+        (8_000, 12_000, 3_900)
+    );
+    assert_eq!(
+        runs[0].lines[0].1, "chronicle — storage.rs",
+        "largest line first"
+    );
+    assert_eq!(
+        runs[1].lines,
+        vec![("Firefox".into(), "ACME-1 review".into(), 5_000)]
+    );
+
+    let claimed = storage::assign_unassigned(
+        &mut conn,
+        ms_to_ts(70_000),
+        runs[0].start_ts,
+        runs[0].end_ts,
+        task,
+    )
+    .unwrap();
+    assert_eq!(
+        claimed, 3_900,
+        "one interval per batch, span bounds within each"
+    );
+    let intervals: Vec<(i64, i64, i64)> = conn
+        .prepare("SELECT batch_id, start_ts, end_ts FROM intervals WHERE task_id=?1 AND confidence=1.0 ORDER BY start_ts")
+        .unwrap()
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(intervals, vec![(1, 8_000, 9_500), (2, 9_600, 12_000)]);
+    let after = storage::unassigned_runs(&conn, 0, 100_000, 10_000).unwrap();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].start_ts, 40_000);
+
+    // The claim is teaching data: the run's app/title mix now suggests the task.
+    let kind: String = conn
+        .query_row(
+            "SELECT kind FROM corrections WHERE task_id=?1 ORDER BY id LIMIT 1",
+            [task],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "assign");
+    let hint = storage::suggest_correction(&conn, "Code chronicle storage.rs").unwrap();
+    assert_eq!(
+        hint.map(|c| c.new_label).as_deref(),
+        Some("Chronicle triage")
+    );
+    assert!(
+        storage::suggest_correction(&conn, "Zoom standup")
+            .unwrap()
+            .is_none()
+    );
+
+    // Once enough corrections exist, terms common to most of them (the
+    // terminal's prompt) stop matching on their own; a distinctive one still does.
+    for label in ["Alpha", "Beta", "Gamma", "Delta"] {
+        conn.execute(
+            "INSERT INTO tasks (label, status, created_ts) VALUES (?1, 'open', 0)",
+            [label],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO corrections (ts, task_id, old_label, new_label, ctx, kind)
+             VALUES (0, ?1, 'x', ?2, ?3, 'rename')",
+            rusqlite::params![
+                id,
+                label,
+                format!("Terminator sam@host:~/dev/{}", label.to_lowercase())
+            ],
+        )
+        .unwrap();
+    }
+    assert!(
+        storage::suggest_correction(&conn, "Terminator sam@host:~/dev/other")
+            .unwrap()
+            .is_none(),
+        "prompt-only text must not suggest"
+    );
+    assert_eq!(
+        storage::suggest_correction(&conn, "Terminator sam@host:~/dev/gamma")
+            .unwrap()
+            .map(|c| c.new_label)
+            .as_deref(),
+        Some("Gamma")
+    );
+
+    // Unbatched span resolves to the batch its start falls in.
+    let claimed =
+        storage::assign_unassigned(&mut conn, ms_to_ts(70_500), 40_000, 45_000, task).unwrap();
+    assert_eq!(claimed, 5_000);
+    let batch: i64 = conn
+        .query_row(
+            "SELECT batch_id FROM intervals WHERE start_ts=40000",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(batch, 2);
+
+    // Assigning where nothing is unassigned claims nothing and logs nothing.
+    let none =
+        storage::assign_unassigned(&mut conn, ms_to_ts(71_000), 50_000, 60_000, task).unwrap();
+    assert_eq!(none, 0);
 }

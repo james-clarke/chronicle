@@ -1511,24 +1511,7 @@ pub fn reassign_intervals(
         };
         let (old_label, old_project) = ident(from_task)?;
         let (new_label, new_project) = ident(to_task)?;
-        let mut ctx = String::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT DISTINCT app, title FROM spans
-                 WHERE kind='focus' AND start_ts < ?1 AND end_ts > ?2 ORDER BY app, title",
-            )?;
-            let mut rows = stmt.query([end_ts, start_ts])?;
-            while let Some(row) = rows.next()? {
-                let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
-                if ctx.len() + app.len() + title.len() + 2 > 2000 {
-                    break;
-                }
-                ctx.push_str(&app);
-                ctx.push(' ');
-                ctx.push_str(&title);
-                ctx.push('\n');
-            }
-        }
+        let ctx = span_ctx(&tx, start_ts, end_ts)?;
         tx.execute(
             "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reassign', ?8)",
@@ -1551,6 +1534,157 @@ pub fn reassign_intervals(
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
     Ok(())
+}
+
+/// Focus app/title lines overlapping `[start_ts, end_ts)`: the FTS-searchable
+/// context a correction stores (capped so one row stays small).
+fn span_ctx(conn: &Connection, start_ts: i64, end_ts: i64) -> Result<String, StorageError> {
+    let mut ctx = String::new();
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT app, title FROM spans
+         WHERE kind='focus' AND start_ts < ?1 AND end_ts > ?2 ORDER BY app, title",
+    )?;
+    let mut rows = stmt.query([end_ts, start_ts])?;
+    while let Some(row) = rows.next()? {
+        let (app, title): (String, String) = (row.get(0)?, row.get(1)?);
+        if ctx.len() + app.len() + title.len() + 2 > 2000 {
+            break;
+        }
+        ctx.push_str(&app);
+        ctx.push(' ');
+        ctx.push_str(&title);
+        ctx.push('\n');
+    }
+    Ok(ctx)
+}
+
+/// A stretch of focus time no interval covers: consecutive unassigned focus
+/// spans with gaps under the caller's threshold, plus its app/title mix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnassignedRun {
+    pub start_ts: i64,
+    pub end_ts: i64,
+    /// Focus ms inside the run (gaps excluded).
+    pub ms: i64,
+    /// `(app, title, ms)`, largest first.
+    pub lines: Vec<(String, String, i64)>,
+}
+
+/// Unassigned focus inside `[lo, hi)` folded into runs (gap < `gap_ms`
+/// joins), oldest first — the triage view's cards. Contiguous unassigned
+/// work is one decision far more often than one app/title cluster is.
+pub fn unassigned_runs(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+    gap_ms: i64,
+) -> Result<Vec<UnassignedRun>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, MIN(end_ts, ?2), app, title FROM spans s
+         WHERE kind='focus' AND start_ts >= ?1 AND start_ts < ?2
+           AND NOT EXISTS (SELECT 1 FROM intervals i
+                           WHERE i.start_ts < s.end_ts AND i.end_ts > s.start_ts)
+         ORDER BY start_ts, id",
+    )?;
+    let mut runs: Vec<UnassignedRun> = Vec::new();
+    let mut rows = stmt.query([lo, hi])?;
+    while let Some(row) = rows.next()? {
+        let (start, end, app, title): (i64, i64, String, String) =
+            (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+        let ms = (end - start).max(0);
+        match runs.last_mut() {
+            Some(run) if start - run.end_ts < gap_ms => {
+                run.end_ts = run.end_ts.max(end);
+                run.ms += ms;
+                match run.lines.iter_mut().find(|l| l.0 == app && l.1 == title) {
+                    Some(l) => l.2 += ms,
+                    None => run.lines.push((app, title, ms)),
+                }
+            }
+            _ => runs.push(UnassignedRun {
+                start_ts: start,
+                end_ts: end,
+                ms,
+                lines: vec![(app, title, ms)],
+            }),
+        }
+    }
+    for run in &mut runs {
+        run.lines
+            .sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    }
+    Ok(runs)
+}
+
+/// Claim the unassigned focus inside `[start_ts, end_ts)` for a task
+/// ('assign' correction): one confidence-1.0 interval per batch the spans
+/// fall in (intervals are batch-scoped), so the time shows under the task on
+/// every surface and the run's app/title mix teaches future derivations.
+/// Spans not yet batched (the live tail) are left for the next derive.
+/// Returns the ms claimed.
+pub fn assign_unassigned(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    start_ts: i64,
+    end_ts: i64,
+    to_task: i64,
+) -> Result<i64, StorageError> {
+    let tx = conn.transaction()?;
+    // batch_id → bounds of its unassigned spans. A span's own batch_id wins;
+    // an unbatched span takes the batch its start falls in.
+    let mut per_batch: Vec<(i64, i64, i64)> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT b.id, s.start_ts, s.end_ts FROM spans s
+             JOIN batches b ON b.id = COALESCE(s.batch_id,
+                 (SELECT id FROM batches WHERE start_ts <= s.start_ts AND end_ts > s.start_ts))
+             WHERE s.kind='focus' AND s.start_ts >= ?1 AND s.start_ts < ?2
+               AND NOT EXISTS (SELECT 1 FROM intervals i
+                               WHERE i.start_ts < s.end_ts AND i.end_ts > s.start_ts)
+             ORDER BY s.start_ts",
+        )?;
+        let mut rows = stmt.query([start_ts, end_ts])?;
+        while let Some(row) = rows.next()? {
+            let (batch, s, e): (i64, i64, i64) = (row.get(0)?, row.get(1)?, row.get(2)?);
+            let e = e.min(end_ts);
+            match per_batch.iter_mut().find(|p| p.0 == batch) {
+                Some(p) => {
+                    p.1 = p.1.min(s);
+                    p.2 = p.2.max(e);
+                }
+                None => per_batch.push((batch, s, e)),
+            }
+        }
+    }
+    let mut claimed = 0;
+    let mut first_interval = None;
+    for (batch, s, e) in &per_batch {
+        if e <= s {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (?1, ?2, ?3, ?4, 1.0)",
+            params![to_task, batch, s, e],
+        )?;
+        first_interval.get_or_insert(tx.last_insert_rowid());
+        claimed += e - s;
+    }
+    if claimed > 0 {
+        let (label, project): (String, Option<String>) = tx.query_row(
+            "SELECT label, project FROM tasks WHERE id=?1",
+            [to_task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let ctx = span_ctx(&tx, start_ts, end_ts)?;
+        tx.execute(
+            "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
+             VALUES (?1, ?2, '(unassigned)', ?3, NULL, ?4, ?5, 'assign', ?6)",
+            params![ts_to_ms(ts), to_task, label, project, ctx, first_interval],
+        )?;
+    }
+    tx.commit()?;
+    Ok(claimed)
 }
 
 /// Fold one task into another ('merge' correction): every interval moves to
@@ -1609,7 +1743,48 @@ pub fn similar_corrections(
     spans: &[SpanDraft],
     k: usize,
 ) -> Result<Vec<Correction>, StorageError> {
-    let query = fts_or_query(spans);
+    corrections_matching(conn, &fts_or_query(spans), k)
+}
+
+/// Best past correction for free text (an unassigned run's app/title mix):
+/// the label the user last gave similar work, if any. Terms found in more
+/// than half of all corrections (a shell prompt's user@host, a terminal's
+/// app name) carry no signal and are dropped first, so a run only gets a
+/// suggestion when something distinctive about it matched. Small corpora
+/// keep every term: with a handful of rows, frequency says nothing yet.
+pub fn suggest_correction(
+    conn: &Connection,
+    text: &str,
+) -> Result<Option<Correction>, StorageError> {
+    let mut terms = Vec::new();
+    push_fts_terms(text, &mut terms);
+    terms.truncate(32);
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM corrections", [], |r| r.get(0))?;
+    if total >= IDF_MIN_ROWS {
+        let mut df =
+            conn.prepare("SELECT COUNT(*) FROM corrections_fts WHERE corrections_fts MATCH ?1")?;
+        let mut kept = Vec::new();
+        for t in terms {
+            let n: i64 = df.query_row([format!("\"{t}\"")], |r| r.get(0))?;
+            if n * 2 <= total {
+                kept.push(t);
+            }
+        }
+        terms = kept;
+    }
+    Ok(corrections_matching(conn, &join_fts_terms(terms), 1)?.pop())
+}
+
+/// Corrections needed before term frequency prunes the suggestion query.
+const IDF_MIN_ROWS: i64 = 4;
+
+/// Top-k corrections for an FTS query, bm25-ranked, deduped by resulting
+/// label + project.
+fn corrections_matching(
+    conn: &Connection,
+    query: &str,
+    k: usize,
+) -> Result<Vec<Correction>, StorageError> {
     if query.is_empty() {
         return Ok(Vec::new());
     }

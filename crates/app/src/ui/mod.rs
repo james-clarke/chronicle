@@ -12,6 +12,7 @@ mod reports;
 mod settings;
 mod theme;
 mod timeline;
+mod triage;
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -323,6 +324,16 @@ enum Action {
     SaveWorkspaceEdit(WorkspaceEdit),
     /// Open task-scoped chat for the task.
     ChatAboutTask(i64),
+    /// Claim unassigned runs `(start_ms, end_ms)` for a task (triage).
+    AssignRuns {
+        runs: Vec<(i64, i64)>,
+        to_task: i64,
+    },
+    /// Declare a task and claim the runs for it in one go.
+    AssignRunsNew {
+        runs: Vec<(i64, i64)>,
+        label: String,
+    },
 }
 
 /// In-flight inline edit of a workspace artifact in the detail pane.
@@ -425,6 +436,10 @@ struct TimelineApp {
     config_path: PathBuf,
     /// Some = settings window open.
     settings: Option<SettingsPanel>,
+    /// Some = unassigned-triage takeover open (Home → Unassigned → organize).
+    triage: Option<triage::TriagePanel>,
+    /// `CHRONICLE_UI_VIEW=triage`: open the takeover once tasks are loaded.
+    triage_requested: bool,
     /// No usable model resolved (config override or default preset).
     model_missing: bool,
     /// Some = model download in flight or just finished.
@@ -553,6 +568,8 @@ impl TimelineApp {
             chat: None,
             config_path,
             settings: None,
+            triage: None,
+            triage_requested: false,
             model_missing: false,
             model_dl: None,
             preset_pick: 0,
@@ -631,6 +648,9 @@ impl TimelineApp {
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+        if std::mem::take(&mut self.triage_requested) {
+            self.open_triage();
         }
         self.poll_ai_jobs();
         if self.view == View::Reports {
@@ -1063,7 +1083,18 @@ impl TimelineApp {
             return;
         };
         let now = jiff::Timestamp::now();
+        // Some = a triage assign ran; ms claimed feeds the panel's status.
+        let mut claimed: Option<i64> = None;
         let result = match action {
+            Action::AssignRuns { runs, to_task } => {
+                assign_runs(conn, now, &runs, to_task, &mut claimed)
+            }
+            Action::AssignRunsNew { runs, label } => {
+                match chronicle_core::storage::insert_user_task(conn, now, &label, None) {
+                    Ok(task_id) => assign_runs(conn, now, &runs, task_id, &mut claimed),
+                    Err(e) => Err(e),
+                }
+            }
             Action::Rename(edit) => {
                 let label = edit.label.trim().to_owned();
                 if label.is_empty() {
@@ -1296,6 +1327,16 @@ impl TimelineApp {
                 }
             }
         };
+        if let Some(panel) = &mut self.triage
+            && let Some(ms) = claimed
+        {
+            panel.dirty = true;
+            panel.set_status(match &result {
+                Ok(()) if ms > 0 => Ok(format!("assigned {}", fmt_dur(ms))),
+                Ok(()) => Ok("nothing claimed \u{2014} that stretch is not batched yet".into()),
+                Err(e) => Err(e.to_string()),
+            });
+        }
         match result {
             Ok(()) => self.loaded_at = None,
             Err(e) => self.error = Some(e.to_string()),
@@ -1311,8 +1352,11 @@ impl TimelineApp {
             self.conn = Some(conn);
             // `CHRONICLE_UI_VIEW=settings` opens the takeover once the DB is
             // up (visual-test loop; Connections reads status from it).
-            if std::env::var("CHRONICLE_UI_VIEW").as_deref() == Ok("settings") {
-                self.toggle_settings();
+            match std::env::var("CHRONICLE_UI_VIEW").as_deref() {
+                Ok("settings") => self.toggle_settings(),
+                // Needs the task lists (pick candidates): opens after this load.
+                Ok("triage") => self.triage_requested = true,
+                _ => {}
             }
         }
         let (lo, hi) = self.day_range_ms()?;
@@ -1486,6 +1530,10 @@ impl TimelineApp {
         // Settings takeover: replaces the whole window, top bar included.
         if self.settings.is_some() {
             self.settings_ui(ui);
+            return;
+        }
+        if self.triage.is_some() {
+            self.triage_ui(ui);
             return;
         }
 
@@ -1731,4 +1779,20 @@ fn fmt_dur(ms: i64) -> String {
     } else {
         format!("{sec}s")
     }
+}
+
+/// Claim each run for the task, summing the ms claimed into `claimed`.
+fn assign_runs(
+    conn: &mut Connection,
+    now: jiff::Timestamp,
+    runs: &[(i64, i64)],
+    to_task: i64,
+    claimed: &mut Option<i64>,
+) -> Result<(), chronicle_core::storage::StorageError> {
+    let mut total = 0;
+    for &(s, e) in runs {
+        total += chronicle_core::storage::assign_unassigned(conn, now, s, e, to_task)?;
+    }
+    *claimed = Some(total);
+    Ok(())
 }

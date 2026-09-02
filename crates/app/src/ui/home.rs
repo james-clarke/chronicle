@@ -158,6 +158,7 @@ impl TimelineApp {
         let candidates = self.merge_candidates();
 
         let mut pending: Option<Action> = None;
+        let mut open_triage = false;
         theme::page().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
@@ -347,6 +348,12 @@ impl TimelineApp {
                     if !unassigned_vis.is_empty() {
                         ui.add_space(theme::SECTION_GAP);
                         theme::section_header_with(ui, "Unassigned", None, |ui| {
+                            if theme::ghost_button(ui, "organize")
+                                .on_hover_text("assign the day's unassigned time to tasks")
+                                .clicked()
+                            {
+                                open_triage = true;
+                            }
                             ui.label(theme::num(fmt_dur(unassigned_ms)));
                         });
                         ui.add_space(theme::SPACE_XS);
@@ -388,6 +395,9 @@ impl TimelineApp {
         });
         if let Some(action) = pending {
             self.apply_action(action);
+        }
+        if open_triage {
+            self.open_triage();
         }
     }
 }

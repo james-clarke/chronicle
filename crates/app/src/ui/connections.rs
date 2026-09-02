@@ -368,6 +368,16 @@ fn kind_label(k: ActivityKind) -> &'static str {
     }
 }
 
+/// One Local-sources row: title, switch, blocker (tool/dir missing), the
+/// kinds whose newest event feeds the chip, detail caption.
+type SourceRow<'a> = (
+    &'a str,
+    &'a mut bool,
+    Option<String>,
+    &'a [ActivityKind],
+    String,
+);
+
 /// Bare command resolved on PATH (plus the user bin dirs the daemon sees)?
 fn on_path(cmd: &str) -> bool {
     chronicle_core::config::resolve_command(cmd).contains('/')
@@ -856,7 +866,7 @@ impl Connections {
         } else {
             "Claude Code transcripts under ~/.claude/projects".to_owned()
         };
-        let mut rows: [(&str, &mut bool, Option<String>, &[ActivityKind], String); 3] = [
+        let mut rows: [SourceRow; 3] = [
             (
                 "Claude Code sessions",
                 &mut sessions_on,
