@@ -205,9 +205,8 @@ fn style(style: &mut egui::Style) {
     spacing.menu_margin = egui::Margin::same(8);
     spacing.interact_size.y = 24.0;
     spacing.extra_text_line_spacing = 1.0;
-    // Floating 6px pill thumb over the content edge; invisible track and
-    // invisible while dormant — it only fades in while scrolling, and
-    // brightens toward TEXT (handle color = fg_stroke) under the pointer.
+    // No visible scrollbar at all: floating so it reserves no width, every
+    // track and handle opacity zero. Wheel/drag scrolling still works.
     spacing.scroll = egui::style::ScrollStyle {
         floating: true,
         bar_width: 6.0,
@@ -218,8 +217,8 @@ fn style(style: &mut egui::Style) {
         active_background_opacity: 0.0,
         interact_background_opacity: 0.0,
         dormant_handle_opacity: 0.0,
-        active_handle_opacity: 0.55,
-        interact_handle_opacity: 1.0,
+        active_handle_opacity: 0.0,
+        interact_handle_opacity: 0.0,
         ..egui::style::ScrollStyle::solid()
     };
 
