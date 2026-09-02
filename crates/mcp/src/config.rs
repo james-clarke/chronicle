@@ -136,10 +136,119 @@ impl McpConfig {
     }
 }
 
+/// One server found in an `mcpServers` JSON document (Claude Code
+/// `~/.claude.json`, Claude Desktop `claude_desktop_config.json`, a repo's
+/// `.mcp.json`). `skip` names why it cannot be imported as-is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportEntry {
+    pub server: ServerConfig,
+    pub skip: Option<String>,
+}
+
+/// Parse the `mcpServers` map (top-level key, or the whole document when it
+/// is already the map). Only stdio servers import: entries with a `url` or
+/// a non-stdio `type` come back with `skip` set so the UI can list them.
+/// Bare commands are left as written; the caller resolves them.
+pub fn parse_mcp_servers_json(text: &str) -> Result<Vec<ImportEntry>, String> {
+    let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    let map = match doc.get("mcpServers") {
+        Some(m) => m,
+        None => &doc,
+    };
+    let Some(map) = map.as_object() else {
+        return Err("no mcpServers object".into());
+    };
+    let mut out = Vec::new();
+    for (name, v) in map {
+        let mut skip = None;
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("stdio");
+        if kind != "stdio" {
+            skip = Some(format!("{kind} transport not supported"));
+        } else if v.get("url").is_some() {
+            skip = Some("remote server (url) not supported".into());
+        }
+        let command = v
+            .get("command")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if skip.is_none() && command.is_empty() {
+            skip = Some("no command".into());
+        }
+        let args = v
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // `env` is an object in every writer we know; Claude Code has been
+        // seen writing `[]` for none — anything but an object is empty.
+        let env = v
+            .get("env")
+            .and_then(|e| e.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(ImportEntry {
+            server: ServerConfig {
+                name: name.clone(),
+                command,
+                args,
+                enabled: true,
+                env,
+            },
+            skip,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn import_json_reads_stdio_entries_and_flags_the_rest() {
+        let text = r#"{"mcpServers": {
+            "context-mode": {"type": "stdio", "command": "npx", "args": ["-y", "context-mode"], "env": []},
+            "jira": {"command": "uvx", "args": ["mcp-atlassian"], "env": {"JIRA_URL": "https://x", "N": 1}},
+            "linear": {"type": "http", "url": "https://mcp.linear.app/mcp"},
+            "remote": {"command": "npx", "url": "https://x/sse"},
+            "empty": {}
+        }}"#;
+        let got = parse_mcp_servers_json(text).unwrap();
+        let by = |n: &str| got.iter().find(|e| e.server.name == n).unwrap();
+        assert_eq!(by("context-mode").server.args, vec!["-y", "context-mode"]);
+        assert!(by("context-mode").server.env.is_empty());
+        assert_eq!(by("context-mode").skip, None);
+        assert_eq!(by("jira").server.env.get("JIRA_URL").unwrap(), "https://x");
+        assert_eq!(by("jira").server.env.len(), 1, "non-string env dropped");
+        assert_eq!(
+            by("linear").skip.as_deref(),
+            Some("http transport not supported")
+        );
+        assert_eq!(
+            by("remote").skip.as_deref(),
+            Some("remote server (url) not supported")
+        );
+        assert_eq!(by("empty").skip.as_deref(), Some("no command"));
+
+        // Bare map (a `.mcp.json` that is only the servers) works too.
+        let bare = r#"{"a": {"command": "a-server"}}"#;
+        assert_eq!(
+            parse_mcp_servers_json(bare).unwrap()[0].server.command,
+            "a-server"
+        );
+        assert!(parse_mcp_servers_json("[1]").is_err());
+        assert!(parse_mcp_servers_json("{").is_err());
+    }
 
     fn sample() -> McpConfig {
         McpConfig {

@@ -2,7 +2,8 @@
 //! repos with resolve + last-seen status. Server edits write mcp.toml at
 //! once — the daemon loads it per call, so they apply without a restart.
 //! Git repos and local collector switches live in config.toml and apply on
-//! the daemon's next start.
+//! the daemon's next start. m21.5: GitHub / Google Calendar / CalDAV presets
+//! and `mcpServers` JSON import (config-only rows, no allowlisted calls).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use std::sync::mpsc;
 use chronicle_core::config::expand_home;
 use chronicle_core::storage;
 use chronicle_core::types::{ActivityEvent, ActivityKind};
-use chronicle_mcp::{ContextCall, McpConfig, ServerConfig, ServerProbe};
+use chronicle_mcp::{ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
 use rusqlite::Connection;
@@ -43,6 +44,9 @@ fn probe_key(name: &str) -> String {
 }
 
 /// Known servers the "add" menu pre-fills: everything but the secrets.
+/// `hint` is the one line the user needs before "test" can pass (install,
+/// auth step). Context-call args may use `{today}` / `{tomorrow}` / `{now}`
+/// (local RFC 3339, expanded per call) for calendar windows.
 struct Preset {
     label: &'static str,
     name: &'static str,
@@ -51,23 +55,77 @@ struct Preset {
     env: &'static [&'static str],
     context_calls: &'static [(&'static str, &'static str)],
     fetch_calls: &'static [(&'static str, &'static str)],
+    hint: &'static str,
 }
 
-const PRESETS: &[Preset] = &[Preset {
-    label: "Jira (mcp-atlassian)",
-    name: "jira",
-    command: "uvx",
-    args: &["mcp-atlassian"],
-    env: &["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"],
-    context_calls: &[(
-        "jira_search",
-        r#"{"jql": "assignee = currentUser() AND updated >= -3d ORDER BY updated DESC", "limit": 5, "fields": "key,summary,status"}"#,
-    )],
-    fetch_calls: &[(
-        "jira_get_issue",
-        r#"{"issue_key": "{ref}", "comment_limit": 10}"#,
-    )],
-}];
+const PRESETS: &[Preset] = &[
+    Preset {
+        label: "Jira (mcp-atlassian)",
+        name: "jira",
+        command: "uvx",
+        args: &["mcp-atlassian"],
+        env: &["JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"],
+        context_calls: &[(
+            "jira_search",
+            r#"{"jql": "assignee = currentUser() AND updated >= -3d ORDER BY updated DESC", "limit": 5, "fields": "key,summary,status"}"#,
+        )],
+        fetch_calls: &[(
+            "jira_get_issue",
+            r#"{"issue_key": "{ref}", "comment_limit": 10}"#,
+        )],
+        hint: "API token from id.atlassian.com \u{b7} needs uvx on PATH",
+    },
+    Preset {
+        label: "GitHub (github-mcp-server)",
+        name: "github",
+        command: "github-mcp-server",
+        args: &[
+            "stdio",
+            "--toolsets",
+            "pull_requests,context",
+            "--read-only",
+        ],
+        env: &["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        context_calls: &[
+            (
+                "search_pull_requests",
+                r#"{"query": "is:pr author:@me", "sort": "updated", "order": "desc", "perPage": 5}"#,
+            ),
+            (
+                "search_pull_requests",
+                r#"{"query": "is:pr reviewed-by:@me", "sort": "updated", "order": "desc", "perPage": 5}"#,
+            ),
+        ],
+        fetch_calls: &[],
+        hint: "binary from github.com/github/github-mcp-server releases on PATH \u{b7} fine-grained PAT with pull request read",
+    },
+    Preset {
+        label: "Google Calendar (google-calendar-mcp)",
+        name: "gcal",
+        command: "npx",
+        args: &["-y", "@cocal/google-calendar-mcp"],
+        env: &["GOOGLE_OAUTH_CREDENTIALS"],
+        context_calls: &[(
+            "list-events",
+            r#"{"calendarId": "primary", "timeMin": "{today}", "timeMax": "{tomorrow}"}"#,
+        )],
+        fetch_calls: &[],
+        hint: "value = path to an OAuth desktop-client JSON; run `npx @cocal/google-calendar-mcp auth` once \u{b7} consent screen must be In production or the token dies in 7 days",
+    },
+    Preset {
+        label: "CalDAV (caldav-mcp)",
+        name: "caldav",
+        command: "npx",
+        args: &["-y", "caldav-mcp"],
+        env: &["CALDAV_BASE_URL", "CALDAV_USERNAME", "CALDAV_PASSWORD"],
+        context_calls: &[(
+            "list-events",
+            r#"{"start": "{today}", "end": "{tomorrow}"}"#,
+        )],
+        fetch_calls: &[],
+        hint: "iCloud / Fastmail / Nextcloud with an app password \u{b7} list-events may need a calendarUrl (see list-calendars)",
+    },
+];
 
 fn preset_calls(spec: &[(&str, &str)]) -> Vec<ContextCall> {
     spec.iter()
@@ -116,6 +174,7 @@ struct ServerForm {
     enabled: bool,
     /// Allowlist entries a preset brings along; `server` is set at submit.
     preset_calls: Option<(Vec<ContextCall>, Vec<ContextCall>)>,
+    hint: Option<&'static str>,
     error: Option<String>,
 }
 
@@ -129,6 +188,7 @@ impl ServerForm {
             env: Vec::new(),
             enabled: true,
             preset_calls: None,
+            hint: None,
             error: None,
         }
     }
@@ -146,6 +206,7 @@ impl ServerForm {
                 .collect(),
             enabled: true,
             preset_calls: Some((preset_calls(p.context_calls), preset_calls(p.fetch_calls))),
+            hint: Some(p.hint),
             error: None,
         }
     }
@@ -159,6 +220,7 @@ impl ServerForm {
             env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             enabled: s.enabled,
             preset_calls: None,
+            hint: None,
             error: None,
         }
     }
@@ -213,6 +275,16 @@ fn form_ui(ui: &mut egui::Ui, form: &mut ServerForm) -> FormAct {
                 .family(egui::FontFamily::Name(theme::MEDIUM.into()))
                 .color(palette::TEXT),
         );
+        if let Some(hint) = form.hint {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(hint)
+                        .text_style(theme::caption())
+                        .weak(),
+                )
+                .wrap(),
+            );
+        }
         ui.add_space(theme::SPACE_XS);
         ui.label("name");
         ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
@@ -383,6 +455,67 @@ fn on_path(cmd: &str) -> bool {
     chronicle_core::config::resolve_command(cmd).contains('/')
 }
 
+/// `mcpServers` JSON import: a path, the entries it parsed, a tick per row.
+struct ImportState {
+    path: String,
+    entries: Vec<(ImportEntry, bool)>,
+    error: Option<String>,
+}
+
+impl ImportState {
+    fn new() -> Self {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let candidates = [
+            "~/.claude.json",
+            "~/.config/Claude/claude_desktop_config.json",
+            "~/.cursor/mcp.json",
+            ".mcp.json",
+        ];
+        let path = candidates
+            .iter()
+            .find(|c| {
+                let p = expand_home(c);
+                home.is_some() && p.is_file()
+            })
+            .map_or_else(|| candidates[0].to_owned(), |c| (*c).to_owned());
+        Self {
+            path,
+            entries: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// Parse the file; rows already configured or unsupported start unticked.
+    fn load(&mut self, existing: &[ServerConfig]) {
+        self.entries.clear();
+        let path = expand_home(self.path.trim());
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.error = Some(format!("{}: {e}", path.display()));
+                return;
+            }
+        };
+        match chronicle_mcp::parse_mcp_servers_json(&text) {
+            Ok(entries) => {
+                self.error = None;
+                for mut e in entries {
+                    if e.skip.is_none() && existing.iter().any(|s| s.name == e.server.name) {
+                        e.skip = Some("already configured".into());
+                    }
+                    e.server.command = chronicle_core::config::resolve_command(&e.server.command);
+                    let tick = e.skip.is_none();
+                    self.entries.push((e, tick));
+                }
+                if self.entries.is_empty() {
+                    self.error = Some("no servers in that file".into());
+                }
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+}
+
 enum RowAct {
     Test(String),
     Edit(String),
@@ -398,6 +531,7 @@ pub(super) struct Connections {
     mcp_error: Option<String>,
     probes: BTreeMap<String, Probe>,
     form: Option<ServerForm>,
+    import: Option<ImportState>,
     arm_remove: Option<String>,
     mcp_status: Option<Result<String, String>>,
     /// Newest `fetch_context` job: (status, created, error).
@@ -444,6 +578,7 @@ impl Connections {
             mcp_error,
             probes,
             form: None,
+            import: None,
             arm_remove: None,
             mcp_status: None,
             last_fetch,
@@ -522,6 +657,7 @@ impl Connections {
 
     fn servers_ui(&mut self, ui: &mut egui::Ui, conn: Option<&Connection>) {
         let mut open_form: Option<ServerForm> = None;
+        let mut open_import = false;
         let editable = self.mcp_error.is_none();
         subhead(ui, "MCP servers", |ui| {
             if editable {
@@ -536,11 +672,22 @@ impl Connections {
                         open_form = Some(ServerForm::blank());
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("import mcpServers JSON\u{2026}").clicked() {
+                        open_import = true;
+                        ui.close();
+                    }
                 });
             }
         });
         if let Some(f) = open_form {
             self.form = Some(f);
+            self.import = None;
+            self.arm_remove = None;
+        }
+        if open_import {
+            self.form = None;
+            self.import = Some(ImportState::new());
             self.arm_remove = None;
         }
         if let Some(err) = &self.mcp_error {
@@ -704,6 +851,103 @@ impl Connections {
             },
             FormAct::Cancel => self.form = None,
             FormAct::None => {}
+        }
+        self.import_ui(ui);
+    }
+
+    /// Import panel under the list: path + load, one tick per parsed server,
+    /// import writes the ticked ones as config-only rows (no allowlisted
+    /// calls — those stay a per-server decision in mcp.toml or a preset).
+    fn import_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(state) = &mut self.import else {
+            return;
+        };
+        let existing = self.mcp.servers.clone();
+        let mut close = false;
+        let mut import = false;
+        ui.add_space(theme::SPACE_XS);
+        theme::card().show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("import mcpServers JSON")
+                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .color(palette::TEXT),
+            );
+            ui.horizontal(|ui| {
+                let w = ui.available_width();
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.path)
+                        .desired_width(w - 56.0)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("~/.claude.json"),
+                );
+                if theme::secondary_button(ui, "load").clicked() {
+                    state.load(&existing);
+                }
+            });
+            if let Some(e) = &state.error {
+                ui.colored_label(palette::RED, e);
+            }
+            let width = ui.available_width();
+            for (entry, tick) in state.entries.iter_mut() {
+                let name = entry.server.name.clone();
+                let (dot, chip, color) = match &entry.skip {
+                    Some(why) => (palette::AMBER, why.clone(), palette::AMBER),
+                    None => (palette::GREEN, "stdio".to_owned(), palette::TEXT_DIM),
+                };
+                theme::ListRow::new(&name)
+                    .emphasis()
+                    .dot(dot)
+                    .chip(chip, color)
+                    .show(ui, width, |ui| {
+                        ui.add_enabled(entry.skip.is_none(), egui::Checkbox::without_text(tick));
+                    });
+                let mut line = entry.server.command.clone();
+                for a in &entry.server.args {
+                    line.push(' ');
+                    line.push_str(a);
+                }
+                if !entry.server.env.is_empty() {
+                    line.push_str(&format!("  \u{b7}  {} env", entry.server.env.len()));
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    caption(ui, line, None);
+                });
+            }
+            let n = state.entries.iter().filter(|(_, t)| *t).count();
+            ui.add_space(theme::SPACE_XS);
+            ui.horizontal(|ui| {
+                if theme::primary_button_enabled(ui, n > 0, &format!("import {n}")).clicked() {
+                    import = true;
+                }
+                if theme::ghost_button(ui, "cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if import {
+            let picked: Vec<ServerConfig> = state
+                .entries
+                .iter()
+                .filter(|(e, t)| *t && e.skip.is_none())
+                .map(|(e, _)| e.server.clone())
+                .collect();
+            let mut next = self.mcp.clone();
+            next.servers.extend(picked.iter().cloned());
+            self.mcp_status = Some(match next.save(&self.mcp_path) {
+                Ok(()) => {
+                    self.mcp = next;
+                    close = true;
+                    Ok(format!(
+                        "imported {} \u{2014} add allowlisted calls in mcp.toml to use them",
+                        picked.len()
+                    ))
+                }
+                Err(e) => Err(e.to_string()),
+            });
+        }
+        if close {
+            self.import = None;
         }
     }
 

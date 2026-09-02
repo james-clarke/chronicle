@@ -834,6 +834,7 @@ name = "chronicle-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jiff",
  "rmcp",
  "serde",
  "serde_json",

@@ -5,7 +5,9 @@
 //! derivation — log and skip.
 
 mod config;
-pub use config::{ContextCall, McpConfig, McpConfigError, ServerConfig};
+pub use config::{
+    ContextCall, ImportEntry, McpConfig, McpConfigError, ServerConfig, parse_mcp_servers_json,
+};
 
 use std::path::Path;
 use std::process::Stdio;
@@ -42,7 +44,16 @@ pub fn gather_context(config_path: &Path) -> Option<String> {
     if cfg.context_calls.is_empty() {
         return None;
     }
-    run_blocking(&cfg, &cfg.context_calls, MAX_CONTEXT_CHARS)
+    let now = jiff::Zoned::now();
+    let calls: Vec<ContextCall> = cfg
+        .context_calls
+        .iter()
+        .map(|c| ContextCall {
+            args_json: c.args_json.as_ref().map(|raw| substitute_time(raw, &now)),
+            ..c.clone()
+        })
+        .collect();
+    run_blocking(&cfg, &calls, MAX_CONTEXT_CHARS)
 }
 
 /// Fetch external context for one task ref (m16): run every `fetch_calls`
@@ -59,15 +70,36 @@ pub fn fetch_context(config_path: &Path, ext_ref: &str) -> Option<String> {
     if cfg.fetch_calls.is_empty() {
         return None;
     }
+    let now = jiff::Zoned::now();
     let calls: Vec<ContextCall> = cfg
         .fetch_calls
         .iter()
         .map(|c| ContextCall {
-            args_json: c.args_json.as_ref().map(|raw| substitute_ref(raw, ext_ref)),
+            args_json: c
+                .args_json
+                .as_ref()
+                .map(|raw| substitute_time(&substitute_ref(raw, ext_ref), &now)),
             ..c.clone()
         })
         .collect();
     run_blocking(&cfg, &calls, MAX_FETCH_CHARS)
+}
+
+/// Replace `{now}`, `{today}` (local midnight) and `{tomorrow}` (next
+/// midnight) with RFC 3339 timestamps in the local offset — what calendar
+/// servers' `timeMin`/`timeMax`/`start`/`end` take. Untouched when absent.
+fn substitute_time(raw: &str, now: &jiff::Zoned) -> String {
+    if !raw.contains("{now}") && !raw.contains("{today}") && !raw.contains("{tomorrow}") {
+        return raw.to_owned();
+    }
+    let today = now.start_of_day().unwrap_or_else(|_| now.clone());
+    let tomorrow = today
+        .checked_add(jiff::Span::new().days(1))
+        .unwrap_or_else(|_| today.clone());
+    let fmt = |z: &jiff::Zoned| z.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string();
+    raw.replace("{now}", &fmt(now))
+        .replace("{today}", &fmt(&today))
+        .replace("{tomorrow}", &fmt(&tomorrow))
 }
 
 /// Replace `{ref}` inside an args template. The ref is JSON-escaped first:
@@ -260,5 +292,26 @@ mod tests {
         let out = super::substitute_ref(r#"{"q":"{ref}"}"#, "a\"b");
         assert_eq!(out, r#"{"q":"a\"b"}"#);
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&out).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::substitute_time;
+
+    #[test]
+    fn time_placeholders_expand_to_local_rfc3339() {
+        let now: jiff::Zoned = "2026-09-02T16:58:00-04:00[America/New_York]"
+            .parse()
+            .unwrap();
+        let got = substitute_time(
+            r#"{"timeMin":"{today}","timeMax":"{tomorrow}","at":"{now}"}"#,
+            &now,
+        );
+        assert_eq!(
+            got,
+            r#"{"timeMin":"2026-09-02T00:00:00-04:00","timeMax":"2026-09-03T00:00:00-04:00","at":"2026-09-02T16:58:00-04:00"}"#
+        );
+        assert_eq!(substitute_time(r#"{"q":"x"}"#, &now), r#"{"q":"x"}"#);
     }
 }
