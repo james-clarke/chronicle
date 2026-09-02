@@ -24,8 +24,11 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Spawn + handshake + tools/list for the settings "test" button. Looser
 /// than `CONNECT_TIMEOUT`: `uvx`-style launchers cold-start slowly.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-/// ~800 tokens by the digest's chars/4 heuristic.
-const MAX_CONTEXT_CHARS: usize = 800 * 4;
+/// ~500 tokens: tool JSON tokenizes at ~2.7 chars per token (measured
+/// 2026-09-02), and the whole digest has ~1900. Results are compacted
+/// first (`compact_json`), so this holds roughly what 3200 pretty-printed
+/// chars did at half the tokens.
+const MAX_CONTEXT_CHARS: usize = 1400;
 /// Task context is a standalone document the user reads (and chat injects),
 /// not squeezed into the digest's cap ladder — bigger budget.
 const MAX_FETCH_CHARS: usize = 6000;
@@ -267,7 +270,23 @@ async fn run_call(
     if text.is_empty() {
         anyhow::bail!("no text content in result");
     }
-    Ok(text.join("\n").trim().to_owned())
+    Ok(text
+        .iter()
+        .map(|t| compact_json(t))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned())
+}
+
+/// Pretty-printed JSON re-serialized without whitespace: same content,
+/// ~15 % fewer tokens and a much smaller char count under the digest cap.
+/// Anything that is not one JSON document passes through unchanged.
+fn compact_json(text: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| text.to_owned()),
+        Err(_) => text.to_owned(),
+    }
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
@@ -282,6 +301,15 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_json_strips_whitespace_and_passes_text_through() {
+        assert_eq!(
+            super::compact_json("{\n  \"a\": [1, 2],\n  \"b\": \"x y\"\n}"),
+            r#"{"a":[1,2],"b":"x y"}"#
+        );
+        assert_eq!(super::compact_json("plain: text"), "plain: text");
+    }
+
     #[test]
     fn substitute_ref_escapes_json_metacharacters() {
         assert_eq!(

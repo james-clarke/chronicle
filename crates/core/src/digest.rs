@@ -10,16 +10,24 @@ use crate::storage::Placement;
 use crate::types::{ActivityEvent, ActivityKind, Correction, OpenTask};
 
 /// Digest budget in `approx_tokens`. The derive runner has 4096 − 900 gen −
-/// 64 = 3132 tokens for the whole prompt and the instruction text alone
-/// takes ~1250 (measured 2026-09-02: a 7.3k-char digest tokenized to 2964
-/// with it), so the digest has ~1850 real tokens; 1800 here lets the render
-/// ladder shorten titles and app lists instead of the runner cutting the
-/// tail, where the open tasks, hints and corrections live.
-pub const MAX_TOKENS: usize = 1800;
+/// 64 = 3132 tokens for the whole prompt; the instruction text plus chat
+/// template takes 1078 (Qwen3 tokenizer, measured 2026-09-02), leaving
+/// ~2050 for the digest. 1900 keeps a margin for template drift, so the
+/// render ladder shortens titles and app lists instead of the runner
+/// cutting the tail, where the open tasks, hints and corrections live.
+pub const MAX_TOKENS: usize = 1900;
 
-/// Rough heuristic; the real tokenizer lives in the derive worker.
+/// Rough heuristic; the real tokenizer lives in the derive worker. Digest
+/// text runs 2.5–3.0 chars per token (timestamps, dashes, paths, JSON
+/// workspace context), measured against the Qwen3 tokenizer on fixture
+/// goldens and a live batch; 8/3 lands a few percent over on each.
 pub fn approx_tokens(s: &str) -> usize {
-    s.chars().count() / 4
+    s.chars().count() * 3 / 8
+}
+
+/// Character budget for `tokens` under the same heuristic.
+pub const fn max_chars(tokens: usize) -> usize {
+    tokens * 8 / 3
 }
 
 /// `hints` are the pre-pass's provisional placements over the window; each
@@ -61,7 +69,7 @@ pub fn build_digest(
         3,
         24,
     );
-    let mut cut = (MAX_TOKENS * 4).min(out.len());
+    let mut cut = max_chars(MAX_TOKENS).min(out.len());
     while !out.is_char_boundary(cut) {
         cut -= 1;
     }

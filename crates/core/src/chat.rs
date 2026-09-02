@@ -14,8 +14,8 @@ use crate::storage::{self, StorageError};
 use crate::types::{Task, ms_to_ts};
 use crate::{digest, timeref};
 
-/// Hard cap ≈ digest::MAX_TOKENS with the chars/4 heuristic.
-const MAX_CHARS: usize = digest::MAX_TOKENS * 4;
+/// Hard cap ≈ digest::MAX_TOKENS under the digest's chars-per-token heuristic.
+const MAX_CHARS: usize = digest::max_chars(digest::MAX_TOKENS);
 const FTS_K: usize = 12;
 
 pub fn build_context(
