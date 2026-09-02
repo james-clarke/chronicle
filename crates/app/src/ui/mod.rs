@@ -202,13 +202,22 @@ struct TaskGroup {
     task_context: Option<(i64, String)>,
     /// A fetch_context job for this task is queued or running.
     context_pending: bool,
-    /// Journal tail, oldest first, as (entry id, time label, entry text).
-    journal: Vec<(i64, String, String)>,
+    /// Journal tail, oldest first.
+    journal: Vec<JournalRow>,
     /// Latest "where I am / what's next".
     checkpoint: Option<chronicle_core::storage::Checkpoint>,
     /// Short, undeclared, unanchored scrap of a task (Wordle-scale); folds
     /// into the timeline's collapsed background strip.
     background: bool,
+}
+
+/// One journal entry of the selected task.
+struct JournalRow {
+    id: i64,
+    ts: i64,
+    /// "Mon 09:41".
+    time: String,
+    entry: String,
 }
 
 /// One commit shown as task evidence.
@@ -905,12 +914,14 @@ impl TimelineApp {
             group.journal = chronicle_core::storage::journal_tail(conn, group.task_id, 15)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|e| {
-                    let time = chronicle_core::types::ms_to_ts(e.start_ts)
+                .map(|e| JournalRow {
+                    id: e.id,
+                    ts: e.start_ts,
+                    time: chronicle_core::types::ms_to_ts(e.start_ts)
                         .to_zoned(self.tz.clone())
                         .strftime("%a %H:%M")
-                        .to_string();
-                    (e.id, time, e.entry)
+                        .to_string(),
+                    entry: e.entry,
                 })
                 .collect();
             group.checkpoint =

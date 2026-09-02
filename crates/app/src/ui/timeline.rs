@@ -40,6 +40,8 @@ impl TimelineApp {
                     let group = &self.groups[gi];
                     let edit = &mut self.edit;
                     let ws_edit = &mut self.ws_edit;
+                    let merge_pick = &mut self.merge_pick;
+                    let spans = &self.spans;
                     let mut close_detail = false;
                     let color = theme::series_color_for(group.task_id);
                     if narrow {
@@ -50,7 +52,7 @@ impl TimelineApp {
                             .frame(frame)
                             .show(ui, |ui| {
                                 ui.multiply_opacity(detail_t);
-                                detail_actions(ui, group, edit, &candidates, &mut pending);
+                                detail_actions(ui, group, edit, merge_pick, &mut pending);
                             });
                         theme::page().show(ui, |ui| {
                             ui.multiply_opacity(detail_t);
@@ -63,6 +65,8 @@ impl TimelineApp {
                                         color,
                                         edit,
                                         ws_edit,
+                                        spans,
+                                        merge_pick,
                                         &candidates,
                                         &mut pending,
                                     );
@@ -92,11 +96,13 @@ impl TimelineApp {
                                 color,
                                 edit,
                                 ws_edit,
+                                spans,
+                                merge_pick,
                                 &candidates,
                                 &mut pending,
                             );
                             ui.add_space(10.0);
-                            detail_actions(ui, group, edit, &candidates, &mut pending);
+                            detail_actions(ui, group, edit, merge_pick, &mut pending);
                         });
                     if close_detail {
                         self.selected_task = None;
@@ -558,18 +564,23 @@ fn card_frame(
         });
 }
 
-/// Detail pane: identity, summary, session chips (with whole-session move),
-/// per-app evidence bars, and correction actions. Returns true to close.
+/// Detail pane: identity, summary, session strips (with whole-session
+/// move), per-app evidence bars, activity, checkpoint, journal, context.
+/// Returns true to close.
+#[allow(clippy::too_many_arguments)]
 fn detail_ui(
     ui: &mut egui::Ui,
     group: &TaskGroup,
     color: egui::Color32,
     edit: &mut Option<EditState>,
     ws_edit: &mut Option<WorkspaceEdit>,
+    spans: &[SpanRow],
+    merge_pick: &mut Option<i64>,
     candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) -> bool {
     let mut close = false;
+    let content_w = theme::content_width(ui);
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
         ui.painter().circle_filled(dot.center(), 4.0, color);
@@ -596,7 +607,10 @@ fn detail_ui(
             }
         });
     });
+    // Rhythm: title, 4, chips, 8, summary + duration line, 16, sections.
+    ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
         if let Some(project) = &group.project {
             theme::badge(ui, project, color);
         }
@@ -607,6 +621,7 @@ fn detail_ui(
             theme::badge(ui, "declared", theme::palette::TEXT_DIM);
         }
     });
+    ui.add_space(theme::SPACE_SM);
     theme::ai_summary_line(ui, group.ai_summary.as_deref(), true);
     if group.ai_pending {
         ui.horizontal(|ui| {
@@ -649,49 +664,18 @@ fn detail_ui(
             }
         });
     }
-
-    ui.add_space(8.0);
-    theme::section_header(ui, "Sessions", None);
-    for s in &group.sessions {
-        let dur = s.end.timestamp().as_millisecond() - s.start.timestamp().as_millisecond();
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{}\u{2013}{}",
-                    s.start.strftime("%H:%M"),
-                    s.end.strftime("%H:%M")
-                ))
-                .color(theme::palette::TEXT),
-            );
-            ui.weak(fmt_dur(dur));
-            if let Some(c) = theme::confidence_color(theme::confidence_band(s.confidence)) {
-                let (dot, resp) =
-                    ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.0, c);
-                resp.on_hover_text(format!("confidence {:.0}%", s.confidence * 100.0));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("move", |ui| {
-                    for (task_id, label) in candidates {
-                        if *task_id == group.task_id {
-                            continue;
-                        }
-                        if ui.button(label).clicked() {
-                            *pending = Some(Action::ReassignSession {
-                                interval_ids: s.interval_ids.clone(),
-                                to_task: *task_id,
-                            });
-                            ui.close();
-                        }
-                    }
-                });
-            });
-        });
+    if *merge_pick == Some(group.task_id) {
+        ui.add_space(theme::SPACE_SM);
+        if !merge_picker(ui, content_w, color, group.task_id, candidates, pending) {
+            *merge_pick = None;
+        }
     }
 
+    detail_section(ui, "Sessions", Some(n), |_| {});
+    sessions_ui(ui, content_w, group, spans, candidates, pending);
+
     if !group.evidence.is_empty() {
-        ui.add_space(8.0);
-        theme::section_header(ui, "Where the time went", None);
+        detail_section(ui, "Where the time went", None, |_| {});
         let max_ms = group
             .evidence
             .iter()
@@ -734,31 +718,22 @@ fn detail_ui(
         }
     }
 
+    // Timestamped artefacts inside the task's day; one row shape for every
+    // kind, commits being the only collector so far.
     if !group.commits.is_empty() {
-        ui.add_space(8.0);
-        theme::section_header(ui, "Commits", None);
+        detail_section(ui, "Activity", Some(group.commits.len()), |_| {});
         for c in &group.commits {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(c.time.strftime("%H:%M").to_string())
-                        .text_style(egui::TextStyle::Small)
-                        .color(theme::palette::TEXT_DIM),
-                );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&c.summary)
-                            .text_style(egui::TextStyle::Small)
-                            .color(theme::palette::TEXT),
-                    )
-                    .truncate(),
-                );
-            });
+            activity_row(
+                ui,
+                theme::icon::GIT_COMMIT,
+                &c.time.strftime("%H:%M").to_string(),
+                &c.summary,
+            );
         }
     }
 
     if let Some(cp) = &group.checkpoint {
-        ui.add_space(8.0);
-        theme::section_header(ui, "Checkpoint", None);
+        detail_section(ui, "Checkpoint", None, |_| {});
         let editing = matches!(ws_edit,
             Some(WorkspaceEdit::Checkpoint { task_id, .. }) if *task_id == group.task_id);
         if editing {
@@ -823,11 +798,10 @@ fn detail_ui(
     }
 
     if !group.journal.is_empty() {
-        ui.add_space(8.0);
-        theme::section_header(ui, "Journal", Some(group.journal.len()));
-        for (id, time, entry) in &group.journal {
+        detail_section(ui, "Journal", Some(group.journal.len()), |_| {});
+        for j in &group.journal {
             let editing = matches!(ws_edit,
-                Some(WorkspaceEdit::Journal { entry_id, .. }) if entry_id == id);
+                Some(WorkspaceEdit::Journal { entry_id, .. }) if *entry_id == j.id);
             if editing {
                 if let Some(WorkspaceEdit::Journal { text, .. }) = ws_edit.as_mut() {
                     ui.add(
@@ -849,16 +823,12 @@ fn detail_ui(
                 continue;
             }
             ui.horizontal_top(|ui| {
-                ui.label(
-                    egui::RichText::new(time)
-                        .text_style(egui::TextStyle::Small)
-                        .color(theme::palette::TEXT_DIM),
-                );
+                time_col(ui, DAYTIME_COL, &j.time);
                 // Click an entry to correct it in place.
                 let resp = ui
                     .add(
                         egui::Label::new(
-                            egui::RichText::new(entry)
+                            egui::RichText::new(&j.entry)
                                 .text_style(egui::TextStyle::Small)
                                 .color(theme::palette::TEXT),
                         )
@@ -868,68 +838,451 @@ fn detail_ui(
                     .on_hover_text("edit");
                 if resp.clicked() {
                     *ws_edit = Some(WorkspaceEdit::Journal {
-                        entry_id: *id,
-                        text: entry.clone(),
+                        entry_id: j.id,
+                        text: j.entry.clone(),
                     });
                 }
             });
         }
     }
 
-    if let Some((fetched_ts, content)) = &group.task_context {
-        ui.add_space(8.0);
-        theme::section_header(ui, "Context", None);
-        let fetched = chronicle_core::types::ms_to_ts(*fetched_ts)
-            .to_zoned(jiff::tz::TimeZone::system())
-            .strftime("%b %-d %H:%M")
-            .to_string();
-        ui.label(
-            egui::RichText::new(format!("fetched {fetched}"))
-                .text_style(egui::TextStyle::Small)
-                .color(theme::palette::TEXT_DIM),
-        );
-        egui::CollapsingHeader::new(
-            egui::RichText::new(context_preview(content))
-                .text_style(egui::TextStyle::Small)
-                .color(theme::palette::TEXT),
-        )
-        .id_salt(("task_context", group.task_id))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(content)
-                    .text_style(egui::TextStyle::Small)
-                    .color(theme::palette::TEXT),
-            );
+    // Anchored tasks always get the section; the fetch controls live on
+    // its header line (right-to-left: action, then the freshness).
+    if group.external_ref.is_some() {
+        detail_section(ui, "Context", None, |ui| {
+            if group.context_pending {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(
+                    egui::RichText::new("fetching\u{2026}")
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                return;
+            }
+            let label = if group.task_context.is_some() {
+                "re-fetch"
+            } else {
+                "fetch"
+            };
+            if theme::ghost_button(ui, label).clicked() {
+                *pending = Some(Action::FetchContext(group.task_id));
+            }
+            if let Some((fetched_ts, _)) = &group.task_context {
+                ui.label(
+                    egui::RichText::new(format!("fetched {}", ago(*fetched_ts)))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+            }
         });
+        match &group.task_context {
+            Some((_, content)) => context_ui(ui, content),
+            None => {
+                ui.weak("nothing fetched yet");
+            }
+        }
     }
 
     close
 }
 
-/// First line of the context bundle, clipped, as the collapsed summary.
-fn context_preview(content: &str) -> String {
-    let line = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let mut p: String = line.chars().take(60).collect();
-    if p.len() < line.len() {
-        p.push('\u{2026}');
+/// Section header on the detail pane's rhythm: 16 above, 8 below.
+fn detail_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    count: Option<usize>,
+    trailing: impl FnOnce(&mut egui::Ui),
+) {
+    ui.add_space(theme::SPACE_LG);
+    theme::section_header_with(ui, title, count, trailing);
+    ui.add_space(theme::SPACE_SM);
+}
+
+/// Time-range column ("09:04–10:03") of a session row.
+const RANGE_COL: f32 = 88.0;
+/// Clock-time column ("09:41") of an activity row.
+const TIME_COL: f32 = 44.0;
+/// Day + clock column ("Mon 09:41") of a journal row.
+const DAYTIME_COL: f32 = 72.0;
+const STRIP_H: f32 = 12.0;
+
+/// Fixed-width, left-aligned [`theme::num`] column, exactly one text line
+/// tall so the row centres it like any other label.
+fn time_col(ui: &mut egui::Ui, width: f32, text: &str) {
+    let h = ui.text_style_height(&egui::TextStyle::Monospace);
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(width);
+            ui.add(egui::Label::new(theme::num(text)).selectable(false));
+        },
+    );
+}
+
+fn ms(z: &Zoned) -> i64 {
+    z.timestamp().as_millisecond()
+}
+
+/// Stable per-app colour: hash into the series palette, so an app keeps
+/// its colour across sessions and days.
+fn app_color(app: &str) -> egui::Color32 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    app.hash(&mut h);
+    theme::series_color_for((h.finish() % 1024) as i64)
+}
+
+/// Session strips: time column, a strip sized against the longest session
+/// and filled with per-app focus segments (confidence as opacity; commit
+/// and journal ticks), the duration, and the whole-session "move" menu.
+/// Hover a segment for app · title · duration.
+fn sessions_ui(
+    ui: &mut egui::Ui,
+    content_w: f32,
+    group: &TaskGroup,
+    spans: &[SpanRow],
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) {
+    let longest = group
+        .sessions
+        .iter()
+        .map(|s| ms(&s.end) - ms(&s.start))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    // Room left after the range column, duration and menu (+ gaps).
+    let strip_max = (content_w - RANGE_COL - 44.0 - 48.0 - 3.0 * 6.0).max(40.0);
+    for s in &group.sessions {
+        let (lo, hi) = (ms(&s.start), ms(&s.end));
+        let dur = (hi - lo).max(1);
+        ui.horizontal(|ui| {
+            time_col(
+                ui,
+                RANGE_COL,
+                &format!(
+                    "{}\u{2013}{}",
+                    s.start.strftime("%H:%M"),
+                    s.end.strftime("%H:%M")
+                ),
+            );
+            let w = (strip_max * dur as f32 / longest as f32).max(4.0);
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(w, STRIP_H), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, egui::CornerRadius::same(3), theme::palette::SURFACE_2);
+            let alpha = 0.45 + 0.55 * s.confidence.clamp(0.0, 1.0) as f32;
+            let x_at = |t: i64| rect.left() + rect.width() * (t - lo) as f32 / dur as f32;
+            let hover_x = resp.hover_pos().map(|p| p.x);
+            let mut hover: Option<String> = None;
+            for sp in spans.iter().filter(|sp| sp.kind == "focus") {
+                let (a, b) = (ms(&sp.start).max(lo), ms(&sp.end).min(hi));
+                if b <= a {
+                    continue;
+                }
+                let seg = egui::Rect::from_min_max(
+                    egui::pos2(x_at(a), rect.top()),
+                    egui::pos2(x_at(b).max(x_at(a) + 1.0), rect.bottom()),
+                );
+                painter.rect_filled(seg, 0, app_color(&sp.app).gamma_multiply(alpha));
+                if hover_x.is_some_and(|x| seg.x_range().contains(x)) {
+                    hover = Some(format!("{} \u{b7} {} \u{b7} {}", sp.app, sp.title, fmt_dur(b - a)));
+                }
+            }
+            let tick = |t: i64, color: egui::Color32| {
+                if (lo..=hi).contains(&t) {
+                    let x = x_at(t);
+                    painter.line_segment(
+                        [egui::pos2(x, rect.top() - 2.0), egui::pos2(x, rect.bottom() + 2.0)],
+                        egui::Stroke::new(1.0, color),
+                    );
+                }
+            };
+            for c in &group.commits {
+                tick(ms(&c.time), theme::palette::TEXT);
+            }
+            for j in &group.journal {
+                tick(j.ts, theme::palette::TEXT_DIM);
+            }
+            resp.on_hover_text(hover.unwrap_or_else(|| {
+                format!("{} \u{b7} confidence {:.0}%", fmt_dur(dur), s.confidence * 100.0)
+            }));
+            ui.label(theme::num(fmt_dur(dur)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("move", |ui| {
+                    for (task_id, label) in candidates {
+                        if *task_id == group.task_id {
+                            continue;
+                        }
+                        if ui.button(label).clicked() {
+                            *pending = Some(Action::ReassignSession {
+                                interval_ids: s.interval_ids.clone(),
+                                to_task: *task_id,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+            });
+        });
     }
-    p
+}
+
+/// One activity row: kind glyph, clock time, summary (truncates).
+fn activity_row(ui: &mut egui::Ui, glyph: &str, time: &str, summary: &str) {
+    ui.horizontal(|ui| {
+        ui.label(
+            theme::glyph(glyph)
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        );
+        time_col(ui, TIME_COL, time);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(summary)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT),
+            )
+            .truncate(),
+        );
+    });
+}
+
+/// "just now" / "12m ago" / "2h ago" / "3d ago".
+fn ago(ts_ms: i64) -> String {
+    let mins = (jiff::Timestamp::now().as_millisecond() - ts_ms).max(0) / 60_000;
+    if mins < 1 {
+        "just now".to_owned()
+    } else if mins < 60 {
+        format!("{mins}m ago")
+    } else if mins < 24 * 60 {
+        format!("{}h ago", mins / 60)
+    } else {
+        format!("{}d ago", mins / (24 * 60))
+    }
+}
+
+/// One `### source.tool` block of the stored context bundle.
+struct ContextBlock {
+    source: Option<String>,
+    tool: Option<String>,
+    body: String,
+}
+
+/// Split the bundle on its `### ` tool headers ("jira.jira_get_issue" →
+/// source "jira", tool "jira_get_issue"); a bundle without headers is one
+/// unnamed block.
+fn context_blocks(content: &str) -> Vec<ContextBlock> {
+    let mut blocks: Vec<ContextBlock> = Vec::new();
+    for line in content.lines() {
+        if let Some(head) = line.strip_prefix("### ") {
+            let head = head.trim();
+            let (source, tool) = match head.split_once('.') {
+                Some((s, t)) => (Some(s.to_owned()), Some(t.to_owned())),
+                None => (None, Some(head.to_owned())),
+            };
+            blocks.push(ContextBlock {
+                source,
+                tool,
+                body: String::new(),
+            });
+            continue;
+        }
+        if blocks.is_empty() {
+            blocks.push(ContextBlock {
+                source: None,
+                tool: None,
+                body: String::new(),
+            });
+        }
+        let body = &mut blocks.last_mut().expect("pushed above").body;
+        body.push_str(line);
+        body.push('\n');
+    }
+    blocks
+}
+
+/// The bundle as sections: a source chip + tool name per block, then its
+/// body — a JSON object field by field (the identifying keys first, long
+/// strings as paragraphs), or plain text as headers / bullets / paragraphs.
+fn context_ui(ui: &mut egui::Ui, content: &str) {
+    for (i, block) in context_blocks(content).iter().enumerate() {
+        if i > 0 {
+            ui.add_space(theme::SPACE_SM);
+        }
+        if block.source.is_some() || block.tool.is_some() {
+            ui.horizontal(|ui| {
+                if let Some(source) = &block.source {
+                    theme::badge(ui, source, theme::palette::ACCENT);
+                }
+                if let Some(tool) = &block.tool {
+                    ui.label(
+                        egui::RichText::new(tool)
+                            .text_style(egui::TextStyle::Small)
+                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                            .color(theme::palette::TEXT),
+                    );
+                }
+            });
+        }
+        match serde_json::from_str::<serde_json::Value>(block.body.trim()) {
+            Ok(serde_json::Value::Object(map)) => json_fields_ui(ui, &map),
+            _ => text_lines_ui(ui, &block.body),
+        }
+    }
+}
+
+/// Keys shown first, in this order; the rest follow alphabetically.
+const CONTEXT_KEYS_FIRST: [&str; 10] = [
+    "key",
+    "summary",
+    "title",
+    "status",
+    "assignee",
+    "reporter",
+    "priority",
+    "created",
+    "updated",
+    "description",
+];
+/// Longest string value rendered before eliding.
+const CONTEXT_VALUE_MAX: usize = 1500;
+
+fn json_fields_ui(ui: &mut egui::Ui, map: &serde_json::Map<String, serde_json::Value>) {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort_by_key(|k| {
+        (
+            CONTEXT_KEYS_FIRST
+                .iter()
+                .position(|f| f == k)
+                .unwrap_or(CONTEXT_KEYS_FIRST.len()),
+            k.as_str(),
+        )
+    });
+    for key in keys {
+        let value = &map[key];
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(s) if s.contains('\n') || s.len() > 80 => {
+                ui.label(
+                    egui::RichText::new(key)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                text_lines_ui(ui, s);
+            }
+            serde_json::Value::String(s) => field_row(ui, key, s),
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                field_row(ui, key, &clip(&value.to_string(), 160));
+            }
+            other => field_row(ui, key, &other.to_string()),
+        }
+    }
+}
+
+/// `key  value` on one line; the value wraps against the key column.
+fn field_row(ui: &mut egui::Ui, key: &str, value: &str) {
+    ui.horizontal_top(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(DAYTIME_COL, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(DAYTIME_COL);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(key)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                    )
+                    .truncate(),
+                );
+            },
+        );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(value)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT),
+            )
+            .wrap(),
+        );
+    });
+}
+
+/// Plain text as lines: `#` headers, `-`/`*` bullets, paragraphs; blank
+/// lines become 4pt gaps. Elides past [`CONTEXT_VALUE_MAX`].
+fn text_lines_ui(ui: &mut egui::Ui, text: &str) {
+    let text = clip(text, CONTEXT_VALUE_MAX);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            ui.add_space(theme::SPACE_XS);
+        } else if let Some(h) = line
+            .strip_prefix("### ")
+            .or_else(|| line.strip_prefix("## "))
+            .or_else(|| line.strip_prefix("# "))
+        {
+            ui.label(
+                egui::RichText::new(h)
+                    .text_style(egui::TextStyle::Small)
+                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .color(theme::palette::TEXT),
+            );
+        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            ui.horizontal_top(|ui| {
+                ui.add_space(theme::SPACE_SM);
+                ui.label(
+                    egui::RichText::new("\u{b7}")
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(item)
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT),
+                    )
+                    .wrap(),
+                );
+            });
+        } else {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(line)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT),
+                )
+                .wrap(),
+            );
+        }
+    }
+}
+
+/// First `max` chars, with an ellipsis when anything was cut.
+fn clip(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if out.len() < text.len() {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 /// Correction actions for the selected task; rendered pinned to the widget's
-/// bottom edge in narrow mode, inline at the pane's end when wide.
+/// bottom edge in narrow mode, inline at the pane's end when wide. Ghost
+/// actions left, the destructive one right; merge sits in the `…` menu.
 fn detail_actions(
     ui: &mut egui::Ui,
     group: &TaskGroup,
     edit: &mut Option<EditState>,
-    candidates: &[(i64, String)],
+    merge_pick: &mut Option<i64>,
     pending: &mut Option<Action>,
 ) {
     ui.horizontal(|ui| {
-        if ui.button("chat").clicked() {
+        if theme::ghost_button(ui, "chat").clicked() {
             *pending = Some(Action::ChatAboutTask(group.task_id));
         }
-        if ui.button("rename").clicked() {
+        if theme::ghost_button(ui, "rename").clicked() {
             *edit = Some(EditState {
                 task_id: group.task_id,
                 label: group.label.clone(),
@@ -937,22 +1290,9 @@ fn detail_actions(
                 description: group.ai_summary.clone().unwrap_or_default(),
             });
         }
-        merge_menu(ui, group.task_id, candidates, pending);
-        if group.external_ref.is_some() {
-            let label = if group.context_pending {
-                "fetching\u{2026}"
-            } else if group.task_context.is_some() {
-                "re-fetch context"
-            } else {
-                "fetch context"
-            };
-            if ui
-                .add_enabled(!group.context_pending, egui::Button::new(label))
-                .clicked()
-            {
-                *pending = Some(Action::FetchContext(group.task_id));
-            }
-        }
+        ui.menu_button("\u{2026}", |ui| {
+            merge_item(ui, group.task_id, merge_pick);
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Destructive action: tinted, and kept apart on the right.
             let close_btn =
@@ -965,8 +1305,6 @@ fn detail_actions(
     });
 }
 
-/// Duration-weighted confidence; a small tinted dot appears only when the
-/// assignment is not high-confidence (hover for the %).
 fn confidence_dot(ui: &mut egui::Ui, group: &TaskGroup) {
     let (mut num, mut den) = (0.0f64, 0.0f64);
     for iv in &group.intervals {
@@ -1008,30 +1346,6 @@ fn card_menu(
         if ui.button("close task").clicked() {
             *pending = Some(Action::Close(group.task_id));
             ui.close();
-        }
-    });
-}
-
-/// Detail-bar "merge into" click menu (top-level, so no hover surprise);
-/// the card/row path uses [`merge_picker`] instead.
-fn merge_menu(
-    ui: &mut egui::Ui,
-    self_task: i64,
-    candidates: &[(i64, String)],
-    pending: &mut Option<Action>,
-) {
-    ui.menu_button("merge into", |ui| {
-        for (task_id, label) in candidates {
-            if *task_id == self_task {
-                continue;
-            }
-            if ui.button(label).clicked() {
-                *pending = Some(Action::Merge {
-                    from_task: self_task,
-                    to_task: *task_id,
-                });
-                ui.close();
-            }
         }
     });
 }
