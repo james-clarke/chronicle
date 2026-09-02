@@ -173,10 +173,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "chronicle-mcp-{}-{name}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("chronicle-mcp-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -195,10 +192,8 @@ mod tests {
 
     #[test]
     fn enabled_defaults_true() {
-        let cfg: McpConfig = toml::from_str(
-            "[[servers]]\nname = \"s\"\ncommand = \"c\"\n",
-        )
-        .unwrap();
+        let cfg: McpConfig =
+            toml::from_str("[[servers]]\nname = \"s\"\ncommand = \"c\"\n").unwrap();
         assert!(cfg.servers[0].enabled);
     }
 
@@ -228,7 +223,10 @@ mod tests {
         let mut cfg = sample();
         cfg.servers.pop();
         let err = cfg.save(&path).unwrap_err();
-        assert!(matches!(err, McpConfigError::UnknownServer(ref s) if s == "off"), "{err}");
+        assert!(
+            matches!(err, McpConfigError::UnknownServer(ref s) if s == "off"),
+            "{err}"
+        );
         assert!(!path.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
