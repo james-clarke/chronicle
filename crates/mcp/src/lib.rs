@@ -207,7 +207,7 @@ async fn connect(
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("spawn {}", server.command))?;
-    Ok(().serve(transport).await.context("handshake")?)
+    ().serve(transport).await.context("handshake")
 }
 
 async fn run_call(

@@ -564,7 +564,7 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let open = storage::open_tasks(&conn, 8)?;
         let corrections = storage::similar_corrections(&conn, &spans, 4)?;
         let tz = TimeZone::system();
-        let mcp_path = config.mcp_path(&data_dir);
+        let mcp_path = config.mcp_path(data_dir);
         let mcp_context = chronicle_mcp::gather_context(&mcp_path);
         let vcs = storage::vcs_in_range(&conn, batch.start_ts, batch.end_ts)?;
         let digest = chronicle_core::digest::build_digest(
@@ -682,7 +682,7 @@ fn run_ai_job(
         let Some(ext_ref) = ext_ref else {
             bail!("task {task_id} has no external_ref")
         };
-        let mcp_path = config.mcp_path(&data_dir);
+        let mcp_path = config.mcp_path(data_dir);
         let Some(content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref) else {
             bail!("no fetch_calls configured or every call failed")
         };
