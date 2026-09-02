@@ -118,6 +118,35 @@ Keep the copyright line. Add one line that makes the page its own proof: "This p
 - Section rhythm: screenshot sections alternate with the two text-shaped sections (pipeline block, table), so the page changes shape twice.
 - Drop `section + section` borders where a background-shift does the same job for the two text sections.
 
+## Where development is going, and what the page must leave room for
+
+The roadmap (README milestone table, `m22-collectors-plan.md`, progress.md "Post-m21 integration research") moves Chronicle from "window-focus tracker" to "everything that shows what you worked on, in one local ledger". The page should be written so each landed piece is one row or one screenshot, not a rewrite.
+
+- **Sources beyond the window title (m22, landed).** Git repos, Claude Code session transcripts read from `~/.claude/projects`, PR events via `gh`, mic-in-use via PipeWire. The "Connect the tools you already use" section becomes **Sources**, split "on this machine" (git, AI agent sessions, calls) and "servers you add" (Jira today; GitHub, Google Calendar, CalDAV presets next in m21.5). One screenshot: Settings › Connections with the Local sources rows.
+- **Each source gets a row in "What leaves your machine".** This is the part that has to stay honest as collectors land, so the table is the roadmap's honesty ledger:
+
+  | Source | Read from | Network |
+  |---|---|---|
+  | Git | `.git` of folders you list | none |
+  | Claude Code sessions | `~/.claude/projects/**/*.jsonl`, timestamps, cwd, branch | none |
+  | Pull requests | `gh` CLI, only when you turn it on | GitHub, your token |
+  | Calls | PipeWire: whether a mic is open. Not audio. | none |
+  | Tickets, calendar | MCP servers you add | that server, when a task asks |
+
+- **Unassigned as the front door (m23, landed; m24 next).** The organize takeover folds a day's unassigned focus into runs, pre-fills the task from past corrections, bulk-assigns. This is the "Correct" step made concrete, and it answers the reader's obvious worry ("the model will get it wrong"). Give it one screenshot in section 3 instead of describing correction in a sentence. Copy: "It guesses. You fix it in bulk, and it learns from the fix."
+- **Standup, journal, checkpoints (m15 to m17).** The hero already shows the standup. The developer note should not overclaim its accuracy: the draft is a first pass from real events, and redraft is one click.
+- **Platform honesty stays a moving line.** Linux X11 today; macOS AX and Win32 capture are written against the native APIs in the README matrix but not shipped; Wayland later. Keep the status line in the hero as a single sentence that gets edited per release rather than a feature grid that goes stale.
+- **Packaging (later).** When a tarball or AppImage exists, the status line becomes a download link plus size plus checksum (Nova pattern: "Nova 14.1.zip - 75.8 MB / Verify integrity"). No changelog on the page until there is a second release.
+
+So the page's sections map to the roadmap like this: hero (standup, m17) → the day and the week (timeline m13/m20, reports m12) → what it sees (capture m1, derive m4, organize m23) → sources (m21, m22) → what leaves your machine (every collector) → note. New milestones extend an existing section; none add one.
+
+## Screenshots: intake
+
+- Location: `site/img/`, referenced as `img/<name>.webp` from `site/index.html`. Existing set: home, timeline-band, timeline-lanes, timeline-hours, task, reports, chat, connections. All 678×1062 except connections (678×900).
+- Drop new captures as PNG into `site/img/src/` (gitignored) named for the section they belong to: `home`, `triage`, `timeline-band`, `timeline-lanes`, `timeline-hours`, `task`, `reports`, `chat`, `connections`, `sources`. Same window size as the existing shots.
+- Conversion is ImageMagick, no cwebp on the box: `magick site/img/src/home.png -quality 85 site/img/home.webp`. Alt text is written per image in the HTML from what the shot actually shows, so a one-line note per capture ("Tuesday, real standup, redrafted once") is enough.
+- What to retake, in priority order: home (with a standup draft that reads human), triage (organize takeover, new), connections (with Local sources rows, replaces current), then any timeline view whose day looks thin.
+
 ## Not doing
 
 - No testimonials, badges, or press quotes. None exist and fakes would be spotted.
