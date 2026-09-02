@@ -89,11 +89,11 @@ const PRESETS: &[Preset] = &[
         context_calls: &[
             (
                 "search_pull_requests",
-                r#"{"query": "is:pr author:@me", "sort": "updated", "order": "desc", "perPage": 5}"#,
+                r#"{"query": "is:pr author:@me", "sort": "updated", "order": "desc", "perPage": 5, "fields": ["number", "title", "state", "updated_at", "html_url"]}"#,
             ),
             (
                 "search_pull_requests",
-                r#"{"query": "is:pr reviewed-by:@me", "sort": "updated", "order": "desc", "perPage": 5}"#,
+                r#"{"query": "is:pr reviewed-by:@me", "sort": "updated", "order": "desc", "perPage": 5, "fields": ["number", "title", "state", "updated_at", "html_url"]}"#,
             ),
         ],
         fetch_calls: &[],
