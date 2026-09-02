@@ -312,8 +312,13 @@ impl TimelineApp {
         let items = chronicle_core::storage::list_conversations(conn, 12).unwrap_or_default();
         let tz = self.tz.clone();
         let mut error: Option<String> = None;
-        let open = ui
-            .menu_button("history", |ui| {
+        // Default menus close on any inner click, which would drop the armed
+        // "\u{d7}" before its confirming click can land.
+        let config = egui::containers::menu::MenuConfig::new()
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let (_, inner) = egui::containers::menu::MenuButton::new("history")
+            .config(config)
+            .ui(ui, |ui| {
                 if items.is_empty() {
                     ui.weak("no conversations yet");
                 }
@@ -363,9 +368,8 @@ impl TimelineApp {
                         });
                     });
                 }
-            })
-            .inner
-            .is_some();
+            });
+        let open = inner.is_some();
         if !open {
             chat.delete_arm = None;
         }
