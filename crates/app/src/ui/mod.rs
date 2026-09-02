@@ -1269,7 +1269,11 @@ impl TimelineApp {
 
     fn load_spans(&mut self) -> anyhow::Result<Vec<SpanRow>> {
         if self.conn.is_none() {
-            self.conn = Some(chronicle_core::storage::open(&self.db_path)?);
+            let conn = chronicle_core::storage::open(&self.db_path)?;
+            // Rows are created by a chat's first question now; drop the empties
+            // older builds made on every chat-view open.
+            let _ = chronicle_core::storage::delete_empty_conversations(&conn);
+            self.conn = Some(conn);
         }
         let (lo, hi) = self.day_range_ms()?;
         let conn = self.conn.as_ref().expect("connection opened above");

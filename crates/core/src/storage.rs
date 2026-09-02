@@ -1755,6 +1755,25 @@ pub fn list_conversations(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Delete a conversation and every message in it (history menu "×").
+pub fn delete_conversation(conn: &mut Connection, id: i64) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM chat_messages WHERE conversation_id=?1", [id])?;
+    tx.execute("DELETE FROM conversations WHERE id=?1", [id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Drop conversations that never received a message (older builds created
+/// one on every chat-view open). Returns how many went.
+pub fn delete_empty_conversations(conn: &Connection) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "DELETE FROM conversations WHERE id NOT IN
+         (SELECT conversation_id FROM chat_messages WHERE conversation_id IS NOT NULL)",
+        [],
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;

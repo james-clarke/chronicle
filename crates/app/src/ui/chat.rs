@@ -31,7 +31,9 @@ struct ChatMsg {
 pub(super) struct ChatPanel {
     child: Child,
     rx: mpsc::Receiver<ChatEvent>,
-    conversation_id: i64,
+    /// None until the first question creates the row, so an untouched chat
+    /// never reaches the history list.
+    conversation_id: Option<i64>,
     /// Retrieval scoped to this task's workspace (m16): (task_id, label).
     task_scope: Option<(i64, String)>,
     transcript: Vec<ChatMsg>,
@@ -41,17 +43,21 @@ pub(super) struct ChatPanel {
     /// Question in flight (answer streaming in).
     busy: bool,
     error: Option<String>,
+    /// History row whose "×" was clicked once; the next click deletes.
+    delete_arm: Option<i64>,
 }
 
 impl ChatPanel {
     fn spawn(
         ctx: &egui::Context,
         conn: Option<&Connection>,
-        conversation_id: i64,
+        conversation_id: Option<i64>,
         task_scope: Option<(i64, String)>,
     ) -> anyhow::Result<Self> {
-        let mut child =
-            crate::spawn_chat_worker(conversation_id, task_scope.as_ref().map(|(id, _)| *id))?;
+        let mut child = crate::spawn_chat_worker(
+            conversation_id.unwrap_or(0),
+            task_scope.as_ref().map(|(id, _)| *id),
+        )?;
         let stdout = child.stdout.take().expect("chat worker stdout is piped");
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
@@ -88,6 +94,7 @@ impl ChatPanel {
             warming: true,
             busy: false,
             error: None,
+            delete_arm: None,
         })
     }
 
@@ -132,10 +139,33 @@ impl ChatPanel {
         true
     }
 
-    fn send_question(&mut self) {
+    /// Send the composer text. A conversation without a row yet gets one
+    /// here (and the worker pointed at it) — never on view open.
+    fn send_question(&mut self, conn: Option<&Connection>) {
         let ask = self.input.trim().to_owned();
         if ask.is_empty() || self.busy || self.warming {
             return;
+        }
+        if self.conversation_id.is_none() {
+            let created = conn.ok_or_else(|| "no database".to_owned()).and_then(|c| {
+                chronicle_core::storage::create_conversation(c, Timestamp::now())
+                    .map_err(|e| format!("conversation create failed: {e}"))
+            });
+            let id = match created {
+                Ok(id) => id,
+                Err(e) => {
+                    self.error = Some(e);
+                    return;
+                }
+            };
+            let task_id = self.task_scope.as_ref().map(|(id, _)| *id);
+            if !self.send_line(&crate::chatproto::ClientMsg::Switch {
+                conversation_id: id,
+                task_id,
+            }) {
+                return;
+            }
+            self.conversation_id = Some(id);
         }
         if !self.send_line(&crate::chatproto::ClientMsg::Ask { ask: ask.clone() }) {
             return;
@@ -158,7 +188,7 @@ impl ChatPanel {
     fn switch_conversation(
         &mut self,
         conn: Option<&Connection>,
-        conversation_id: i64,
+        conversation_id: Option<i64>,
         task_scope: Option<(i64, String)>,
     ) {
         let same_scope =
@@ -167,7 +197,7 @@ impl ChatPanel {
             return;
         }
         if !self.send_line(&crate::chatproto::ClientMsg::Switch {
-            conversation_id,
+            conversation_id: conversation_id.unwrap_or(0),
             task_id: task_scope.as_ref().map(|(id, _)| *id),
         }) {
             return;
@@ -194,8 +224,9 @@ fn task_label(conn: &Connection, task_id: i64) -> String {
     .unwrap_or_else(|_| format!("task {task_id}"))
 }
 
-fn load_transcript(conn: Option<&Connection>, conversation_id: i64) -> Vec<ChatMsg> {
-    conn.and_then(|c| chronicle_core::storage::recent_chat_messages(c, conversation_id, 20).ok())
+fn load_transcript(conn: Option<&Connection>, conversation_id: Option<i64>) -> Vec<ChatMsg> {
+    conn.zip(conversation_id)
+        .and_then(|(c, id)| chronicle_core::storage::recent_chat_messages(c, id, 20).ok())
         .unwrap_or_default()
         .into_iter()
         .map(|(role, text)| ChatMsg {
@@ -206,7 +237,8 @@ fn load_transcript(conn: Option<&Connection>, conversation_id: i64) -> Vec<ChatM
 }
 
 impl TimelineApp {
-    /// Ensure a live worker on the most recent conversation (or a fresh one).
+    /// Ensure a live worker on the newest general conversation, or a fresh
+    /// one whose row waits for the first question.
     fn chat_ensure(&mut self, ctx: &egui::Context) {
         if self.chat.is_some() {
             return;
@@ -221,17 +253,7 @@ impl TimelineApp {
         let latest = chronicle_core::storage::latest_general_conversation(conn)
             .ok()
             .flatten();
-        let conversation_id = match latest {
-            Some(id) => id,
-            None => match chronicle_core::storage::create_conversation(conn, Timestamp::now()) {
-                Ok(id) => id,
-                Err(e) => {
-                    self.error = Some(format!("conversation create failed: {e}"));
-                    return;
-                }
-            },
-        };
-        match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id, None) {
+        match ChatPanel::spawn(ctx, self.conn.as_ref(), latest, None) {
             Ok(panel) => self.chat = Some(panel),
             Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
         }
@@ -260,15 +282,16 @@ impl TimelineApp {
             };
         let scope = Some((task_id, task_label(conn, task_id)));
         match self.chat.as_mut() {
-            Some(chat) => chat.switch_conversation(Some(conn), conversation_id, scope),
-            None => match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id, scope) {
+            Some(chat) => chat.switch_conversation(Some(conn), Some(conversation_id), scope),
+            None => match ChatPanel::spawn(ctx, self.conn.as_ref(), Some(conversation_id), scope) {
                 Ok(panel) => self.chat = Some(panel),
                 Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
             },
         }
     }
 
-    /// Top-bar action: start a fresh conversation.
+    /// Top-bar action: start a fresh conversation (row created by its first
+    /// question).
     pub(super) fn chat_new(&mut self) {
         let (Some(conn), Some(chat)) = (self.conn.as_ref(), self.chat.as_mut()) else {
             return;
@@ -276,37 +299,79 @@ impl TimelineApp {
         if chat.busy {
             return;
         }
-        match chronicle_core::storage::create_conversation(conn, Timestamp::now()) {
-            Ok(id) => chat.switch_conversation(Some(conn), id, None),
-            Err(e) => self.error = Some(format!("conversation create failed: {e}")),
-        }
+        chat.switch_conversation(Some(conn), None, None);
     }
 
-    /// Top-bar menu listing past conversations by first question.
+    /// Top-bar menu listing past conversations by first question. "×" on a
+    /// row arms a delete; the confirming click ("delete?") removes the
+    /// conversation with its messages. Deleting the open one starts fresh.
     pub(super) fn chat_history_menu(&mut self, ui: &mut egui::Ui) {
-        let (Some(conn), Some(chat)) = (self.conn.as_ref(), self.chat.as_mut()) else {
+        let (Some(conn), Some(chat)) = (self.conn.as_mut(), self.chat.as_mut()) else {
             return;
         };
         let items = chronicle_core::storage::list_conversations(conn, 12).unwrap_or_default();
         let tz = self.tz.clone();
-        ui.menu_button("history", |ui| {
-            for (id, last_ts, snippet) in &items {
-                let head: String = if snippet.is_empty() {
-                    "(empty chat)".into()
-                } else {
-                    snippet.chars().take(40).collect()
-                };
-                let date = Timestamp::from_millisecond(*last_ts)
-                    .map(|t| t.to_zoned(tz.clone()).strftime("%-d %b").to_string())
-                    .unwrap_or_default();
-                let current = *id == chat.conversation_id;
-                if theme::selectable(ui, current, format!("{date} \u{b7} {head}")).clicked() {
-                    let scope = conversation_scope(conn, *id);
-                    chat.switch_conversation(Some(conn), *id, scope);
-                    ui.close();
+        let mut error: Option<String> = None;
+        let open = ui
+            .menu_button("history", |ui| {
+                if items.is_empty() {
+                    ui.weak("no conversations yet");
                 }
-            }
-        });
+                for (id, last_ts, snippet) in &items {
+                    let head: String = if snippet.is_empty() {
+                        "(empty chat)".into()
+                    } else {
+                        snippet.chars().take(40).collect()
+                    };
+                    let date = Timestamp::from_millisecond(*last_ts)
+                        .map(|t| t.to_zoned(tz.clone()).strftime("%-d %b").to_string())
+                        .unwrap_or_default();
+                    let current = chat.conversation_id == Some(*id);
+                    ui.horizontal(|ui| {
+                        if theme::selectable(ui, current, format!("{date} \u{b7} {head}")).clicked()
+                        {
+                            let scope = conversation_scope(conn, *id);
+                            chat.switch_conversation(Some(&*conn), Some(*id), scope);
+                            ui.close();
+                        }
+                        // No delete under a streaming answer: the worker is
+                        // still writing into this conversation.
+                        if current && chat.busy {
+                            return;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let armed = chat.delete_arm == Some(*id);
+                            let label = if armed {
+                                egui::RichText::new("delete?").color(theme::palette::RED)
+                            } else {
+                                egui::RichText::new("\u{d7}")
+                            };
+                            if !theme::ghost_button(ui, label).clicked() {
+                                return;
+                            }
+                            if !armed {
+                                chat.delete_arm = Some(*id);
+                                return;
+                            }
+                            chat.delete_arm = None;
+                            if let Err(e) = chronicle_core::storage::delete_conversation(conn, *id)
+                            {
+                                error = Some(format!("delete failed: {e}"));
+                            } else if current {
+                                chat.switch_conversation(Some(&*conn), None, None);
+                            }
+                        });
+                    });
+                }
+            })
+            .inner
+            .is_some();
+        if !open {
+            chat.delete_arm = None;
+        }
+        if error.is_some() {
+            self.error = error;
+        }
     }
 
     /// True while the model is still loading (top-bar indicator).
@@ -321,16 +386,14 @@ impl TimelineApp {
         };
         let general = chronicle_core::storage::latest_general_conversation(conn)
             .ok()
-            .flatten()
-            .or_else(|| chronicle_core::storage::create_conversation(conn, Timestamp::now()).ok());
-        if let Some(id) = general {
-            chat.switch_conversation(Some(conn), id, None);
-        }
+            .flatten();
+        chat.switch_conversation(Some(conn), general, None);
     }
 
     pub(super) fn chat_ui(&mut self, ui: &mut egui::Ui) {
         self.chat_take_task_request(ui.ctx());
         self.chat_ensure(ui.ctx());
+        let conn = self.conn.as_ref();
         let Some(chat) = &mut self.chat else {
             theme::page().show(ui, |ui| {
                 ui.add_space(ui.available_height() * 0.35);
@@ -411,7 +474,7 @@ impl TimelineApp {
                         })
                         .inner;
                     if send_clicked && can_send {
-                        chat.send_question();
+                        chat.send_question(conn);
                     }
                 });
             });
