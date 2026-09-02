@@ -117,6 +117,7 @@ impl TimelineApp {
             let groups = &self.groups;
             let spans = &self.spans;
             let edit = &mut self.edit;
+            let merge_pick = &mut self.merge_pick;
             let selected_task = &mut self.selected_task;
             let show_background = &mut self.show_background;
             // Foreground and background together, interval order restored,
@@ -159,10 +160,22 @@ impl TimelineApp {
                             &groups[g],
                             theme::series_color_for(groups[g].task_id),
                             edit,
+                            merge_pick,
                             selected_task,
-                            &candidates,
                             &mut pending,
                         );
+                        if *merge_pick == Some(groups[g].task_id)
+                            && !merge_picker(
+                                ui,
+                                content_w,
+                                theme::series_color_for(groups[g].task_id),
+                                groups[g].task_id,
+                                &candidates,
+                                &mut pending,
+                            )
+                        {
+                            *merge_pick = None;
+                        }
                     }
                     if !bg_vis.is_empty() {
                         let total: i64 = bg_vis.iter().map(|&g| groups[g].total_ms).sum();
@@ -183,10 +196,22 @@ impl TimelineApp {
                                     &groups[g],
                                     theme::series_color_for(groups[g].task_id),
                                     edit,
+                                    merge_pick,
                                     selected_task,
-                                    &candidates,
                                     &mut pending,
                                 );
+                                if *merge_pick == Some(groups[g].task_id)
+                                    && !merge_picker(
+                                        ui,
+                                        content_w,
+                                        theme::series_color_for(groups[g].task_id),
+                                        groups[g].task_id,
+                                        &candidates,
+                                        &mut pending,
+                                    )
+                                {
+                                    *merge_pick = None;
+                                }
                             }
                         });
                     }
@@ -379,8 +404,8 @@ fn task_card(
     group: &TaskGroup,
     color: egui::Color32,
     edit: &mut Option<EditState>,
+    merge_pick: &mut Option<i64>,
     selected_task: &mut Option<i64>,
-    candidates: &[(i64, String)],
     pending: &mut Option<Action>,
 ) {
     let selected = *selected_task == Some(group.task_id);
@@ -417,7 +442,7 @@ fn task_card(
                     stroke_color,
                     fill,
                     edit,
-                    candidates,
+                    merge_pick,
                     pending,
                 );
             },
@@ -441,7 +466,7 @@ fn card_frame(
     stroke_color: egui::Color32,
     fill: egui::Color32,
     edit: &mut Option<EditState>,
-    candidates: &[(i64, String)],
+    merge_pick: &mut Option<i64>,
     pending: &mut Option<Action>,
 ) {
     egui::Frame::new()
@@ -485,55 +510,33 @@ fn card_frame(
                 });
                 return;
             }
-            ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 4.0, color);
-                // Leave room for the duration + confidence dot + menu.
-                let label_w = (ui.available_width() - 110.0).max(60.0);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(label_w, 18.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        theme::truncated_label(
-                            ui,
-                            egui::Label::new(
-                                egui::RichText::new(&group.label)
-                                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
-                                    .color(theme::palette::TEXT),
-                            )
-                            .truncate(),
-                            &group.label,
-                        );
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    card_menu(ui, group, edit, candidates, pending);
+            // Title row on the shared list_row grid: duration in the number
+            // column, menu pinned right, so every card's numbers align.
+            theme::ListRow::new(&group.label)
+                .emphasis()
+                .dot(color)
+                .num(fmt_dur(group.total_ms))
+                .show(ui, content_w - 20.0, |ui| {
+                    card_menu(ui, group, edit, merge_pick, pending);
                     confidence_dot(ui, group);
-                    ui.label(
-                        egui::RichText::new(fmt_dur(group.total_ms))
-                            .text_style(egui::TextStyle::Small)
-                            .color(theme::palette::TEXT_DIM),
-                    );
                 });
-            });
             ui.horizontal(|ui| {
-                ui.add_space(16.0);
+                // Indented to the title's x (dot + gap); chips 4pt apart.
+                ui.add_space(14.0);
+                ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
                 if let Some(project) = &group.project {
                     theme::badge(ui, project, color);
                 }
                 if group.declared {
                     theme::badge(ui, "declared", theme::palette::TEXT_DIM);
                 }
+                ui.spacing_mut().item_spacing.x = 6.0;
                 if let (Some(first), Some(last)) = (group.sessions.first(), group.sessions.last()) {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}\u{2013}{}",
-                            first.start.strftime("%H:%M"),
-                            last.end.strftime("%H:%M")
-                        ))
-                        .text_style(egui::TextStyle::Small)
-                        .color(theme::palette::TEXT_DIM),
-                    );
+                    ui.label(theme::num(format!(
+                        "{}\u{2013}{}",
+                        first.start.strftime("%H:%M"),
+                        last.end.strftime("%H:%M")
+                    )));
                 }
                 if let Some(e) = group.evidence.first() {
                     let text = if e.top_title.is_empty() {
@@ -988,7 +991,7 @@ fn card_menu(
     ui: &mut egui::Ui,
     group: &TaskGroup,
     edit: &mut Option<EditState>,
-    candidates: &[(i64, String)],
+    merge_pick: &mut Option<i64>,
     pending: &mut Option<Action>,
 ) {
     ui.menu_button("\u{2026}", |ui| {
@@ -1001,20 +1004,7 @@ fn card_menu(
             });
             ui.close();
         }
-        ui.menu_button("merge into", |ui| {
-            for (task_id, label) in candidates {
-                if *task_id == group.task_id {
-                    continue;
-                }
-                if ui.button(label).clicked() {
-                    *pending = Some(Action::Merge {
-                        from_task: group.task_id,
-                        to_task: *task_id,
-                    });
-                    ui.close();
-                }
-            }
-        });
+        merge_item(ui, group.task_id, merge_pick);
         if ui.button("close task").clicked() {
             *pending = Some(Action::Close(group.task_id));
             ui.close();
@@ -1022,9 +1012,9 @@ fn card_menu(
     });
 }
 
-/// "merge into" target picker: folds this task into the chosen one
-/// (a 'merge' correction — see storage::merge_task).
-pub(super) fn merge_menu(
+/// Detail-bar "merge into" click menu (top-level, so no hover surprise);
+/// the card/row path uses [`merge_picker`] instead.
+fn merge_menu(
     ui: &mut egui::Ui,
     self_task: i64,
     candidates: &[(i64, String)],
@@ -1044,6 +1034,78 @@ pub(super) fn merge_menu(
             }
         }
     });
+}
+
+/// "merge into…" menu item: opens the inline [`merge_picker`] under the
+/// card/row. A hover submenu opened over the card and merged on the first
+/// click that landed on a candidate; now nothing merges until a pick.
+pub(super) fn merge_item(ui: &mut egui::Ui, self_task: i64, merge_pick: &mut Option<i64>) {
+    if ui.button("merge into\u{2026}").clicked() {
+        *merge_pick = Some(self_task);
+        ui.close();
+    }
+}
+
+/// Inline "merge into" chooser: the other tasks as full-width rows under
+/// the card, cancel on the header line (or Escape). A pick folds this task
+/// into the chosen one (a 'merge' correction — see storage::merge_task).
+/// Returns false once it should close.
+pub(super) fn merge_picker(
+    ui: &mut egui::Ui,
+    content_w: f32,
+    color: egui::Color32,
+    self_task: i64,
+    candidates: &[(i64, String)],
+    pending: &mut Option<Action>,
+) -> bool {
+    let mut keep = !ui.input(|i| i.key_pressed(egui::Key::Escape));
+    egui::Frame::new()
+        .fill(theme::palette::SURFACE_2)
+        .stroke(egui::Stroke::new(1.0, color))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(content_w - 16.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("merge into")
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::ghost_button(ui, "cancel").clicked() {
+                        keep = false;
+                    }
+                });
+            });
+            let mut any = false;
+            ui.scope(|ui| {
+                let w = &mut ui.style_mut().visuals.widgets;
+                w.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                w.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::TRANSPARENT);
+                for (task_id, label) in candidates {
+                    if *task_id == self_task {
+                        continue;
+                    }
+                    any = true;
+                    let row = egui::Button::new(label.as_str())
+                        .truncate()
+                        .min_size(egui::vec2(ui.available_width(), 0.0));
+                    if ui.add(row).clicked() {
+                        *pending = Some(Action::Merge {
+                            from_task: self_task,
+                            to_task: *task_id,
+                        });
+                        keep = false;
+                    }
+                }
+            });
+            if !any {
+                ui.weak("no other task to merge into");
+            }
+        });
+    ui.add_space(2.0);
+    keep
 }
 
 #[cfg(test)]

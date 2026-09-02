@@ -4,7 +4,7 @@
 
 use eframe::egui;
 
-use super::timeline::{matches_filter, merge_menu};
+use super::timeline::{matches_filter, merge_item, merge_picker};
 use super::{Action, OpenRow, SpanRow, StandupRow, TimelineApp, fmt_dur, theme};
 
 impl TimelineApp {
@@ -190,6 +190,7 @@ impl TimelineApp {
                     let spans = &self.spans;
                     let new_label = &mut self.new_label;
                     let new_project = &mut self.new_project;
+                    let merge_pick = &mut self.merge_pick;
                     let suggestion = &self.suggestion;
                     let model_missing = self.model_missing;
 
@@ -245,9 +246,21 @@ impl TimelineApp {
                                     pending = Some(Action::Close(t.task_id));
                                     ui.close();
                                 }
-                                merge_menu(ui, t.task_id, &candidates, &mut pending);
+                                merge_item(ui, t.task_id, merge_pick);
                             });
                         });
+                        if *merge_pick == Some(t.task_id)
+                            && !merge_picker(
+                                ui,
+                                content_w,
+                                color,
+                                t.task_id,
+                                &candidates,
+                                &mut pending,
+                            )
+                        {
+                            *merge_pick = None;
+                        }
                     }
                     // AI declare-suggestion outcome: a dismissible chip whose
                     // "use" pre-fills the declare inputs, or the failure.

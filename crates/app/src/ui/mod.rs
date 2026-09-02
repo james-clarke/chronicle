@@ -376,6 +376,8 @@ struct TimelineApp {
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
+    /// Task whose inline "merge into" picker is open (from a card/row menu).
+    merge_pick: Option<i64>,
     /// In-flight journal/checkpoint inline edit (detail pane).
     ws_edit: Option<WorkspaceEdit>,
     /// Task whose detail pane is open (card click toggles).
@@ -500,6 +502,7 @@ impl TimelineApp {
             new_label: String::new(),
             new_project: String::new(),
             edit: None,
+            merge_pick: None,
             ws_edit: None,
             selected_task: None,
             loaded_at: None,
