@@ -120,3 +120,28 @@ impl Config {
             .unwrap_or_else(|| data_dir.join("mcp.toml"))
     }
 }
+
+/// `~/x` → `$HOME/x`; anything else passes through unchanged. Config paths
+/// are stored as written so config.toml stays portable between machines.
+pub fn expand_home(path: &str) -> PathBuf {
+    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_home_only_touches_tilde_slash() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        assert_eq!(expand_home("~/dev/x"), PathBuf::from(home).join("dev/x"));
+        assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_home("relative"), PathBuf::from("relative"));
+        assert_eq!(expand_home("~"), PathBuf::from("~"));
+    }
+}

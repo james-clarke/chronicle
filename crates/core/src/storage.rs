@@ -154,6 +154,18 @@ pub fn branch_state_before(conn: &Connection, lo: i64) -> Result<Vec<VcsEvent>, 
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Newest event per repo, any kind — the settings panel's per-repo "last
+/// seen" line. Ordered by repo name.
+pub fn latest_vcs_event_per_repo(conn: &Connection) -> Result<Vec<VcsEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {VCS_COLS} FROM vcs_events
+         WHERE id IN (SELECT MAX(id) FROM vcs_events GROUP BY repo)
+         ORDER BY repo"
+    ))?;
+    let rows = stmt.query_map([], vcs_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Commits whose ts falls inside any of the task's intervals, oldest first.
 pub fn commits_for_task(conn: &Connection, task_id: i64) -> Result<Vec<VcsEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
@@ -442,6 +454,23 @@ pub fn fail_ai_job(conn: &Connection, id: i64, error: &str) -> Result<(), Storag
         params![id, error],
     )?;
     Ok(())
+}
+
+/// Newest job of `kind`, any status: (status, created, error) — the
+/// settings panel's "last context fetch" line.
+pub fn latest_ai_job(
+    conn: &Connection,
+    kind: &str,
+) -> Result<Option<(String, jiff::Timestamp, Option<String>)>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT status, created_ts, error FROM ai_jobs WHERE kind=?1
+             ORDER BY id DESC LIMIT 1",
+            [kind],
+            |r| Ok((r.get(0)?, ms_to_ts(r.get(1)?), r.get(2)?)),
+        )
+        .optional()?)
 }
 
 /// (status, result) for a job, for UI polling.
@@ -1920,6 +1949,65 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 0, "{table} exists and starts empty");
         }
+    }
+
+    #[test]
+    fn latest_vcs_event_per_repo_picks_newest_of_each() {
+        use crate::types::{VcsEvent, VcsKind};
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ev = |ms: i64, repo: &str, kind: VcsKind, branch: &str| {
+            let commit_id = matches!(kind, VcsKind::Commit).then(|| "abc".to_owned());
+            VcsEvent {
+                ts: crate::types::ms_to_ts(ms),
+                repo: repo.into(),
+                branch: branch.into(),
+                kind,
+                commit_id,
+                summary: None,
+            }
+        };
+        assert!(super::latest_vcs_event_per_repo(&conn).unwrap().is_empty());
+        super::insert_vcs_event(&conn, &ev(1_000, "a", VcsKind::Checkout, "main")).unwrap();
+        super::insert_vcs_event(&conn, &ev(2_000, "b", VcsKind::Checkout, "feat")).unwrap();
+        super::insert_vcs_event(&conn, &ev(3_000, "a", VcsKind::Commit, "main")).unwrap();
+        let latest = super::latest_vcs_event_per_repo(&conn).unwrap();
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[0].repo, "a");
+        assert!(matches!(latest[0].kind, VcsKind::Commit));
+        assert_eq!(latest[0].ts, crate::types::ms_to_ts(3_000));
+        assert_eq!(
+            (latest[1].repo.as_str(), latest[1].branch.as_str()),
+            ("b", "feat")
+        );
+    }
+
+    #[test]
+    fn latest_ai_job_is_newest_of_its_kind() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts;
+        assert!(
+            super::latest_ai_job(&conn, "fetch_context")
+                .unwrap()
+                .is_none()
+        );
+        let first = super::enqueue_ai_job(&conn, ts(1_000), "fetch_context", 0, "{}").unwrap();
+        super::fail_ai_job(&conn, first, "boom").unwrap();
+        let (status, created, err) = super::latest_ai_job(&conn, "fetch_context")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), created, err.as_deref()),
+            ("failed", ts(1_000), Some("boom"))
+        );
+        let second = super::enqueue_ai_job(&conn, ts(2_000), "fetch_context", 0, "{}").unwrap();
+        super::complete_ai_job(&conn, second, "ok").unwrap();
+        super::enqueue_ai_job(&conn, ts(3_000), "narrative", 0, "{}").unwrap();
+        let (status, created, err) = super::latest_ai_job(&conn, "fetch_context")
+            .unwrap()
+            .unwrap();
+        assert_eq!((status.as_str(), created, err), ("done", ts(2_000), None));
     }
 
     // Priority beats insertion order; the interactive floor filters; a claim

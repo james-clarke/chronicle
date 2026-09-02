@@ -1922,14 +1922,10 @@ fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Resul
     use chronicle_capture::FocusProvider;
     use chronicle_capture::git::GitProvider;
 
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     let repos: Vec<PathBuf> = config
         .git_repos
         .iter()
-        .map(|p| match (p.strip_prefix("~/"), &home) {
-            (Some(rest), Some(h)) => h.join(rest),
-            _ => PathBuf::from(p),
-        })
+        .map(|p| chronicle_core::config::expand_home(p))
         .collect();
     let git = GitProvider::new(&repos);
     if git.is_empty() {

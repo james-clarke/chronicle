@@ -133,7 +133,7 @@ fn diff_state(old: Option<&RepoState>, new: Option<&RepoState>, name: &str) -> O
 
 /// `.git` may be a directory or, in worktrees/submodules, a file holding
 /// `gitdir: <path>`.
-fn resolve_git_dir(repo: &Path) -> Option<PathBuf> {
+pub fn resolve_git_dir(repo: &Path) -> Option<PathBuf> {
     let dot = repo.join(".git");
     if dot.is_dir() {
         return Some(dot);
