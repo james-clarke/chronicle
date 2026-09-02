@@ -204,9 +204,9 @@ fn style(style: &mut egui::Style) {
     spacing.menu_margin = egui::Margin::same(8);
     spacing.interact_size.y = 24.0;
     spacing.extra_text_line_spacing = 1.0;
-    // Floating 6px pill thumb over the content edge; invisible track. Handle
-    // color = fg_stroke (TEXT) at the opacities below, so it reads as
-    // TEXT_DIM when dormant and brightens toward TEXT on hover/drag.
+    // Floating 6px pill thumb over the content edge; invisible track and
+    // invisible while dormant — it only fades in while scrolling, and
+    // brightens toward TEXT (handle color = fg_stroke) under the pointer.
     spacing.scroll = egui::style::ScrollStyle {
         floating: true,
         bar_width: 6.0,
@@ -216,7 +216,7 @@ fn style(style: &mut egui::Style) {
         dormant_background_opacity: 0.0,
         active_background_opacity: 0.0,
         interact_background_opacity: 0.0,
-        dormant_handle_opacity: 0.35,
+        dormant_handle_opacity: 0.0,
         active_handle_opacity: 0.55,
         interact_handle_opacity: 1.0,
         ..egui::style::ScrollStyle::solid()
