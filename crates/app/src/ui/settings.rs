@@ -284,11 +284,7 @@ impl TimelineApp {
 
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
-                                let save = egui::Button::new(
-                                    egui::RichText::new("save").color(theme::palette::BG),
-                                )
-                                .fill(theme::palette::ACCENT);
-                                if ui.add(save).clicked() {
+                                if theme::primary_button(ui, "save").clicked() {
                                     panel.status = Some(match panel.save(&config_path) {
                                         Ok(()) => {
                                             Ok("saved \u{2014} restart daemon to apply".into())

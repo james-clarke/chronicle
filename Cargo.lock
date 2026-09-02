@@ -781,6 +781,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "x11rb 0.14.0",
 ]
 
 [[package]]

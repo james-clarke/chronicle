@@ -26,6 +26,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+x11rb.workspace = true
 
 [features]
 metal = ["chronicle-derive/metal"]

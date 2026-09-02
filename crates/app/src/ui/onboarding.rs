@@ -161,62 +161,59 @@ impl TimelineApp {
         if !self.service_card || self.service_dismissed {
             return;
         }
-        egui::Frame::new()
-            .fill(theme::palette::SURFACE)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                match &self.service_status {
-                    Some(Ok(msg)) => {
-                        ui.colored_label(theme::palette::GREEN, msg);
-                        return;
-                    }
-                    Some(Err(e)) => {
-                        ui.colored_label(theme::palette::RED, e);
-                    }
-                    None => {}
+        theme::hover_card(ui, "service_card", |ui| {
+            match &self.service_status {
+                Some(Ok(msg)) => {
+                    ui.colored_label(theme::palette::GREEN, msg);
+                    return;
                 }
-                ui.label(
-                    egui::RichText::new("Start Chronicle at login")
-                        .text_style(egui::TextStyle::Heading)
-                        .color(theme::palette::TEXT),
-                );
-                ui.label(
-                    "Chronicle is running now; install the background service so it \
+                Some(Err(e)) => {
+                    ui.colored_label(theme::palette::RED, e);
+                }
+                None => {}
+            }
+            ui.label(
+                egui::RichText::new("Start Chronicle at login")
+                    .text_style(egui::TextStyle::Heading)
+                    .color(theme::palette::TEXT),
+            );
+            ui.label(
+                "Chronicle is running now; install the background service so it \
                      starts automatically at your next login.",
+            );
+            if let Ok(exe) = crate::own_exe()
+                && exe.components().any(|c| c.as_os_str() == "target")
+            {
+                ui.colored_label(
+                    theme::palette::AMBER,
+                    format!(
+                        "running a dev build \u{2014} the service will point at {}",
+                        exe.display()
+                    ),
                 );
-                if let Ok(exe) = crate::own_exe()
-                    && exe.components().any(|c| c.as_os_str() == "target")
-                {
-                    ui.colored_label(
-                        theme::palette::AMBER,
-                        format!(
-                            "running a dev build \u{2014} the service will point at {}",
-                            exe.display()
-                        ),
-                    );
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "install service").clicked() {
+                    self.service_status = Some(install_service());
                 }
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let install = egui::Button::new(
-                        egui::RichText::new("install service").color(theme::palette::BG),
-                    )
-                    .fill(theme::palette::ACCENT);
-                    if ui.add(install).clicked() {
-                        self.service_status = Some(install_service());
+                if theme::ghost_button(
+                    ui,
+                    egui::RichText::new("dismiss").text_style(egui::TextStyle::Small),
+                )
+                .clicked()
+                {
+                    self.service_dismissed = true;
+                    if let Some(conn) = self.conn.as_ref() {
+                        let _ = chronicle_core::storage::set_meta(
+                            conn,
+                            "onboard_service_dismissed",
+                            Some("1"),
+                        );
                     }
-                    if ui.small_button("dismiss").clicked() {
-                        self.service_dismissed = true;
-                        if let Some(conn) = self.conn.as_ref() {
-                            let _ = chronicle_core::storage::set_meta(
-                                conn,
-                                "onboard_service_dismissed",
-                                Some("1"),
-                            );
-                        }
-                    }
-                });
+                }
             });
+        });
         ui.add_space(8.0);
     }
 
@@ -249,66 +246,55 @@ impl TimelineApp {
             return;
         }
         let mut start: Option<&'static ModelSpec> = None;
-        egui::Frame::new()
-            .fill(theme::palette::SURFACE)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| match &self.model_dl {
-                Some(dl) => match &dl.finished {
-                    None => progress_ui(ui, dl),
-                    Some(Ok(())) => {
-                        ui.colored_label(
-                            theme::palette::GREEN,
-                            "model ready \u{2014} tasks will start appearing after the \
+        theme::hover_card(ui, "model_card", |ui| match &self.model_dl {
+            Some(dl) => match &dl.finished {
+                None => progress_ui(ui, dl),
+                Some(Ok(())) => {
+                    ui.colored_label(
+                        theme::palette::GREEN,
+                        "model ready \u{2014} tasks will start appearing after the \
                                  next batch (or press derive now)",
-                        );
-                    }
-                    Some(Err(e)) => {
-                        ui.colored_label(theme::palette::RED, format!("download failed: {e}"));
-                        if ui.button("retry").clicked() {
-                            start = Some(dl.spec);
-                        }
-                    }
-                },
-                None => {
-                    ui.label(
-                        egui::RichText::new("Chronicle needs a local model")
-                            .text_style(egui::TextStyle::Heading)
-                            .color(theme::palette::TEXT),
                     );
-                    ui.label(
-                        "Tasks are derived on-device by a small LLM. Download once; \
-                             everything stays local.",
-                    );
-                    ui.add_space(4.0);
-                    // Stacked, not side by side: both labels together are
-                    // wider than the 400px widget.
-                    for (i, spec) in model::PRESETS.iter().enumerate() {
-                        let hint = if i == 0 {
-                            "recommended \u{b7} ~2.4 GiB"
-                        } else {
-                            "low-RAM \u{b7} ~1.1 GiB"
-                        };
-                        if ui
-                            .selectable_label(
-                                self.preset_pick == i,
-                                format!("{} ({hint})", spec.name),
-                            )
-                            .clicked()
-                        {
-                            self.preset_pick = i;
-                        }
-                    }
-                    ui.add_space(4.0);
-                    let dl_btn = egui::Button::new(
-                        egui::RichText::new("download model").color(theme::palette::BG),
-                    )
-                    .fill(theme::palette::ACCENT);
-                    if ui.add(dl_btn).clicked() {
-                        start = Some(&model::PRESETS[self.preset_pick]);
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(theme::palette::RED, format!("download failed: {e}"));
+                    if ui.button("retry").clicked() {
+                        start = Some(dl.spec);
                     }
                 }
-            });
+            },
+            None => {
+                ui.label(
+                    egui::RichText::new("Chronicle needs a local model")
+                        .text_style(egui::TextStyle::Heading)
+                        .color(theme::palette::TEXT),
+                );
+                ui.label(
+                    "Tasks are derived on-device by a small LLM. Download once; \
+                             everything stays local.",
+                );
+                ui.add_space(4.0);
+                // Stacked, not side by side: both labels together are
+                // wider than the 400px widget.
+                for (i, spec) in model::PRESETS.iter().enumerate() {
+                    let hint = if i == 0 {
+                        "recommended \u{b7} ~2.4 GiB"
+                    } else {
+                        "low-RAM \u{b7} ~1.1 GiB"
+                    };
+                    if ui
+                        .selectable_label(self.preset_pick == i, format!("{} ({hint})", spec.name))
+                        .clicked()
+                    {
+                        self.preset_pick = i;
+                    }
+                }
+                ui.add_space(4.0);
+                if theme::primary_button(ui, "download model").clicked() {
+                    start = Some(&model::PRESETS[self.preset_pick]);
+                }
+            }
+        });
         ui.add_space(8.0);
         if let Some(spec) = start {
             self.start_model_download(&ui.ctx().clone(), spec);

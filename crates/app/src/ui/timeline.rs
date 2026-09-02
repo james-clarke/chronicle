@@ -23,6 +23,14 @@ impl TimelineApp {
         let day_start = self.day.to_zoned(self.tz.clone()).ok();
 
         let mut pending: Option<Action> = None;
+        // Detail-pane fade-in. Registered every frame (not just while open):
+        // animate_bool snaps on an id's first sighting, so a lazily created
+        // id would never animate. Fade-out is invisible (the pane unmounts).
+        let detail_t = ui.ctx().animate_bool_with_time(
+            egui::Id::new("detail_pane_fade"),
+            self.selected_task.is_some(),
+            0.12,
+        );
         // Detail pane for the selected task: side panel when wide, the whole
         // central panel when the window is widget-narrow.
         let narrow = ui.ctx().viewport_rect().width() < 700.0;
@@ -43,9 +51,11 @@ impl TimelineApp {
                         egui::Panel::bottom("task_detail_actions")
                             .frame(frame)
                             .show(ui, |ui| {
+                                ui.multiply_opacity(detail_t);
                                 detail_actions(ui, group, edit, &candidates, &mut pending);
                             });
                         egui::CentralPanel::default().show(ui, |ui| {
+                            ui.multiply_opacity(detail_t);
                             egui::ScrollArea::vertical()
                                 .auto_shrink(false)
                                 .show(ui, |ui| {
@@ -77,6 +87,7 @@ impl TimelineApp {
                         .default_size(320.0)
                         .size_range(280.0..=420.0)
                         .show(ui, |ui| {
+                            ui.multiply_opacity(detail_t);
                             close_detail = detail_ui(
                                 ui,
                                 group,
@@ -158,33 +169,14 @@ impl TimelineApp {
                     if !bg_vis.is_empty() {
                         let total: i64 = bg_vis.iter().map(|&g| groups[g].total_ms).sum();
                         ui.add_space(2.0);
-                        // ▼/▶: Inter lacks the small-triangle codepoints.
-                        let arrow = if *show_background {
-                            "\u{25bc}"
-                        } else {
-                            "\u{25b6}"
-                        };
-                        let label = format!(
-                            "{arrow} background \u{b7} {} task{} \u{b7} {}",
-                            bg_vis.len(),
-                            if bg_vis.len() == 1 { "" } else { "s" },
-                            fmt_dur(total)
-                        );
-                        if ui
-                            .add(
-                                egui::Label::new(
-                                    egui::RichText::new(label)
-                                        .text_style(egui::TextStyle::Small)
-                                        .color(theme::palette::TEXT_DIM),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_text("short scattered sessions; declare one to promote it")
-                            .clicked()
-                        {
-                            *show_background = !*show_background;
-                        }
-                        if *show_background {
+                        theme::disclosure_header(
+                            ui,
+                            show_background,
+                            &format!("background \u{b7} {}", fmt_dur(total)),
+                            Some(bg_vis.len()),
+                        )
+                        .on_hover_text("short scattered sessions; declare one to promote it");
+                        theme::fade_body(ui, "background_body", *show_background, |ui| {
                             ui.add_space(4.0);
                             for &g in &bg_vis {
                                 task_card(
@@ -198,7 +190,7 @@ impl TimelineApp {
                                     &mut pending,
                                 );
                             }
-                        }
+                        });
                     }
                 });
         });
@@ -232,8 +224,7 @@ fn today_header(ui: &mut egui::Ui, groups: &[TaskGroup], spans: &[SpanRow]) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(fmt_dur(total))
-                .size(22.0)
-                .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                .text_style(theme::display())
                 .color(theme::palette::TEXT),
         );
         ui.label(
@@ -374,7 +365,7 @@ fn activity_band(
             egui::pos2(x.clamp(label_min, label_max), label_rect.top()),
             egui::Align2::CENTER_TOP,
             z.strftime("%H:%M").to_string(),
-            egui::FontId::new(10.0, egui::FontFamily::Proportional),
+            theme::caption().resolve(ui.style()),
             theme::palette::TEXT_DIM,
         );
     }
@@ -458,7 +449,7 @@ fn card_frame(
     egui::Frame::new()
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, stroke_color))
-        .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             // Pinned from the view's content width, never available_width():
@@ -505,14 +496,15 @@ fn card_frame(
                     egui::vec2(label_w, 18.0),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        ui.add(
+                        theme::truncated_label(
+                            ui,
                             egui::Label::new(
                                 egui::RichText::new(&group.label)
-                                    .size(13.0)
                                     .family(egui::FontFamily::Name(theme::MEDIUM.into()))
                                     .color(theme::palette::TEXT),
                             )
                             .truncate(),
+                            &group.label,
                         );
                     },
                 );
@@ -521,7 +513,7 @@ fn card_frame(
                     confidence_dot(ui, group);
                     ui.label(
                         egui::RichText::new(fmt_dur(group.total_ms))
-                            .size(12.0)
+                            .text_style(egui::TextStyle::Small)
                             .color(theme::palette::TEXT_DIM),
                     );
                 });
@@ -585,19 +577,20 @@ fn detail_ui(
             egui::vec2(label_w, 20.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                ui.add(
+                theme::truncated_label(
+                    ui,
                     egui::Label::new(
                         egui::RichText::new(&group.label)
-                            .size(15.0)
-                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                            .text_style(egui::TextStyle::Heading)
                             .color(theme::palette::TEXT),
                     )
                     .truncate(),
+                    &group.label,
                 );
             },
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("\u{d7}").clicked() {
+            if theme::ghost_button(ui, "\u{d7}").clicked() {
                 close = true;
             }
         });

@@ -33,6 +33,30 @@ const WAKE_EVERY: Duration = Duration::from_secs(10);
 /// Fixed widget size (logical px); the window is not resizable.
 const WIDGET_W: f32 = 400.0;
 const WIDGET_H: f32 = 640.0;
+/// Transparent margin around the card when composited: room for the drop
+/// shadow. The window grows by 2× this; the visible card stays WIDGET_W/H.
+const SHADOW_PAD: f32 = 12.0;
+
+/// True when an X11 compositor owns `_NET_WM_CM_S<screen>`. Without one
+/// (bare Openbox) a transparent window degrades to opaque garbage, so the
+/// rounded chrome falls back to the old square card. Wayland (connect
+/// failure) also falls back — this widget targets X11.
+fn compositor_active() -> bool {
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return false;
+    };
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = x11rb::protocol::xproto::intern_atom(&conn, false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    x11rb::protocol::xproto::get_selection_owner(&conn, atom.atom)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|r| r.owner != x11rb::NONE)
+}
 
 pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     // Bare-WM desktops (Openbox et al.) render 1:1, but winit derives an X11
@@ -70,15 +94,19 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
             Some(egui::pos2(x.parse().ok()?, y.parse().ok()?))
         });
     drop(boot_conn);
+    let composited = compositor_active();
+    let pad = if composited { SHADOW_PAD } else { 0.0 };
+    let (win_w, win_h) = (WIDGET_W + 2.0 * pad, WIDGET_H + 2.0 * pad);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Chronicle")
-        .with_inner_size([WIDGET_W, WIDGET_H])
+        .with_inner_size([win_w, win_h])
         // min == max == inner: some X11 WMs ignore resizable(false) but
         // honor WM_SIZE_HINTS, so pin all three.
-        .with_min_inner_size([WIDGET_W, WIDGET_H])
-        .with_max_inner_size([WIDGET_W, WIDGET_H])
+        .with_min_inner_size([win_w, win_h])
+        .with_max_inner_size([win_w, win_h])
         .with_resizable(false)
         .with_decorations(false)
+        .with_transparent(composited)
         .with_always_on_top()
         .with_window_type(egui::X11WindowType::Utility);
     if let Some(p) = saved_pos {
@@ -109,6 +137,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                 config_path,
                 visible,
                 saved_pos,
+                composited,
             )))
         }),
     )
@@ -390,6 +419,9 @@ struct TimelineApp {
     standup_error: Option<String>,
     /// Standup card expanded (collapsible; long drafts otherwise bury Home).
     standup_open: bool,
+    /// X11 compositor present at boot: transparent window, rounded card,
+    /// shadow. False = square opaque fallback (bare WM / Wayland).
+    composited: bool,
 }
 
 /// Home standup card data.
@@ -418,6 +450,7 @@ impl TimelineApp {
         config_path: PathBuf,
         visible: Arc<AtomicBool>,
         saved_pos: Option<egui::Pos2>,
+        composited: bool,
     ) -> Self {
         let tz = TimeZone::system();
         let day = Zoned::now().with_time_zone(tz.clone()).date();
@@ -480,7 +513,13 @@ impl TimelineApp {
             standup_job: None,
             standup_error: None,
             standup_open: true,
+            composited,
         }
+    }
+
+    /// Transparent margin around the visible card (0 when not composited).
+    fn shadow_pad(&self) -> f32 {
+        if self.composited { SHADOW_PAD } else { 0.0 }
     }
 
     fn shift_day(&mut self, days: i64) {
@@ -1203,17 +1242,22 @@ impl eframe::App for TimelineApp {
             // clears a typical bottom panel (tint2 ~24px) since
             // _NET_WORKAREA isn't exposed through egui.
             let panel = 24.0;
+            // Window = card + transparent shadow pad on every side; the
+            // margins below meter the gap to the *card* edge, so the pad
+            // cancels one margin-width per axis.
+            let pad = self.shadow_pad();
+            let (win_w, win_h) = (WIDGET_W + 2.0 * pad, WIDGET_H + 2.0 * pad);
             // On-screen = at least a grabbable slice of the top bar visible.
             let usable = |p: egui::Pos2| {
-                p.x > -(WIDGET_W - 60.0)
+                p.x > -(win_w - 60.0)
                     && p.x + 60.0 < monitor.x
                     && p.y >= 0.0
                     && p.y + 60.0 < monitor.y
             };
             let pos = self.saved_pos.filter(|&p| usable(p)).unwrap_or_else(|| {
                 egui::pos2(
-                    (monitor.x - WIDGET_W - margin).max(0.0),
-                    (monitor.y - panel - WIDGET_H - margin).max(0.0),
+                    (monitor.x - win_w - margin + pad).max(0.0),
+                    (monitor.y - panel - win_h - margin + pad).max(0.0),
                 )
             });
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
@@ -1266,6 +1310,54 @@ impl eframe::App for TimelineApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
 
+        // m19 window chrome: one rounded card with border + shadow, painted
+        // here because panels can't round their own corners. Content lives in
+        // a child ui inset by the shadow pad; square fallback when there is
+        // no compositor (panel_fill is transparent either way — this card is
+        // the only window background).
+        let card = ui.max_rect().shrink(self.shadow_pad());
+        let radius = if self.composited {
+            egui::CornerRadius::same(theme::RADIUS_WINDOW)
+        } else {
+            egui::CornerRadius::ZERO
+        };
+        if self.composited {
+            ui.painter().add(
+                egui::epaint::Shadow {
+                    offset: [0, 2],
+                    blur: 18,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(110),
+                }
+                .as_shape(card, radius),
+            );
+        }
+        ui.painter().rect_filled(card, radius, theme::palette::BG);
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(card));
+        self.window_ui(&mut content);
+        // Border last so panel/card fills can't overpaint the 1px edge.
+        ui.painter().rect_stroke(
+            card,
+            radius,
+            egui::Stroke::new(1.0, theme::palette::BORDER),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    // The card in `ui` is the only opaque window content; everything outside
+    // it (the shadow pad) must clear to transparent. Opaque BG otherwise.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.composited {
+            egui::Rgba::TRANSPARENT.to_array()
+        } else {
+            theme::palette::BG.to_normalized_gamma_f32()
+        }
+    }
+}
+
+impl TimelineApp {
+    /// Everything inside the window card (top bar + active view).
+    fn window_ui(&mut self, ui: &mut egui::Ui) {
         // Settings takeover: replaces the whole window, top bar included.
         if self.settings.is_some() {
             self.settings_ui(ui);
@@ -1274,6 +1366,20 @@ impl eframe::App for TimelineApp {
 
         let top_frame = egui::Frame::new()
             .fill(theme::palette::SURFACE)
+            .corner_radius(egui::CornerRadius {
+                nw: if self.composited {
+                    theme::RADIUS_WINDOW
+                } else {
+                    0
+                },
+                ne: if self.composited {
+                    theme::RADIUS_WINDOW
+                } else {
+                    0
+                },
+                sw: 0,
+                se: 0,
+            })
             .inner_margin(egui::Margin::symmetric(12, 8));
         egui::Panel::top("day_picker")
             .frame(top_frame)
@@ -1322,8 +1428,7 @@ impl eframe::App for TimelineApp {
                                     // Routes through the close_requested
                                     // handler: daemon child hides (reopen via
                                     // `chronicle toggle`), standalone quits.
-                                    if ui
-                                        .button("\u{d7}")
+                                    if theme::ghost_button(ui, "\u{d7}")
                                         .on_hover_text("close (reopen: chronicle toggle)")
                                         .clicked()
                                     {
@@ -1444,7 +1549,12 @@ impl eframe::App for TimelineApp {
                             });
                         }
                     });
-                if bar.response.drag_started() {
+                // Hand off to the WM only once the pointer actually moves
+                // while held: StartDrag on the bare press gave the pointer
+                // away instantly, so the release never reached egui and any
+                // bar click that grazed the background sense went dead
+                // (buttons "needed a double click").
+                if bar.response.dragged() && bar.response.drag_delta() != egui::Vec2::ZERO {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             });

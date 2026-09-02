@@ -14,45 +14,41 @@ impl TimelineApp {
         };
         let mut open = false;
         let mut dismiss = false;
-        egui::Frame::new()
-            .fill(theme::palette::SURFACE)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("Where you left off")
-                            .text_style(egui::TextStyle::Small)
-                            .color(theme::palette::TEXT_DIM),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("\u{d7}").clicked() {
-                            dismiss = true;
-                        }
-                    });
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&resume.label).strong());
-                    if let Some(external_ref) = &resume.external_ref {
-                        theme::badge(ui, external_ref, theme::palette::TEXT_DIM);
-                    }
-                });
+        theme::hover_card(ui, "resume_card", |ui| {
+            ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(&resume.state)
-                        .text_style(egui::TextStyle::Small)
-                        .color(theme::palette::TEXT),
-                );
-                ui.label(
-                    egui::RichText::new(format!("Next: {}", resume.next_steps))
+                    egui::RichText::new("Where you left off")
                         .text_style(egui::TextStyle::Small)
                         .color(theme::palette::TEXT_DIM),
                 );
-                ui.add_space(4.0);
-                if ui.button("open workspace").clicked() {
-                    open = true;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::ghost_button(ui, "\u{d7}").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(&resume.label).strong());
+                if let Some(external_ref) = &resume.external_ref {
+                    theme::badge(ui, external_ref, theme::palette::TEXT_DIM);
                 }
             });
-        ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(&resume.state)
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT),
+            );
+            ui.label(
+                egui::RichText::new(format!("Next: {}", resume.next_steps))
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+            );
+            ui.add_space(theme::SPACE_XS);
+            if theme::secondary_button(ui, "open workspace").clicked() {
+                open = true;
+            }
+        });
+        ui.add_space(theme::CARD_GAP);
         if open {
             let resume = self.resume.take().expect("checked above");
             self.selected_task = Some(resume.task_id);
@@ -84,34 +80,16 @@ impl TimelineApp {
             ui.add_space(4.0);
             return generate;
         }
-        egui::Frame::new()
-            .fill(theme::palette::SURFACE)
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                let day = self
-                    .standup
-                    .as_ref()
-                    .map(|s| format!("Standup \u{b7} {}", s.day))
-                    .unwrap_or_else(|| "Standup".to_owned());
-                ui.horizontal(|ui| {
-                    let arrow = if self.standup_open {
-                        "\u{25bc}"
-                    } else {
-                        "\u{25b6}"
-                    };
-                    if ui.small_button(arrow).clicked() {
-                        self.standup_open = !self.standup_open;
-                    }
-                    ui.label(
-                        egui::RichText::new(day)
-                            .text_style(egui::TextStyle::Small)
-                            .color(theme::palette::TEXT_DIM),
-                    );
-                });
-                if !self.standup_open {
-                    return;
-                }
+        theme::hover_card(ui, "standup_card", |ui| {
+            let day = self
+                .standup
+                .as_ref()
+                .map(|s| format!("Standup \u{b7} {}", s.day))
+                .unwrap_or_else(|| "Standup".to_owned());
+            let mut open = self.standup_open;
+            theme::disclosure_header(ui, &mut open, &day, None);
+            self.standup_open = open;
+            theme::fade_body(ui, "standup_body", self.standup_open, |ui| {
                 if self.standup_job.is_some() {
                     ui.horizontal(|ui| {
                         ui.add(egui::Spinner::new().size(12.0));
@@ -140,7 +118,8 @@ impl TimelineApp {
                     self.standup_error_ui(ui);
                 }
             });
-        ui.add_space(8.0);
+        });
+        ui.add_space(theme::CARD_GAP);
         generate
     }
 
@@ -238,7 +217,7 @@ impl TimelineApp {
                             );
                             ui.label("");
                             cell(ui, ACTION_COL, |ui| {
-                                if ui.button("add").clicked() {
+                                if theme::primary_button(ui, "add").clicked() {
                                     pending = Some(Action::Declare);
                                 }
                             });
@@ -333,15 +312,14 @@ impl TimelineApp {
                     }
 
                     if !closed_vis.is_empty() {
-                        ui.add_space(4.0);
-                        let arrow = if *show_closed { "\u{25bc}" } else { "\u{25b6}" };
-                        if ui
-                            .small_button(format!("{arrow} recently closed"))
-                            .clicked()
-                        {
-                            *show_closed = !*show_closed;
-                        }
-                        if *show_closed {
+                        ui.add_space(theme::SPACE_XS);
+                        theme::disclosure_header(
+                            ui,
+                            show_closed,
+                            "recently closed",
+                            Some(closed_vis.len()),
+                        );
+                        theme::fade_body(ui, "recently_closed_body", *show_closed, |ui| {
                             egui::Grid::new("recently_closed")
                                 .num_columns(4)
                                 .striped(true)
@@ -358,26 +336,18 @@ impl TimelineApp {
                                         ui.end_row();
                                     }
                                 });
-                        }
+                        });
                     }
 
                     // Debug-grade raw spans; hidden unless enabled in settings.
                     if spans_debug {
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            let arrow = if *show_spans { "\u{25bc}" } else { "\u{25b6}" };
-                            if ui
-                                .small_button(format!("{arrow} Spans \u{b7} {}", span_vis.len()))
-                                .clicked()
-                            {
-                                *show_spans = !*show_spans;
-                            }
-                        });
-                        if *show_spans {
+                        ui.add_space(theme::SPACE_XS);
+                        theme::disclosure_header(ui, show_spans, "Spans", Some(span_vis.len()));
+                        theme::fade_body(ui, "spans_body", *show_spans, |ui| {
                             for &s in &span_vis {
                                 span_row(ui, &spans[s]);
                             }
-                        }
+                        });
                     }
                 });
         });
@@ -412,7 +382,7 @@ fn task_cells(ui: &mut egui::Ui, task: &OpenRow, label_w: f32, strong: bool) {
     cell(ui, label_w, |ui| {
         let text = egui::RichText::new(&task.label);
         let text = if strong { text.strong() } else { text };
-        ui.add(egui::Label::new(text).truncate());
+        theme::truncated_label(ui, egui::Label::new(text).truncate(), &task.label);
     });
     cell(ui, PROJECT_COL, |ui| {
         if let Some(project) = &task.project {

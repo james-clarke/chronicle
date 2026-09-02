@@ -41,14 +41,14 @@ impl TimelineApp {
                 .show(ui, |ui| {
                     week_chart(ui, r, &today);
                     if let Some(wi) = week_insights {
-                        ui.add_space(10.0);
+                        ui.add_space(theme::CARD_GAP);
                         narrative_ui(ui, wi, narrative_busy, model_missing, &mut pending);
-                        ui.add_space(10.0);
+                        ui.add_space(theme::CARD_GAP);
                         insights_strip(ui, wi);
                     }
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SECTION_GAP);
                     theme::section_header(ui, "Tasks", Some(r.tasks.len()));
-                    ui.add_space(4.0);
+                    ui.add_space(theme::SPACE_XS);
                     // Per-day distribution lives in the chart above; rows show
                     // week totals only (per-day cells don't fit at 400px).
                     // Right-to-left so total and badge keep their room and the
@@ -72,7 +72,11 @@ impl TimelineApp {
                                     ui.with_layout(
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                            ui.add(egui::Label::new(&t.label).truncate());
+                                            theme::truncated_label(
+                                                ui,
+                                                egui::Label::new(&t.label).truncate(),
+                                                &t.label,
+                                            );
                                         },
                                     );
                                 },
@@ -82,9 +86,9 @@ impl TimelineApp {
                     if r.tasks.is_empty() {
                         ui.weak("no tasks this week");
                     }
-                    ui.add_space(14.0);
+                    ui.add_space(theme::SECTION_GAP);
                     theme::section_header(ui, "Projects", None);
-                    ui.add_space(4.0);
+                    ui.add_space(theme::SPACE_XS);
                     egui::Grid::new("week_projects")
                         .striped(true)
                         .min_col_width(48.0)
@@ -120,22 +124,18 @@ fn narrative_ui(
     pending: &mut Option<Action>,
 ) {
     if let Some(text) = &wi.narrative {
-        egui::Frame::new()
-            .fill(theme::palette::SURFACE)
-            .corner_radius(egui::CornerRadius::same(theme::RADIUS_LG))
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(text)
-                            .text_style(egui::TextStyle::Small)
-                            .italics()
-                            .color(theme::palette::TEXT_DIM),
-                    )
-                    .wrap(),
-                );
-            });
+        theme::hover_card(ui, "narrative_card", |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .text_style(egui::TextStyle::Small)
+                        .italics()
+                        .color(theme::palette::TEXT_DIM),
+                )
+                .wrap(),
+            );
+        });
         return;
     }
     if busy {
@@ -163,8 +163,7 @@ fn insights_strip(ui: &mut egui::Ui, wi: &WeekInsights) {
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(value)
-                    .size(15.0)
-                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .text_style(egui::TextStyle::Heading)
                     .color(theme::palette::TEXT),
             );
             ui.label(
@@ -209,13 +208,16 @@ fn insights_strip(ui: &mut egui::Ui, wi: &WeekInsights) {
             .map(|(app, ms)| format!("{app} {}", fmt_dur(*ms)))
             .collect::<Vec<_>>()
             .join(" \u{b7} ");
-        ui.add(
+        let full = format!("top apps: {line}");
+        theme::truncated_label(
+            ui,
             egui::Label::new(
-                egui::RichText::new(format!("top apps: {line}"))
+                egui::RichText::new(&full)
                     .text_style(egui::TextStyle::Small)
                     .color(theme::palette::TEXT_DIM),
             )
             .truncate(),
+            &full,
         );
     }
 }
@@ -290,7 +292,7 @@ fn week_chart(
             egui::pos2(cx, base + 4.0),
             egui::Align2::CENTER_TOP,
             day.strftime("%a").to_string(),
-            egui::FontId::new(11.0, egui::FontFamily::Proportional),
+            theme::caption().resolve(ui.style()),
             label_color,
         );
     }

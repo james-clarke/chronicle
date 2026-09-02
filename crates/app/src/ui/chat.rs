@@ -214,9 +214,13 @@ impl TimelineApp {
         let Some(conn) = self.conn.as_ref() else {
             return;
         };
-        let latest = chronicle_core::storage::list_conversations(conn, 1)
+        // Plain navigation never resumes a task-scoped thread: scope carries
+        // in only via the task card's "chat" button (or an explicit history
+        // pick). Resuming the newest conversation of any kind brought a
+        // dismissed scope chip back on every tab switch.
+        let latest = chronicle_core::storage::latest_general_conversation(conn)
             .ok()
-            .and_then(|v| v.first().map(|(id, _, _)| *id));
+            .flatten();
         let conversation_id = match latest {
             Some(id) => id,
             None => match chronicle_core::storage::create_conversation(conn, Timestamp::now()) {
@@ -227,9 +231,7 @@ impl TimelineApp {
                 }
             },
         };
-        // The latest conversation may be task-scoped; the worker must match.
-        let task_scope = conversation_scope(conn, conversation_id);
-        match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id, task_scope) {
+        match ChatPanel::spawn(ctx, self.conn.as_ref(), conversation_id, None) {
             Ok(panel) => self.chat = Some(panel),
             Err(e) => self.error = Some(format!("chat worker spawn failed: {e}")),
         }
@@ -351,8 +353,7 @@ impl TimelineApp {
             if let Some((_, label)) = &chat.task_scope {
                 ui.horizontal(|ui| {
                     theme::badge(ui, &format!("scoped to {label}"), theme::palette::ACCENT);
-                    if ui
-                        .small_button("\u{d7}")
+                    if theme::ghost_button(ui, "\u{d7}")
                         .on_hover_text("back to general chat")
                         .clicked()
                     {
@@ -394,9 +395,7 @@ impl TimelineApp {
                 let can_send = !chat.busy && !chat.warming;
                 let send_clicked = ui
                     .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let clicked = ui
-                            .add_enabled(can_send, egui::Button::new("send"))
-                            .clicked();
+                        let clicked = theme::primary_button_enabled(ui, can_send, "send").clicked();
                         let edit = ui.add_sized(
                             ui.available_size(),
                             egui::TextEdit::singleline(&mut chat.input)
