@@ -352,7 +352,7 @@ impl TimelineApp {
                 ui.horizontal(|ui| {
                     theme::badge(ui, &format!("scoped to {label}"), theme::palette::ACCENT);
                     if ui
-                        .small_button("\u{2715}")
+                        .small_button("\u{d7}")
                         .on_hover_text("back to general chat")
                         .clicked()
                     {

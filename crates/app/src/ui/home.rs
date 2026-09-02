@@ -26,7 +26,7 @@ impl TimelineApp {
                             .color(theme::palette::TEXT_DIM),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("\u{2715}").clicked() {
+                        if ui.small_button("\u{d7}").clicked() {
                             dismiss = true;
                         }
                     });
