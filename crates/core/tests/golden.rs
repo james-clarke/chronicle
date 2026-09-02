@@ -823,6 +823,80 @@ fn activity_events_upsert_and_ignore_paths() {
         1,
         "point events outside intervals stay out: {by_task:?}"
     );
+
+    // Repo signal: a task whose project names another repo never inherits a
+    // session that merely overlapped it in time; case-insensitive project
+    // match, a branch carrying the external_ref, and repo-less rows attach.
+    let mut task_with = |project: Option<&str>, ext: Option<&str>| {
+        conn.execute(
+            "INSERT INTO tasks (label, project, external_ref, status, created_ts)
+             VALUES ('t', ?1, ?2, 'open', 0)",
+            rusqlite::params![project, ext],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, 1, 2_500, 4_000, 1.0)",
+            [id],
+        )
+        .unwrap();
+        id
+    };
+    let other = task_with(Some("mailer"), None);
+    let upper = task_with(Some("APP"), None);
+    let anchored = task_with(Some("nothing"), Some("ABC-9"));
+    let none = task_with(None, None);
+    storage::insert_activity_event(
+        &conn,
+        &ActivityEvent {
+            repo: "mailer".into(),
+            ..ev(ActivityKind::Checkout, 100, None, "c", None)
+        },
+    )
+    .unwrap();
+    storage::insert_activity_event(
+        &conn,
+        &ActivityEvent {
+            branch: "feat/ABC-9".into(),
+            ..ev(ActivityKind::Checkout, 200, None, "c2", None)
+        },
+    )
+    .unwrap();
+    storage::insert_activity_event(
+        &conn,
+        &ActivityEvent {
+            repo: String::new(),
+            ..ev(ActivityKind::Call, 3_000, Some(3_500), "call", None)
+        },
+    )
+    .unwrap();
+    let by_task = storage::activity_in_range_by_task(&conn, 0, 100_000).unwrap();
+    let kinds = |t: i64| -> Vec<ActivityKind> {
+        by_task
+            .iter()
+            .filter(|(id, _)| *id == t)
+            .map(|(_, e)| e.kind)
+            .collect()
+    };
+    assert_eq!(kinds(other), vec![ActivityKind::Call], "{by_task:?}");
+    assert!(
+        kinds(upper).contains(&ActivityKind::AiSession),
+        "{by_task:?}"
+    );
+    assert!(
+        kinds(anchored).contains(&ActivityKind::AiSession),
+        "{by_task:?}"
+    );
+    assert!(
+        kinds(none).contains(&ActivityKind::AiSession),
+        "{by_task:?}"
+    );
+    let journal = storage::activity_for_task_in_range(&conn, other, 0, 100_000).unwrap();
+    assert_eq!(
+        journal.iter().map(|e| e.kind).collect::<Vec<_>>(),
+        vec![ActivityKind::Call],
+        "{journal:?}"
+    );
 }
 
 #[test]

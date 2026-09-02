@@ -156,6 +156,7 @@ fn activity_from_row_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Ac
 const ACTIVITY_COLS: &str = "ts, end_ts, repo, branch, kind, ext_id, summary";
 const ACTIVITY_COLS_V: &str = "v.ts, v.end_ts, v.repo, v.branch, v.kind, v.ext_id, v.summary";
 const VCS_KINDS: &str = "kind IN ('checkout','commit')";
+const VCS_KINDS_A: &str = "a.kind IN ('checkout','commit')";
 
 /// Every kind inside `[lo, hi)` by start ts — the digest's activity section.
 pub fn activity_in_range(
@@ -233,13 +234,57 @@ pub fn activity_in_range_by_task(
     lo: i64,
     hi: i64,
 ) -> Result<Vec<(i64, ActivityEvent)>, StorageError> {
+    activity_by_task(conn, lo, hi, None, "v.kind != 'checkout'")
+}
+
+/// Every kind overlapping one task's intervals inside `[lo, hi)` — the
+/// journal's activity lines.
+pub fn activity_for_task_in_range(
+    conn: &Connection,
+    task_id: i64,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
+    Ok(activity_by_task(conn, lo, hi, Some(task_id), "1")?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect())
+}
+
+/// Repo-aware interval join. A task's repo signal is every repo whose name
+/// matches its `project` (case-insensitive) or that has vcs activity on a
+/// branch carrying its `external_ref`. With a signal, only rows from those
+/// repos attach (a Claude session in `chronicle` never lands under a
+/// `mailer` task that merely overlapped it); repo-less rows (calls) and
+/// tasks with no signal fall back to time overlap alone.
+fn activity_by_task(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+    task_id: Option<i64>,
+    kinds: &str,
+) -> Result<Vec<(i64, ActivityEvent)>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT DISTINCT i.task_id, {ACTIVITY_COLS_V} FROM activity_events v
+        "WITH task_repos AS (
+           SELECT DISTINCT t.id AS task_id, a.repo FROM tasks t
+           JOIN activity_events a ON a.repo != ''
+            AND (LOWER(a.repo) = LOWER(t.project)
+                 OR (t.external_ref IS NOT NULL AND {VCS_KINDS_A}
+                     AND instr(a.branch, t.external_ref) > 0))
+           WHERE t.id IN (SELECT task_id FROM intervals
+                          WHERE start_ts < ?2 AND end_ts >= ?1)
+         )
+         SELECT DISTINCT i.task_id, {ACTIVITY_COLS_V} FROM activity_events v
          JOIN intervals i ON v.ts < i.end_ts AND COALESCE(v.end_ts, v.ts) >= i.start_ts
-         WHERE v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
+         WHERE {kinds} AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
+           AND (?3 IS NULL OR i.task_id = ?3)
+           AND (v.repo = ''
+                OR NOT EXISTS (SELECT 1 FROM task_repos r WHERE r.task_id = i.task_id)
+                OR EXISTS (SELECT 1 FROM task_repos r
+                           WHERE r.task_id = i.task_id AND r.repo = v.repo))
          ORDER BY i.task_id, v.ts"
     ))?;
-    let rows = stmt.query_map([lo, hi], |r| {
+    let rows = stmt.query_map(params![lo, hi, task_id], |r| {
         Ok((r.get::<_, i64>(0)?, activity_from_row_at(r, 1)?))
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

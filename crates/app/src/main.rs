@@ -758,7 +758,7 @@ fn run_ai_job(
                 .unwrap_or_default();
             let tz = TimeZone::system();
             let mut git = String::new();
-            for v in storage::activity_in_range(conn, lo, hi)? {
+            for v in storage::activity_for_task_in_range(conn, task_id, lo, hi)? {
                 use std::fmt::Write as _;
                 let _ = writeln!(
                     git,
