@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chronicle — track everything, lose nothing</title>
-  <meta name="description" content="Chronicle is a local-first activity tracker. It watches window focus on your machine and a small local model turns it into a timeline of tasks, a standup draft, and a weekly report. Nothing leaves your computer.">
+  <meta name="description" content="Chronicle notices what you work on and turns it into a timeline of tasks, a morning standup draft, and a weekly report. Runs entirely on your own computer.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -54,7 +54,7 @@
   </figure>
   <div class="feature-text">
     <h2>Every task, one card.</h2>
-    <p>Open a block for its description, every session that fed it, and where the time went. Chat about it, rename it, close it.</p>
+    <p>Open any block for its summary, every session that went into it, and where the time went. Ask about it, rename it, close it.</p>
   </div>
 </section>
 
@@ -80,32 +80,61 @@
 
 <section class="feature reverse">
   <figure class="shot">
-    <img src="img/connections.webp" width="678" height="900" alt="Chronicle settings, Connections: a Jira MCP server with 63 tools connected, and a list of git repositories with their last commit or checkout" loading="lazy">
+    <img src="img/connections.webp" width="678" height="900" alt="Chronicle settings, Connections: a Jira connection with 63 tools available, and a list of linked project folders with their latest activity" loading="lazy">
   </figure>
   <div class="feature-text">
-    <h2>It knows your repos and your tickets.</h2>
-    <p>Point it at your git repositories and connect Jira over MCP. Commits, branches and ticket keys become task context.</p>
+    <h2>Connect the tools you already use.</h2>
+    <p>Link your ticket tracker and your project folders. A ticket number in a window title becomes a task with its real name and context attached.</p>
   </div>
 </section>
 
 <section class="how">
   <h2>How it works</h2>
-  <ol>
-    <li><strong>Capture.</strong> A small daemon records which window has focus and when you go idle.</li>
-    <li><strong>Derive.</strong> A local model groups focus events into tasks and describes them.</li>
-    <li><strong>Correct.</strong> Fix what it got wrong. Corrections feed the next derivation.</li>
-    <li><strong>Use.</strong> Standup draft in the morning, report on Friday, chat whenever.</li>
+  <p class="section-lede">Chronicle is built close to the operating system, in Rust, with no browser engine and no server. Every step below happens on your machine.</p>
+  <ol class="steps">
+    <li>
+      <span class="step-n">1</span>
+      <h3>Capture</h3>
+      <p>A small background process notices which window is in front and when you step away. Any app counts: browser, documents, mail, design tools, terminal.</p>
+      <p class="tech">Native OS hooks · X11 today, macOS Accessibility and Win32 events next · idle detection</p>
+    </li>
+    <li>
+      <span class="step-n">2</span>
+      <h3>Derive</h3>
+      <p>A language model running inside the app groups that activity into tasks and writes a plain-English line for each one.</p>
+      <p class="tech">Qwen3 1.7B, embedded via llama.cpp · runs on CPU · downloaded once, then offline</p>
+    </li>
+    <li>
+      <span class="step-n">3</span>
+      <h3>Correct</h3>
+      <p>Move a block, rename a task, merge two that are really one. Every correction feeds the next pass, so it gets better at reading your day.</p>
+      <p class="tech">Corrections stored as anchors · the next derivation reads them</p>
+    </li>
+    <li>
+      <span class="step-n">4</span>
+      <h3>Use</h3>
+      <p>Standup draft each morning, a weekly report, a card per task, and a chat that answers from your own history.</p>
+      <p class="tech">Standup, reports and chat all read the same local database</p>
+    </li>
   </ol>
-</section>
-
-<section class="privacy">
-  <h2>Where your data lives</h2>
-  <p>One SQLite file in your home directory. The model runs in-process. No account, no sync, no telemetry.</p>
-</section>
-
-<section class="download" id="download">
-  <h2>Download</h2>
-  <p>Not yet. Chronicle runs on Linux (X11) today. macOS and Windows are in progress, and downloads open when all three work.</p>
+  <div class="facts">
+    <div class="fact">
+      <h3>Native, not a web page in a box</h3>
+      <p>One binary written in Rust. No Electron, no web view, no runtime to install.</p>
+    </div>
+    <div class="fact">
+      <h3>The model lives in the app</h3>
+      <p>Inference runs in-process on your CPU. No API key, no usage meter, no waiting on someone else's server.</p>
+    </div>
+    <div class="fact">
+      <h3>Your history is one file</h3>
+      <p>A SQLite database in your home folder with full-text search built in. Back it up, move it, or delete it. It's yours.</p>
+    </div>
+    <div class="fact">
+      <h3>Nothing phones home</h3>
+      <p>No account, no sync, no telemetry, no crash reports. The only network calls are to connections you add yourself.</p>
+    </div>
+  </div>
 </section>
 
 <section class="feedback" id="feedback">
