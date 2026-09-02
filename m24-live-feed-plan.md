@@ -1,6 +1,6 @@
 # M24 — Live feed ("the brain at work")
 
-Status: **concept, parked** (2026-09-02). Written up after m23 landed so it can be picked up later; open questions at the end need James's answers before build order is final.
+Status: **planned, not started** (2026-09-02). Written up after m23 landed; decisions recorded at the end, build order final.
 
 ## Context
 
@@ -78,13 +78,13 @@ Blocks fade in on arrival (theme fade helpers exist); a block moving from unmatc
 - Eject a wrongly grouped block: it leaves the task, the next derive on the same titles does not put it back.
 - Unassigned total at end of day is what the system genuinely could not place, not what it never got to.
 
-## Open questions (for James)
+## Decisions (James, 2026-09-02)
 
-1. Home section or new tab (decision 5)?
-2. Is a provisional interval allowed to show in reports/timesheet before derive confirms it, or only on Home/timeline with the tint?
-3. Should `eject` be a hard negative (never that task again for those tokens) or a soft one (only a few-shot line for the model)?
-4. Pre-pass cadence: every sessionizer tick, or on a slower timer to avoid flicker while a block is still growing?
-5. Priority relative to m21.5 presets and reading tomorrow's first m22-evidence standup.
+1. Lives on Home: the Unassigned section becomes the feed.
+2. Provisional intervals count in reports and timesheets (tinted on Home/timeline; reports show them like any interval).
+3. Eject: hard negative for the deterministic pre-pass (it would otherwise re-link the same tokens on the next tick), soft for the model (an `"X" ✗ "task"` few-shot line; the model may still choose the task when the wider context says so). Recommended by Claude, accepted pending build.
+4. Pre-pass on a slower timer than the sessionizer tick (start at 60 s) so a growing block settles before it is placed.
+5. Sequenced after m21.5 presets.
 
 ## Roadmap (not in this milestone)
 
