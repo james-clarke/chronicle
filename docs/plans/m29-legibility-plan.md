@@ -222,3 +222,84 @@ Verified in the sandbox at 400×640 and 900×700: Home (Working on, Recently
 closed expanded, feed with claimed and unclaimed rows), timeline lanes with
 cards. Shots in `site/img/src/` (`home`, `home-wide`, `timeline-lanes`,
 `timeline-wide`) for chunk 8. 168 tests, clippy clean.
+
+### Chunks 2–4, 6, 7 — scale, buttons, legends, chat numbers, ref resolution (2026-09-03)
+
+Chunk 2 (33580a4, a0a16f9): Small 12, Caption 11, `extra_text_line_spacing`
+2 (`theme.rs` `style()`). The existing "ui scale" row in Settings › Window &
+appearance became `text size` S / M / L = 0.92 / 1.0 / 1.1 on the same
+`ui_zoom_factor` meta. The window follows the zoom: boot scales the default
+card and the minimum by the saved zoom (`mod.rs` `BootPrefs.zoom`), and a
+runtime change (S/M/L click or Ctrl +/−/0) sends `InnerSize` scaled by
+new/old zoom plus a `MinInnerSize` floor; the meta write settles once the
+zoom stops moving, and the shadow pad is not scaled.
+
+Chunk 3 (33580a4, a0a16f9): `ListRow::show` returns `RowResponse` (derefs to
+the row response, carries the state word's response); `.state_tip()` for a
+hover-only word, `.meta_action()` for a clickable one (underline + pointing
+hand on hover). Feed rows: `to confirm` click = `Action::KeepBlock`, the
+`…` → keep path; `unsorted` / `new` click opens the assign popup with the
+same candidates as `…` → assign; `live`, `kept`, `moved out` get one-line
+tooltips. Only pre-pass placements route to keep.
+
+Chunk 4 (c0d3cbe, a0a16f9): `reports.rs` `legend()` / `legend_row()` — swatch
+· elided name (100) · thin bar · duration (`NUM_COL`) · percent (34), top 5
+plus "other" summed from the true total. Same row function draws the
+tasks-by-project headers, and task rows reserve the percent column so every
+duration on the page shares one right edge. `WeekInsights.top_apps` cap 3 →
+5.
+
+Chunk 6 (459ae3f, 1d20c74): `core::chat::build_context` returns
+`(prompt, ChatContextInfo { blocks, start_ms, end_ms, rows })`. Quantity
+questions ("how long", "how much", "total", "per project", "how many
+hours") get a `## Time per task` table from `report::task_totals` clamped to
+the exact range (a phraseless quantity question defaults to this week);
+`prompts/chat_v1.txt` says to quote those figures verbatim. Ranges: "this
+week", "last week", weekday names, "yesterday afternoon" / "this morning",
+"before / after the call" (first `Call` activity block that day; running
+call ends now; ignored over multi-day ranges; empty result falls back to
+the parsed range). The worker sends a `Context` message before the first
+token; task-scoped chats send none. Tests: phrase → range fixtures,
+call-edge cases, totals-in-context.
+
+Chunk 7 (ea7548a, fd35628): `open_task_by_ref(conn, key, projects)` prefers
+the open task whose project matches a repo/folder from the run (vcs repos ∪
+cwd repos parsed from span titles, read before the branch rule), then the
+most recently touched, then `id DESC` — never lowest id. `set_task_external_ref`
+refuses a key another open task owns; derive's anchoring logs and skips.
+There is no MCP declare tool; the UI declare path (`Action::Declare`) checks
+`open_tasks_by_ref` first and shows "task N «label» already owns KEY" with an
+"add to it" jump instead of creating a duplicate. Golden test: two open tasks
+on one key, spans in one's folder → interval lands there. One-off for
+interval 513 (task 100 → 85, re-describe 85) run against the live DB after
+deploy.
+
+### Chunks 5 and 8 — chat surface, site re-shoot (2026-09-03)
+
+Chunk 5 (1998e3b, 4803810, plus the galley commit): `chat_worker` sends
+`WorkerMsg::Context { blocks, start_ms, end_ms, rows }` before the first
+token; the panel keeps it on the answer and draws "Read N blocks · Thu 3 Sep
+08:00–14:56" (or "Searched N blocks") under it, click to expand the exact
+rows. `Seeds` (today's top task or ticket ref, the last call's `HH:MM`,
+today's task labels) feed three openers in the empty state and two
+follow-ups after each answer; rebuilt on spawn and on `Done`, not on the 5 s
+tick. Answers: `link_spans` marks today's task labels (ticket-ref shape or
+≥ 8 chars and 2+ words, every occurrence) first, then `HH:MM` / `HH:MM–HH:MM`
+in the gaps (skipped when the answer's range spans more than one day, or
+when followed by `:`); a line with links is one `LayoutJob` with an
+underlined accent format per link, hit-tested with `cursor_from_pos` on
+click — no per-piece widgets. Time → timeline at that day; task → task
+detail; either path drops the resident chat worker like the tab bar does.
+Pipe tables render as an `egui::Grid`, last column mono right-aligned, cells
+never wrap. Input: multiline, Enter sends unless an IME event is in flight,
+Shift+Enter newline; `stop` reaps the worker and respawns it (no cancel path
+in `ChatSession::answer`); `copy` on answers; history as a left panel at
+`WIDE_W`.
+
+Chunk 8: sandbox copy of the live DB (private spans deleted, saved window
+position dropped so the widget parks in the corner) rendered by the release
+binary at `WINIT_X11_SCALE_FACTOR=1.6`, zoom 1.0: `home-wide` (900×700),
+`task-wide` (timeline lanes, first card clicked open), `reports-wide`,
+`chat` (seeded conversation with a linked answer and a table), `feed`
+(narrow, four wheel clicks). Sources in `site/img/src/`; alt text updated for
+reports and chat.
