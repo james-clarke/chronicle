@@ -1897,6 +1897,19 @@ pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>
         .optional()?)
 }
 
+/// A task's anchor (`tasks.external_ref`), if set.
+pub fn task_external_ref(conn: &Connection, task_id: i64) -> Result<Option<String>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT external_ref FROM tasks WHERE id=?1",
+            [task_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// Distinct repos with activity overlapping `[lo, hi)` — a run's repo signal.
 pub fn repos_active_in(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<String>, StorageError> {
     let mut stmt = conn.prepare(

@@ -282,6 +282,8 @@ struct JournalRow {
 struct ActivityRow {
     time: Zoned,
     kind: chronicle_core::types::ActivityKind,
+    /// Empty when the kind has none.
+    branch: String,
     /// Subject line / first prompt / PR title / calling app; the short hash
     /// when a commit had no subject.
     summary: String,
@@ -322,6 +324,30 @@ struct OpenRow {
     label: String,
     project: Option<String>,
     declared: bool,
+    /// Interval time inside the shown day (0 when none).
+    today_ms: i64,
+    /// End of the task's newest interval in the shown day.
+    last_touched: Option<Zoned>,
+    /// Ticket key (`tasks.external_ref`), else the newest branch seen in
+    /// today's activity for the task.
+    anchor: Option<String>,
+    /// First line of the newest checkpoint's next steps.
+    next_step: Option<String>,
+}
+
+impl OpenRow {
+    fn from_task(t: chronicle_core::types::OpenTask) -> Self {
+        Self {
+            task_id: t.id,
+            label: t.label,
+            project: t.project,
+            declared: t.declared,
+            today_ms: 0,
+            last_touched: None,
+            anchor: None,
+            next_step: None,
+        }
+    }
 }
 
 /// In-flight label/project edit of one task identity; committing writes a
@@ -719,7 +745,7 @@ impl TimelineApp {
         match self.load_spans().and_then(|spans| {
             let groups = self.load_groups()?;
             let unplaced = self.load_unplaced()?;
-            let open = self.load_open()?;
+            let open = self.load_open(&groups)?;
             let closed = self.load_closed()?;
             let feed = self.load_feed()?;
             let proposals = self.load_proposals()?;
@@ -1109,6 +1135,7 @@ impl TimelineApp {
         ActivityRow {
             time: a.ts.to_zoned(self.tz.clone()),
             kind: a.kind,
+            branch: a.branch,
             summary,
             duration_ms: a.end_ts.map(|e| e.as_millisecond() - a.ts.as_millisecond()),
         }
@@ -1125,18 +1152,44 @@ impl TimelineApp {
         )
     }
 
-    fn load_open(&mut self) -> anyhow::Result<Vec<OpenRow>> {
+    fn load_open(&mut self, groups: &[TaskGroup]) -> anyhow::Result<Vec<OpenRow>> {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let open = chronicle_core::storage::open_tasks(conn, 8)?;
-        Ok(open
+        let mut rows: Vec<OpenRow> = open
             .into_iter()
-            .map(|t| OpenRow {
-                task_id: t.id,
-                label: t.label,
-                project: t.project,
-                declared: t.declared,
+            .map(|t| {
+                let mut row = OpenRow::from_task(t);
+                // Today's time, last touch and branch come from the day's
+                // groups (loaded just before, same day range).
+                if let Some(g) = groups.iter().find(|g| g.task_id == row.task_id) {
+                    row.today_ms = g.total_ms;
+                    row.last_touched = g.intervals.iter().map(|i| i.end.clone()).max();
+                    row.anchor = g
+                        .activity
+                        .iter()
+                        .rev()
+                        .find(|a| !a.branch.is_empty())
+                        .map(|a| a.branch.clone());
+                }
+                if let Ok(Some(key)) = chronicle_core::storage::task_external_ref(conn, row.task_id)
+                {
+                    row.anchor = Some(key);
+                }
+                row.next_step = chronicle_core::storage::get_checkpoint(conn, row.task_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|c| {
+                        c.next_steps
+                            .lines()
+                            .map(|l| l.trim().trim_start_matches(['-', '*', ' ']))
+                            .find(|l| !l.is_empty())
+                            .map(str::to_owned)
+                    });
+                row
             })
-            .collect())
+            .collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.today_ms));
+        Ok(rows)
     }
 
     /// The shown day's feed plus its whole unassigned total. Same day
@@ -1200,15 +1253,7 @@ impl TimelineApp {
     fn load_closed(&mut self) -> anyhow::Result<Vec<OpenRow>> {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let closed = chronicle_core::storage::recently_closed(conn, 10)?;
-        Ok(closed
-            .into_iter()
-            .map(|t| OpenRow {
-                task_id: t.id,
-                label: t.label,
-                project: t.project,
-                declared: t.declared,
-            })
-            .collect())
+        Ok(closed.into_iter().map(OpenRow::from_task).collect())
     }
 
     fn apply_action(&mut self, action: Action) {
