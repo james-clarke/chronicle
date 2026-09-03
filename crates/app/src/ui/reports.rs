@@ -7,6 +7,13 @@ use jiff::Zoned;
 use super::{Action, TimelineApp, WeekInsights, fmt_dur, theme};
 use chronicle_core::report::{ProjectTotal, RangeReport, TaskRow, UNTAGGED};
 
+/// Legend/project-header columns: fixed so the elided name width, the share
+/// bar's start x, and the duration/percent numbers line up across the
+/// app-share legend, the project-mix legend and the project header rows
+/// below them — one table, not three.
+const LEGEND_NAME_COL: f32 = 100.0;
+const LEGEND_PCT_COL: f32 = 34.0;
+
 impl TimelineApp {
     pub(super) fn reports_ui(&mut self, ui: &mut egui::Ui) {
         let mut pending: Option<Action> = None;
@@ -239,7 +246,7 @@ fn tile(ui: &mut egui::Ui, width: f32, glyph: &str, value: &str, caption: &str) 
 }
 
 /// Top apps as shares of the week's app focus time: a segmented bar (hover
-/// a segment for the app) over a one-line legend, biggest first.
+/// a segment for the app) over a [`legend`], biggest first.
 fn apps_bar(ui: &mut egui::Ui, width: f32, wi: &WeekInsights) {
     let total = wi.apps_total_ms.max(1) as f32;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::hover());
@@ -272,22 +279,12 @@ fn apps_bar(ui: &mut egui::Ui, width: f32, wi: &WeekInsights) {
         ));
     }
     ui.add_space(theme::SPACE_XS);
-    let legend = wi
+    let entries: Vec<(&str, egui::Color32, i64)> = wi
         .top_apps
         .iter()
-        .map(|(app, ms)| format!("{app} {}%", (*ms as f32 / total * 100.0).round()))
-        .collect::<Vec<_>>()
-        .join(" \u{b7} ");
-    theme::truncated_label(
-        ui,
-        egui::Label::new(
-            egui::RichText::new(&legend)
-                .text_style(egui::TextStyle::Small)
-                .color(theme::palette::TEXT_DIM),
-        )
-        .truncate(),
-        &legend,
-    );
+        .map(|(app, ms)| (app.as_str(), theme::series_color_for_key(app), *ms))
+        .collect();
+    legend(ui, width, wi.apps_total_ms, &entries);
 }
 
 /// A report task's identity colour: its project's hue, shaded by id.
@@ -313,8 +310,8 @@ fn project_name(project: &str) -> &str {
 }
 
 /// Single-row project mix under the week chart: the week's total split by
-/// project, biggest first, over a one-line legend (name and share) — the
-/// chart's colour key. Hover a segment for the project's total.
+/// project, biggest first, over a [`legend`] — the chart's colour key.
+/// Hover a segment for the project's total.
 fn project_mix(ui: &mut egui::Ui, width: f32, r: &RangeReport) {
     let total = r.grand_total_ms.max(1) as f32;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::hover());
@@ -344,51 +341,66 @@ fn project_mix(ui: &mut egui::Ui, width: f32, r: &RangeReport) {
         ));
     }
     ui.add_space(theme::SPACE_XS);
-    let legend = r
+    let entries: Vec<(&str, egui::Color32, i64)> = r
         .projects
         .iter()
         .map(|p| {
-            format!(
-                "{} {}%",
+            (
                 project_name(&p.project),
-                (p.total_ms as f32 / total * 100.0).round()
+                project_color(&p.project),
+                p.total_ms,
             )
         })
-        .collect::<Vec<_>>()
-        .join(" \u{b7} ");
-    theme::truncated_label(
-        ui,
-        egui::Label::new(
-            egui::RichText::new(&legend)
-                .text_style(egui::TextStyle::Small)
-                .color(theme::palette::TEXT_DIM),
-        )
-        .truncate(),
-        &legend,
-    );
+        .collect();
+    legend(ui, width, r.grand_total_ms, &entries);
 }
 
-/// Project header (chip, thin share bar, share %, total in the number
-/// column) then its tasks as list rows indented [`theme::PAGE_MARGIN`];
-/// a task row click jumps to the timeline on the task's busiest day.
-fn project_group(
+/// Compact legend row: colour swatch, elided name (fixed
+/// [`LEGEND_NAME_COL`]), a thin share bar filling what's left, then
+/// duration and percent right-aligned in mono ([`theme::NUM_COL`],
+/// [`LEGEND_PCT_COL`]) so every row's numbers line up.
+fn legend_row(
     ui: &mut egui::Ui,
     width: f32,
-    r: &RangeReport,
-    p: &ProjectTotal,
-    jump: &mut Option<(i64, jiff::civil::Date)>,
+    name: &str,
+    color: egui::Color32,
+    ms: i64,
+    total: f32,
 ) {
-    let color = project_color(&p.project);
-    let share = p.total_ms as f32 / r.grand_total_ms.max(1) as f32;
+    let share = ms as f32 / total;
+    let row_h = ui.text_style_height(&egui::TextStyle::Small).max(12.0);
     ui.allocate_ui_with_layout(
-        egui::vec2(width, ui.spacing().interact_size.y),
+        egui::vec2(width, row_h),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.set_width(width);
-            theme::badge(ui, project_name(&p.project), color);
+            let (slot, _) =
+                ui.allocate_exact_size(egui::vec2(theme::STATUS_COL, row_h), egui::Sense::hover());
+            ui.painter().circle_filled(slot.center(), 4.0, color);
+            ui.allocate_ui_with_layout(
+                egui::vec2(LEGEND_NAME_COL, row_h),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(LEGEND_NAME_COL);
+                    theme::truncated_label(
+                        ui,
+                        egui::Label::new(
+                            egui::RichText::new(name)
+                                .text_style(egui::TextStyle::Small)
+                                .color(theme::palette::TEXT),
+                        )
+                        .truncate(),
+                        name,
+                    );
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                theme::num_cell(ui, theme::NUM_COL, theme::num(fmt_dur(p.total_ms)));
-                ui.label(theme::num(format!("{}%", (share * 100.0).round())));
+                theme::num_cell(
+                    ui,
+                    LEGEND_PCT_COL,
+                    theme::num(format!("{}%", (share * 100.0).round())),
+                );
+                theme::num_cell(ui, theme::NUM_COL, theme::num(fmt_dur(ms)));
                 let (bar, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width().max(0.0), 4.0),
                     egui::Sense::hover(),
@@ -405,6 +417,45 @@ fn project_group(
                 painter.rect_filled(fill, egui::CornerRadius::same(2), color);
             });
         },
+    );
+}
+
+/// Top 5 `entries` (already sorted biggest first) as [`legend_row`]s, then
+/// an "other" row summing what's left of `total_ms` — the chart's colour
+/// key as a small table instead of a text sentence.
+fn legend(ui: &mut egui::Ui, width: f32, total_ms: i64, entries: &[(&str, egui::Color32, i64)]) {
+    const TOP_N: usize = 5;
+    let total = total_ms.max(1) as f32;
+    let shown = &entries[..entries.len().min(TOP_N)];
+    for &(name, color, ms) in shown {
+        legend_row(ui, width, name, color, ms, total);
+    }
+    let shown_ms: i64 = shown.iter().map(|&(_, _, ms)| ms).sum();
+    let rest_ms = (total_ms - shown_ms).max(0);
+    if rest_ms > 0 {
+        legend_row(ui, width, "other", theme::palette::TEXT_DIM, rest_ms, total);
+    }
+}
+
+/// Project header ([`legend_row`]: swatch, name, share bar, duration,
+/// percent) then its tasks as list rows indented [`theme::PAGE_MARGIN`],
+/// aligned to the header's columns; a task row click jumps to the timeline
+/// on the task's busiest day.
+fn project_group(
+    ui: &mut egui::Ui,
+    width: f32,
+    r: &RangeReport,
+    p: &ProjectTotal,
+    jump: &mut Option<(i64, jiff::civil::Date)>,
+) {
+    let color = project_color(&p.project);
+    legend_row(
+        ui,
+        width,
+        project_name(&p.project),
+        color,
+        p.total_ms,
+        r.grand_total_ms.max(1) as f32,
     );
     let indent = theme::PAGE_MARGIN as f32;
     for t in r.tasks.iter().filter(|t| t.project == p.project) {
