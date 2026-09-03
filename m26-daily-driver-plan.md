@@ -1,11 +1,19 @@
 # M26 — Daily driver: right for James first
 
-Status: **chunks 1–6 shipped 2026-09-03** (chunk 1: 3e3e8ca, 496fe5b, e906918,
-4f37f34; chunks 2–6: ffbe428 scaffolding, cc384f8 shell, eec9cfe heartbeats,
-ed2bb7a calendar, c37fbaa intent, 6f8f156 upsert fix, ad67b3c Jira post).
-Chunk 7 (click-tests, feed soak) is James's. Chunks 2–6 were built in
-parallel by five agents on sibling worktrees off one scaffolding commit and
-merged linearly; 143 tests, clippy clean. Written so a fresh context can plan
+Status: **chunks 1–6 built 2026-09-03** (chunk 1: 3e3e8ca, 496fe5b, e906918,
+4f37f34; chunks 2–6 on branch `m26`, worktree `../chronicle-m26`, rebased on
+main ed3f387 (m27 chunk 3): ee8a387 scaffolding, a45799e shell, a59d659
+heartbeats, 12100f2 calendar, f87defb intent, 90f43b9 upsert fix, cc45ebe
+Jira post, 09ca750 review fixes). Chunk 7 (click-tests, feed soak) is
+James's. Chunks 2–6 were built in parallel by five agents on sibling
+worktrees off one scaffolding commit and merged linearly; 153 tests, clippy
+clean. **Merge into main is pending**: main's working tree carried m27 WIP in
+`config.rs`/`types.rs` the whole time, so the branch was installed from the
+worktree instead. When main is clean: `git rebase main` in
+`../chronicle-m26` (if main moved), then `git merge --ff-only m26` in the
+main checkout and `git worktree remove ../chronicle-m26` (plus the
+`../chronicle-m26-c2..c6` worktrees and `m26-c*` branches).
+Written so a fresh context can plan
 and build from this file alone. Repo conventions:
 one chunk per commit, tests + clippy per chunk, Conventional Commits
 single line, stop the systemd unit before `cargo install --locked`
