@@ -1,0 +1,418 @@
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use anyhow::{Context, bail};
+use chronicle_core::config::Config;
+use chronicle_core::types::CaptureEvent;
+use crossbeam_channel::Sender;
+use jiff::{Timestamp, ToSpan};
+use regex::Regex;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_capture(
+    config: &Config,
+    data_dir: &Path,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
+
+    let focus = X11FocusProvider::new().map_err(|e| anyhow::anyhow!("X11 focus provider: {e}"))?;
+    let ftx = tx.clone();
+    std::thread::Builder::new()
+        .name("focus".into())
+        .spawn(move || {
+            if let Err(e) = focus.run(ftx) {
+                tracing::error!("focus provider exited: {e}");
+            }
+        })?;
+
+    let afk = X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
+    let threshold_ms = u64::from(config.afk_close_secs) * 1000;
+    let gtx = tx.clone();
+    std::thread::Builder::new()
+        .name("afk".into())
+        .spawn(move || afk_loop(afk, gtx, threshold_ms))?;
+
+    spawn_git_capture(config, tx.clone())?;
+    spawn_ai_sessions_capture(config, tx.clone())?;
+    spawn_github_capture(config, tx.clone())?;
+    spawn_shell_capture(config, tx.clone())?;
+    spawn_mic_capture(config, tx.clone())?;
+    spawn_gcal_capture(config, data_dir, tx)
+}
+
+/// Spawn a named thread running `provider.run(tx)`; a run failure is logged,
+/// not propagated — capture providers are never load-bearing.
+pub(crate) fn spawn_provider_thread(
+    name: &'static str,
+    what: &'static str,
+    provider: impl chronicle_capture::FocusProvider + 'static,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("{what} exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// Mic-in-use watcher via `pw-dump`: optional, never load-bearing.
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_mic_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::mic::MicProvider;
+
+    if !config.mic_capture {
+        return Ok(());
+    }
+    let pw_dump = chronicle_core::config::resolve_command("pw-dump");
+    if !pw_dump.contains('/') {
+        tracing::warn!("mic_capture = true but `pw-dump` is not on PATH");
+        return Ok(());
+    }
+    let provider = MicProvider::new(PathBuf::from(pw_dump));
+    spawn_provider_thread("mic", "mic provider", provider, tx)
+}
+
+/// Git poller: optional, never load-bearing — a dead thread loses git
+/// evidence, not capture.
+pub(crate) fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::git::GitProvider;
+
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let git = GitProvider::new(&repos);
+    if git.is_empty() {
+        if !repos.is_empty() {
+            tracing::warn!("git_repos configured but none resolved to a git dir");
+        }
+        return Ok(());
+    }
+    spawn_provider_thread("git", "git provider", git, tx)
+}
+
+/// AI session watcher: optional, never load-bearing — same contract as git.
+pub(crate) fn spawn_ai_sessions_capture(
+    config: &Config,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::ai_sessions::AiSessionProvider;
+
+    let dirs: Vec<PathBuf> = config
+        .ai_session_dirs
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let watcher = AiSessionProvider::new(&dirs);
+    if watcher.is_empty() {
+        if !dirs.is_empty() {
+            tracing::warn!("ai_session_dirs configured but none is a directory");
+        }
+        return Ok(());
+    }
+    spawn_provider_thread("ai-sessions", "ai session provider", watcher, tx)
+}
+
+/// PR poller via the user's `gh`: opt-in, never load-bearing.
+pub(crate) fn spawn_github_capture(
+    config: &Config,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::github::GitHubProvider;
+
+    if !config.github_prs {
+        return Ok(());
+    }
+    let gh = chronicle_core::config::resolve_command("gh");
+    if !gh.contains('/') {
+        tracing::warn!("github_prs = true but `gh` is not on PATH");
+        return Ok(());
+    }
+    let provider = GitHubProvider::new(PathBuf::from(gh));
+    spawn_provider_thread("github", "github provider", provider, tx)
+}
+
+/// atuin history poller: opt-in, never load-bearing.
+pub(crate) fn spawn_shell_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::shell::{ShellProvider, default_db_path};
+
+    if !config.shell_history {
+        return Ok(());
+    }
+    let db = default_db_path();
+    if !db.is_file() {
+        tracing::warn!("shell_history = true but {} is missing", db.display());
+        return Ok(());
+    }
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let provider = ShellProvider::new(db, &repos);
+    spawn_provider_thread("shell", "shell provider", provider, tx)
+}
+
+/// Google Calendar poller: opt-in and only once `chronicle gcal-login` has
+/// written the token file; never load-bearing.
+pub(crate) fn spawn_gcal_capture(
+    config: &Config,
+    data_dir: &Path,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::gcal::{GcalProvider, Tokens, token_path};
+
+    if !config.google_calendar {
+        return Ok(());
+    }
+    let path = token_path(data_dir);
+    if !path.exists() {
+        tracing::warn!(
+            "google_calendar = true but no {}: run `chronicle gcal-login`",
+            path.display()
+        );
+        return Ok(());
+    }
+    let tokens = match Tokens::load(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("google_calendar: {} unreadable: {e}", path.display());
+            return Ok(());
+        }
+    };
+    let provider = GcalProvider::new(tokens);
+    std::thread::Builder::new()
+        .name("gcal".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("google calendar provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// `chronicle gcal-login`: OAuth desktop flow. Opens the consent screen in
+/// the browser, takes the code off an ephemeral loopback port, exchanges it
+/// and writes `<data dir>/google.toml` (mode 0600).
+pub(crate) fn gcal_login(
+    data_dir: &Path,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::gcal;
+
+    let client_id = flag_or_env(client_id, "CHRONICLE_GOOGLE_CLIENT_ID")
+        .context("no OAuth client id: pass --client-id or set CHRONICLE_GOOGLE_CLIENT_ID")?;
+    let client_secret = flag_or_env(client_secret, "CHRONICLE_GOOGLE_CLIENT_SECRET").context(
+        "no OAuth client secret: pass --client-secret or set CHRONICLE_GOOGLE_CLIENT_SECRET",
+    )?;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let redirect_uri = format!("http://{}", listener.local_addr()?);
+    let state = random_hex(16)?;
+    let endpoints = gcal::Endpoints::default();
+    let url = gcal::auth_url(&endpoints, &client_id, &redirect_uri, &state);
+    let _ = Command::new("xdg-open")
+        .arg(&url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    println!("waiting for Google on {redirect_uri}; if no browser opened, visit:\n{url}");
+
+    let code = wait_for_oauth_code(&listener, &state)?;
+    let grant = gcal::exchange_code(&endpoints, &client_id, &client_secret, &code, &redirect_uri)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let refresh_token = grant.refresh_token.context(
+        "Google returned no refresh token: remove Chronicle under \
+         myaccount.google.com/permissions and sign in again",
+    )?;
+    let email = gcal::account_email(&endpoints, &grant.access_token).unwrap_or_default();
+    std::fs::create_dir_all(data_dir)?;
+    let path = gcal::token_path(data_dir);
+    gcal::Tokens {
+        client_id,
+        client_secret,
+        refresh_token,
+        email: email.clone(),
+    }
+    .save(&path)
+    .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+    let who = if email.is_empty() {
+        "the primary calendar".to_owned()
+    } else {
+        email
+    };
+    println!(
+        "signed in as {who} \u{b7} token in {} \u{b7} turn Google Calendar on in \
+         Settings \u{203a} Connections and restart the daemon",
+        path.display()
+    );
+    Ok(())
+}
+
+pub(crate) fn flag_or_env(flag: Option<String>, var: &str) -> Option<String> {
+    flag.or_else(|| std::env::var(var).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// `n` bytes from the OS CSPRNG, hex-encoded.
+pub(crate) fn random_hex(n: usize) -> anyhow::Result<String> {
+    use std::io::Read;
+
+    let mut buf = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The browser's redirect carries the code; anything else on the port (a
+/// favicon probe, a stray hit) is answered and ignored.
+pub(crate) fn wait_for_oauth_code(
+    listener: &std::net::TcpListener,
+    state: &str,
+) -> anyhow::Result<String> {
+    use chronicle_capture::gcal::redirect_param;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    for stream in listener.incoming() {
+        let mut stream = stream?;
+        let mut line = String::new();
+        // Bounded: the request line is all we read, and the peer is not
+        // necessarily the browser we opened.
+        BufReader::new(&stream)
+            .take(8 * 1024)
+            .read_line(&mut line)?;
+        let code = redirect_param(&line, "code");
+        let error = redirect_param(&line, "error");
+        let body = match (&code, &error) {
+            (Some(_), _) => "Chronicle is signed in. You can close this tab.",
+            (_, Some(_)) => "Google refused the sign-in; check the terminal.",
+            _ => "Waiting for Google.",
+        };
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.flush();
+        if let Some(err) = error {
+            bail!("Google returned {err}");
+        }
+        if let Some(code) = code {
+            if redirect_param(&line, "state").as_deref() != Some(state) {
+                bail!("OAuth state mismatch \u{2014} ignoring the redirect");
+            }
+            return Ok(code);
+        }
+    }
+    bail!("the loopback listener closed before the code arrived")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn spawn_capture(
+    _config: &Config,
+    _data_dir: &Path,
+    _tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    bail!("capture on this platform lands in M9/M10")
+}
+
+pub(crate) const AFK_POLL: Duration = Duration::from_secs(30);
+pub(crate) const GAP_MARKER_SECS: i64 = 60;
+
+pub(crate) fn afk_loop(
+    afk: impl chronicle_capture::AfkProvider,
+    tx: Sender<CaptureEvent>,
+    threshold_ms: u64,
+) {
+    // Announce the starting state so a dangling AFK span (gap marker, or a
+    // restart while idle) gets closed.
+    let mut was_idle = match afk.idle_ms() {
+        Ok(ms) => {
+            let idle = ms >= threshold_ms;
+            if tx.send(afk_event(idle, ms)).is_err() {
+                return;
+            }
+            idle
+        }
+        Err(e) => {
+            tracing::warn!("afk poll failed: {e}");
+            false
+        }
+    };
+    loop {
+        std::thread::sleep(AFK_POLL);
+        let ms = match afk.idle_ms() {
+            Ok(ms) => ms,
+            Err(e) => {
+                tracing::warn!("afk poll failed: {e}");
+                continue;
+            }
+        };
+        let idle = ms >= threshold_ms;
+        if idle == was_idle {
+            continue;
+        }
+        was_idle = idle;
+        if tx.send(afk_event(idle, ms)).is_err() {
+            return;
+        }
+    }
+}
+
+/// Idle transitions are backdated to when input actually stopped.
+pub(crate) fn afk_event(idle: bool, idle_ms: u64) -> CaptureEvent {
+    let now = Timestamp::now();
+    let ts = if idle {
+        now.checked_sub((idle_ms as i64).milliseconds())
+            .unwrap_or(now)
+    } else {
+        now
+    };
+    CaptureEvent::Afk { idle, ts }
+}
+
+pub(crate) struct Filters {
+    apps: Vec<Regex>,
+    titles: Vec<Regex>,
+}
+
+impl Filters {
+    pub(crate) fn new(config: &Config) -> anyhow::Result<Self> {
+        let compile = |patterns: &[String]| -> anyhow::Result<Vec<Regex>> {
+            patterns
+                .iter()
+                .map(|p| Regex::new(p).with_context(|| format!("bad exclusion regex {p:?}")))
+                .collect()
+        };
+        Ok(Self {
+            apps: compile(&config.excluded_apps)?,
+            titles: compile(&config.excluded_titles)?,
+        })
+    }
+
+    /// Excluded events are dropped before storage — never written at all.
+    pub(crate) fn excluded(&self, event: &CaptureEvent) -> bool {
+        let (app, title, url) = match event {
+            CaptureEvent::Focus(e) | CaptureEvent::TitleChanged(e) => (&e.app, &e.title, None),
+            CaptureEvent::Url(e) => (&e.app, &e.title, Some(&e.url)),
+            CaptureEvent::Activity(_) | CaptureEvent::Afk { .. } => return false,
+        };
+        self.apps.iter().any(|r| r.is_match(app))
+            || self
+                .titles
+                .iter()
+                .any(|r| r.is_match(title) || url.is_some_and(|u| r.is_match(u)))
+    }
+}
