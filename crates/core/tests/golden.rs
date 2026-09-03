@@ -190,6 +190,67 @@ fn prepass_title_key_recency_gate_and_distractions() {
     );
 }
 
+// m29 chunk 7: two open tasks carry the same ticket key. The run's folder
+// names the project, so the block lands on the mailer task even though the
+// chronicle one has the lower id and the more recent interval.
+#[test]
+fn prepass_ref_picks_the_task_whose_project_matches() {
+    use chronicle_core::prepass;
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m29_ref_project.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    let h = 3_600_000i64;
+    let task = |conn: &rusqlite::Connection, label: &str, project: &str| {
+        conn.execute(
+            "INSERT INTO tasks (label, project, status, source, created_ts, external_ref) VALUES (?1, ?2, 'open', 'user', 0, 'ACME-9')",
+            rusqlite::params![label, project],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let chronicle = task(&conn, "m27 task", "chronicle");
+    let mailer = task(&conn, "start dev on ACME-9", "mailer");
+    conn.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, NULL, ?2, ?3, 0.9)",
+        rusqlite::params![chronicle, 12 * h, 12 * h + 600_000],
+    )
+    .unwrap();
+    // One run: the key on screen for 3 of its 5 minutes, then a shell in the
+    // mailer checkout.
+    let spans = [
+        (
+            15 * h,
+            15 * h + 180_000,
+            "chrome",
+            "[ACME-9] SMS rules - Jira",
+        ),
+        (
+            15 * h + 180_000,
+            15 * h + 300_000,
+            "Terminator",
+            "sam@box:~/dev/mailer",
+        ),
+    ];
+    for (s, e, app, title) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, 'focus', NULL)",
+            rusqlite::params![s, e, app, title],
+        )
+        .unwrap();
+    }
+    let placed = prepass::run(&mut conn, &Config::default(), ms_to_ts(20 * h)).unwrap();
+    let got: Vec<(i64, &str)> = placed
+        .iter()
+        .map(|p| (p.task_id, p.reason.as_str()))
+        .collect();
+    assert_eq!(got, vec![(mailer, "title ACME-9")], "{placed:?}");
+}
+
 // m27 chunk 5: ticket keys on screen and cwd paths in titles render under
 // "## Keys seen" when a ticket regex is given; without one only cwd shows.
 #[test]

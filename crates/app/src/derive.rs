@@ -622,6 +622,21 @@ pub(crate) fn derive_batch(
                 for (task_id, key) in
                     chronicle_core::anchor::anchor_tasks(&stored, &prior, &vcs, &re)
                 {
+                    // One open task per key: while another holds it the work
+                    // belongs there, and a second anchor is what let a
+                    // mailer ticket name a chronicle task (m27).
+                    if let Some(owner) = storage::open_tasks_by_ref(conn, &key)?
+                        .into_iter()
+                        .find(|t| t.id != task_id)
+                    {
+                        tracing::warn!(
+                            task_id,
+                            owner = owner.id,
+                            %key,
+                            "ticket key already anchored to an open task; skipping"
+                        );
+                        continue;
+                    }
                     // Newly anchored → fetch external context in the background
                     // (acceptance: context lands without touching a terminal).
                     if storage::set_task_external_ref(conn, task_id, &key)? {

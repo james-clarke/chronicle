@@ -95,6 +95,11 @@ pub fn run(
                 .collect()
         })
         .unwrap_or_default();
+    // Every candidate run's repo signal in one query: it tells the ref rules
+    // which of two open tasks sharing a ticket key the work belongs to, and
+    // the repo rule below reuses it instead of querying per run.
+    let ranges: Vec<(i64, i64)> = candidates.iter().map(|r| (r.start_ts, r.end_ts)).collect();
+    let run_repos = storage::repos_active_in_many(&tx, &ranges)?;
     // Repo rule's recency inputs, batched once for the whole open-task list;
     // a run placed onto a task this tick updates its own last-end so a later
     // run in the same tick still sees it (the rule's within-tick
@@ -110,9 +115,10 @@ pub fn run(
                 .iter()
                 .any(|c| c.old_label.eq_ignore_ascii_case(&t.label) && c.old_project == t.project)
         };
+        let mut repos = run_repos.get(i).cloned().unwrap_or_default();
         let mut hit = None;
         if let Some(key) = anchors.get(&(i as i64))
-            && let Some(t) = storage::open_task_by_ref(&tx, key)?
+            && let Some(t) = storage::open_task_by_ref(&tx, key, &repos)?
             && allowed(&t)
         {
             hit = Some((t.id, format!("branch {key}")));
@@ -123,6 +129,11 @@ pub fn run(
         } else {
             Vec::new()
         };
+        for (repo, _) in crate::evidence::cwd_repos(&spans, run.start_ts, run.end_ts) {
+            if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+                repos.push(repo);
+            }
+        }
         // A ticket key on screen (Jira page title, PR URL) for most of the
         // run names the task as firmly as a branch does.
         if hit.is_none()
@@ -133,19 +144,13 @@ pub fn run(
             if let Some(top) = keys.first()
                 && top.ms >= KEY_MIN_MS
                 && top.ms * 2 >= total
-                && let Some(t) = storage::open_task_by_ref(&tx, &top.key)?
+                && let Some(t) = storage::open_task_by_ref(&tx, &top.key, &repos)?
                 && allowed(&t)
             {
                 hit = Some((t.id, format!("title {}", top.key)));
             }
         }
         if hit.is_none() {
-            let mut repos = storage::repos_active_in(&tx, run.start_ts, run.end_ts)?;
-            for (repo, _) in crate::evidence::cwd_repos(&spans, run.start_ts, run.end_ts) {
-                if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
-                    repos.push(repo);
-                }
-            }
             let mut best: Option<(i64, i64, &str)> = None;
             for repo in &repos {
                 for t in open.iter().filter(|t| {

@@ -335,6 +335,8 @@ fn activity_by_task(
 }
 
 /// Anchoring never overwrites: first ref wins, user edits win over both.
+/// Nor does a key ever reach a second open task while one already owns it —
+/// that duplicate is what filed a mailer block on a chronicle task (m27).
 /// True when the ref was newly set (callers chain a context fetch on it).
 pub fn set_task_external_ref(
     conn: &Connection,
@@ -342,7 +344,9 @@ pub fn set_task_external_ref(
     external_ref: &str,
 ) -> Result<bool, StorageError> {
     let n = conn.execute(
-        "UPDATE tasks SET external_ref=?2 WHERE id=?1 AND external_ref IS NULL",
+        "UPDATE tasks SET external_ref=?2 WHERE id=?1 AND external_ref IS NULL
+           AND NOT EXISTS (SELECT 1 FROM tasks o
+                           WHERE o.id <> ?1 AND o.status='open' AND o.external_ref=?2)",
         params![task_id, external_ref],
     )?;
     Ok(n > 0)
@@ -2543,23 +2547,48 @@ pub fn tail_placements(
         .collect::<Result<_, _>>()?)
 }
 
-/// The open task anchored to `key` (`tasks.external_ref`), if any.
-pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>, StorageError> {
-    use rusqlite::OptionalExtension;
+/// Open tasks anchored to `key` (`tasks.external_ref`), most recently
+/// touched first: the end of the latest interval, or the creation stamp for
+/// a task declared but not yet worked.
+pub fn open_tasks_by_ref(conn: &Connection, key: &str) -> Result<Vec<OpenTask>, StorageError> {
     Ok(conn
         .prepare_cached(
-            "SELECT id, label, project, source='user' FROM tasks
-             WHERE status='open' AND external_ref=?1 ORDER BY id LIMIT 1",
+            "SELECT id, label, project, source='user' FROM tasks t
+             WHERE status='open' AND external_ref=?1
+             ORDER BY COALESCE(
+                 (SELECT MAX(end_ts) FROM intervals WHERE task_id = t.id), created_ts
+             ) DESC, id DESC",
         )?
-        .query_row([key], |r| {
+        .query_map([key], |r| {
             Ok(OpenTask {
                 id: r.get(0)?,
                 label: r.get(1)?,
                 project: r.get(2)?,
                 declared: r.get(3)?,
             })
-        })
-        .optional()?)
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
+/// The open task `key` names: the one whose project matches a repo or folder
+/// the work happened in (`projects`), else the most recently touched. Id
+/// order never decides — two open tasks sharing a ref (m27: a chronicle task
+/// and a mailer task both anchored to ACME-11382) filed the block on
+/// whichever was created first.
+pub fn open_task_by_ref(
+    conn: &Connection,
+    key: &str,
+    projects: &[String],
+) -> Result<Option<OpenTask>, StorageError> {
+    let mut tasks = open_tasks_by_ref(conn, key)?;
+    if let Some(i) = tasks.iter().position(|t| {
+        t.project
+            .as_deref()
+            .is_some_and(|p| projects.iter().any(|r| r.eq_ignore_ascii_case(p)))
+    }) {
+        return Ok(Some(tasks.swap_remove(i)));
+    }
+    Ok(tasks.into_iter().next())
 }
 
 /// A task's anchor (`tasks.external_ref`), if set.
@@ -4146,5 +4175,52 @@ mod tests {
         assert!(super::stuck_tasks(&conn, ts, 7).unwrap().is_empty());
         // 0 = off.
         assert!(super::stuck_tasks(&conn, ts, 0).unwrap().is_empty());
+    }
+
+    // m29 chunk 7: two open tasks share a ticket key. The span's repo picks
+    // the owner; with no repo signal the most recently touched wins, and a
+    // third task never gets the key at all.
+    #[test]
+    fn ref_resolution_prefers_project_then_recency() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, label, project, status, source, created_ts, external_ref)
+                 VALUES (85, 'start dev on ACME-11382', 'mailer', 'open', 'user', 10, 'ACME-11382'),
+                        (100, 'm27 task', 'chronicle', 'open', 'user', 20, 'ACME-11382');
+             INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+                 VALUES (100, NULL, 30, 40, 0.9);",
+        )
+        .unwrap();
+        let by = |repos: &[&str]| {
+            let repos: Vec<String> = repos.iter().map(|r| (*r).to_owned()).collect();
+            super::open_task_by_ref(&conn, "ACME-11382", &repos)
+                .unwrap()
+                .map(|t| t.id)
+        };
+        assert_eq!(
+            by(&["mailer"]),
+            Some(85),
+            "the span's repo names the task"
+        );
+        assert_eq!(by(&["Chronicle"]), Some(100), "repo match is case-blind");
+        assert_eq!(by(&[]), Some(100), "no repo signal: most recently touched");
+        assert_eq!(by(&["contoso"]), Some(100), "unrelated repo: same fallback");
+        // A third task cannot take a key an open task already owns.
+        conn.execute(
+            "INSERT INTO tasks (id, label, project, status, source, created_ts)
+                 VALUES (101, 'other', 'chronicle', 'open', 'derived', 30)",
+            [],
+        )
+        .unwrap();
+        assert!(!super::set_task_external_ref(&conn, 101, "ACME-11382").unwrap());
+        assert_eq!(
+            super::open_tasks_by_ref(&conn, "ACME-11382")
+                .unwrap()
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            vec![100, 85]
+        );
     }
 }
