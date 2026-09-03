@@ -21,6 +21,9 @@ pub struct Config {
     pub afk_close_secs: u32,
     /// Derivation may start when idle at least this long.
     pub derive_idle_secs: u32,
+    /// The resident derive worker (model loaded, prompt prefix cached) exits
+    /// after this long without a request. 0 = exit after each request.
+    pub worker_idle_secs: u32,
     /// The deterministic pre-pass (branch → ticket, repo → project, past
     /// corrections) places provisional intervals over the not-yet-derived
     /// tail this often. 0 = off.
@@ -84,6 +87,7 @@ impl Default for Config {
             batch_minutes: 30,
             afk_close_secs: 120,
             derive_idle_secs: 300,
+            worker_idle_secs: 1200,
             prepass_secs: 60,
             title_similarity: 0.8,
             retention_days: 180,

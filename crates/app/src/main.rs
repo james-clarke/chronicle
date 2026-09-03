@@ -27,7 +27,11 @@ enum Cmd {
     /// Internal: egui window process, spawned by the daemon.
     #[command(hide = true)]
     Ui,
-    /// Internal: ephemeral derivation worker.
+    /// Internal: resident derivation worker (m27 chunk 3) — JSON requests on
+    /// stdin, replies on stdout; exits after `worker_idle_secs` idle.
+    #[command(hide = true)]
+    DeriveWorker,
+    /// Internal: one-shot derivation of a single batch.
     #[command(hide = true)]
     Derive {
         #[arg(long)]
@@ -173,6 +177,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Standup { day } => standup_cmd(&data_dir, day.as_deref()),
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
+        Cmd::DeriveWorker => derive_resident(&data_dir),
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Bench {
@@ -234,6 +239,34 @@ pub(crate) mod chatproto {
         },
         Done,
         Err {
+            message: String,
+        },
+    }
+}
+
+/// One JSON object per line over the resident derive worker's stdio.
+pub(crate) mod deriveproto {
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    pub enum Request {
+        Derive { batch_id: i64 },
+    }
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    pub enum Reply {
+        /// Model loaded and prefix cached; requests accepted.
+        Ready,
+        /// A piece of generated text (the feed's "deriving…" row).
+        Tok {
+            text: String,
+        },
+        Done {
+            batch_id: i64,
+            intervals: usize,
+        },
+        Err {
+            batch_id: Option<i64>,
             message: String,
         },
     }
@@ -535,14 +568,16 @@ fn bench(
 
     let models = bench_models(data_dir, model_filter)?;
 
-    for (case, digest_text, open, expect, gaps) in &cases {
-        println!(
-            "\n=== {case} (digest ~{} tokens)",
-            digest::approx_tokens(digest_text)
-        );
-        for (name, path) in &models {
+    for (name, path) in &models {
+        let model = chronicle_derive::DeriveModel::load(path)?;
+        let mut session = model.session()?;
+        for (case, digest_text, open, expect, gaps) in &cases {
+            println!(
+                "\n=== {case} [{name}] (digest ~{} tokens)",
+                digest::approx_tokens(digest_text)
+            );
             let t0 = Instant::now();
-            match chronicle_derive::infer_intervals(path, digest_text) {
+            match session.infer(digest_text, &mut |_| {}) {
                 Ok(run) => {
                     let drafts =
                         chronicle_core::merge::sanitize_intervals(run.intervals, open.len());
@@ -550,10 +585,12 @@ fn bench(
                     let linked = chronicle_core::merge::coalesce(linked, gaps, COALESCE_GAP_MIN);
                     let resolved = chronicle_core::eval::resolve(&slots, &linked, open);
                     println!(
-                        "--- {name}: {} intervals over {} tasks in {:.1}s (linked)",
+                        "--- {name}: {} intervals over {} tasks in {:.1}s (linked; {} prompt tokens, {} cached)",
                         resolved.len(),
                         slots.len(),
-                        t0.elapsed().as_secs_f64()
+                        t0.elapsed().as_secs_f64(),
+                        run.prompt_tokens,
+                        run.cached_prefix_tokens
                     );
                     for t in &resolved {
                         let project = t.project.as_deref().unwrap_or("-");
@@ -651,6 +688,8 @@ fn replay_eval(
 
     let mut report = Vec::new();
     for (name, path) in &models {
+        let model = chronicle_derive::DeriveModel::load(path)?;
+        let mut session = model.session()?;
         let mut results: Vec<replay::ProbeResult> = Vec::new();
         for &bid in &batch_ids {
             let batch = storage::batch_row(&conn, bid)?
@@ -672,8 +711,9 @@ fn replay_eval(
                 digest::approx_tokens(&bd.digest)
             );
             let t0 = Instant::now();
-            match chronicle_derive::infer_intervals(path, &bd.digest) {
+            match session.infer(&bd.digest, &mut |_| {}) {
                 Ok(run) => {
+                    let cached = run.cached_prefix_tokens;
                     let drafts = merge::sanitize_intervals(run.intervals, bd.open.len());
                     let (slots, linked) = merge::link_intervals(&drafts, &bd.open);
                     let linked = merge::coalesce(linked, &bd.gaps, COALESCE_GAP_MIN);
@@ -700,7 +740,7 @@ fn replay_eval(
                         })
                         .collect();
                     println!(
-                        "--- {} intervals in {:.1}s",
+                        "--- {} intervals in {:.1}s ({cached} cached prefix tokens)",
                         replayed.len(),
                         t0.elapsed().as_secs_f64()
                     );
@@ -844,28 +884,154 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
     else {
         bail!("no model available; run `chronicle model pull`")
     };
-    let Some(batch) = storage::claim_batch(&conn, batch_id)? else {
+    let model = chronicle_derive::DeriveModel::load(&model_path)?;
+    let mut session = model.session()?;
+    derive_batch(
+        &mut conn,
+        &config,
+        data_dir,
+        &mut session,
+        batch_id,
+        &mut |_| {},
+    )
+    .map(|_| ())
+}
+
+/// Resident derive worker (m27 chunk 3): the model loads once, the session
+/// keeps the instruction prefix in its KV cache, and each `derive` request
+/// on stdin decodes only its digest. Exits on stdin EOF or after
+/// `worker_idle_secs` without a request.
+fn derive_resident(data_dir: &Path) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+
+    use chronicle_core::storage;
+    use crossbeam_channel::RecvTimeoutError;
+    use deriveproto::{Reply, Request};
+
+    let _guard = init_logging(data_dir)?;
+    let mut stdout = std::io::stdout();
+    let mut send = move |msg: &Reply| {
+        let mut line = serde_json::to_string(msg).expect("reply serializes");
+        line.push('\n');
+        // A dead pipe means the daemon is gone; exiting quietly is correct.
+        if stdout
+            .write_all(line.as_bytes())
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            std::process::exit(0);
+        }
+    };
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let Some(model_path) = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+    else {
+        send(&Reply::Err {
+            batch_id: None,
+            message: "no model available; run `chronicle model pull`".into(),
+        });
+        bail!("no model available")
+    };
+    let model = match chronicle_derive::DeriveModel::load(&model_path) {
+        Ok(m) => m,
+        Err(e) => {
+            send(&Reply::Err {
+                batch_id: None,
+                message: format!("model load failed: {e:#}"),
+            });
+            return Err(e);
+        }
+    };
+    let mut session = model.session()?;
+
+    let (tx, rx) = crossbeam_channel::unbounded::<Request>();
+    std::thread::Builder::new()
+        .name("stdin".into())
+        .spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if let Ok(req) = serde_json::from_str::<Request>(&line)
+                    && tx.send(req).is_err()
+                {
+                    break;
+                }
+            }
+        })?;
+    send(&Reply::Ready);
+    tracing::info!("derive worker ready");
+
+    let idle = Duration::from_secs(u64::from(config.worker_idle_secs).max(1));
+    loop {
+        let req = match rx.recv_timeout(idle) {
+            Ok(req) => req,
+            Err(RecvTimeoutError::Timeout) => {
+                tracing::info!("derive worker idle, exiting");
+                return Ok(());
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        match req {
+            Request::Derive { batch_id } => {
+                let result = derive_batch(
+                    &mut conn,
+                    &config,
+                    data_dir,
+                    &mut session,
+                    batch_id,
+                    &mut |text| send(&Reply::Tok { text: text.into() }),
+                );
+                match result {
+                    Ok(intervals) => send(&Reply::Done {
+                        batch_id,
+                        intervals,
+                    }),
+                    Err(e) => send(&Reply::Err {
+                        batch_id: Some(batch_id),
+                        message: format!("{e:#}"),
+                    }),
+                }
+            }
+        }
+        if config.worker_idle_secs == 0 {
+            return Ok(()); // one request per process
+        }
+    }
+}
+
+/// Claim → digest → infer → store → anchor → journal jobs for one batch.
+/// Any failure marks the batch failed (retry-once via attempts cap). Returns
+/// the stored interval count.
+fn derive_batch(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    session: &mut chronicle_derive::DeriveSession<'_>,
+    batch_id: i64,
+    on_token: &mut dyn FnMut(&str),
+) -> anyhow::Result<usize> {
+    use chronicle_core::storage;
+    let Some(batch) = storage::claim_batch(conn, batch_id)? else {
         bail!("batch {batch_id} is not eligible for derivation")
     };
     let result = (|| -> anyhow::Result<usize> {
         let t0 = Instant::now();
-        let open = storage::open_tasks(&conn, 8)?;
+        let open = storage::open_tasks(conn, 8)?;
         let BatchDigest {
             digest,
             open,
             spans,
             gaps,
             activity,
-        } = build_batch_digest(&conn, &config, data_dir, &batch, open, true)?;
-        let run = chronicle_derive::infer_intervals(&model_path, &digest)?;
+        } = build_batch_digest(conn, config, data_dir, &batch, open, true)?;
+        let run = session.infer(&digest, on_token)?;
         let drafts = chronicle_core::merge::sanitize_intervals(run.intervals, open.len());
         let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, &open);
         let linked = chronicle_core::merge::coalesce(linked, &gaps, COALESCE_GAP_MIN);
         let intervals = clamp_intervals(linked, &spans, batch.start_ts, batch.end_ts);
         let n = intervals.len();
-        let stored = storage::store_derivation(&mut conn, batch_id, &slots, &intervals)?;
+        let stored = storage::store_derivation(conn, batch_id, &slots, &intervals)?;
         storage::record_derive_metrics(
-            &conn,
+            conn,
             &storage::DeriveMetrics {
                 batch_id,
                 derived_ts: Timestamp::now().as_millisecond(),
@@ -875,12 +1041,12 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
             },
         )?;
         // The inspector's "last output" (chunk 7) reads these back.
-        storage::set_meta(&conn, "derive_last_output", Some(&run.raw))?;
-        storage::set_meta(&conn, "derive_last_batch", Some(&batch_id.to_string()))?;
+        storage::set_meta(conn, "derive_last_output", Some(&run.raw))?;
+        storage::set_meta(conn, "derive_last_batch", Some(&batch_id.to_string()))?;
         // Deterministic anchoring: majority branch names the ticket key.
         match regex::Regex::new(&config.ticket_regex) {
             Ok(re) => {
-                let prior = storage::branch_state_before(&conn, batch.start_ts)?;
+                let prior = storage::branch_state_before(conn, batch.start_ts)?;
                 // Git kinds plus PR markers (title carries the key): a
                 // session's `gitBranch` is not vcs activity.
                 let vcs: Vec<_> = activity
@@ -893,9 +1059,9 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
                 {
                     // Newly anchored → fetch external context in the background
                     // (acceptance: context lands without touching a terminal).
-                    if storage::set_task_external_ref(&conn, task_id, &key)? {
+                    if storage::set_task_external_ref(conn, task_id, &key)? {
                         storage::enqueue_ai_job(
-                            &conn,
+                            conn,
                             Timestamp::now(),
                             "fetch_context",
                             0,
@@ -911,9 +1077,9 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let touched: std::collections::BTreeSet<i64> =
             stored.iter().map(|(task_id, _, _)| *task_id).collect();
         for task_id in touched {
-            if !storage::pending_journal_job(&conn, task_id, batch_id)? {
+            if !storage::pending_journal_job(conn, task_id, batch_id)? {
                 storage::enqueue_ai_job(
-                    &conn,
+                    conn,
                     Timestamp::now(),
                     "journal",
                     0,
@@ -926,11 +1092,11 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
     match result {
         Ok(n) => {
             tracing::info!(batch_id, tasks = n, "derivation done");
-            Ok(())
+            Ok(n)
         }
         Err(e) => {
             tracing::error!(batch_id, "derivation failed: {e:#}");
-            storage::fail_batch(&conn, batch_id)?;
+            storage::fail_batch(conn, batch_id)?;
             Err(e)
         }
     }
@@ -1884,7 +2050,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     if chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_none() {
         toggle_ui(&mut ui_child);
     }
-    let mut scheduler = Scheduler { worker: None };
+    let mut scheduler = Scheduler::new();
     let mut idle_since: Option<i64> = None;
     // Fires once per idle stretch: remembers which idle_since epoch already
     // queued checkpoints, cleared when the user comes back.
@@ -1957,21 +2123,8 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
         }
     };
     tracing::info!("shutting down");
-    // Child drop leaks the OS process — kills must be explicit. SIGKILL on the
-    // derive worker is safe: `store_derivation` commits in one transaction, and
-    // `fail_batch` records the burned attempt immediately.
-    if let Some((mut child, _, kind)) = scheduler.worker.take() {
-        let _ = child.kill();
-        let _ = child.wait();
-        match kind {
-            WorkerKind::Batch(id) => {
-                let _ = chronicle_core::storage::fail_batch(&conn, id);
-            }
-            WorkerKind::AiJob(id) => {
-                let _ = chronicle_core::storage::fail_ai_job(&conn, id, "daemon shutdown");
-            }
-        }
-    }
+    // Child drop leaks the OS process — kills must be explicit.
+    scheduler.shutdown(&conn);
     if let Some(mut child) = ui_child.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -2075,16 +2228,27 @@ const DERIVE_TIMEOUT: Duration = Duration::from_secs(300);
 const LOW_LOAD: f64 = 1.0;
 const BATTERY_DEFER_PCT: u32 = 30;
 
-/// What the single worker slot is running.
-enum WorkerKind {
-    Batch(i64),
-    AiJob(i64),
+/// The resident derive worker (m27 chunk 3): one process holding the model
+/// and a KV cache with the instruction prefix. Requests go down its stdin; a
+/// reader thread relays its replies.
+struct Resident {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    rx: crossbeam_channel::Receiver<deriveproto::Reply>,
+    ready: bool,
+    /// The batch in flight and when it was requested.
+    busy: Option<(i64, Instant)>,
+    last_used: Instant,
 }
 
+/// Daemon-side backstop over the worker's own idle exit.
+const RESIDENT_IDLE_GRACE_SECS: u64 = 60;
+
 struct Scheduler {
-    /// At most one inference worker at a time (derive or ai-job): the whole
-    /// design assumes a single resident llama.cpp process.
-    worker: Option<(Child, Instant, WorkerKind)>,
+    /// AI jobs stay one-shot subprocesses (`Describer`/`ChatModel`); at most
+    /// one inference process works at a time, derive or ai-job.
+    ai_job: Option<(Child, Instant, i64)>,
+    resident: Option<Resident>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2097,6 +2261,9 @@ struct DaemonStatus {
     worker: Option<String>,
     #[serde(default)]
     worker_secs: Option<u64>,
+    /// The resident derive worker is up with the model loaded.
+    #[serde(default)]
+    model_resident: bool,
     idle_secs: Option<u64>,
     ui_open: bool,
 }
@@ -2107,17 +2274,13 @@ fn status_json(
     ui_child: &mut Option<Child>,
     started: Instant,
 ) -> String {
+    let busy = scheduler.busy();
     let status = DaemonStatus {
         uptime_secs: started.elapsed().as_secs(),
-        derive_active: scheduler.worker.is_some(),
-        worker: scheduler.worker.as_ref().map(|(_, _, kind)| match kind {
-            WorkerKind::Batch(id) => format!("derive batch {id}"),
-            WorkerKind::AiJob(id) => format!("ai job {id}"),
-        }),
-        worker_secs: scheduler
-            .worker
-            .as_ref()
-            .map(|(_, started, _)| started.elapsed().as_secs()),
+        derive_active: busy.is_some(),
+        worker: busy.as_ref().map(|(what, _)| what.clone()),
+        worker_secs: busy.as_ref().map(|(_, since)| since.elapsed().as_secs()),
+        model_resident: scheduler.resident.as_ref().is_some_and(|r| r.ready),
         idle_secs: idle_since
             .map(|since| ((Timestamp::now().as_millisecond() - since) / 1000).max(0) as u64),
         ui_open: ui_child
@@ -2127,7 +2290,51 @@ fn status_json(
     serde_json::to_string(&status).unwrap_or_default()
 }
 
+#[derive(Debug, PartialEq)]
+enum ResidentAction {
+    Keep,
+    KillTimeout,
+    KillIdle,
+}
+
+/// Pure state rule for the resident worker: a request past `timeout` kills
+/// it; an idle worker past `idle` is reaped (it exits itself first).
+fn resident_action(
+    busy_since: Option<Instant>,
+    last_used: Instant,
+    now: Instant,
+    timeout: Duration,
+    idle: Duration,
+) -> ResidentAction {
+    match busy_since {
+        Some(since) if now.duration_since(since) >= timeout => ResidentAction::KillTimeout,
+        Some(_) => ResidentAction::Keep,
+        None if now.duration_since(last_used) >= idle => ResidentAction::KillIdle,
+        None => ResidentAction::Keep,
+    }
+}
+
 impl Scheduler {
+    fn new() -> Self {
+        Self {
+            ai_job: None,
+            resident: None,
+        }
+    }
+
+    /// What the inference slot is doing, and since when.
+    fn busy(&self) -> Option<(String, Instant)> {
+        if let Some((_, started, id)) = &self.ai_job {
+            return Some((format!("ai job {id}"), *started));
+        }
+        if let Some(r) = &self.resident
+            && let Some((id, since)) = r.busy
+        {
+            return Some((format!("derive batch {id}"), since));
+        }
+        None
+    }
+
     fn tick(
         &mut self,
         conn: &rusqlite::Connection,
@@ -2137,55 +2344,10 @@ impl Scheduler {
         force: bool,
     ) {
         use chronicle_core::storage;
-        if let Some((child, started, kind)) = &mut self.worker {
-            // A worker that died before reporting leaves its row `running`;
-            // count that as the failed attempt it was.
-            let mark_dead = |conn: &rusqlite::Connection, kind: &WorkerKind| match *kind {
-                WorkerKind::Batch(id) => {
-                    let stuck = matches!(
-                        storage::batch_status(conn, id),
-                        Ok(Some(ref s)) if s == "running"
-                    );
-                    if stuck {
-                        let _ = storage::fail_batch(conn, id);
-                    }
-                }
-                WorkerKind::AiJob(id) => {
-                    let stuck = matches!(
-                        storage::ai_job_status(conn, id),
-                        Ok(Some((ref s, _))) if s == "running"
-                    );
-                    if stuck {
-                        let _ = storage::fail_ai_job(conn, id, "worker died");
-                    }
-                }
-            };
-            let id = match kind {
-                WorkerKind::Batch(id) | WorkerKind::AiJob(id) => *id,
-            };
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    mark_dead(conn, kind);
-                    if !status.success() {
-                        tracing::warn!(id, %status, "inference worker failed");
-                    }
-                    self.worker = None;
-                }
-                Ok(None) => {
-                    if started.elapsed() >= DERIVE_TIMEOUT {
-                        tracing::warn!(id, "inference worker timed out; killing");
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        mark_dead(conn, kind);
-                        self.worker = None;
-                    }
-                    return; // one worker at a time
-                }
-                Err(e) => {
-                    tracing::error!(id, "inference worker wait failed: {e}");
-                    self.worker = None;
-                }
-            }
+        self.reap_ai_job(conn);
+        self.poll_resident(conn, config);
+        if self.busy().is_some() {
+            return; // one inference process at a time
         }
         // An interactive AI job (a user actively waiting on a suggestion)
         // jumps the idle gate; background jobs and derivation respect it.
@@ -2205,13 +2367,13 @@ impl Scheduler {
             return;
         }
         if let Some(job_id) = interactive {
-            self.spawn(spawn_ai_job_worker(job_id), WorkerKind::AiJob(job_id));
+            self.spawn_ai_job(job_id);
             return;
         }
         // Derivation stays ahead of background summarization.
         match storage::next_eligible_batch(conn) {
             Ok(Some(batch_id)) => {
-                self.spawn(spawn_derive_worker(batch_id), WorkerKind::Batch(batch_id));
+                self.dispatch_batch(batch_id);
                 return;
             }
             Ok(None) => {}
@@ -2221,23 +2383,241 @@ impl Scheduler {
             }
         }
         if let Ok(Some(job_id)) = storage::next_eligible_ai_job(conn, i64::MIN) {
-            self.spawn(spawn_ai_job_worker(job_id), WorkerKind::AiJob(job_id));
+            self.spawn_ai_job(job_id);
         }
     }
 
-    fn spawn(&mut self, child: std::io::Result<Child>, kind: WorkerKind) {
-        let (id, what) = match kind {
-            WorkerKind::Batch(id) => (id, "derive"),
-            WorkerKind::AiJob(id) => (id, "ai-job"),
+    fn reap_ai_job(&mut self, conn: &rusqlite::Connection) {
+        use chronicle_core::storage;
+        let Some((child, started, id)) = &mut self.ai_job else {
+            return;
         };
-        match child {
-            Ok(child) => {
-                tracing::info!(id, "{what} worker spawned");
-                self.worker = Some((child, Instant::now(), kind));
+        let id = *id;
+        // A worker that died before reporting leaves its row `running`;
+        // count that as the failed attempt it was.
+        let mark_dead = |conn: &rusqlite::Connection| {
+            let stuck = matches!(
+                storage::ai_job_status(conn, id),
+                Ok(Some((ref s, _))) if s == "running"
+            );
+            if stuck {
+                let _ = storage::fail_ai_job(conn, id, "worker died");
             }
-            Err(e) => tracing::error!(id, "failed to spawn {what} worker: {e}"),
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                mark_dead(conn);
+                if !status.success() {
+                    tracing::warn!(id, %status, "ai-job worker failed");
+                }
+                self.ai_job = None;
+            }
+            Ok(None) => {
+                if started.elapsed() >= DERIVE_TIMEOUT {
+                    tracing::warn!(id, "ai-job worker timed out; killing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    mark_dead(conn);
+                    self.ai_job = None;
+                }
+            }
+            Err(e) => {
+                tracing::error!(id, "ai-job worker wait failed: {e}");
+                self.ai_job = None;
+            }
         }
     }
+
+    /// Relay the resident worker's replies, then apply the timeout/idle rule.
+    fn poll_resident(&mut self, conn: &rusqlite::Connection, config: &Config) {
+        use chronicle_core::storage;
+        use deriveproto::Reply;
+        let Some(r) = &mut self.resident else {
+            return;
+        };
+        while let Ok(msg) = r.rx.try_recv() {
+            match msg {
+                Reply::Ready => {
+                    r.ready = true;
+                    // The request queued behind model load; the timeout
+                    // clock covers inference only.
+                    if let Some((_, since)) = &mut r.busy {
+                        *since = Instant::now();
+                    }
+                    tracing::info!("derive worker ready");
+                }
+                // Chunk 4 streams these into the feed's "deriving…" row.
+                Reply::Tok { .. } => {}
+                Reply::Done {
+                    batch_id,
+                    intervals,
+                } => {
+                    tracing::info!(batch_id, intervals, "derive worker done");
+                    r.busy = None;
+                    r.last_used = Instant::now();
+                }
+                Reply::Err { batch_id, message } => {
+                    tracing::warn!(?batch_id, "derive worker: {message}");
+                    r.busy = None;
+                    r.last_used = Instant::now();
+                }
+            }
+        }
+        // A batch the worker never answered for keeps its `running` row;
+        // count that as the failed attempt it was.
+        let fail_stuck = |conn: &rusqlite::Connection, busy: Option<(i64, Instant)>| {
+            if let Some((id, _)) = busy
+                && matches!(storage::batch_status(conn, id), Ok(Some(ref s)) if s == "running")
+            {
+                let _ = storage::fail_batch(conn, id);
+            }
+        };
+        let action = resident_action(
+            r.busy.map(|(_, since)| since),
+            r.last_used,
+            Instant::now(),
+            DERIVE_TIMEOUT,
+            Duration::from_secs(u64::from(config.worker_idle_secs) + RESIDENT_IDLE_GRACE_SECS),
+        );
+        match r.child.try_wait() {
+            Ok(Some(status)) => {
+                if r.busy.is_some() || !status.success() {
+                    tracing::warn!(%status, busy = ?r.busy.map(|b| b.0), "derive worker exited");
+                } else {
+                    tracing::info!("derive worker exited (idle)");
+                }
+                fail_stuck(conn, r.busy);
+                self.resident = None;
+            }
+            Ok(None) => match action {
+                ResidentAction::Keep => {}
+                ResidentAction::KillTimeout => {
+                    tracing::warn!(busy = ?r.busy.map(|b| b.0), "derive worker timed out; killing");
+                    let _ = r.child.kill();
+                    let _ = r.child.wait();
+                    fail_stuck(conn, r.busy);
+                    self.resident = None;
+                }
+                ResidentAction::KillIdle => {
+                    tracing::info!("derive worker idle past grace; killing");
+                    let _ = r.child.kill();
+                    let _ = r.child.wait();
+                    self.resident = None;
+                }
+            },
+            Err(e) => {
+                tracing::error!("derive worker wait failed: {e}");
+                let _ = r.child.kill();
+                fail_stuck(conn, r.busy);
+                self.resident = None;
+            }
+        }
+    }
+
+    fn spawn_ai_job(&mut self, job_id: i64) {
+        match spawn_ai_job_worker(job_id) {
+            Ok(child) => {
+                tracing::info!(id = job_id, "ai-job worker spawned");
+                self.ai_job = Some((child, Instant::now(), job_id));
+            }
+            Err(e) => tracing::error!(id = job_id, "failed to spawn ai-job worker: {e}"),
+        }
+    }
+
+    /// Send a batch to the resident worker, spawning it first if needed. The
+    /// request queues in the pipe behind model load; `Ready` restarts the
+    /// timeout clock so it covers inference only.
+    fn dispatch_batch(&mut self, batch_id: i64) {
+        use std::io::Write;
+        if self.resident.is_none() {
+            match spawn_resident() {
+                Ok(r) => {
+                    tracing::info!("derive worker spawned");
+                    self.resident = Some(r);
+                }
+                Err(e) => {
+                    tracing::error!("failed to spawn derive worker: {e}");
+                    return;
+                }
+            }
+        }
+        let Some(r) = self.resident.as_mut() else {
+            return;
+        };
+        let mut line = serde_json::to_string(&deriveproto::Request::Derive { batch_id })
+            .expect("request serializes");
+        line.push('\n');
+        match r
+            .stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| r.stdin.flush())
+        {
+            Ok(()) => {
+                tracing::info!(batch_id, "derive requested");
+                r.busy = Some((batch_id, Instant::now()));
+            }
+            Err(e) => {
+                tracing::error!(batch_id, "derive worker pipe broken: {e}");
+                let _ = r.child.kill();
+                let _ = r.child.wait();
+                self.resident = None;
+            }
+        }
+    }
+
+    /// Kill whatever is running; the rows they were working on go back to
+    /// retryable states. SIGKILL is safe: `store_derivation` commits in one
+    /// transaction and `fail_batch` records the burned attempt immediately.
+    fn shutdown(&mut self, conn: &rusqlite::Connection) {
+        use chronicle_core::storage;
+        if let Some((mut child, _, id)) = self.ai_job.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = storage::fail_ai_job(conn, id, "daemon shutdown");
+        }
+        if let Some(mut r) = self.resident.take() {
+            let _ = r.child.kill();
+            let _ = r.child.wait();
+            if let Some((id, _)) = r.busy {
+                let _ = storage::fail_batch(conn, id);
+            }
+        }
+    }
+}
+
+fn spawn_resident() -> std::io::Result<Resident> {
+    use std::io::BufRead;
+    // Worker logging goes to the log file; stderr would only carry llama's
+    // own noise.
+    let mut child = Command::new(own_exe()?)
+        .arg("derive-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child.stdin.take().expect("stdin piped");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let (tx, rx) = crossbeam_channel::unbounded();
+    std::thread::Builder::new()
+        .name("derive-reader".into())
+        .spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(msg) = serde_json::from_str::<deriveproto::Reply>(&line)
+                    && tx.send(msg).is_err()
+                {
+                    break;
+                }
+            }
+        })?;
+    Ok(Resident {
+        child,
+        stdin,
+        rx,
+        ready: false,
+        busy: None,
+        last_used: Instant::now(),
+    })
 }
 
 const PRUNE_EVERY_MS: i64 = 24 * 3_600_000;
@@ -2276,15 +2656,6 @@ fn prune_if_due(conn: &rusqlite::Connection, config: &Config) {
         }
     }
     let _ = storage::set_meta(conn, "last_prune_ts", Some(&now.to_string()));
-}
-
-fn spawn_derive_worker(batch_id: i64) -> std::io::Result<Child> {
-    // Worker logging goes to the log file; keep the daemon terminal clean.
-    Command::new(own_exe()?)
-        .args(["derive", "--batch", &batch_id.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
 }
 
 fn spawn_ai_job_worker(job_id: i64) -> std::io::Result<Child> {
@@ -2684,6 +3055,7 @@ fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
                 (Some(w), Some(secs)) => format!("{w} ({})", fmt_secs(secs)),
                 (Some(w), None) => w.clone(),
                 (None, _) if s.derive_active => "running".into(),
+                (None, _) if s.model_resident => "idle (model resident)".into(),
                 (None, _) => "idle".into(),
             };
             out.push_str(&format!("  derive worker: {worker}\n"));
@@ -3002,6 +3374,7 @@ mod tests {
                 derive_active: true,
                 worker: Some("derive batch 71".into()),
                 worker_secs: Some(45),
+                model_resident: true,
                 idle_secs: Some(90),
                 ui_open: true,
             }),
@@ -3042,6 +3415,75 @@ mod tests {
         let s = format_status(&Liveness::Running(s), &DbStatus::default());
         assert!(s.contains("derive worker: running"));
         assert!(s.contains("last derive: none instrumented yet"));
+    }
+
+    #[test]
+    fn deriveproto_round_trips() {
+        use deriveproto::{Reply, Request};
+        let req = serde_json::to_string(&Request::Derive { batch_id: 71 }).unwrap();
+        assert_eq!(req, r#"{"t":"derive","batch_id":71}"#);
+        assert_eq!(
+            serde_json::from_str::<Request>(&req).unwrap(),
+            Request::Derive { batch_id: 71 }
+        );
+        for reply in [
+            Reply::Ready,
+            Reply::Tok {
+                text: "{\"in".into(),
+            },
+            Reply::Done {
+                batch_id: 71,
+                intervals: 3,
+            },
+            Reply::Err {
+                batch_id: None,
+                message: "boom".into(),
+            },
+        ] {
+            let line = serde_json::to_string(&reply).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Reply>(&line).unwrap(),
+                reply,
+                "{line}"
+            );
+        }
+        // A pre-m27 daemon's status JSON lacks model_resident.
+        let s: DaemonStatus = serde_json::from_str(
+            r#"{"uptime_secs":5,"derive_active":false,"idle_secs":null,"ui_open":false}"#,
+        )
+        .unwrap();
+        assert!(!s.model_resident);
+        let s = format_status(&Liveness::Running(s), &DbStatus::default());
+        assert!(s.contains("derive worker: idle\n"), "{s}");
+    }
+
+    #[test]
+    fn resident_action_rules() {
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(300);
+        let idle = Duration::from_secs(1260);
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        assert_eq!(
+            resident_action(Some(at(10)), t0, at(100), timeout, idle),
+            ResidentAction::Keep
+        );
+        assert_eq!(
+            resident_action(Some(at(10)), t0, at(310), timeout, idle),
+            ResidentAction::KillTimeout
+        );
+        assert_eq!(
+            resident_action(None, at(10), at(1000), timeout, idle),
+            ResidentAction::Keep
+        );
+        assert_eq!(
+            resident_action(None, at(10), at(1270), timeout, idle),
+            ResidentAction::KillIdle
+        );
+        // Busy since well past idle but under timeout: busy wins.
+        assert_eq!(
+            resident_action(Some(at(2000)), t0, at(2100), timeout, idle),
+            ResidentAction::Keep
+        );
     }
 
     #[test]
