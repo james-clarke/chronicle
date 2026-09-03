@@ -583,6 +583,8 @@ struct TimelineApp {
     standup_error: Option<String>,
     /// Standup card expanded (collapsible; long drafts otherwise bury Home).
     standup_open: bool,
+    /// Draft day whose `standup_read:<day>` meta is known written.
+    standup_read_day: Option<String>,
     /// Standup card shows every task block (else the first plus "N more").
     standup_show_all: bool,
     /// X11 compositor present at boot: transparent window, rounded card,
@@ -699,6 +701,7 @@ impl TimelineApp {
             standup_job: None,
             standup_error: None,
             standup_open: true,
+            standup_read_day: None,
             standup_show_all: false,
             composited,
         }
@@ -815,12 +818,28 @@ impl TimelineApp {
                 .date()
                 .checked_sub(1.day())
                 .map(|d| d.to_string());
+            let prev_day = self.standup.as_ref().map(|s| s.day.clone());
             self.standup = yesterday.ok().and_then(|day| {
                 chronicle_core::storage::get_standup_draft(conn, &day)
                     .ok()
                     .flatten()
                     .map(|(_, content)| StandupRow { day, content })
             });
+            // A draft first seen this pass starts collapsed when an earlier
+            // launch already showed it (`standup_read:<day>`).
+            if let Some(s) = &self.standup
+                && prev_day.as_deref() != Some(s.day.as_str())
+            {
+                let read =
+                    chronicle_core::storage::get_meta(conn, &format!("standup_read:{}", s.day))
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if read {
+                    self.standup_read_day = Some(s.day.clone());
+                    self.standup_open = false;
+                }
+            }
         }
         if let Some(conn) = self.conn.as_ref() {
             self.warning = chronicle_core::storage::get_meta(conn, "server_error")

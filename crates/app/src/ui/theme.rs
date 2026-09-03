@@ -888,8 +888,10 @@ impl<'a> ListRow<'a> {
             }
             (galley, title_w)
         });
+        let title_h = h;
+        let sub_h = ui.text_style_height(&egui::TextStyle::Small);
         if self.subtitle.is_some() {
-            h += ui.text_style_height(&egui::TextStyle::Small) + 2.0;
+            h += sub_h + SUB_GAP;
         }
         let pad = if self.padded { row_pad() } else { 0.0 };
         // The row is allocated at its full height (padding included) so the
@@ -904,83 +906,99 @@ impl<'a> ListRow<'a> {
             inner.min.x += BAR_INSET;
         }
         let subtitle = self.subtitle;
+        let dot = self.dot;
+        // Title line (dot, title, chips, number, trailing) at `title_h`; the
+        // subtitle underneath spans the whole row so it never fights the
+        // chips for width.
+        let title_line = |ui: &mut egui::Ui, trailing: Box<dyn FnOnce(&mut egui::Ui) + '_>| {
+            ui.set_width(inner.width());
+            ui.style_mut().interaction.selectable_labels = false;
+            if let Some(color) = dot {
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 4.0, color);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                trailing(ui);
+                if let Some(n) = &self.num {
+                    num_cell(ui, NUM_COL, num(n.as_str()));
+                }
+                for (text, color) in self.chips.iter().rev() {
+                    badge(ui, text, *color);
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        match title_galley {
+                            Some((galley, title_w)) => {
+                                let actual_w = ui.available_width();
+                                ui.set_max_width(title_w.min(actual_w));
+                                // Estimate too generous: re-lay at the real
+                                // width so the title truncates instead of
+                                // running under the trailing controls.
+                                let galley = if actual_w + 0.5 < title_w {
+                                    let mut job = egui::text::LayoutJob::simple(
+                                        self.title.to_owned(),
+                                        font.clone(),
+                                        palette::TEXT,
+                                        actual_w.max(20.0),
+                                    );
+                                    job.wrap.max_rows = galley.rows.len().max(1);
+                                    job.wrap.break_anywhere = false;
+                                    job.wrap.overflow_character = Some('\u{2026}');
+                                    ui.fonts_mut(|f| f.layout_job(job))
+                                } else {
+                                    galley
+                                };
+                                let elided = galley.elided;
+                                let resp = ui.add(egui::Label::new(galley).selectable(false));
+                                if elided {
+                                    resp.on_hover_text(self.title.to_owned());
+                                }
+                            }
+                            None => {
+                                let mut text = egui::RichText::new(self.title).color(palette::TEXT);
+                                if self.emphasis {
+                                    text = text.family(egui::FontFamily::Name(MEDIUM.into()));
+                                }
+                                truncated_label(ui, egui::Label::new(text).truncate(), self.title);
+                            }
+                        }
+                    });
+                });
+            });
+        };
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(inner)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                .layout(egui::Layout::top_down(egui::Align::Min)),
             |ui| {
-                ui.set_width(inner.width());
-                ui.style_mut().interaction.selectable_labels = false;
-                if let Some(color) = self.dot {
-                    let (dot, _) =
-                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(dot.center(), 4.0, color);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    trailing(ui);
-                    if let Some(n) = &self.num {
-                        num_cell(ui, NUM_COL, num(n.as_str()));
-                    }
-                    for (text, color) in self.chips.iter().rev() {
-                        badge(ui, text, *color);
-                    }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            match title_galley {
-                                Some((galley, title_w)) => {
-                                    let actual_w = ui.available_width();
-                                    ui.set_max_width(title_w.min(actual_w));
-                                    // Estimate too generous: re-lay at the real
-                                    // width so the title truncates instead of
-                                    // running under the trailing controls.
-                                    let galley = if actual_w + 0.5 < title_w {
-                                        let mut job = egui::text::LayoutJob::simple(
-                                            self.title.to_owned(),
-                                            font.clone(),
-                                            palette::TEXT,
-                                            actual_w.max(20.0),
-                                        );
-                                        job.wrap.max_rows = galley.rows.len().max(1);
-                                        job.wrap.break_anywhere = false;
-                                        job.wrap.overflow_character = Some('\u{2026}');
-                                        ui.fonts_mut(|f| f.layout_job(job))
-                                    } else {
-                                        galley
-                                    };
-                                    let elided = galley.elided;
-                                    let resp = ui.add(egui::Label::new(galley).selectable(false));
-                                    if elided {
-                                        resp.on_hover_text(self.title.to_owned());
-                                    }
-                                }
-                                None => {
-                                    let mut text =
-                                        egui::RichText::new(self.title).color(palette::TEXT);
-                                    if self.emphasis {
-                                        text = text.family(egui::FontFamily::Name(MEDIUM.into()));
-                                    }
-                                    truncated_label(
-                                        ui,
-                                        egui::Label::new(text).truncate(),
-                                        self.title,
-                                    );
-                                }
-                            }
-                            if let Some(sub) = &subtitle {
-                                let text = egui::RichText::new(sub.as_str())
-                                    .text_style(egui::TextStyle::Small)
-                                    .color(palette::TEXT_DIM);
-                                truncated_label(ui, egui::Label::new(text).truncate(), sub);
-                            }
-                        });
+                ui.spacing_mut().item_spacing.y = SUB_GAP;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(inner.width(), title_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| title_line(ui, Box::new(trailing)),
+                );
+                if let Some(sub) = &subtitle {
+                    // Under the title, past the dot when there is one.
+                    ui.horizontal(|ui| {
+                        if dot.is_some() {
+                            ui.add_space(14.0);
+                        }
+                        ui.style_mut().interaction.selectable_labels = false;
+                        let text = egui::RichText::new(sub.as_str())
+                            .text_style(egui::TextStyle::Small)
+                            .color(palette::TEXT_DIM);
+                        truncated_label(ui, egui::Label::new(text).truncate(), sub);
                     });
-                });
+                }
             },
         )
         .response
     }
 }
+
+/// Gap between a row's title line and its subtitle.
+const SUB_GAP: f32 = 2.0;
 
 /// Identity bar width and the gap it plus its margin take from the title.
 const BAR_W: f32 = 3.0;

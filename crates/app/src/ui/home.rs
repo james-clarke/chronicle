@@ -84,13 +84,32 @@ impl TimelineApp {
             ui.add_space(4.0);
             return generate;
         }
-        let title = match &self.standup {
-            Some(s) => format!("Standup \u{b7} {}", standup_day(&s.day)),
-            None => "Standup".to_owned(),
-        };
         let model_missing = self.model_missing;
         let drafting = self.standup_job.is_some();
         let mut open = self.standup_open;
+        // Collapsed: one line that says what is inside and that it was read.
+        let title = match &self.standup {
+            Some(s) if !open => {
+                let labels: Vec<&str> = self
+                    .open_tasks
+                    .iter()
+                    .chain(&self.closed_tasks)
+                    .map(|t| t.label.as_str())
+                    .collect();
+                let n = standup_blocks(&s.content, &labels)
+                    .iter()
+                    .filter(|b| !b.meta)
+                    .count();
+                let read = if self.standup_read_day.as_deref() == Some(s.day.as_str()) {
+                    " \u{b7} read"
+                } else {
+                    ""
+                };
+                format!("Standup \u{b7} {n} tasks{read}")
+            }
+            Some(s) => format!("Standup \u{b7} {}", standup_day(&s.day)),
+            None => "Standup".to_owned(),
+        };
         let mut show_all = self.standup_show_all;
         theme::hover_card(ui, "standup_card", |ui| {
             // Redraft lives on the header line so the body's height never
@@ -120,6 +139,22 @@ impl TimelineApp {
         });
         self.standup_open = open;
         self.standup_show_all = show_all;
+        // Shown expanded once = read: remembered per draft day so the next
+        // launch starts it collapsed.
+        if open
+            && !drafting
+            && let Some(day) = self.standup.as_ref().map(|s| s.day.clone())
+            && self.standup_read_day.as_deref() != Some(day.as_str())
+        {
+            if let Some(conn) = self.conn.as_ref() {
+                let _ = chronicle_core::storage::set_meta(
+                    conn,
+                    &format!("standup_read:{day}"),
+                    Some("1"),
+                );
+            }
+            self.standup_read_day = Some(day);
+        }
         ui.add_space(theme::CARD_GAP);
         generate
     }
@@ -229,9 +264,6 @@ impl TimelineApp {
                     self.model_card_ui(ui);
                     self.service_card_ui(ui);
                     self.resume_card_ui(ui);
-                    if self.standup_card_ui(ui) {
-                        pending = Some(Action::GenerateStandup);
-                    }
                     let open_tasks = &self.open_tasks;
                     let closed_tasks = &self.closed_tasks;
                     let feed = &self.feed;
@@ -241,9 +273,6 @@ impl TimelineApp {
                     let tz = &self.tz;
                     let unassigned_ms = self.unassigned_ms;
                     let show_closed = &mut self.show_closed;
-                    let show_spans = &mut self.show_spans;
-                    let spans_debug = self.spans_debug;
-                    let spans = &self.spans;
                     let new_label = &mut self.new_label;
                     let new_project = &mut self.new_project;
                     let merge_pick = &mut self.merge_pick;
@@ -300,9 +329,11 @@ impl TimelineApp {
                     for &o in &open_vis {
                         let t = &open_tasks[o];
                         let color = theme::task_color(t.task_id, t.project.as_deref());
-                        task_row(t, color)
+                        task_row(t, color, true)
                             .emphasis()
                             .lines(2)
+                            .padded()
+                            .subtitle(working_subtitle(t))
                             .show(ui, content_w, |ui| {
                                 ui.menu_button("\u{2026}", |ui| {
                                     if ui.button("close").clicked() {
@@ -396,7 +427,7 @@ impl TimelineApp {
                             for &c in &closed_vis {
                                 let t = &closed_tasks[c];
                                 let color = theme::task_color(t.task_id, t.project.as_deref());
-                                task_row(t, color).show(ui, content_w, |ui| {
+                                task_row(t, color, false).show(ui, content_w, |ui| {
                                     if theme::ghost_button(ui, "reopen").clicked() {
                                         pending = Some(Action::Reopen(t.task_id));
                                     }
@@ -425,8 +456,17 @@ impl TimelineApp {
                         );
                     }
 
+                    // Standup last (m26): the task list is the page; the
+                    // draft is one click away and collapses once read.
+                    ui.add_space(theme::SECTION_GAP);
+                    if self.standup_card_ui(ui) {
+                        pending = Some(Action::GenerateStandup);
+                    }
+
                     // Debug-grade raw spans; hidden unless enabled in settings.
-                    if spans_debug {
+                    let show_spans = &mut self.show_spans;
+                    let spans = &self.spans;
+                    if self.spans_debug {
                         ui.add_space(theme::SECTION_GAP);
                         theme::disclosure_header(ui, show_spans, "Spans", Some(span_vis.len()));
                         theme::fade_body(ui, "spans_body", *show_spans, |ui| {
@@ -449,17 +489,55 @@ impl TimelineApp {
 /// Project input width on the declare row.
 const PROJECT_COL: f32 = 110.0;
 
-/// Task row: identity dot, label, project chip in the task's color, the
-/// "declared" chip.
-fn task_row<'a>(task: &'a OpenRow, color: egui::Color32) -> theme::ListRow<'a> {
-    let mut row = theme::ListRow::new(&task.label).dot(color);
+/// The feed's `?` hover: how a block gets placed, and when.
+fn feed_help_ui(ui: &mut egui::Ui) {
+    ui.set_max_width(300.0);
+    ui.label("Each block of work is placed by the first rule that fits:");
+    for line in [
+        "1. the checked-out branch carries a ticket key \u{2192} that task",
+        "2. the block's repo matches an open task's project",
+        "3. its window titles match one of your past corrections",
+        "4. otherwise it waits; blocks sharing a rare title or a repo become a proposal after 10 min",
+    ] {
+        ui.weak(line);
+    }
+    ui.add_space(theme::SPACE_XS);
+    ui.weak("Rules run every 60 s and place provisionally (\"to confirm\"). The model re-reads each batch about 35 min later and its placements replace the provisional ones. Rows you keep or move are never touched.");
+}
+
+/// Task row: identity mark (a left-edge bar for Working on, a dot
+/// elsewhere), label, project chip in the task's color, the anchor chip
+/// (ticket key or branch), the "declared" chip.
+fn task_row<'a>(task: &'a OpenRow, color: egui::Color32, bar: bool) -> theme::ListRow<'a> {
+    let mut row = theme::ListRow::new(&task.label);
+    row = if bar { row.bar(color) } else { row.dot(color) };
     if let Some(project) = &task.project {
         row = row.chip(project.as_str(), color);
+    }
+    if bar && let Some(anchor) = &task.anchor {
+        row = row.chip(anchor.as_str(), theme::palette::TEXT_DIM);
     }
     if task.declared {
         row = row.chip("declared", theme::palette::TEXT_DIM);
     }
     row
+}
+
+/// Working-on second line: time today · last touched · next step.
+fn working_subtitle(task: &OpenRow) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if task.today_ms > 0 {
+        parts.push(format!("{} today", fmt_dur(task.today_ms)));
+    } else {
+        parts.push("no time today".to_owned());
+    }
+    if let Some(z) = &task.last_touched {
+        parts.push(format!("touched {}", z.strftime("%H:%M")));
+    }
+    if let Some(next) = &task.next_step {
+        parts.push(next.clone());
+    }
+    parts.join(" \u{b7} ")
 }
 
 /// A proposed task: the cluster's suggested label (a spinner while the
@@ -652,7 +730,10 @@ fn feed_row(
             (top_title, reason, detail)
         }
     };
-    let mut row = theme::ListRow::new(title).lines(2).num(fmt_dur(block.ms));
+    let mut row = theme::ListRow::new(title)
+        .lines(2)
+        .padded()
+        .num(fmt_dur(block.ms));
     match &block.claim {
         Some(c) => {
             row = row.dot(theme::task_color(c.task_id, c.project.as_deref()));
@@ -800,6 +881,8 @@ fn feed_section_ui(
             }
             ui.label(theme::num(fmt_dur(unassigned_ms)))
                 .on_hover_text("unassigned today");
+            ui.label(egui::RichText::new("?").color(theme::palette::TEXT_DIM))
+                .on_hover_ui(feed_help_ui);
         });
         ui.add_space(theme::SPACE_XS);
         for p in proposals {
