@@ -874,10 +874,9 @@ fn build_batch_digest(
     let corrections = storage::similar_corrections(conn, &spans, 4)?;
     let tz = TimeZone::system();
     let mcp_context = if mcp {
-        let ctx = chronicle_mcp::gather_context(&config.mcp_path(data_dir));
-        if ctx.is_some() {
-            bump_day_counter(conn, "fetches");
-        }
+        let (mcp_calls, ctx) = chronicle_mcp::gather_context(&config.mcp_path(data_dir));
+        // Counted per call that left the machine, empty reply or not.
+        bump_day_counter_by(conn, "fetches", mcp_calls);
         ctx
     } else {
         None
@@ -1204,11 +1203,12 @@ fn run_ai_job(
             bail!("task {task_id} has no external_ref")
         };
         let mcp_path = config.mcp_path(data_dir);
-        let Some(content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref) else {
+        let (calls, content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref);
+        bump_day_counter_by(conn, "fetches", calls);
+        let Some(content) = content else {
             bail!("no fetch_calls configured or every call failed")
         };
         storage::upsert_task_context(conn, task_id, "mcp", Timestamp::now(), &content)?;
-        bump_day_counter(conn, "fetches");
         return Ok(content);
     }
     let model_path = model_path.context("no model available; run `chronicle model pull`")?;
@@ -1763,14 +1763,22 @@ fn clamp_intervals(
 /// what Settings › Storage reports as having left this machine today.
 /// Best-effort — a meta write must never block the thing it counts.
 pub(crate) fn bump_day_counter(conn: &rusqlite::Connection, prefix: &str) {
+    bump_day_counter_by(conn, prefix, 1);
+}
+
+/// [`bump_day_counter`] for a batch: one mcp gather runs several calls.
+pub(crate) fn bump_day_counter_by(conn: &rusqlite::Connection, prefix: &str, by: usize) {
     use chronicle_core::storage;
+    if by == 0 {
+        return;
+    }
     let key = day_counter_key(prefix);
     let n = storage::get_meta(conn, &key)
         .ok()
         .flatten()
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
-    let _ = storage::set_meta(conn, &key, Some(&(n + 1).to_string()));
+    let _ = storage::set_meta(conn, &key, Some(&(n + by as i64).to_string()));
 }
 
 /// The key [`bump_day_counter`] writes and the settings panel reads.
@@ -2097,13 +2105,16 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     spawn_capture(&config, data_dir, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
     let api_key = wakapi_api_key(&conn)?;
-    let server_error = match chronicle_server::spawn(&config, tx, api_key) {
-        Ok(()) => None,
-        Err(e) => {
-            tracing::error!("AW endpoint failed on 127.0.0.1:{}: {e}", config.port);
-            Some(format!("AW endpoint failed on port {}: {e}", config.port))
-        }
-    };
+    // The key exists either way so Settings can show it; the switch decides
+    // whether the routes accept it.
+    let server_error =
+        match chronicle_server::spawn(&config, tx, config.editor_heartbeats.then_some(api_key)) {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::error!("AW endpoint failed on 127.0.0.1:{}: {e}", config.port);
+                Some(format!("AW endpoint failed on port {}: {e}", config.port))
+            }
+        };
     chronicle_core::storage::set_meta(&conn, "server_error", server_error.as_deref())?;
     tracing::info!(?data_dir, "chronicle daemon running");
     let mut ui_child: Option<Child> = None;
@@ -3076,12 +3087,16 @@ fn random_hex(n: usize) -> anyhow::Result<String> {
 /// favicon probe, a stray hit) is answered and ignored.
 fn wait_for_oauth_code(listener: &std::net::TcpListener, state: &str) -> anyhow::Result<String> {
     use chronicle_capture::gcal::redirect_param;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
 
     for stream in listener.incoming() {
         let mut stream = stream?;
         let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line)?;
+        // Bounded: the request line is all we read, and the peer is not
+        // necessarily the browser we opened.
+        BufReader::new(&stream)
+            .take(8 * 1024)
+            .read_line(&mut line)?;
         let code = redirect_param(&line, "code");
         let error = redirect_param(&line, "error");
         let body = match (&code, &error) {
@@ -3247,7 +3262,7 @@ fn mcp_check(data_dir: &Path) -> anyhow::Result<()> {
             Err(e) => println!("{}: FAILED \u{2014} {e:#}", server.name),
         }
     }
-    match chronicle_mcp::gather_context(&path) {
+    match chronicle_mcp::gather_context(&path).1 {
         Some(ctx) => println!("\n## Workspace context\n{ctx}"),
         None => println!(
             "no context gathered (missing/empty config, or every call failed — see warnings above)"

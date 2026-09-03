@@ -464,6 +464,7 @@ pub(super) struct LocalSources {
     pub mic_capture: bool,
     pub shell_history: bool,
     pub google_calendar: bool,
+    pub editor_heartbeats: bool,
 }
 
 impl LocalSources {
@@ -474,6 +475,7 @@ impl LocalSources {
             mic_capture: c.mic_capture,
             shell_history: c.shell_history,
             google_calendar: c.google_calendar,
+            editor_heartbeats: c.editor_heartbeats,
         }
     }
 
@@ -483,6 +485,7 @@ impl LocalSources {
         c.mic_capture = self.mic_capture;
         c.shell_history = self.shell_history;
         c.google_calendar = self.google_calendar;
+        c.editor_heartbeats = self.editor_heartbeats;
     }
 }
 
@@ -1222,9 +1225,6 @@ impl Connections {
             "Claude Code transcripts under ~/.claude/projects".to_owned()
         };
         let atuin_db = chronicle_capture::shell::default_db_path();
-        // The heartbeat routes run with the daemon's endpoint: no config key
-        // to switch, so the row's switch is a local always-on flag.
-        let mut heartbeats_on = true;
         let gcal_detail = match self.google_account.as_deref() {
             Some("") => "primary calendar every 5 min".to_owned(),
             Some(email) => format!("primary calendar every 5 min \u{b7} {email}"),
@@ -1261,7 +1261,7 @@ impl Connections {
             ),
             (
                 "Editor heartbeats (WakaTime plugins)",
-                &mut heartbeats_on,
+                &mut src.editor_heartbeats,
                 None,
                 &[ActivityKind::Edit],
                 "vim-wakatime and friends post to this machine \u{b7} folded into edit spans per project"

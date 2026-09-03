@@ -1,12 +1,71 @@
 # M26 — Daily driver: right for James first
 
-Status: **chunk 1 shipped 2026-09-03** (3e3e8ca, 496fe5b, e906918,
-4f37f34; installed daemon). Chunks 2–7 planned, approved in outline. Written so
-a fresh context can plan and build from this file alone. Repo conventions:
+Status: **chunks 1–6 shipped 2026-09-03** (chunk 1: 3e3e8ca, 496fe5b, e906918,
+4f37f34; chunks 2–6: ffbe428 scaffolding, cc384f8 shell, eec9cfe heartbeats,
+ed2bb7a calendar, c37fbaa intent, 6f8f156 upsert fix, ad67b3c Jira post).
+Chunk 7 (click-tests, feed soak) is James's. Chunks 2–6 were built in
+parallel by five agents on sibling worktrees off one scaffolding commit and
+merged linearly; 143 tests, clippy clean. Written so a fresh context can plan
+and build from this file alone. Repo conventions:
 one chunk per commit, tests + clippy per chunk, Conventional Commits
 single line, stop the systemd unit before `cargo install --locked`
 (memory: `chronicle-no-rebuild-under-daemon`), visual pass via the
 standalone UI loop (memory: `chronicle-ui-visual-loop`).
+
+## Shipped: deviations from the text below (2026-09-03)
+
+- Storage: `Dedupe::Upsert` now rewrites `ts`/`end_ts` and takes the newest
+  non-empty summary (was: first summary wins). Needed so a live `shell` span
+  shows its counts, an `edit` span names the current file and a moved
+  meeting moves.
+- Chunk 2: poll adds `showDeleted=true` (Google only returns cancelled rows
+  with it); the provider remembers `ext_id → start` from the last poll so a
+  cancelled instance without times can be tombstoned (not across a daemon
+  restart); no PKCE (client secret + random `state`); account email comes
+  from the events.list `summary` field (no extra scope); client id/secret
+  via `--client-id/--client-secret` or `CHRONICLE_GOOGLE_CLIENT_ID/SECRET`.
+- Chunk 3: non-file heartbeats (`type` app/domain) are skipped; the
+  Connections row has no config key (endpoint always on) so its switch is a
+  local always-on flag; the copy button is a caption line under the row;
+  `/api/heartbeat` returns the bulk envelope like wakapi.
+- Chunk 4: `exit` is not stored (nothing reads it); per-command duration
+  clamped to 10 min (atuin keeps `-1` while running and multi-day rows for
+  servers); `NAME=value` prefixes are skipped when taking `argv[0]`;
+  watermark starts at daemon start (no backfill of old history).
+- Chunk 5: picker offers open tasks only — `fetch_context` is task-scoped
+  and `gather_context` output is never persisted, so there is no stored
+  "assigned to me" list to parse (would need meta `mcp_context:<ts>`);
+  `stuck` = open, last interval end (or created) and checkpoint both older
+  than `task_stuck_days` (checkpoints keep one row per task, so
+  "next_steps unchanged" cannot be diffed); `narrative_v1.txt` untouched
+  (its digest is a week aggregate, never carries a plan); no bench fixture
+  path exists for standups, the `## Plan` line is covered by unit tests;
+  chips are text, no glyph (icon font is a separate family).
+- Chunk 6: field is `args_json` like the sibling calls; result line lives in
+  the dialog; only the first action call is offered per task; checkpoint
+  body = state + `Next: …`, journal body verbatim; counters in meta
+  `fetches:<date>` / `posts:<date>`. James's live mcp.toml has no
+  `[[action_calls]]` yet — re-add the Jira preset or paste the block from
+  the preset table.
+- Review pass: a `Config.editor_heartbeats` key was added (default true),
+  superseding the chunk 3 note above — the Connections row's switch now
+  binds to it and the WakaTime routes answer 403 with
+  `editor heartbeats are off in config` when it is off.
+
+## Manual steps for James
+
+1. Google: create a **Desktop app** OAuth client in the Acme Cloud
+   project, published **Internal**; run `chronicle gcal-login --client-id …
+   --client-secret …`; switch Google Calendar on in Connections; restart.
+2. vim: `Plug 'wakatime/vim-wakatime'`, copy the key from Connections ›
+   Local sources into `~/.wakatime.cfg` with
+   `api_url = http://127.0.0.1:5600/api` (README Local sources).
+3. atuin: switch Shell history on in Connections (or `shell_history = true`).
+4. Jira posting: add the `[[action_calls]]` block (Connections › jira
+   preset re-add does it), then try "comment on ACME-…" from a task pane —
+   the dialog shows the exact body before anything is sent.
+5. Chunk 7 click-tests remain: Connections test/remove/repo-add, chat
+   history ×, the new intent picker, the post dialog.
 
 ## Decision and context
 

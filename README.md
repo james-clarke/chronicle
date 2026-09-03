@@ -99,14 +99,15 @@ cancelled event is tombstoned to zero length so it stops covering time.
 1. In Google Cloud, create an OAuth client of type **Desktop app** in the
    workspace that owns the calendar. Publish it as an **Internal** Workspace
    app: refresh tokens of an external app in "testing" expire after 7 days.
-2. `chronicle gcal-login --client-id … --client-secret …` (or set
-   `CHRONICLE_GOOGLE_CLIENT_ID` / `CHRONICLE_GOOGLE_CLIENT_SECRET`). It opens
-   the consent screen, takes the redirect on `127.0.0.1:<ephemeral port>` and
-   writes `<data dir>/google.toml` at mode 0600 (client id/secret, refresh
-   token, account email).
+2. Export `CHRONICLE_GOOGLE_CLIENT_ID` / `CHRONICLE_GOOGLE_CLIENT_SECRET` and
+   run `chronicle gcal-login`. It opens the consent screen, takes the redirect
+   on `127.0.0.1:<ephemeral port>` and writes `<data dir>/google.toml` at mode
+   0600 (client id/secret, refresh token, account email). The
+   `--client-id …` / `--client-secret …` flags do the same, but a secret in
+   argv is visible in `ps` and lands in shell history.
 3. Turn Google Calendar on under Settings › Connections → Local sources and
    restart the daemon.
-**Editor heartbeats (WakaTime protocol)** (no config key: the endpoint is always on):
+**Editor heartbeats (WakaTime protocol)** (`editor_heartbeats = true` by default, or the Local sources switch in Settings › Connections; off = the routes answer 403):
 
 The same endpoint speaks WakaTime: `POST /api/v1/users/current/heartbeats.bulk` (and wakapi's single `POST /api/heartbeat`), `Authorization: Basic base64(<api_key>)`, reply `201 {"responses": [[…, 201], …]}`, 401 on a bad key, same `Host` allowlist as the AW routes. Heartbeats fold per `(project, branch)` with a 15-minute gap into `activity_events(kind='edit')`: `summary` = the file, `repo` = the project, `ext_id` = `<project>@<branch>#<span-start-ms>`, so every heartbeat inside the gap refreshes `end_ts`. Any of the ~60 WakaTime plugins works (they queue offline); no account, nothing leaves the machine. Setup:
 

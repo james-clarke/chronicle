@@ -270,7 +270,9 @@ fn render(
     // unchanged.
     if let Some(plan) = plan.map(str::trim).filter(|s| !s.is_empty()) {
         let _ = writeln!(out, "\n## Plan");
-        let _ = writeln!(out, "{plan}");
+        // Clipped: a long intent must not push `## Open tasks` past the
+        // digest's own truncation.
+        let _ = writeln!(out, "{}", clip(plan, 400));
     }
 
     // Numbered so interval output can link by index ("ref"). Omitted when

@@ -805,8 +805,14 @@ impl TimelineApp {
         let Some(rx) = dialog.rx.as_ref() else {
             return;
         };
-        let Ok(result) = rx.try_recv() else {
-            return;
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            // The thread panicked or dropped the sender: end `sending` with
+            // an error line rather than leaving the modal spinning forever.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the post thread died".to_owned())
+            }
         };
         dialog.rx = None;
         let ok = result.is_ok();

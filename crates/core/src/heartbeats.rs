@@ -17,6 +17,11 @@ use crate::types::{ActivityEvent, ActivityKind, ms_to_ts};
 /// Gap that closes an edit span (WakaTime's default heartbeat timeout).
 pub const GAP_SECS: i64 = 15 * 60;
 
+/// How far a client's clock may sit from ours before its `time` is ignored.
+/// The value reaches [`ms_to_ts`], which panics outside jiff's range, and it
+/// arrives over an unauthenticated-until-checked HTTP body.
+const MAX_SKEW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 /// One heartbeat as the WakaTime API documents it. Clients send `null` for
 /// the fields they cannot fill, so every field takes null as its default.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -68,11 +73,10 @@ impl Folder {
         if !hb.kind.is_empty() && hb.kind != "file" {
             return None;
         }
-        let ms = if hb.time > 0.0 {
-            (hb.time * 1000.0) as i64
-        } else {
-            now_ms
-        };
+        let ms = heartbeat_ms(hb.time, now_ms);
+        // Spans nothing can reopen are dead weight in a map that lives as
+        // long as the daemon.
+        self.spans.retain(|_, s| ms - s.end_ms <= GAP_SECS * 1000);
         let key = (hb.project.clone(), hb.branch.clone());
         let open = match self.spans.get(&key) {
             Some(s) => ms >= s.start_ms && ms - s.end_ms <= GAP_SECS * 1000,
@@ -98,6 +102,19 @@ impl Folder {
             ext_id: Some(format!("{}@{}#{}", hb.project, hb.branch, span.start_ms)),
             summary: Some(basename(&hb.entity).to_owned()),
         })
+    }
+}
+
+/// The heartbeat's epoch seconds as milliseconds, or `now_ms` when the
+/// client sent nothing usable: absent, non-finite, or further than
+/// [`MAX_SKEW_MS`] from our own clock.
+fn heartbeat_ms(time: f64, now_ms: i64) -> i64 {
+    let ms = time * 1000.0;
+    let (lo, hi) = ((now_ms - MAX_SKEW_MS) as f64, (now_ms + MAX_SKEW_MS) as f64);
+    if time > 0.0 && ms.is_finite() && ms >= lo && ms <= hi {
+        ms as i64
+    } else {
+        now_ms
     }
 }
 
@@ -188,6 +205,34 @@ mod tests {
         other.branch = "feature".into();
         let d = folder.fold(&other, 0).unwrap();
         assert_ne!(d.ext_id, c.ext_id);
+    }
+
+    #[test]
+    fn an_absurd_time_folds_at_now() {
+        let mut folder = Folder::default();
+        let now_ms = 1_756_890_000_000;
+        // Epoch *seconds* the size of epoch milliseconds: `ms_to_ts` would
+        // panic on it, and the endpoint holds a lock while folding.
+        let a = folder.fold(&hb(1.7e12, "a/models.py"), now_ms).unwrap();
+        assert_eq!(a.ts, ms_to_ts(now_ms));
+        assert_eq!(a.end_ts, Some(ms_to_ts(now_ms)));
+        assert_eq!(a.ext_id.as_deref(), Some("contoso@main#1756890000000"));
+        for absurd in [-1.7e12, f64::INFINITY, f64::NAN, f64::MAX] {
+            let mut folder = Folder::default();
+            let ev = folder.fold(&hb(absurd, "a/models.py"), now_ms).unwrap();
+            assert_eq!(ev.ts, ms_to_ts(now_ms), "time {absurd}");
+        }
+    }
+
+    #[test]
+    fn a_span_past_the_gap_is_evicted_not_kept() {
+        let mut folder = Folder::default();
+        folder.fold(&hb(1000.0, "a/models.py"), 0).unwrap();
+        assert_eq!(folder.spans.len(), 1);
+        let mut other = hb(1001.0 + 2.0 * GAP_SECS as f64, "b/views.py");
+        other.project = "other".into();
+        folder.fold(&other, 0).unwrap();
+        assert_eq!(folder.spans.len(), 1, "the stale span is dropped");
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! token for an access token every hour. Only the event id, title and
 //! start/end are stored; the scope is events-read-only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -149,7 +149,7 @@ impl GcalProvider {
                 ("showDeleted", "true".to_owned()),
             ],
         )?;
-        let (events, seen) = parse_events(&json, &self.seen);
+        let (events, seen) = parse_events(&json, &self.seen, (now - WINDOW, now + WINDOW));
         self.seen = seen;
         Ok(events)
     }
@@ -338,10 +338,17 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(b) => out.push(b),
-                    Err(_) => out.push(b'%'),
+            // Over bytes, not chars: `&s[i + 1..i + 3]` would panic on a
+            // `%` followed by a multi-byte character.
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
+                if let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+                {
+                    out.push(b);
                 }
                 i += 3;
             }
@@ -361,10 +368,14 @@ fn percent_decode(s: &str) -> String {
 /// events.list payload → meeting spans, plus the starts to remember for the
 /// next poll. All-day events (a `date`, no `dateTime`) and events the user
 /// declined are skipped; a `cancelled` event becomes a tombstone
-/// (`end_ts = ts`, zero length) so the stored row stops covering time.
+/// (`end_ts = ts`, zero length) so the stored row stops covering time. So
+/// does anything `known` from the last poll that this one no longer reports
+/// live while its start is still inside `window` — declined since, or gone
+/// from the calendar without a `cancelled` item.
 fn parse_events(
     json: &str,
     known: &HashMap<String, Timestamp>,
+    window: (Timestamp, Timestamp),
 ) -> (Vec<ActivityEvent>, HashMap<String, Timestamp>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return (Vec::new(), known.clone());
@@ -374,6 +385,7 @@ fn parse_events(
     };
     let mut out = Vec::new();
     let mut seen = HashMap::new();
+    let mut cancelled: HashSet<&str> = HashSet::new();
     for item in items {
         let Some(id) = item.get("id").and_then(|i| i.as_str()) else {
             continue;
@@ -385,6 +397,7 @@ fn parse_events(
                 .or_else(|| event_time(item.get("originalStartTime")))
                 .or_else(|| known.get(id).copied());
             if let Some(ts) = start {
+                cancelled.insert(id);
                 out.push(meeting(ts, ts, id, None));
             }
             continue;
@@ -408,6 +421,21 @@ fn parse_events(
                 .map(str::to_owned),
         ));
     }
+    // Sorted so the emitted order does not depend on the map's iteration.
+    let mut gone: Vec<(&String, &Timestamp)> = known
+        .iter()
+        .filter(|(id, start)| {
+            !seen.contains_key(*id)
+                && !cancelled.contains(id.as_str())
+                && **start >= window.0
+                && **start <= window.1
+        })
+        .collect();
+    gone.sort_unstable();
+    out.extend(
+        gone.into_iter()
+            .map(|(id, start)| meeting(*start, *start, id, None)),
+    );
     (out, seen)
 }
 
@@ -476,9 +504,14 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// Wide enough to hold every fixture event.
+    fn window() -> (Timestamp, Timestamp) {
+        (ts("2026-09-02T00:00:00Z"), ts("2026-09-04T00:00:00Z"))
+    }
+
     #[test]
     fn maps_events_and_skips_all_day_and_declined() {
-        let (got, seen) = parse_events(EVENTS, &HashMap::new());
+        let (got, seen) = parse_events(EVENTS, &HashMap::new(), window());
         let ids: Vec<&str> = got.iter().filter_map(|e| e.ext_id.as_deref()).collect();
         assert_eq!(ids, vec!["ev1", "ev2", "gone"], "{got:?}");
         assert_eq!(got[0].kind, ActivityKind::Meeting);
@@ -492,20 +525,62 @@ mod tests {
         assert_eq!(got[2].end_ts, Some(ts("2026-09-03T15:00:00Z")));
         assert_eq!(seen.len(), 2, "only live events are remembered: {seen:?}");
         assert_eq!(seen["ev1"], ts("2026-09-03T08:00:00Z"));
-        assert!(parse_events("not json", &HashMap::new()).0.is_empty());
-        assert!(parse_events("{}", &HashMap::new()).0.is_empty());
+        assert!(
+            parse_events("not json", &HashMap::new(), window())
+                .0
+                .is_empty()
+        );
+        assert!(parse_events("{}", &HashMap::new(), window()).0.is_empty());
     }
 
     #[test]
     fn cancelled_without_times_tombstones_the_remembered_start() {
         let known = HashMap::from([("never-stored".to_owned(), ts("2026-09-03T12:00:00Z"))]);
-        let (got, _) = parse_events(EVENTS, &known);
+        let (got, _) = parse_events(EVENTS, &known, window());
         let tomb = got
             .iter()
             .find(|e| e.ext_id.as_deref() == Some("never-stored"));
         let tomb = tomb.expect("the last poll's start makes it tombstonable");
         assert_eq!(tomb.ts, ts("2026-09-03T12:00:00Z"));
         assert_eq!(tomb.end_ts, Some(tomb.ts));
+    }
+
+    /// A meeting we already stored that this poll no longer reports live
+    /// keeps covering time until something zeroes it.
+    #[test]
+    fn declined_or_vanished_meetings_are_tombstoned() {
+        let known = HashMap::from([
+            // Still live in the payload: untouched.
+            ("ev1".to_owned(), ts("2026-09-03T08:00:00Z")),
+            // Declined since the last poll: the payload has it, we skip it.
+            ("nope".to_owned(), ts("2026-09-03T10:00:00Z")),
+            // Deleted without a `cancelled` item: absent from the payload.
+            ("vanished".to_owned(), ts("2026-09-03T13:00:00Z")),
+            // Absent because it aged out of the window: real history.
+            ("old".to_owned(), ts("2026-08-20T09:00:00Z")),
+        ]);
+        let (got, seen) = parse_events(EVENTS, &known, window());
+        let tomb = |id: &str| {
+            got.iter()
+                .find(|e| e.ext_id.as_deref() == Some(id))
+                .map(|e| (e.ts, e.end_ts))
+        };
+        assert_eq!(
+            tomb("nope"),
+            Some((ts("2026-09-03T10:00:00Z"), Some(ts("2026-09-03T10:00:00Z"))))
+        );
+        assert_eq!(
+            tomb("vanished"),
+            Some((ts("2026-09-03T13:00:00Z"), Some(ts("2026-09-03T13:00:00Z"))))
+        );
+        assert_eq!(tomb("old"), None, "outside the window is not a deletion");
+        assert_eq!(
+            tomb("ev1"),
+            Some((ts("2026-09-03T08:00:00Z"), Some(ts("2026-09-03T08:30:00Z")))),
+            "a live event keeps its span"
+        );
+        // Tombstoned ids are not remembered, so the next poll stops re-zeroing.
+        assert_eq!(seen.len(), 2, "{seen:?}");
     }
 
     /// Serve one HTTP request from a local socket; returns the URL and a
@@ -619,5 +694,17 @@ mod tests {
         assert_eq!(redirect_param(line, "state").as_deref(), Some("s7"));
         assert_eq!(redirect_param(line, "error"), None);
         assert_eq!(redirect_param("GET /favicon.ico HTTP/1.1", "code"), None);
+    }
+
+    /// A `%` in front of a multi-byte character is not a hex escape; slicing
+    /// the two bytes after it as `str` would panic mid-character.
+    #[test]
+    fn percent_decode_survives_a_stray_percent() {
+        assert_eq!(percent_decode("%\u{20ac}"), "%\u{20ac}");
+        assert_eq!(percent_decode("a%\u{20ac}b"), "a%\u{20ac}b");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%2"), "%2");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("a+b%2Fc"), "a b/c");
     }
 }

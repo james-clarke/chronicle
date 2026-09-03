@@ -72,9 +72,12 @@ pub struct Config {
     /// Poll the primary Google Calendar for `meeting` spans (needs
     /// `chronicle gcal-login`; off by default).
     pub google_calendar: bool,
-    /// Fold atuin shell history into `shell` spans per repo (cwd, argv[0],
-    /// exit and duration only; off by default).
+    /// Fold atuin shell history into `shell` spans per repo (cwd, argv[0]
+    /// and duration only; off by default).
     pub shell_history: bool,
+    /// Accept WakaTime heartbeats from editor plugins on the local endpoint
+    /// and fold them into `edit` spans. Off = the routes answer 403.
+    pub editor_heartbeats: bool,
     /// Full-match-anywhere regex extracting a ticket key from branch names,
     /// used to anchor derived tasks (`tasks.external_ref`).
     pub ticket_regex: String,
@@ -128,6 +131,7 @@ impl Default for Config {
             mic_capture: true,
             google_calendar: false,
             shell_history: false,
+            editor_heartbeats: true,
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
             task_stuck_days: 3,

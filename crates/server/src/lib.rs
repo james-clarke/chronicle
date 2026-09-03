@@ -39,7 +39,9 @@ struct AppState {
     buckets: Mutex<HashMap<String, Bucket>>,
     tx: Sender<CaptureEvent>,
     /// Key WakaTime plugins authenticate with (meta `wakapi_api_key`).
-    api_key: String,
+    /// None = `editor_heartbeats` is off in config: the routes exist but
+    /// refuse everything.
+    api_key: Option<String>,
     /// Open edit span per (project, branch) across heartbeats.
     edits: Mutex<Folder>,
 }
@@ -58,7 +60,7 @@ struct LastEvent {
 fn app_state(
     config: &Config,
     tx: Sender<CaptureEvent>,
-    api_key: String,
+    api_key: Option<String>,
 ) -> anyhow::Result<Arc<AppState>> {
     let mut cors = vec![regex::Regex::new(MOZ_EXT_RE).expect("static regex")];
     for pat in &config.cors_allow {
@@ -85,7 +87,11 @@ fn app_state(
 
 /// Bind and serve on a background thread. A bind failure (port taken)
 /// surfaces here so the daemon can log it and warn in the UI.
-pub fn spawn(config: &Config, tx: Sender<CaptureEvent>, api_key: String) -> anyhow::Result<()> {
+pub fn spawn(
+    config: &Config,
+    tx: Sender<CaptureEvent>,
+    api_key: Option<String>,
+) -> anyhow::Result<()> {
     let state = app_state(config, tx, api_key)?;
     let port = config.port;
     let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
@@ -354,7 +360,10 @@ async fn wakatime_heartbeats(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !authorized(&headers, &st.api_key) {
+    let Some(key) = st.api_key.as_deref() else {
+        return (StatusCode::FORBIDDEN, "editor heartbeats are off in config").into_response();
+    };
+    if !authorized(&headers, key) {
         return (StatusCode::UNAUTHORIZED, "bad api key").into_response();
     }
     let Some(heartbeats) = parse_heartbeats(&body) else {
@@ -362,7 +371,12 @@ async fn wakatime_heartbeats(
     };
     let now_ms = Timestamp::now().as_millisecond();
     let mut responses = Vec::with_capacity(heartbeats.len());
-    let mut folder = st.edits.lock().expect("heartbeat fold lock");
+    // A panic inside the fold must not wedge the endpoint for the rest of
+    // the daemon's life: the folder is plain in-memory state.
+    let mut folder = st
+        .edits
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for hb in &heartbeats {
         if let Some(event) = folder.fold(hb, now_ms)
             && st.tx.send(CaptureEvent::Activity(event)).is_err()
@@ -401,7 +415,13 @@ fn authorized(headers: &HeaderMap, key: &str) -> bool {
         return false;
     };
     let decoded = decoded.strip_suffix(':').unwrap_or(&decoded);
-    !key.is_empty() && decoded == key
+    !key.is_empty() && ct_eq(decoded.as_bytes(), key.as_bytes())
+}
+
+/// Length check then an XOR fold over every byte: a byte-at-a-time compare
+/// leaks the key's prefix through response timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Enough base64 to read one Basic credential (standard or url-safe
@@ -457,8 +477,14 @@ mod tests {
     const TEST_KEY: &str = "test-api-key";
 
     fn test_router() -> (Router, Receiver<CaptureEvent>) {
+        router_with_key(Some(TEST_KEY.to_owned()))
+    }
+
+    /// None = `editor_heartbeats` off, the state the daemon builds when the
+    /// config switch is off.
+    fn router_with_key(key: Option<String>) -> (Router, Receiver<CaptureEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let state = app_state(&Config::default(), tx, TEST_KEY.to_owned()).unwrap();
+        let state = app_state(&Config::default(), tx, key).unwrap();
         (router(state), rx)
     }
 
@@ -591,6 +617,12 @@ mod tests {
                "branch": "main", "language": "Python", "is_write": true})
     }
 
+    /// Whole epoch seconds near our own clock: the folder ignores a `time`
+    /// more than 30 days out and substitutes now.
+    fn now_secs() -> f64 {
+        (Timestamp::now().as_millisecond() / 1000) as f64
+    }
+
     fn activity_ext_id(ev: CaptureEvent) -> (String, i64) {
         let CaptureEvent::Activity(ev) = ev else {
             panic!("expected activity event, got {ev:?}")
@@ -608,9 +640,11 @@ mod tests {
     #[tokio::test]
     async fn heartbeats_bulk_folds_into_one_span_until_the_gap() {
         let (app, rx) = test_router();
+        let base = now_secs();
+        let base_ms = base as i64 * 1000;
         let bulk = json!([
-            waka_hb(1000.0, "/dev/contoso/a.py"),
-            waka_hb(1060.0, "/dev/contoso/b.py")
+            waka_hb(base, "/dev/contoso/a.py"),
+            waka_hb(base + 60.0, "/dev/contoso/b.py")
         ]);
         let res = app
             .clone()
@@ -629,11 +663,12 @@ mod tests {
         let (first, first_end) = activity_ext_id(rx.try_recv().expect("first heartbeat stores"));
         let (second, second_end) = activity_ext_id(rx.try_recv().expect("second heartbeat stores"));
         assert_eq!(
-            first, "contoso@main#1000000",
+            first,
+            format!("contoso@main#{base_ms}"),
             "span start is the first heartbeat"
         );
         assert_eq!(second, first, "same span refreshes end_ts via Upsert");
-        assert_eq!((first_end, second_end), (1_000_000, 1_060_000));
+        assert_eq!((first_end, second_end), (base_ms, base_ms + 60_000));
 
         // Single-heartbeat route, past the gap, key with the empty password
         // separator some clients encode: a new span.
@@ -642,7 +677,7 @@ mod tests {
                 "/api/heartbeat",
                 "Basic dGVzdC1hcGkta2V5Og==",
                 waka_hb(
-                    1060.0 + chronicle_core::heartbeats::GAP_SECS as f64 + 1.0,
+                    base + 60.0 + chronicle_core::heartbeats::GAP_SECS as f64 + 1.0,
                     "/dev/contoso/a.py",
                 ),
             ))
@@ -675,6 +710,23 @@ mod tests {
             rx.try_recv().is_err(),
             "a rejected heartbeat stores nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn heartbeats_are_forbidden_when_the_switch_is_off() {
+        let (app, rx) = router_with_key(None);
+        let res = app
+            .oneshot(waka_req(
+                "/api/v1/users/current/heartbeats.bulk",
+                "Basic dGVzdC1hcGkta2V5",
+                json!([waka_hb(1000.0, "/dev/contoso/a.py")]),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"editor heartbeats are off in config");
+        assert!(rx.try_recv().is_err(), "nothing folds with the switch off");
     }
 
     #[tokio::test]

@@ -36,17 +36,19 @@ const MAX_FETCH_CHARS: usize = 6000;
 
 /// Run every allowlisted context call from the TOML config at `config_path`
 /// and format the results for the digest's `## Workspace context` section.
-/// None = nothing to inject: missing/empty config, or every call failed.
-pub fn gather_context(config_path: &Path) -> Option<String> {
+/// Returns how many calls actually reached a server — what leaves the
+/// machine, which is what Settings counts — and the text to inject. None =
+/// nothing to inject: missing/empty config, or every call failed.
+pub fn gather_context(config_path: &Path) -> (usize, Option<String>) {
     let cfg = match McpConfig::load(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!("mcp config {}: {e}", config_path.display());
-            return None;
+            return (0, None);
         }
     };
     if cfg.context_calls.is_empty() {
-        return None;
+        return (0, None);
     }
     let now = jiff::Zoned::now();
     let calls: Vec<ContextCall> = cfg
@@ -61,18 +63,19 @@ pub fn gather_context(config_path: &Path) -> Option<String> {
 }
 
 /// Fetch external context for one task ref (m16): run every `fetch_calls`
-/// entry with `{ref}` in its args replaced by `ext_ref`. None = feature off
-/// (no fetch_calls), bad config, or every call failed.
-pub fn fetch_context(config_path: &Path, ext_ref: &str) -> Option<String> {
+/// entry with `{ref}` in its args replaced by `ext_ref`. Counted like
+/// [`gather_context`]. None = feature off (no fetch_calls), bad config, or
+/// every call failed.
+pub fn fetch_context(config_path: &Path, ext_ref: &str) -> (usize, Option<String>) {
     let cfg = match McpConfig::load(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!("mcp config {}: {e}", config_path.display());
-            return None;
+            return (0, None);
         }
     };
     if cfg.fetch_calls.is_empty() {
-        return None;
+        return (0, None);
     }
     let now = jiff::Zoned::now();
     let calls: Vec<ContextCall> = cfg
@@ -150,10 +153,29 @@ pub fn run_action(
 
 /// Replace `{key}` and `{body}` in an action template. Both placeholders sit
 /// inside JSON string literals and both carry user text (a whole journal
-/// entry for `{body}`), so each is JSON-escaped first.
+/// entry for `{body}`), so each is JSON-escaped first. One pass, so a
+/// substituted value that itself reads `{body}` stays literal text instead
+/// of splicing the entry into the ticket field.
 fn substitute_action(raw: &str, key: &str, body: &str) -> String {
-    raw.replace("{key}", &json_escape(key))
-        .replace("{body}", &json_escape(body))
+    let (key, body) = (json_escape(key), json_escape(body));
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        let at = &rest[i..];
+        if let Some(tail) = at.strip_prefix("{key}") {
+            out.push_str(&key);
+            rest = tail;
+        } else if let Some(tail) = at.strip_prefix("{body}") {
+            out.push_str(&body);
+            rest = tail;
+        } else {
+            out.push('{');
+            rest = &at[1..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The text of a JSON string literal, without its quotes.
@@ -187,7 +209,11 @@ fn substitute_ref(raw: &str, ext_ref: &str) -> String {
     raw.replace("{ref}", escaped.trim_matches('"'))
 }
 
-fn run_blocking(cfg: &McpConfig, calls: &[ContextCall], max_chars: usize) -> Option<String> {
+fn run_blocking(
+    cfg: &McpConfig,
+    calls: &[ContextCall],
+    max_chars: usize,
+) -> (usize, Option<String>) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -195,18 +221,21 @@ fn run_blocking(cfg: &McpConfig, calls: &[ContextCall], max_chars: usize) -> Opt
         Ok(rt) => rt,
         Err(e) => {
             tracing::warn!("mcp runtime: {e}");
-            return None;
+            return (0, None);
         }
     };
-    let out = rt.block_on(gather(cfg, calls));
+    let (ran, out) = rt.block_on(gather(cfg, calls));
     let out = out.trim();
     if out.is_empty() {
-        return None;
+        return (ran, None);
     }
-    Some(truncate_chars(out, max_chars))
+    (ran, Some(truncate_chars(out, max_chars)))
 }
 
-async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
+/// Formatted results, and the number of calls sent to a live server (an
+/// empty or failed reply still left the machine).
+async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> (usize, String) {
+    let mut ran = 0usize;
     let mut out = String::new();
     for server in &cfg.servers {
         let calls: Vec<&ContextCall> = all_calls
@@ -236,6 +265,7 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
             }
         };
         for call in calls {
+            ran += 1;
             match tokio::time::timeout(CALL_TIMEOUT, run_call(&client, call)).await {
                 Ok(Ok(text)) => {
                     out.push_str(&format!("### {}.{}\n{}\n", call.server, call.tool, text));
@@ -252,7 +282,7 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
             tracing::debug!("mcp server {}: close: {e}", server.name);
         }
     }
-    out
+    (ran, out)
 }
 
 /// What a live server said about itself — the settings panel's "test"
@@ -429,6 +459,17 @@ mod action_tests {
         assert_eq!(args["comment"], "ends with \"");
         // No placeholders, no change.
         assert_eq!(substitute_action(r#"{"a":"b"}"#, "K", "B"), r#"{"a":"b"}"#);
+        // One pass: a key spelling `{body}` is a ticket named `{body}`, not
+        // the journal entry spliced into issue_key.
+        let out = substitute_action(JIRA_ARGS, "PB-1{body}", "secret entry");
+        let args: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(args["issue_key"], "PB-1{body}");
+        assert_eq!(args["comment"], "secret entry");
+        // A brace that starts no placeholder survives verbatim.
+        assert_eq!(
+            substitute_action(r#"{"a":"{x} {key}"}"#, "K", "B"),
+            r#"{"a":"{x} K"}"#
+        );
     }
 
     /// A config whose only calls are actions: the read paths must find
@@ -459,8 +500,8 @@ mod action_tests {
         };
         let path = dir.join("mcp.toml");
         cfg.save(&path).unwrap();
-        assert!(super::gather_context(&path).is_none());
-        assert!(super::fetch_context(&path, "ACME-1").is_none());
+        assert_eq!(super::gather_context(&path), (0, None));
+        assert_eq!(super::fetch_context(&path, "ACME-1"), (0, None));
         assert!(!marker.exists(), "a read path spawned the action's server");
 
         // An action the file does not list is refused before any spawn.
