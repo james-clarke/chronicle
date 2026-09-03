@@ -116,23 +116,20 @@ pub fn run(
                 .any(|c| c.old_label.eq_ignore_ascii_case(&t.label) && c.old_project == t.project)
         };
         let mut repos = run_repos.get(i).cloned().unwrap_or_default();
+        // Spans feed every rule: cwd repos disambiguate the branch anchor
+        // too, so they are read before it.
+        let spans = storage::spans_in_range(&tx, run.start_ts, run.end_ts)?;
+        for (repo, _) in crate::evidence::cwd_repos(&spans, run.start_ts, run.end_ts) {
+            if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+                repos.push(repo);
+            }
+        }
         let mut hit = None;
         if let Some(key) = anchors.get(&(i as i64))
             && let Some(t) = storage::open_task_by_ref(&tx, key, &repos)?
             && allowed(&t)
         {
             hit = Some((t.id, format!("branch {key}")));
-        }
-        // Titles feed the next two rules; a branch hit never needs them.
-        let spans = if hit.is_none() {
-            storage::spans_in_range(&tx, run.start_ts, run.end_ts)?
-        } else {
-            Vec::new()
-        };
-        for (repo, _) in crate::evidence::cwd_repos(&spans, run.start_ts, run.end_ts) {
-            if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
-                repos.push(repo);
-            }
         }
         // A ticket key on screen (Jira page title, PR URL) for most of the
         // run names the task as firmly as a branch does.
