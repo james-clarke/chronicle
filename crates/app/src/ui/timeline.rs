@@ -950,55 +950,47 @@ fn card_frame(
             }
             // Title row on the shared list_row grid: duration in the number
             // column, menu pinned right, so every card's numbers align.
-            theme::ListRow::new(&group.label)
+            // Meta line: the time range leads (same x on every card, so
+            // the digits line up), then the top evidence line.
+            let mut meta = String::new();
+            if let (Some(first), Some(last)) = (group.sessions.first(), group.sessions.last()) {
+                meta = format!(
+                    "{}\u{2013}{}",
+                    first.start.strftime("%H:%M"),
+                    last.end.strftime("%H:%M")
+                );
+            }
+            if let Some(e) = group.evidence.first() {
+                let title = theme::display_title(&e.top_title);
+                if !meta.is_empty() {
+                    meta.push_str(" \u{b7} ");
+                }
+                meta.push_str(&e.app);
+                if !title.is_empty() {
+                    meta.push_str(": ");
+                    meta.push_str(title);
+                }
+            }
+            let mut row = theme::ListRow::new(&group.label)
                 .emphasis()
-                .lines(2)
                 .dot(color)
                 .num(fmt_dur(group.total_ms))
-                .show(ui, content_w - 20.0, |ui| {
-                    card_menu(ui, group, edit, merge_pick, pending);
-                    confidence_dot(ui, group);
-                });
-            ui.horizontal(|ui| {
-                // The time range leads in a fixed column so the monospace
-                // digits line up card to card; chips follow, 4pt apart.
-                if let (Some(first), Some(last)) = (group.sessions.first(), group.sessions.last()) {
-                    time_col(
-                        ui,
-                        RANGE_COL,
-                        &format!(
-                            "{}\u{2013}{}",
-                            first.start.strftime("%H:%M"),
-                            last.end.strftime("%H:%M")
-                        ),
-                    );
-                }
-                ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
-                if let Some(project) = &group.project {
-                    theme::badge(ui, project, color);
-                }
-                if group.declared {
-                    theme::badge(ui, "declared", theme::palette::TEXT_DIM);
-                }
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if let Some(e) = group.evidence.first() {
-                    let title = theme::display_title(&e.top_title);
-                    let text = if title.is_empty() {
-                        e.app.clone()
-                    } else {
-                        format!("{} \u{b7} {title}", e.app)
-                    };
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(text)
-                                .text_style(egui::TextStyle::Small)
-                                .color(theme::palette::TEXT_DIM),
-                        )
-                        .truncate(),
-                    );
-                }
+                .meta(None, meta);
+            if let Some(project) = &group.project {
+                row = row.chip(project.as_str(), color);
+            }
+            if group.declared {
+                row = row.chip("declared", theme::palette::TEXT_DIM);
+            }
+            row.show(ui, content_w - 20.0, |ui| {
+                card_menu(ui, group, edit, merge_pick, pending);
+                confidence_dot(ui, group);
             });
-            theme::ai_summary_line(ui, group.ai_summary.as_deref(), false);
+            // Summary at the title's x, so the card keeps one left edge.
+            ui.horizontal(|ui| {
+                ui.add_space(theme::STATUS_COL + ui.spacing().item_spacing.x);
+                theme::summary_line(ui, group.ai_summary.as_deref(), false);
+            });
         });
 }
 
@@ -1187,6 +1179,8 @@ fn detail_ui(
     // Rhythm: title, 4, chips, 8, summary + duration line, 16, sections.
     ui.add_space(theme::SPACE_XS);
     ui.horizontal(|ui| {
+        // Chips start at the title's x, past the dot.
+        ui.add_space(8.0 + ui.spacing().item_spacing.x);
         ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
         if let Some(project) = &group.project {
             theme::badge(ui, project, color);
@@ -1202,7 +1196,7 @@ fn detail_ui(
         }
     });
     ui.add_space(theme::SPACE_SM);
-    theme::ai_summary_line(ui, group.ai_summary.as_deref(), true);
+    theme::summary_line(ui, group.ai_summary.as_deref(), true);
     if group.ai_pending {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(12.0));

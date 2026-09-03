@@ -183,19 +183,30 @@ pub(super) fn empty_state(ui: &mut egui::Ui, headline: &str, hint: &str) {
     });
 }
 
-/// One dim italic line for an AI-written task summary; renders nothing while
-/// no summary exists. `wrap` for the roomy detail pane, truncate on cards.
-pub(super) fn ai_summary_line(ui: &mut egui::Ui, text: Option<&str>, wrap: bool) {
+/// An AI-written task summary at Body size in `TEXT_DIM` (m29: no italics,
+/// no Small); renders nothing while no summary exists. `wrap` for the roomy
+/// detail pane; cards get two lines, then `…` with the whole text on hover.
+pub(super) fn summary_line(ui: &mut egui::Ui, text: Option<&str>, wrap: bool) {
     let Some(text) = text else { return };
-    let rich = egui::RichText::new(text)
-        .text_style(egui::TextStyle::Small)
-        .italics()
-        .color(palette::TEXT_DIM);
-    let label = egui::Label::new(rich);
     if wrap {
-        ui.add(label.wrap());
-    } else {
-        truncated_label(ui, label.truncate(), text);
+        ui.add(egui::Label::new(egui::RichText::new(text).color(palette::TEXT_DIM)).wrap());
+        return;
+    }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::simple(
+        text.to_owned(),
+        font,
+        palette::TEXT_DIM,
+        ui.available_width(),
+    );
+    job.wrap.max_rows = 2;
+    job.wrap.break_anywhere = false;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let elided = galley.elided;
+    let resp = ui.add(egui::Label::new(galley).selectable(false));
+    if elided {
+        resp.on_hover_text(text.to_owned());
     }
 }
 
@@ -404,6 +415,37 @@ pub(super) fn series_color_for_key(key: &str) -> Color32 {
 /// titles (and the digest) keep it.
 pub(super) fn display_title(title: &str) -> &str {
     chronicle_core::evidence::strip_glyphs(title)
+}
+
+/// A raw window title as the row title of an unclaimed feed block (m29):
+/// a shell prompt title `user@host:~/dev/contoso` becomes `contoso · app`
+/// (the last path segment and the app), anything else stays as is.
+pub(super) fn humanize_title<'a>(title: &'a str, app: &str) -> std::borrow::Cow<'a, str> {
+    let title = display_title(title);
+    let prompt = title
+        .split_once('@')
+        .and_then(|(user, rest)| rest.split_once(':').map(|(host, path)| (user, host, path)))
+        .filter(|(user, host, path)| {
+            !user.is_empty()
+                && !host.is_empty()
+                && !user.contains(' ')
+                && !host.contains(' ')
+                && !path.contains(' ')
+        });
+    let Some((_, _, path)) = prompt else {
+        return std::borrow::Cow::Borrowed(title);
+    };
+    let dir = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(path);
+    if app.is_empty() {
+        std::borrow::Cow::Owned(dir.to_owned())
+    } else {
+        std::borrow::Cow::Owned(format!("{dir} \u{b7} {app}"))
+    }
 }
 
 /// Cut `text` to whole sentences fitting `max_chars` (at least one). Returns
@@ -741,20 +783,40 @@ pub(super) fn num_cell(ui: &mut egui::Ui, width: f32, text: egui::RichText) {
     );
 }
 
-/// One full-width list row: identity dot, a title that fills and truncates
-/// (hover shows it whole), chips, the fixed [`NUM_COL`] number column, and
-/// the trailing control pinned right. Rows built from the same `width` line
-/// up column for column — Grid can't, it sizes columns to content.
+/// One full-width list row on the m29 grammar, left to right: an optional
+/// mono time column ([`TIME_COL`]), the always-reserved status slot
+/// ([`STATUS_COL`]: dot, hollow ring or bar), the title (wraps to two
+/// lines, then elides with the whole text on hover), the fixed [`NUM_COL`]
+/// number column and the trailing control pinned right. Under the title,
+/// indented to the title's x: a meta line (tinted state word, then dim
+/// text) and a chips line. Rows built from the same `width` line up column
+/// for column — Grid can't, it sizes columns to content.
 pub(super) struct ListRow<'a> {
     title: &'a str,
     emphasis: bool,
-    dot: Option<Color32>,
+    time: Option<String>,
+    status: Status,
     chips: Vec<(String, Color32)>,
     num: Option<String>,
     lines: usize,
-    bar: Option<Color32>,
-    subtitle: Option<String>,
+    /// Meta line: tinted state word (optional) then the dim text.
+    meta: Option<(Option<(String, Color32)>, String)>,
+    /// Extra hover text under the meta line's own text.
+    hover: Option<String>,
     padded: bool,
+}
+
+/// What the status slot shows.
+#[derive(Clone, Copy)]
+enum Status {
+    /// Reserved but blank (a row that is neither a task nor a block).
+    Empty,
+    /// 8pt identity dot.
+    Dot(Color32),
+    /// 8pt hollow ring: a block no task claims yet.
+    Ring,
+    /// 3pt bar down the full row height: the primary rows (Working on).
+    Bar(Color32),
 }
 
 impl<'a> ListRow<'a> {
@@ -762,29 +824,67 @@ impl<'a> ListRow<'a> {
         Self {
             title,
             emphasis: false,
-            dot: None,
+            time: None,
+            status: Status::Empty,
             chips: Vec::new(),
             num: None,
-            lines: 1,
-            bar: None,
-            subtitle: None,
+            lines: 2,
+            meta: None,
+            hover: None,
             padded: false,
         }
     }
 
-    /// 3pt identity bar down the row's left edge (full row height,
-    /// padding included) instead of the dot.
-    pub(super) fn bar(mut self, color: Color32) -> Self {
-        self.bar = Some(color);
+    /// Mono clock time ("13:54") leading the row in the [`TIME_COL`] column.
+    pub(super) fn time(mut self, text: impl Into<String>) -> Self {
+        self.time = Some(text.into());
         self
     }
 
-    /// Small dim second line under the title, truncated with the whole
-    /// text on hover. Chips and the trailing control stay on the title line.
+    /// 3pt identity bar in the status slot, spanning the row's full height
+    /// (padding included).
+    pub(super) fn bar(mut self, color: Color32) -> Self {
+        self.status = Status::Bar(color);
+        self
+    }
+
+    /// 8pt identity dot in the status slot.
+    pub(super) fn dot(mut self, color: Color32) -> Self {
+        self.status = Status::Dot(color);
+        self
+    }
+
+    /// Hollow ring in the status slot: nothing claims this row yet.
+    pub(super) fn ring(mut self) -> Self {
+        self.status = Status::Ring;
+        self
+    }
+
+    /// Small dim line under the title, truncated with the whole text on
+    /// hover.
     pub(super) fn subtitle(mut self, text: impl Into<String>) -> Self {
         let text = text.into();
         if !text.is_empty() {
-            self.subtitle = Some(text);
+            self.meta = Some((None, text));
+        }
+        self
+    }
+
+    /// Meta line under the title: a tinted state word, then `text` in dim.
+    pub(super) fn meta(mut self, state: Option<(&str, Color32)>, text: impl Into<String>) -> Self {
+        let text = text.into();
+        let state = state.map(|(s, c)| (s.to_owned(), c));
+        if state.is_some() || !text.is_empty() {
+            self.meta = Some((state, text));
+        }
+        self
+    }
+
+    /// Extra lines shown on hover over the meta line, after its full text.
+    pub(super) fn hover(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        if !text.is_empty() {
+            self.hover = Some(text);
         }
         self
     }
@@ -795,9 +895,8 @@ impl<'a> ListRow<'a> {
         self
     }
 
-    /// Let the title wrap onto up to `n` lines before it truncates (m25:
-    /// chips and the number column used to leave a 30-character title).
-    /// The row grows by whole text lines only when the title needs them.
+    /// Let the title wrap onto up to `n` lines before it truncates (default
+    /// 2). The row grows by whole text lines only when the title needs them.
     pub(super) fn lines(mut self, n: usize) -> Self {
         self.lines = n.max(1);
         self
@@ -809,13 +908,8 @@ impl<'a> ListRow<'a> {
         self
     }
 
-    /// 8pt identity dot before the title.
-    pub(super) fn dot(mut self, color: Color32) -> Self {
-        self.dot = Some(color);
-        self
-    }
-
-    /// Tinted chip after the title; chips keep the order they are added in.
+    /// Tinted chip on the chips line under the title; chips keep the order
+    /// they are added in.
     pub(super) fn chip(mut self, text: impl Into<String>, color: Color32) -> Self {
         self.chips.push((text.into(), color));
         self
@@ -836,6 +930,7 @@ impl<'a> ListRow<'a> {
         trailing: impl FnOnce(&mut egui::Ui),
     ) -> egui::Response {
         let mut h = ui.spacing().interact_size.y;
+        let gap = ui.spacing().item_spacing.x;
         let font = if self.emphasis {
             egui::FontId::new(
                 egui::TextStyle::Body.resolve(ui.style()).size,
@@ -844,39 +939,19 @@ impl<'a> ListRow<'a> {
         } else {
             egui::TextStyle::Body.resolve(ui.style())
         };
-        // Multi-line titles: the width left for the title is estimated up
-        // front (chip and number widths from their text), and the galley is
-        // laid out once at that width so the row can be allocated at its
-        // real height — a taller child inside a 24pt row would overlap the
-        // row above it.
+        // Everything left of the title: time column, status slot, gaps.
+        let indent = self.time.as_ref().map_or(0.0, |_| TIME_COL + gap) + STATUS_COL + gap;
+        // Multi-line titles: the galley is laid out once up front at the
+        // width the trailing controls and number column leave, so the row
+        // can be allocated at its real height — a taller child inside a
+        // 24pt row would overlap the row above it.
         let title_galley = (self.lines > 1).then(|| {
             // 72 covers the trailing controls (a `…` menu plus a dot or a
             // ghost button); the real leftover width re-lays the galley
             // below when it turns out narrower.
-            let mut reserved = 72.0 + self.num.as_ref().map_or(0.0, |_| NUM_COL + 6.0);
-            if self.dot.is_some() {
-                reserved += 14.0;
-            }
-            if self.bar.is_some() {
-                reserved += BAR_INSET;
-            }
-            let small = egui::TextStyle::Small.resolve(ui.style());
-            for (text, _) in &self.chips {
-                let chip =
-                    ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), small.clone(), palette::TEXT));
-                reserved += chip.size().x + 12.0 + 6.0;
-            }
+            let reserved = indent + 72.0 + self.num.as_ref().map_or(0.0, |_| NUM_COL + 6.0);
             let title_w = (width - reserved).max(60.0);
-            let mut job = egui::text::LayoutJob::simple(
-                self.title.to_owned(),
-                font.clone(),
-                palette::TEXT,
-                title_w,
-            );
-            job.wrap.max_rows = self.lines;
-            job.wrap.break_anywhere = false;
-            job.wrap.overflow_character = Some('\u{2026}');
-            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            let galley = title_job(self.title, font.clone(), title_w, self.lines, ui);
             let line_h = ui.text_style_height(&egui::TextStyle::Body);
             if galley.rows.len() > 1 {
                 h += line_h * (galley.rows.len() as f32 - 1.0) + 2.0;
@@ -884,41 +959,74 @@ impl<'a> ListRow<'a> {
             (galley, title_w)
         });
         let title_h = h;
-        let sub_h = ui.text_style_height(&egui::TextStyle::Small);
-        if self.subtitle.is_some() {
-            h += sub_h + SUB_GAP;
+        let small_h = ui.text_style_height(&egui::TextStyle::Small);
+        if self.meta.is_some() {
+            h += small_h + SUB_GAP;
+        }
+        if !self.chips.is_empty() {
+            h += small_h + 2.0 + SUB_GAP;
         }
         let pad = if self.padded { row_pad() } else { 0.0 };
         // The row is allocated at its full height (padding included) so the
         // bar spans it; content lays out in the inset rect.
         let (rect, _) =
             ui.allocate_exact_size(egui::vec2(width, h + 2.0 * pad), egui::Sense::hover());
-        let mut inner = rect.shrink2(egui::vec2(0.0, pad));
-        if let Some(color) = self.bar {
-            let bar = egui::Rect::from_min_size(rect.min, egui::vec2(BAR_W, rect.height()));
-            ui.painter()
-                .rect_filled(bar, egui::CornerRadius::same(1), color);
-            inner.min.x += BAR_INSET;
-        }
-        let subtitle = self.subtitle;
-        let dot = self.dot;
-        // Title line (dot, title, chips, number, trailing) at `title_h`; the
-        // subtitle underneath spans the whole row so it never fights the
-        // chips for width.
+        let inner = rect.shrink2(egui::vec2(0.0, pad));
+        let Self {
+            title,
+            time,
+            status,
+            chips,
+            num: num_text,
+            meta,
+            hover,
+            emphasis,
+            ..
+        } = self;
+        // Title line (time, status, title, number, trailing) at `title_h`;
+        // the meta and chips lines underneath start at the title's x.
         let title_line = |ui: &mut egui::Ui, trailing: Box<dyn FnOnce(&mut egui::Ui) + '_>| {
             ui.set_width(inner.width());
             ui.style_mut().interaction.selectable_labels = false;
-            if let Some(color) = dot {
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 4.0, color);
+            if let Some(t) = &time {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(TIME_COL, ui.spacing().interact_size.y),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_width(TIME_COL);
+                        ui.add(egui::Label::new(num(t.as_str())).selectable(false));
+                    },
+                );
+            }
+            let (slot, _) = ui.allocate_exact_size(
+                egui::vec2(STATUS_COL, ui.spacing().interact_size.y),
+                egui::Sense::hover(),
+            );
+            match status {
+                Status::Empty => {}
+                Status::Dot(color) => {
+                    ui.painter().circle_filled(slot.center(), 4.0, color);
+                }
+                Status::Ring => {
+                    ui.painter().circle_stroke(
+                        slot.center(),
+                        3.5,
+                        egui::Stroke::new(1.0, palette::TEXT_DIM),
+                    );
+                }
+                Status::Bar(color) => {
+                    let bar = egui::Rect::from_min_size(
+                        egui::pos2(slot.min.x, rect.min.y),
+                        egui::vec2(BAR_W, rect.height()),
+                    );
+                    ui.painter()
+                        .rect_filled(bar, egui::CornerRadius::same(1), color);
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 trailing(ui);
-                if let Some(n) = &self.num {
+                if let Some(n) = &num_text {
                     num_cell(ui, NUM_COL, num(n.as_str()));
-                }
-                for (text, color) in self.chips.iter().rev() {
-                    badge(ui, text, *color);
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     match title_galley {
@@ -929,31 +1037,28 @@ impl<'a> ListRow<'a> {
                             // width so the title truncates instead of
                             // running under the trailing controls.
                             let galley = if actual_w + 0.5 < title_w {
-                                let mut job = egui::text::LayoutJob::simple(
-                                    self.title.to_owned(),
+                                title_job(
+                                    title,
                                     font.clone(),
-                                    palette::TEXT,
                                     actual_w.max(20.0),
-                                );
-                                job.wrap.max_rows = galley.rows.len().max(1);
-                                job.wrap.break_anywhere = false;
-                                job.wrap.overflow_character = Some('\u{2026}');
-                                ui.fonts_mut(|f| f.layout_job(job))
+                                    galley.rows.len().max(1),
+                                    ui,
+                                )
                             } else {
                                 galley
                             };
                             let elided = galley.elided;
                             let resp = ui.add(egui::Label::new(galley).selectable(false));
                             if elided {
-                                resp.on_hover_text(self.title.to_owned());
+                                resp.on_hover_text(title.to_owned());
                             }
                         }
                         None => {
-                            let mut text = egui::RichText::new(self.title).color(palette::TEXT);
-                            if self.emphasis {
+                            let mut text = egui::RichText::new(title).color(palette::TEXT);
+                            if emphasis {
                                 text = text.family(egui::FontFamily::Name(MEDIUM.into()));
                             }
-                            truncated_label(ui, egui::Label::new(text).truncate(), self.title);
+                            truncated_label(ui, egui::Label::new(text).truncate(), title);
                         }
                     }
                 });
@@ -970,17 +1075,48 @@ impl<'a> ListRow<'a> {
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| title_line(ui, Box::new(trailing)),
                 );
-                if let Some(sub) = &subtitle {
-                    // Under the title, past the dot when there is one.
+                if let Some((state, text)) = &meta {
                     ui.horizontal(|ui| {
-                        if dot.is_some() {
-                            ui.add_space(14.0);
-                        }
+                        ui.add_space(indent);
                         ui.style_mut().interaction.selectable_labels = false;
-                        let text = egui::RichText::new(sub.as_str())
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
+                        if let Some((word, color)) = state {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(word.as_str())
+                                        .text_style(egui::TextStyle::Small)
+                                        .family(egui::FontFamily::Name(MEDIUM.into()))
+                                        .color(*color),
+                                )
+                                .selectable(false),
+                            );
+                        }
+                        let rich = egui::RichText::new(text.as_str())
                             .text_style(egui::TextStyle::Small)
                             .color(palette::TEXT_DIM);
-                        truncated_label(ui, egui::Label::new(text).truncate(), sub);
+                        let full = match &hover {
+                            Some(more) => format!("{text}\n{more}"),
+                            None => text.clone(),
+                        };
+                        let label = egui::Label::new(rich)
+                            .truncate()
+                            .show_tooltip_when_elided(false);
+                        let resp = ui.add(label);
+                        let elided = resp
+                            .intrinsic_size()
+                            .is_some_and(|s| s.x > resp.rect.width() + 0.5);
+                        if elided || hover.is_some() {
+                            resp.on_hover_text(full);
+                        }
+                    });
+                }
+                if !chips.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(indent);
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
+                        for (text, color) in &chips {
+                            badge(ui, text, *color);
+                        }
                     });
                 }
             },
@@ -989,12 +1125,33 @@ impl<'a> ListRow<'a> {
     }
 }
 
-/// Gap between a row's title line and its subtitle.
+/// A title galley wrapped to `max_rows` lines of `width`, eliding with `…`.
+fn title_job(
+    title: &str,
+    font: egui::FontId,
+    width: f32,
+    max_rows: usize,
+    ui: &egui::Ui,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(title.to_owned(), font, palette::TEXT, width);
+    job.wrap.max_rows = max_rows;
+    job.wrap.break_anywhere = false;
+    job.wrap.overflow_character = Some('\u{2026}');
+    ui.fonts_mut(|f| f.layout_job(job))
+}
+
+/// Gap between a row's title line and the lines under it.
 const SUB_GAP: f32 = 2.0;
 
-/// Identity bar width and the gap it plus its margin take from the title.
+/// Mono clock-time column leading a row ("13:54").
+pub(super) const TIME_COL: f32 = 44.0;
+
+/// The status slot every row reserves (dot, ring or bar), so titles share
+/// one x whether or not a row has an identity mark.
+pub(super) const STATUS_COL: f32 = 12.0;
+
+/// Identity bar width inside the status slot.
 const BAR_W: f32 = 3.0;
-const BAR_INSET: f32 = BAR_W + 8.0;
 
 /// Card title row: Heading/TEXT title flush with the card body, an optional
 /// disclosure caret (the whole row toggles `open`; the caret brightens on
@@ -1115,6 +1272,25 @@ mod tests {
         assert_eq!(confidence_band(0.55), Band::Medium);
         assert_eq!(confidence_band(0.54), Band::Low);
         assert_eq!(confidence_band(0.0), Band::Low);
+    }
+
+    #[test]
+    fn humanize_shell_prompt_titles() {
+        assert_eq!(
+            humanize_title("sam@workstation:~/dev/contoso", "Terminator"),
+            "contoso \u{b7} Terminator"
+        );
+        assert_eq!(humanize_title("sam@host:~", ""), "~");
+        assert_eq!(humanize_title("sam@host:/", "T"), "/ \u{b7} T");
+        assert_eq!(
+            humanize_title("m27-chunks-2-7-execution", "T"),
+            "m27-chunks-2-7-execution"
+        );
+        assert_eq!(
+            humanize_title("Re: meeting @ 10: notes", "T"),
+            "Re: meeting @ 10: notes"
+        );
+        assert_eq!(humanize_title("\u{2733} sam@host:~/x", "T"), "x \u{b7} T");
     }
 
     #[test]

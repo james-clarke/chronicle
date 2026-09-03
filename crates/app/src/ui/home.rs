@@ -2,6 +2,8 @@
 //! open and recently closed tasks, unassigned activity (and the raw-spans
 //! debug list).
 
+use std::borrow::Cow;
+
 use eframe::egui;
 
 use super::timeline::{matches_filter, merge_item, merge_picker};
@@ -413,7 +415,6 @@ impl TimelineApp {
                         let color = theme::task_color(t.task_id, t.project.as_deref());
                         task_row(t, color, true)
                             .emphasis()
-                            .lines(2)
                             .padded()
                             .subtitle(working_subtitle(t))
                             .show(ui, content_w, |ui| {
@@ -739,11 +740,13 @@ fn proposal_card(
     ui.add_space(theme::SPACE_XS);
 }
 
-/// One feed block: a task row (identity dot, label, app chip, a
-/// "provisional" chip for pre-pass rows) or a run row (top title, app chip,
-/// state chip), the focus time, and a menu of what the user can do with it;
-/// then a Small line with the block's span and the one-line reason it sits
-/// where it does.
+/// One feed block on the row grammar: block start in the time column, a
+/// task dot (or a hollow ring while nothing claims it), the task label (or
+/// the humanised top window title), the focus time, and a menu of what the
+/// user can do with it; under the title the meta line: a tinted state word
+/// (`to confirm` / `kept` / `live` / `unsorted` / `new` / `moved out`) and the
+/// one-line reason it sits where it does, the span and pipeline detail on
+/// hover.
 #[allow(clippy::too_many_arguments)]
 fn feed_row(
     ui: &mut egui::Ui,
@@ -767,12 +770,21 @@ fn feed_row(
         })
         .unwrap_or("");
     let top_title = theme::display_title(top_title);
-    // Human words on the row; the pipeline's own vocabulary (source,
-    // confidence, rule) goes in `detail`, the hover on the row's sub line.
-    let (title, reason, detail): (&str, String, String) = match &block.claim {
+    let fmt = |ms: i64| {
+        chronicle_core::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .strftime("%H:%M")
+            .to_string()
+    };
+    // Human words on the row: a tinted state word leads the meta line, the
+    // reason follows; the pipeline's own vocabulary (source, confidence,
+    // rule) goes in `detail`, the hover on the meta line.
+    type State = Option<(&'static str, egui::Color32)>;
+    let (title, state, reason, detail): (Cow<str>, State, String, String) = match &block.claim {
         Some(c) => {
-            let (reason, detail) = match c.source.as_str() {
+            let (state, reason, detail) = match c.source.as_str() {
                 "prepass" => (
+                    Some(("to confirm", theme::palette::AMBER)),
                     match &c.reason {
                         Some(r) => format!("placed by a rule \u{b7} {r}"),
                         None => "placed by a rule".to_owned(),
@@ -786,20 +798,23 @@ fn feed_row(
                     ),
                 ),
                 "user" => (
+                    Some(("kept", theme::palette::GREEN)),
                     match &c.reason {
-                        Some(r) => format!("kept by you \u{b7} {r}"),
-                        None => "placed by you".to_owned(),
+                        Some(r) => format!("by you \u{b7} {r}"),
+                        None => "by you".to_owned(),
                     },
                     "source: user".to_owned(),
                 ),
                 "live" => (
-                    "placed live by the model".to_owned(),
+                    Some(("live", theme::palette::AMBER)),
+                    "placed by the model".to_owned(),
                     format!(
                         "live pass, not confirmed by the batch yet \u{b7} confidence {:.0}%",
                         c.confidence * 100.0
                     ),
                 ),
                 _ => (
+                    None,
                     "placed by the model".to_owned(),
                     format!(
                         "source: model \u{b7} confidence {:.0}%",
@@ -807,30 +822,53 @@ fn feed_row(
                     ),
                 ),
             };
-            (c.label.as_str(), reason, detail)
+            (Cow::Borrowed(c.label.as_str()), state, reason, detail)
         }
         None => {
-            let (reason, detail) = match ejected_from {
+            let (state, reason, detail) = match ejected_from {
                 Some(label) => (
-                    format!("moved out of {label}"),
+                    "moved out",
+                    format!("of {label}"),
                     "ejected by you; the model will not re-place it".to_owned(),
                 ),
                 None if block.derived => (
+                    "unsorted",
                     "not placed by the model".to_owned(),
                     "the model's pass over this stretch left it unassigned".to_owned(),
                 ),
                 None => (
+                    "new",
                     "waiting for the model".to_owned(),
                     "no derive batch has covered this stretch yet".to_owned(),
                 ),
             };
-            (top_title, reason, detail)
+            (
+                theme::humanize_title(top_title, app),
+                Some((state, theme::palette::TEXT_DIM)),
+                reason,
+                detail,
+            )
         }
     };
-    let mut row = theme::ListRow::new(title)
-        .lines(2)
+    let mut meta = reason;
+    if !app.is_empty() && !title.contains(app) {
+        meta.push_str(" \u{b7} ");
+        meta.push_str(app);
+        if block.claim.is_some() && !top_title.is_empty() && top_title != app {
+            meta.push_str(": ");
+            meta.push_str(top_title);
+        }
+    }
+    let mut row = theme::ListRow::new(&title)
+        .time(fmt(block.start_ts))
         .padded()
-        .num(fmt_dur(block.ms));
+        .num(fmt_dur(block.ms))
+        .meta(state, meta)
+        .hover(format!(
+            "{}\u{2013}{}\n{detail}",
+            fmt(block.start_ts),
+            fmt(block.end_ts)
+        ));
     match &block.claim {
         Some(c) => {
             // A shaky model placement wears the timeline's confidence tint
@@ -842,25 +880,9 @@ fn feed_row(
                 theme::task_color(c.task_id, c.project.as_deref())
             };
             row = row.dot(dot);
-            if c.source == "prepass" {
-                row = row.chip("to confirm", theme::palette::AMBER);
-            } else if c.source == "live" {
-                row = row.chip("live", theme::palette::AMBER);
-            }
         }
-        None => {
-            if !app.is_empty() && app != title {
-                row = row.chip(app, theme::palette::TEXT_DIM);
-            }
-            let state = if ejected_from.is_some() {
-                "moved out"
-            } else if block.derived {
-                "unsorted"
-            } else {
-                "new"
-            };
-            row = row.chip(state, theme::palette::TEXT_DIM);
-        }
+        // Raw window titles stay on one line; the hover has the whole thing.
+        None => row = row.ring().lines(1),
     }
     row.show(ui, width, |ui| {
         ui.menu_button("\u{2026}", |ui| match &block.claim {
@@ -908,38 +930,6 @@ fn feed_row(
                 });
             }
         });
-    });
-    let fmt = |ms: i64| {
-        chronicle_core::types::ms_to_ts(ms)
-            .to_zoned(tz.clone())
-            .strftime("%H:%M")
-            .to_string()
-    };
-    let mut sub = format!(
-        "{}\u{2013}{} \u{b7} {reason}",
-        fmt(block.start_ts),
-        fmt(block.end_ts)
-    );
-    if block.claim.is_some() && !top_title.is_empty() {
-        sub.push_str(" \u{b7} ");
-        if !app.is_empty() && app != top_title {
-            sub.push_str(app);
-            sub.push_str(": ");
-        }
-        sub.push_str(top_title);
-    }
-    ui.horizontal(|ui| {
-        ui.add_space(16.0);
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&sub)
-                    .text_style(egui::TextStyle::Small)
-                    .color(theme::palette::TEXT_DIM),
-            )
-            .truncate()
-            .show_tooltip_when_elided(false),
-        )
-        .on_hover_text(format!("{sub}\n{detail}"));
     });
 }
 
@@ -1083,10 +1073,8 @@ fn progress_row(
         _ => "batch",
     };
     theme::ListRow::new(&title)
-        .lines(2)
         .padded()
-        .subtitle(sub)
-        .chip(chip, theme::palette::AMBER)
+        .meta(Some((chip, theme::palette::AMBER)), sub)
         .show(ui, width, |ui| {
             ui.add(egui::Spinner::new().size(12.0));
         });
