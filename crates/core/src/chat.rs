@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use jiff::ToSpan;
 use jiff::Zoned;
 use jiff::tz::TimeZone;
 use rusqlite::Connection;
@@ -44,6 +45,13 @@ pub fn build_context(
     let tz = now.time_zone();
     let (mut out, mut info) = match resolve_range(conn, question, now)? {
         Some((lo, hi)) => range_context(conn, question, lo, hi, tz)?,
+        // A quantity question has to arrive with the totals table — the
+        // prompt tells the model to refuse the total without one — and FTS
+        // context carries none. This week stands in for the missing phrase.
+        None if is_quantity_question(question) => {
+            let (lo, hi) = this_week_range(now);
+            range_context(conn, question, lo, hi, tz)?
+        }
         None => {
             let (fts, fts_info) = fts_context(conn, question, tz)?;
             if fts.is_empty() {
@@ -60,6 +68,9 @@ pub fn build_context(
         }
     };
     digest::truncate_chars(&mut out, MAX_CHARS);
+    // Truncation drops rows off the tail of the prompt; the footer must
+    // count only the ones the model actually received.
+    info.rows.retain(|r| out.contains(r.as_str()));
     info.blocks = info.rows.len();
     Ok((out, info))
 }
@@ -98,19 +109,40 @@ fn resolve_range(
     let parsed = timeref::parse(question, now);
     if let Some(side) = call_side(question) {
         let (day_lo, day_hi) = parsed.unwrap_or_else(|| today_range(now));
-        let call = storage::activity_in_range(conn, day_lo, day_hi)?
-            .into_iter()
-            .find(|e| e.kind == ActivityKind::Call);
-        if let Some(call) = call {
-            let start = ts_to_ms(call.ts);
-            let end = call.end_ts.map_or(start, ts_to_ms);
-            return Ok(Some(match side {
-                CallSide::Before => (day_lo, start.clamp(day_lo, day_hi)),
-                CallSide::After => (end.clamp(day_lo, day_hi), day_hi),
-            }));
+        // A call splits one day. Over a wider span the first call in it
+        // would cut the whole span down to one side of that one call, so
+        // the phrase is ignored instead.
+        if within_one_day(day_lo, day_hi, now.time_zone()) {
+            let call = storage::activity_in_range(conn, day_lo, day_hi)?
+                .into_iter()
+                .find(|e| e.kind == ActivityKind::Call);
+            if let Some(call) = call {
+                let start = ts_to_ms(call.ts);
+                // A call still running ends now, not at its own start —
+                // otherwise "after the call" covers the call itself.
+                let end = call
+                    .end_ts
+                    .map_or_else(|| now.timestamp().as_millisecond(), ts_to_ms);
+                let (lo, hi) = match side {
+                    CallSide::Before => (day_lo, start.clamp(day_lo, day_hi)),
+                    CallSide::After => (end.clamp(day_lo, day_hi), day_hi),
+                };
+                // A call at the window's edge collapses the range to
+                // nothing; the phrase's own range beats an empty one.
+                if hi - lo >= 60_000 {
+                    return Ok(Some((lo, hi)));
+                }
+            }
         }
     }
     Ok(parsed)
+}
+
+/// Whether `[lo, hi)` falls inside a single civil day locally — `hi` is
+/// exclusive, so a whole-day range ending at the next midnight counts.
+fn within_one_day(lo: i64, hi: i64, tz: &TimeZone) -> bool {
+    hi > lo
+        && ms_to_ts(lo).to_zoned(tz.clone()).date() == ms_to_ts(hi - 1).to_zoned(tz.clone()).date()
 }
 
 /// Questions whose answer is a number. Those get the totals table and are
@@ -192,6 +224,20 @@ fn today_range(now: &Zoned) -> (i64, i64) {
         .start_of_day()
         .map(|z| z.timestamp().as_millisecond())
         .unwrap_or_else(|_| now.timestamp().as_millisecond() - 24 * 3_600_000);
+    (lo, now.timestamp().as_millisecond())
+}
+
+/// Monday 00:00 local through now — the default range for a quantity
+/// question that named no time at all.
+fn this_week_range(now: &Zoned) -> (i64, i64) {
+    let back = i64::from(now.date().weekday().to_monday_zero_offset());
+    let lo = now
+        .date()
+        .checked_sub(back.days())
+        .ok()
+        .and_then(|d| d.to_zoned(now.time_zone().clone()).ok())
+        .map(|z| z.timestamp().as_millisecond())
+        .unwrap_or_else(|| today_range(now).0);
     (lo, now.timestamp().as_millisecond())
 }
 
@@ -503,6 +549,15 @@ mod tests {
         }
     }
 
+    fn insert_call(conn: &rusqlite::Connection, ts: i64, end_ts: Option<i64>) {
+        conn.execute(
+            "INSERT INTO activity_events (ts, end_ts, repo, branch, kind, ext_id)
+                 VALUES (?1, ?2, '', '', 'call', 'call:' || ?1)",
+            rusqlite::params![ts, end_ts],
+        )
+        .unwrap();
+    }
+
     // The call = the day's first mic-in-use block; a day without one keeps
     // the range the rest of the phrase parsed to.
     #[test]
@@ -532,6 +587,77 @@ mod tests {
                 (at(wed, 10), at(wed, 12)),
             ),
             ("before the call yesterday", (at(tue, 0), at(wed, 0))),
+        ] {
+            assert_eq!(
+                super::resolve_range(&conn, question, &now()).unwrap(),
+                Some(want),
+                "{question}"
+            );
+        }
+
+        // A call still running ends now, not at its own start, so "after
+        // the call" doesn't swallow the call itself.
+        let conn = db();
+        insert_call(&conn, at(wed, 9), None);
+        assert_eq!(
+            super::resolve_range(&conn, "what did I do after the call today", &now()).unwrap(),
+            Some((now_ms, at(civil::date(2026, 8, 27), 0)))
+        );
+    }
+
+    // A call at the edge of the window would collapse the range to nothing;
+    // the range the phrase itself parsed to stands instead.
+    #[test]
+    fn calls_at_the_window_edge_keep_the_parsed_range() {
+        let (wed, thu) = (civil::date(2026, 8, 26), civil::date(2026, 8, 27));
+
+        // Starts at midnight: nothing is "before the call".
+        let conn = db();
+        insert_call(&conn, at(wed, 0), Some(at(wed, 1)));
+        assert_eq!(
+            super::resolve_range(&conn, "what did I do before the call today", &now()).unwrap(),
+            Some((at(wed, 0), at(thu, 0)))
+        );
+
+        // Runs past the window: nothing is "after the call" inside it.
+        let conn = db();
+        insert_call(&conn, at(wed, 11), Some(at(wed, 18)));
+        assert_eq!(
+            super::resolve_range(&conn, "what did I do after the call this morning", &now())
+                .unwrap(),
+            Some((at(wed, 0), at(wed, 12)))
+        );
+
+        // Same for a call still running when the window closes.
+        let conn = db();
+        insert_call(&conn, at(wed, 8), None);
+        assert_eq!(
+            super::resolve_range(&conn, "what did I do after the call this morning", &now())
+                .unwrap(),
+            Some((at(wed, 0), at(wed, 12)))
+        );
+    }
+
+    // A call splits one day, not a span of them: over a multi-day range the
+    // phrase is ignored rather than truncating the span at its first call.
+    #[test]
+    fn call_phrase_is_ignored_over_a_multi_day_range() {
+        let conn = db();
+        let (mon, wed, thu) = (
+            civil::date(2026, 8, 24),
+            civil::date(2026, 8, 26),
+            civil::date(2026, 8, 27),
+        );
+        insert_call(&conn, at(wed, 9), Some(at(wed, 10)));
+        for (question, want) in [
+            (
+                "how long before the call this week",
+                (at(mon, 0), at(thu, 0)),
+            ),
+            (
+                "what did I do after the call last week",
+                (at(civil::date(2026, 8, 17), 0), at(mon, 0)),
+            ),
         ] {
             assert_eq!(
                 super::resolve_range(&conn, question, &now()).unwrap(),
@@ -574,5 +700,38 @@ mod tests {
         let (ctx, _) =
             super::build_context(&conn, "what did I work on this morning?", &now()).unwrap();
         assert!(!ctx.contains("## Time per task"), "{ctx}");
+    }
+
+    // No time phrase at all: the quantity question still has to arrive with
+    // the table (the prompt refuses the total without one), so it defaults
+    // to this week instead of falling to search.
+    #[test]
+    fn quantity_question_without_a_time_phrase_covers_this_week() {
+        let conn = db();
+        let mon = civil::date(2026, 8, 24);
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+                 VALUES (5, 1, ?1, ?2, 0.9)",
+            [at(mon, 9), at(mon, 11)],
+        )
+        .unwrap();
+
+        let (ctx, info) =
+            super::build_context(&conn, "how long did I spend on ABC-123?", &now()).unwrap();
+        assert!(ctx.contains("## Time per task"), "{ctx}");
+        assert!(ctx.contains("| sending plans | plans | 2h00m |"), "{ctx}");
+        assert_eq!(
+            (info.start_ms, info.end_ms),
+            (Some(at(mon, 0)), Some(now().timestamp().as_millisecond()))
+        );
+
+        // A non-quantity question with no phrase still goes through search.
+        let (ctx, info) =
+            super::build_context(&conn, "what was that plans thing?", &now()).unwrap();
+        assert!(
+            ctx.contains("# Stored activity matching the question"),
+            "{ctx}"
+        );
+        assert_eq!((info.start_ms, info.end_ms), (None, None));
     }
 }

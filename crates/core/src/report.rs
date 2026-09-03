@@ -85,14 +85,19 @@ pub fn task_totals(tasks: &[Task], lo: i64, hi: i64) -> Vec<TaskTotal> {
 /// `task · project · total` markdown plus the range total — the figures a
 /// chat answer quotes instead of adding rows up itself. The total covers
 /// every row, including any past `max_rows`.
+/// A `|` in a label or project would split the markdown row it sits in.
+fn cell(s: &str) -> String {
+    s.replace('|', "/")
+}
+
 pub fn totals_table(rows: &[TaskTotal], max_rows: usize) -> String {
     let mut out = String::from("| task | project | total |\n|---|---|---|\n");
     for r in rows.iter().take(max_rows) {
         let _ = writeln!(
             out,
             "| {} | {} | {} |",
-            r.label,
-            r.project,
+            cell(&r.label),
+            cell(&r.project),
             fmt_dur(r.total_ms)
         );
     }
