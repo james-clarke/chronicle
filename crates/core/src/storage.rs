@@ -279,7 +279,7 @@ pub fn activity_unplaced_in_range(
 ) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {ACTIVITY_COLS_V} FROM activity_events v
-         WHERE v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
+         WHERE v.kind != 'cwd' AND v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
            AND NOT EXISTS (SELECT 1 FROM intervals i
                            WHERE v.ts < i.end_ts AND COALESCE(v.end_ts, v.ts) >= i.start_ts)
          ORDER BY v.ts, v.id"
@@ -322,7 +322,7 @@ fn activity_by_task(
             AND (LOWER(a.repo) = LOWER(t.project)
                  OR (t.external_ref IS NOT NULL AND {VCS_KINDS_A}
                      AND instr(a.branch, t.external_ref) > 0))
-           WHERE t.id IN (SELECT task_id FROM intervals
+           WHERE v.kind != 'cwd' AND t.id IN (SELECT task_id FROM intervals
                           WHERE start_ts < ?2 AND end_ts >= ?1)
          )
          SELECT DISTINCT i.task_id, {ACTIVITY_COLS_V} FROM activity_events v

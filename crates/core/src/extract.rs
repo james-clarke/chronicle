@@ -433,7 +433,7 @@ pub fn from_activity(
                     out.push(Anchor::new(AnchorKind::Doc, doc));
                 }
             }
-            ActivityKind::Shell if fam == Family::Terminal && same_place(e) => {
+            ActivityKind::Shell | ActivityKind::Cwd if fam == Family::Terminal && same_place(e) => {
                 push_scope(&mut out, &e.repo, "", ticket_re);
             }
             ActivityKind::Meeting => {
@@ -744,6 +744,17 @@ fn path_in(text: &str) -> Option<&str> {
         }
     }
     Some(p.trim_end())
+}
+
+/// The place a filesystem path names: the project folder under a known
+/// root for home-relative paths, else the last component. Home itself and
+/// the filesystem root name nothing.
+pub fn place_from_path(path: &str) -> Option<String> {
+    if PATH.is_match(path) {
+        path_place(path)
+    } else {
+        place_value(path)
+    }
 }
 
 fn place_value(s: &str) -> Option<String> {
@@ -1593,6 +1604,21 @@ mod tests {
         let own = vec![Anchor::new(AnchorKind::Place, "chronicle")];
         let a = from_activity("Terminator", 50 * m, 55 * m, &own, &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+    }
+
+    #[test]
+    fn places_from_paths() {
+        assert_eq!(
+            place_from_path("/home/james/dev/chronicle/crates").as_deref(),
+            Some("chronicle")
+        );
+        assert_eq!(place_from_path("/home/james"), None);
+        assert_eq!(place_from_path("/"), None);
+        assert_eq!(place_from_path("/srv/app").as_deref(), Some("app"));
+        assert_eq!(
+            place_from_path("/Users/jc/Documents/Acme Ltd/x").as_deref(),
+            Some("acme ltd")
+        );
     }
 
     #[test]

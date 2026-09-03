@@ -113,6 +113,8 @@ struct Agg<'a> {
     in_window: Vec<&'a ActivityEvent>,
     keys: Vec<crate::evidence::KeySeen>,
     cwds: Vec<(String, i64)>,
+    docs: Vec<(String, i64)>,
+    people: Vec<(String, i64)>,
     win_start: i64,
     mins: usize,
     minute: Vec<Option<(MinuteKey<'a>, Option<MinuteKey<'a>>)>>,
@@ -172,6 +174,8 @@ fn aggregate<'a>(
     let win_hi = last.end.as_millisecond();
     let in_window: Vec<&ActivityEvent> = vcs
         .iter()
+        // Cwd probes are anchor evidence, not activity worth a line.
+        .filter(|v| v.kind != ActivityKind::Cwd)
         .filter(|v| {
             let ms = v.ts.as_millisecond();
             ms >= win_lo && ms < win_hi
@@ -185,6 +189,9 @@ fn aggregate<'a>(
         .map(|re| crate::evidence::keys_in_spans(spans, re, win_lo, win_hi))
         .unwrap_or_default();
     let cwds = crate::evidence::cwd_repos(spans, win_lo, win_hi);
+    // Documents and people the anchors see (m30 chunk 1): the evidence the
+    // timeline titles carry only implicitly, aggregated by focus time.
+    let (docs, people) = anchor_evidence(spans, vcs, ticket_re, win_lo, win_hi);
 
     // Chronological view: without it the model has only aggregates and must
     // guess task offsets. Dominant activity per minute, run-length encoded —
@@ -235,6 +242,8 @@ fn aggregate<'a>(
         in_window,
         keys,
         cwds,
+        docs,
+        people,
         win_start,
         mins,
         minute,
@@ -321,6 +330,25 @@ fn render(
                 .collect();
             let _ = writeln!(out, "cwd {}", line.join(", "));
         }
+    }
+
+    if !agg.docs.is_empty() {
+        let line: Vec<String> = agg
+            .docs
+            .iter()
+            .take(5)
+            .map(|(d, ms)| format!("{} {}", clip(d, title_chars.min(60)), fmt_dur(*ms)))
+            .collect();
+        let _ = writeln!(out, "\n## Documents\n{}", line.join(", "));
+    }
+    if !agg.people.is_empty() {
+        let line: Vec<String> = agg
+            .people
+            .iter()
+            .take(4)
+            .map(|(p, ms)| format!("{p} {}", fmt_dur(*ms)))
+            .collect();
+        let _ = writeln!(out, "\n## People\n{}", line.join(", "));
     }
 
     let _ = writeln!(out, "\n## Timeline (minute offsets from window start)");
@@ -564,7 +592,7 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
             }
             line
         }
-        ActivityKind::Meeting | ActivityKind::Edit | ActivityKind::Shell => {
+        ActivityKind::Meeting | ActivityKind::Edit | ActivityKind::Shell | ActivityKind::Cwd => {
             let mut line = format!("- {hm} {}", v.kind.as_str());
             if !v.repo.is_empty() {
                 let _ = write!(line, " {}", v.repo);
@@ -581,6 +609,48 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
             line
         }
     }
+}
+
+/// Focus time per document and per person named by the spans' anchors in
+/// `[lo, hi)`, most first; ties by name so the order is stable.
+fn anchor_evidence(
+    spans: &[SpanDraft],
+    vcs: &[ActivityEvent],
+    ticket_re: Option<&regex::Regex>,
+    lo: i64,
+    hi: i64,
+) -> (Vec<(String, i64)>, Vec<(String, i64)>) {
+    #![allow(clippy::type_complexity)]
+    use crate::extract::{self, AnchorKind};
+    static NEVER: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new("$^").unwrap());
+    let re = ticket_re.unwrap_or(&NEVER);
+    let mut docs: HashMap<String, i64> = HashMap::new();
+    let mut people: HashMap<String, i64> = HashMap::new();
+    for s in spans.iter().filter(|s| s.kind == SpanKind::Focus) {
+        let (a, b) = (
+            s.start.as_millisecond().max(lo),
+            s.end.as_millisecond().min(hi),
+        );
+        if b <= a {
+            continue;
+        }
+        let own = extract::extract(&s.app, &s.title, s.url.as_deref(), re);
+        let more = extract::from_activity(&s.app, a, b, &own, vcs, re);
+        for anchor in extract::merge(own, more) {
+            match anchor.kind {
+                AnchorKind::Doc => *docs.entry(anchor.value).or_default() += b - a,
+                AnchorKind::People => *people.entry(anchor.value).or_default() += b - a,
+                _ => {}
+            }
+        }
+    }
+    let sorted = |m: HashMap<String, i64>| {
+        let mut v: Vec<(String, i64)> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    };
+    (sorted(docs), sorted(people))
 }
 
 pub(crate) fn clip(s: &str, max_chars: usize) -> String {
