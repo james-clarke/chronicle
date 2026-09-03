@@ -1098,6 +1098,14 @@ pub(super) mod icon {
     pub const TARGET: &str = "\u{E47C}";
     pub const CHECK: &str = "\u{E182}";
     pub const WARNING: &str = "\u{E4E0}";
+    pub const CALENDAR: &str = "\u{E108}";
+    pub const CODE: &str = "\u{E1BC}";
+    pub const TERMINAL: &str = "\u{E47E}";
+    pub const COPY: &str = "\u{E1CA}";
+    pub const PAPER_PLANE_TILT: &str = "\u{E398}";
+    pub const PUSH_PIN: &str = "\u{E3E2}";
+    pub const FLAG: &str = "\u{E244}";
+    pub const SIGN_IN: &str = "\u{E428}";
 }
 
 #[cfg(test)]

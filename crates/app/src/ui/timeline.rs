@@ -1520,6 +1520,9 @@ fn activity_glyph(kind: chronicle_core::types::ActivityKind) -> &'static str {
         K::AiSession => theme::icon::TERMINAL_WINDOW,
         K::PrAuthored | K::PrReviewed => theme::icon::GIT_PULL_REQUEST,
         K::Call => theme::icon::PHONE_CALL,
+        K::Meeting => theme::icon::CALENDAR,
+        K::Edit => theme::icon::CODE,
+        K::Shell => theme::icon::TERMINAL,
     }
 }
 
@@ -1536,6 +1539,9 @@ fn activity_kind_name(kind: chronicle_core::types::ActivityKind) -> &'static str
         K::PrAuthored => "pull request you opened",
         K::PrReviewed => "pull request you reviewed",
         K::Call => "call",
+        K::Meeting => "calendar event",
+        K::Edit => "editor time",
+        K::Shell => "shell commands",
     }
 }
 

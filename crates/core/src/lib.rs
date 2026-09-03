@@ -3,6 +3,7 @@ pub mod chat;
 pub mod config;
 pub mod digest;
 pub mod eval;
+pub mod heartbeats;
 pub mod insights;
 pub mod merge;
 pub mod prepass;

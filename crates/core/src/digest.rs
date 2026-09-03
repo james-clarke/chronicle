@@ -416,6 +416,22 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
             }
             line
         }
+        ActivityKind::Meeting | ActivityKind::Edit | ActivityKind::Shell => {
+            let mut line = format!("- {hm} {}", v.kind.as_str());
+            if !v.repo.is_empty() {
+                let _ = write!(line, " {}", v.repo);
+            }
+            if !v.branch.is_empty() {
+                let _ = write!(line, "@{}", v.branch);
+            }
+            if !dur.is_empty() {
+                let _ = write!(line, " {dur}");
+            }
+            if let Some(s) = summary {
+                let _ = write!(line, " \"{s}\"");
+            }
+            line
+        }
     }
 }
 
