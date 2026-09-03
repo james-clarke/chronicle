@@ -1,15 +1,16 @@
 //! Digest→prompt, llama runner, GBNF grammar, model manager.
 //! Corrections retrieval lands in M5.
 
+mod backend;
 pub mod chat;
 pub mod describe;
 pub mod model;
 pub mod runner;
 
-pub use chat::ChatModel;
+pub use chat::{ChatModel, ChatSession};
 pub use runner::{
     ConsolidateRun, DeriveModel, DeriveRun, DeriveSession, IntervalDraft, LIVE_N_CTX, LiveDraft,
-    LiveRun, N_CTX, Prompt, RunStats, infer_intervals,
+    LiveRun, N_CTX, Prompt, RunStats,
 };
 
 /// Tokenize `text` inside its prompt, shrinking the text until the whole
@@ -29,7 +30,8 @@ pub(crate) fn fit_prompt<T>(
         if tokens.len() <= limit {
             return Ok(tokens);
         }
-        cut = (cut * limit * 96 / (tokens.len() * 100)).min(cut.saturating_sub(1));
+        cut = ((cut as u128 * limit as u128 * 96 / (tokens.len() as u128 * 100)) as usize)
+            .min(cut.saturating_sub(1));
         while !text.is_char_boundary(cut) {
             cut -= 1;
         }

@@ -1,22 +1,26 @@
-//! Warm chat session: model loaded once per worker process, one fresh
-//! context per question. Free-text output (no grammar) — chat answers are
-//! only ever displayed, never acted on.
+//! Warm chat session: model loaded once per worker process. `ChatSession`
+//! keeps one context whose KV cache holds the tokens of the last prompt and
+//! answer, mirroring `runner::DeriveSession` — each question decodes only
+//! what differs from the cached tokens. Free-text output (no grammar) —
+//! chat answers are only ever displayed, never acted on.
 
 use std::num::NonZeroU32;
 use std::path::Path;
 
 use anyhow::Context;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
+
+use crate::backend::{self, N_BATCH};
 
 const SYSTEM_PROMPT: &str = include_str!("../../../prompts/chat_v1.txt");
 
 const N_CTX: u32 = 4096;
-const N_BATCH: u32 = 512;
 const MAX_GEN: usize = 1024;
 /// Prior turns re-sent with each question (answers clipped to keep room).
 const HISTORY_TURNS: usize = 3;
@@ -29,17 +33,31 @@ pub struct ChatModel {
 
 impl ChatModel {
     pub fn load(model_path: &Path) -> anyhow::Result<Self> {
-        static LLAMA_LOGS: std::sync::Once = std::sync::Once::new();
-        LLAMA_LOGS
-            .call_once(|| llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default()));
-        let backend = LlamaBackend::init()?;
-        let model = LlamaModel::load_from_file(&backend, model_path, &LlamaModelParams::default())
-            .with_context(|| format!("loading model {}", model_path.display()))?;
+        let (backend, model) = backend::load_model(model_path)?;
         Ok(Self { backend, model })
     }
 
+    /// A context that keeps its KV cache between turns; see `ChatSession`.
+    pub fn session(&self) -> anyhow::Result<ChatSession<'_>> {
+        let threads = backend::threads();
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(N_CTX))
+            .with_n_batch(N_BATCH)
+            .with_n_threads(threads)
+            .with_n_threads_batch(threads);
+        let ctx = self.model.new_context(&self.backend, ctx_params)?;
+        Ok(ChatSession {
+            model: &self.model,
+            ctx,
+            batch: LlamaBatch::new(N_BATCH as usize, 1),
+            cached: Vec::new(),
+        })
+    }
+
     /// Answer one question grounded in `context`, streaming filtered pieces
-    /// through `on_token`. Returns the full filtered answer.
+    /// through `on_token`. Returns the full filtered answer. Fresh context
+    /// per call — callers asking more than one question should hold a
+    /// `ChatSession` instead so the KV cache carries across turns.
     pub fn answer(
         &self,
         history: &[(String, String)],
@@ -47,36 +65,59 @@ impl ChatModel {
         question: &str,
         on_token: &mut dyn FnMut(&str),
     ) -> anyhow::Result<String> {
+        self.session()?.answer(history, context, question, on_token)
+    }
+}
+
+pub struct ChatSession<'m> {
+    model: &'m LlamaModel,
+    ctx: LlamaContext<'m>,
+    batch: LlamaBatch<'m>,
+    /// Tokens whose KV entries are resident at positions `0..len`: the last
+    /// prompt followed by what the model generated for it.
+    cached: Vec<LlamaToken>,
+}
+
+impl ChatSession<'_> {
+    /// Answer one question grounded in `context`, streaming filtered pieces
+    /// through `on_token`. Returns the full filtered answer. Reuses the KV
+    /// cache across turns: only the suffix of the new prompt after the
+    /// longest common prefix with the last prompt+answer gets decoded.
+    pub fn answer(
+        &mut self,
+        history: &[(String, String)],
+        context: &str,
+        question: &str,
+        on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<String> {
         let limit = N_CTX as usize - MAX_GEN - 64;
-        let tokens = crate::fit_prompt(context, limit, |c| self.tokenize(history, c, question))?;
+        let model = self.model;
+        let tokens = crate::fit_prompt(context, limit, |c| tokenize(model, history, c, question))?;
 
-        let threads = num_cpus::get_physical().saturating_sub(1).clamp(1, 8) as i32;
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(N_CTX))
-            .with_n_batch(N_BATCH)
-            .with_n_threads(threads)
-            .with_n_threads_batch(threads);
-        let mut ctx = self.model.new_context(&self.backend, ctx_params)?;
+        // fit_prompt caps tokens well under N_CTX; this is a defensive
+        // fallback in case that ever doesn't hold, forfeiting cache reuse
+        // rather than decoding past the end of the KV cache.
+        let keep = if tokens.len() >= N_CTX as usize {
+            self.cached.clear();
+            0
+        } else {
+            backend::common_prefix(&self.cached, &tokens).min(tokens.len() - 1)
+        };
+        self.ctx
+            .clear_kv_cache_seq(Some(0), Some(keep as u32), None)
+            .context("clearing kv cache")?;
+        self.cached.truncate(keep);
 
-        let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
-        let last = tokens.len() - 1;
-        let mut pos = 0i32;
-        for chunk in tokens.chunks(N_BATCH as usize) {
-            batch.clear();
-            for tok in chunk {
-                let is_last = pos as usize == last;
-                batch.add(*tok, pos, &[0], is_last)?;
-                pos += 1;
-            }
-            ctx.decode(&mut batch)?;
-        }
+        let start_pos =
+            backend::decode_prompt(&mut self.ctx, &mut self.batch, &tokens[keep..], keep as i32)?;
+        self.cached.extend_from_slice(&tokens[keep..]);
 
         let mut sampler = LlamaSampler::chain_simple([LlamaSampler::greedy()]);
         let mut filter = ThinkFilter::default();
         let mut out = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        for _ in 0..MAX_GEN {
-            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        for pos in (start_pos..).take(MAX_GEN) {
+            let token = sampler.sample(&self.ctx, self.batch.n_tokens() - 1);
             if self.model.is_eog_token(token) {
                 break;
             }
@@ -87,10 +128,10 @@ impl ChatModel {
                 out.push_str(s);
                 on_token(s);
             });
-            batch.clear();
-            batch.add(token, pos, &[0], true)?;
-            pos += 1;
-            ctx.decode(&mut batch)?;
+            self.batch.clear();
+            self.batch.add(token, pos, &[0], true)?;
+            self.ctx.decode(&mut self.batch)?;
+            self.cached.push(token);
         }
         filter.finish(&mut |s| {
             out.push_str(s);
@@ -98,41 +139,40 @@ impl ChatModel {
         });
         Ok(out)
     }
+}
 
-    fn tokenize(
-        &self,
-        history: &[(String, String)],
-        context: &str,
-        question: &str,
-    ) -> anyhow::Result<Vec<llama_cpp_2::token::LlamaToken>> {
-        let mut messages = vec![LlamaChatMessage::new(
-            "system".into(),
-            SYSTEM_PROMPT.trim().into(),
-        )?];
-        for (q, a) in history.iter().rev().take(HISTORY_TURNS).rev() {
-            // Prior questions go in bare (their DATA sections would blow the
-            // window); answers are clipped for the same reason.
-            messages.push(LlamaChatMessage::new(
-                "user".into(),
-                format!("/no_think\n{q}"),
-            )?);
-            messages.push(LlamaChatMessage::new(
-                "assistant".into(),
-                clip_chars(a, HISTORY_ANSWER_CHARS),
-            )?);
-        }
+fn tokenize(
+    model: &LlamaModel,
+    history: &[(String, String)],
+    context: &str,
+    question: &str,
+) -> anyhow::Result<Vec<LlamaToken>> {
+    let mut messages = vec![LlamaChatMessage::new(
+        "system".into(),
+        SYSTEM_PROMPT.trim().into(),
+    )?];
+    for (q, a) in history.iter().rev().take(HISTORY_TURNS).rev() {
+        // Prior questions go in bare (their DATA sections would blow the
+        // window); answers are clipped for the same reason.
         messages.push(LlamaChatMessage::new(
             "user".into(),
-            format!("/no_think\nDATA:\n{context}\n\nQuestion: {question}"),
+            format!("/no_think\n{q}"),
         )?);
-        let tmpl = self
-            .model
-            .chat_template(None)
-            .context("model has no embedded chat template")?;
-        let text = self.model.apply_chat_template(&tmpl, &messages, true)?;
-        // Never AddBos: the rendered template already carries its special tokens.
-        Ok(self.model.str_to_token(&text, AddBos::Never)?)
+        messages.push(LlamaChatMessage::new(
+            "assistant".into(),
+            clip_chars(a, HISTORY_ANSWER_CHARS),
+        )?);
     }
+    messages.push(LlamaChatMessage::new(
+        "user".into(),
+        format!("/no_think\nDATA:\n{context}\n\nQuestion: {question}"),
+    )?);
+    let tmpl = model
+        .chat_template(None)
+        .context("model has no embedded chat template")?;
+    let text = model.apply_chat_template(&tmpl, &messages, true)?;
+    // Never AddBos: the rendered template already carries its special tokens.
+    Ok(model.str_to_token(&text, AddBos::Never)?)
 }
 
 fn clip_chars(s: &str, max_chars: usize) -> String {

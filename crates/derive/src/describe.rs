@@ -9,12 +9,12 @@ use anyhow::{Context, bail};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 use chronicle_core::types::SuggestedTask;
 
+use crate::backend::{self, N_BATCH};
 use crate::chat::ThinkFilter;
 
 const DESCRIPTION_PROMPT: &str = include_str!("../../../prompts/task_description_v1.txt");
@@ -27,7 +27,6 @@ const CHECKPOINT_GRAMMAR: &str = include_str!("../../../grammars/checkpoint_v1.g
 const SUGGEST_GRAMMAR: &str = include_str!("../../../grammars/suggest_task_v1.gbnf");
 
 const N_CTX: u32 = 4096;
-const N_BATCH: u32 = 512;
 /// Descriptions and narratives are a few sentences; suggestions one JSON object.
 const MAX_GEN: usize = 256;
 
@@ -38,12 +37,7 @@ pub struct Describer {
 
 impl Describer {
     pub fn load(model_path: &Path) -> anyhow::Result<Self> {
-        static LLAMA_LOGS: std::sync::Once = std::sync::Once::new();
-        LLAMA_LOGS
-            .call_once(|| llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default()));
-        let backend = LlamaBackend::init()?;
-        let model = LlamaModel::load_from_file(&backend, model_path, &LlamaModelParams::default())
-            .with_context(|| format!("loading model {}", model_path.display()))?;
+        let (backend, model) = backend::load_model(model_path)?;
         Ok(Self { backend, model })
     }
 
@@ -162,7 +156,7 @@ impl Describer {
     /// forecloses think blocks); without one the ThinkFilter strips Qwen3's
     /// empty `<think>` preamble.
     fn generate(&self, content: &str, grammar: Option<&str>) -> anyhow::Result<String> {
-        let threads = num_cpus::get_physical().saturating_sub(1).clamp(1, 8) as i32;
+        let threads = backend::threads();
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(N_CTX))
             .with_n_batch(N_BATCH)
@@ -174,17 +168,7 @@ impl Describer {
         let tokens = crate::fit_prompt(content, limit, |c| self.tokenize(c))?;
 
         let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
-        let last = tokens.len() - 1;
-        let mut pos = 0i32;
-        for chunk in tokens.chunks(N_BATCH as usize) {
-            batch.clear();
-            for tok in chunk {
-                let is_last = pos as usize == last;
-                batch.add(*tok, pos, &[0], is_last)?;
-                pos += 1;
-            }
-            ctx.decode(&mut batch)?;
-        }
+        let start_pos = backend::decode_prompt(&mut ctx, &mut batch, &tokens, 0)?;
 
         let mut sampler = match grammar {
             Some(g) => LlamaSampler::chain_simple([
@@ -197,7 +181,7 @@ impl Describer {
         let mut filter = ThinkFilter::default();
         let mut out = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        for _ in 0..MAX_GEN {
+        for pos in (start_pos..).take(MAX_GEN) {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             if self.model.is_eog_token(token) {
                 break;
@@ -212,7 +196,6 @@ impl Describer {
             }
             batch.clear();
             batch.add(token, pos, &[0], true)?;
-            pos += 1;
             ctx.decode(&mut batch)?;
         }
         if grammar.is_none() {

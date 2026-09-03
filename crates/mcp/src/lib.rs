@@ -224,7 +224,7 @@ fn run_blocking(
             return (0, None);
         }
     };
-    let (ran, out) = rt.block_on(gather(cfg, calls));
+    let (ran, out) = rt.block_on(gather(cfg, calls, max_chars));
     let out = out.trim();
     if out.is_empty() {
         return (ran, None);
@@ -232,11 +232,20 @@ fn run_blocking(
     (ran, Some(truncate_chars(out, max_chars)))
 }
 
+/// Even share of `remaining_chars` across the `left` calls not yet run.
+fn call_budget(remaining_chars: usize, left: usize) -> usize {
+    remaining_chars / left.max(1)
+}
+
 /// Formatted results, and the number of calls sent to a live server (an
-/// empty or failed reply still left the machine).
-async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> (usize, String) {
+/// empty or failed reply still left the machine). Each call gets an even
+/// share of `max_chars` up front, computed against the calls still pending;
+/// a call that uses less than its share leaves the rest for later calls.
+async fn gather(cfg: &McpConfig, all_calls: &[ContextCall], max_chars: usize) -> (usize, String) {
     let mut ran = 0usize;
     let mut out = String::new();
+    let mut budget = max_chars;
+    let mut left = all_calls.len();
     for server in &cfg.servers {
         let calls: Vec<&ContextCall> = all_calls
             .iter()
@@ -251,23 +260,30 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> (usize, String) {
                 server.name,
                 calls.len()
             );
+            left -= calls.len();
             continue;
         }
         let mut client = match tokio::time::timeout(CONNECT_TIMEOUT, connect(server)).await {
             Ok(Ok(client)) => client,
             Ok(Err(e)) => {
                 tracing::warn!("mcp server {}: connect failed: {e:#}", server.name);
+                left -= calls.len();
                 continue;
             }
             Err(_) => {
                 tracing::warn!("mcp server {}: connect timed out", server.name);
+                left -= calls.len();
                 continue;
             }
         };
         for call in calls {
             ran += 1;
+            let cap = call_budget(budget, left);
+            left -= 1;
             match tokio::time::timeout(CALL_TIMEOUT, run_call(&client, call)).await {
                 Ok(Ok(text)) => {
+                    let text = truncate_chars(&text, cap);
+                    budget = budget.saturating_sub(text.chars().count());
                     out.push_str(&format!("### {}.{}\n{}\n", call.server, call.tool, text));
                 }
                 Ok(Err(e)) => {
@@ -412,6 +428,15 @@ mod tests {
             r#"{"a":[1,2],"b":"x y"}"#
         );
         assert_eq!(super::compact_json("plain: text"), "plain: text");
+    }
+
+    #[test]
+    fn call_budget_splits_evenly_and_guards_zero_left() {
+        assert_eq!(super::call_budget(300, 3), 100);
+        assert_eq!(super::call_budget(301, 3), 100);
+        assert_eq!(super::call_budget(0, 3), 0);
+        // No pending calls: guarded by `.max(1)`, does not divide by zero.
+        assert_eq!(super::call_budget(300, 0), 300);
     }
 
     #[test]
