@@ -361,6 +361,7 @@ impl TimelineApp {
                     let new_project = &mut self.new_project;
                     let merge_pick = &mut self.merge_pick;
                     let suggestion = &self.suggestion;
+                    let declare_conflict = &self.declare_conflict;
                     let model_missing = self.model_missing;
 
                     theme::section_header_with(ui, "Working on", None, |ui| {
@@ -406,6 +407,21 @@ impl TimelineApp {
                             );
                         });
                     });
+                    if let Some(c) = declare_conflict {
+                        ui.add_space(theme::SPACE_XS);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(
+                                theme::palette::AMBER,
+                                format!(
+                                    "task {} \u{ab}{}\u{bb} already owns {}",
+                                    c.task_id, c.label, c.key
+                                ),
+                            );
+                            if theme::ghost_button(ui, "add to it").clicked() {
+                                pending = Some(Action::OpenTask(c.task_id));
+                            }
+                        });
+                    }
                     if open_tasks.is_empty() && q.is_empty() {
                         ui.add_space(theme::SPACE_XS);
                         ui.weak("no open tasks yet \u{2014} declare one above, or accept what the feed proposes");
@@ -884,7 +900,37 @@ fn feed_row(
         // Raw window titles stay on one line; the hover has the whole thing.
         None => row = row.ring().lines(1),
     }
-    row.show(ui, width, |ui| {
+    // The state word says what it means on hover; the two words that stand
+    // for a decision the user can take now are also buttons.
+    if let Some((tip, action)) = state.map(|(word, _)| match word {
+        "to confirm" => (
+            "A rule placed this from the branch name. The model re-reads this batch in about 35 minutes. Click to keep it as it is.",
+            true,
+        ),
+        "live" => (
+            "The model placed this as the work happened; the batch re-reads the stretch in about 35 minutes and can move it.",
+            false,
+        ),
+        "kept" => (
+            "You placed or kept this block, so no later pass moves it.",
+            false,
+        ),
+        "moved out" => (
+            "You took this out of that task, so the model will not place it back.",
+            false,
+        ),
+        _ => (
+            "No task owns this stretch yet. Click to assign it to one.",
+            true,
+        ),
+    }) {
+        row = if action {
+            row.meta_action(tip)
+        } else {
+            row.state_tip(tip)
+        };
+    }
+    let shown = row.show(ui, width, |ui| {
         ui.menu_button("\u{2026}", |ui| match &block.claim {
             Some(c) => {
                 if (c.source == "prepass" || c.source == "live") && ui.button("keep").clicked() {
@@ -931,6 +977,25 @@ fn feed_row(
             }
         });
     });
+    if let Some(state) = shown.state {
+        match &block.claim {
+            Some(c) if state.clicked() => *pending = Some(Action::KeepBlock(c.interval_id)),
+            None => {
+                egui::Popup::menu(&state).show(|ui| {
+                    for (task_id, label) in candidates {
+                        if ui.button(label).clicked() {
+                            *pending = Some(Action::AssignRuns {
+                                runs: vec![(block.start_ts, block.end_ts)],
+                                to_task: *task_id,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Arguments of the feed section, which renders in place on the narrow

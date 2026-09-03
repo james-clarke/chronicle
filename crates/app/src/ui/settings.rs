@@ -410,7 +410,6 @@ impl TimelineApp {
         let model_dl = &self.model_dl;
         let mut start_dl = false;
         let mut close = false;
-        let mut zoom_pick: Option<f32> = None;
         let mut density_pick: Option<theme::Density> = None;
         let mut spans_toggle: Option<bool> = None;
         let spans_debug_now = self.spans_debug;
@@ -625,14 +624,11 @@ impl TimelineApp {
                             // db meta (not config.toml), no daemon restart.
                             section(ui, "Window & appearance", false, jump);
                             ui.horizontal(|ui| {
-                                ui.label("ui scale");
-                                for (label, z) in
-                                    [("compact", 0.9f32), ("default", 1.0), ("comfortable", 1.15)]
-                                {
+                                ui.label("text size");
+                                for (label, z) in [("S", 0.92f32), ("M", 1.0), ("L", 1.1)] {
                                     let active = (ui.ctx().zoom_factor() - z).abs() < 0.01;
                                     if theme::selectable(ui, active, label).clicked() && !active {
                                         ui.ctx().set_zoom_factor(z);
-                                        zoom_pick = Some(z);
                                     }
                                 }
                             });
@@ -691,10 +687,6 @@ impl TimelineApp {
         });
         if close {
             self.settings = None;
-        }
-        if let (Some(z), Some(conn)) = (zoom_pick, self.conn.as_ref()) {
-            let _ =
-                chronicle_core::storage::set_meta(conn, "ui_zoom_factor", Some(&format!("{z:.2}")));
         }
         if let Some(d) = density_pick {
             theme::set_density(d);

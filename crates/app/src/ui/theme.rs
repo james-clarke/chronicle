@@ -140,7 +140,7 @@ pub(super) fn display() -> egui::TextStyle {
     egui::TextStyle::Name("display".into())
 }
 
-/// Caption style (10.5): axis ticks, band labels, finest-grain metadata.
+/// Caption style (11): axis ticks, band labels, finest-grain metadata.
 /// Pair with `TEXT_DIM` — caption text is always dim.
 pub(super) fn caption() -> egui::TextStyle {
     egui::TextStyle::Name("caption".into())
@@ -251,8 +251,8 @@ pub(super) fn apply(ctx: &egui::Context) {
 
 fn style(style: &mut egui::Style) {
     use egui::{FontFamily, FontId, TextStyle};
-    // m19 type scale: Display 22 / Heading 15 / Body 13 / Small 11.5 /
-    // Caption 10.5. Call sites use text styles, never hand-rolled sizes.
+    // m29 type scale: Display 22 / Heading 15 / Body 13 / Small 12 /
+    // Caption 11. Call sites use text styles, never hand-rolled sizes.
     style.text_styles = [
         (
             TextStyle::Heading,
@@ -265,7 +265,7 @@ fn style(style: &mut egui::Style) {
         ),
         (
             TextStyle::Small,
-            FontId::new(11.5, FontFamily::Proportional),
+            FontId::new(12.0, FontFamily::Proportional),
         ),
         (
             TextStyle::Monospace,
@@ -275,7 +275,7 @@ fn style(style: &mut egui::Style) {
             display(),
             FontId::new(22.0, FontFamily::Name(MEDIUM.into())),
         ),
-        (caption(), FontId::new(10.5, FontFamily::Proportional)),
+        (caption(), FontId::new(11.0, FontFamily::Proportional)),
     ]
     .into();
 
@@ -285,7 +285,7 @@ fn style(style: &mut egui::Style) {
     spacing.window_margin = egui::Margin::same(14);
     spacing.menu_margin = egui::Margin::same(8);
     spacing.interact_size.y = 24.0;
-    spacing.extra_text_line_spacing = 1.0;
+    spacing.extra_text_line_spacing = 2.0;
     // No visible scrollbar at all: floating so it reserves no width, every
     // track and handle opacity zero. Wheel/drag scrolling still works.
     spacing.scroll = egui::style::ScrollStyle {
@@ -801,6 +801,8 @@ pub(super) struct ListRow<'a> {
     lines: usize,
     /// Meta line: tinted state word (optional) then the dim text.
     meta: Option<(Option<(String, Color32)>, String)>,
+    /// Hover text on the state word, and whether it is also clickable.
+    state_tip: Option<(String, bool)>,
     /// Extra hover text under the meta line's own text.
     hover: Option<String>,
     padded: bool,
@@ -830,6 +832,7 @@ impl<'a> ListRow<'a> {
             num: None,
             lines: 2,
             meta: None,
+            state_tip: None,
             hover: None,
             padded: false,
         }
@@ -877,6 +880,20 @@ impl<'a> ListRow<'a> {
         if state.is_some() || !text.is_empty() {
             self.meta = Some((state, text));
         }
+        self
+    }
+
+    /// Hover text for the meta line's state word.
+    pub(super) fn state_tip(mut self, tip: impl Into<String>) -> Self {
+        self.state_tip = Some((tip.into(), false));
+        self
+    }
+
+    /// Like [`Self::state_tip`], but the state word is also a button: it
+    /// underlines under the pointer and its click comes back on
+    /// [`RowResponse::state`].
+    pub(super) fn meta_action(mut self, tip: impl Into<String>) -> Self {
+        self.state_tip = Some((tip.into(), true));
         self
     }
 
@@ -928,7 +945,7 @@ impl<'a> ListRow<'a> {
         ui: &mut egui::Ui,
         width: f32,
         trailing: impl FnOnce(&mut egui::Ui),
-    ) -> egui::Response {
+    ) -> RowResponse {
         let mut h = ui.spacing().interact_size.y;
         let gap = ui.spacing().item_spacing.x;
         let font = if self.emphasis {
@@ -979,6 +996,7 @@ impl<'a> ListRow<'a> {
             chips,
             num: num_text,
             meta,
+            state_tip,
             hover,
             emphasis,
             ..
@@ -1064,64 +1082,101 @@ impl<'a> ListRow<'a> {
                 });
             });
         };
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(inner)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| {
-                ui.spacing_mut().item_spacing.y = SUB_GAP;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(inner.width(), title_h),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| title_line(ui, Box::new(trailing)),
-                );
-                if let Some((state, text)) = &meta {
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        ui.style_mut().interaction.selectable_labels = false;
-                        ui.spacing_mut().item_spacing.x = SPACE_XS;
-                        if let Some((word, color)) = state {
-                            ui.add(
-                                egui::Label::new(
+        let mut state_resp = None;
+        let response = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(inner)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = SUB_GAP;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(inner.width(), title_h),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| title_line(ui, Box::new(trailing)),
+                    );
+                    if let Some((state, text)) = &meta {
+                        ui.horizontal(|ui| {
+                            ui.add_space(indent);
+                            ui.style_mut().interaction.selectable_labels = false;
+                            ui.spacing_mut().item_spacing.x = SPACE_XS;
+                            if let Some((word, color)) = state {
+                                let mut label = egui::Label::new(
                                     egui::RichText::new(word.as_str())
                                         .text_style(egui::TextStyle::Small)
                                         .family(egui::FontFamily::Name(MEDIUM.into()))
                                         .color(*color),
                                 )
-                                .selectable(false),
-                            );
-                        }
-                        let rich = egui::RichText::new(text.as_str())
-                            .text_style(egui::TextStyle::Small)
-                            .color(palette::TEXT_DIM);
-                        let full = match &hover {
-                            Some(more) => format!("{text}\n{more}"),
-                            None => text.clone(),
-                        };
-                        let label = egui::Label::new(rich)
-                            .truncate()
-                            .show_tooltip_when_elided(false);
-                        let resp = ui.add(label);
-                        let elided = resp
-                            .intrinsic_size()
-                            .is_some_and(|s| s.x > resp.rect.width() + 0.5);
-                        if elided || hover.is_some() {
-                            resp.on_hover_text(full);
-                        }
-                    });
-                }
-                if !chips.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        ui.spacing_mut().item_spacing.x = SPACE_XS;
-                        for (text, color) in &chips {
-                            badge(ui, text, *color);
-                        }
-                    });
-                }
-            },
-        )
-        .response
+                                .selectable(false);
+                                let clickable = matches!(state_tip, Some((_, true)));
+                                if clickable {
+                                    label = label.sense(egui::Sense::click());
+                                }
+                                let resp = ui.add(label);
+                                if clickable && resp.hovered() {
+                                    ui.painter().hline(
+                                        resp.rect.x_range(),
+                                        resp.rect.bottom() - 1.0,
+                                        egui::Stroke::new(1.0, *color),
+                                    );
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if let Some((tip, _)) = &state_tip {
+                                    resp.clone().on_hover_text(tip.clone());
+                                }
+                                state_resp = Some(resp);
+                            }
+                            let rich = egui::RichText::new(text.as_str())
+                                .text_style(egui::TextStyle::Small)
+                                .color(palette::TEXT_DIM);
+                            let full = match &hover {
+                                Some(more) => format!("{text}\n{more}"),
+                                None => text.clone(),
+                            };
+                            let label = egui::Label::new(rich)
+                                .truncate()
+                                .show_tooltip_when_elided(false);
+                            let resp = ui.add(label);
+                            let elided = resp
+                                .intrinsic_size()
+                                .is_some_and(|s| s.x > resp.rect.width() + 0.5);
+                            if elided || hover.is_some() {
+                                resp.on_hover_text(full);
+                            }
+                        });
+                    }
+                    if !chips.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(indent);
+                            ui.spacing_mut().item_spacing.x = SPACE_XS;
+                            for (text, color) in &chips {
+                                badge(ui, text, *color);
+                            }
+                        });
+                    }
+                },
+            )
+            .response;
+        RowResponse {
+            response,
+            state: state_resp,
+        }
+    }
+}
+
+/// What [`ListRow::show`] hands back: the row itself, plus the meta line's
+/// state word when [`ListRow::meta_action`] made it a button (the caller
+/// reads its click, or hangs a popup off it).
+pub(super) struct RowResponse {
+    response: egui::Response,
+    pub(super) state: Option<egui::Response>,
+}
+
+impl std::ops::Deref for RowResponse {
+    type Target = egui::Response;
+
+    fn deref(&self) -> &egui::Response {
+        &self.response
     }
 }
 

@@ -90,6 +90,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
         })
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|z| (0.5..=2.0).contains(z));
+    let text_zoom = zoom.unwrap_or(1.0);
     // Last dragged-to position ("x,y" logical px); restored at boot so the
     // window comes back where the user left it, re-clamped once the monitor
     // size is known (see `logic`).
@@ -117,7 +118,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
             let (w, h) = s.split_once(',')?;
             Some(egui::vec2(w.parse().ok()?, h.parse().ok()?))
         })
-        .map(|v| egui::vec2(v.x.max(WIDGET_W), v.y.max(WIDGET_H)));
+        .map(|v| egui::vec2(v.x.max(WIDGET_W * text_zoom), v.y.max(WIDGET_H * text_zoom)));
     // Popover hide is opt-in: the settings toggle (meta `ui_autohide`) or
     // `CHRONICLE_UI_AUTOHIDE=1` for test runs.
     let autohide = std::env::var_os("CHRONICLE_UI_AUTOHIDE").is_some()
@@ -143,8 +144,16 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     drop(boot_conn);
     let composited = compositor_active();
     let pad = if composited { SHADOW_PAD } else { 0.0 };
-    let (min_w, min_h) = (WIDGET_W + 2.0 * pad, WIDGET_H + 2.0 * pad);
-    let card = saved_size.unwrap_or(egui::vec2(WIDGET_W, WIDGET_H));
+    // Window sizes are winit logical px, which egui divides by the zoom
+    // factor to get the points the layout is written in: at zoom 1.1 a
+    // WIDGET_W-px window is only 364 pt of card. So the floor and the
+    // default card scale with the boot zoom; a size the user dragged to is
+    // stored in the same px and comes back as it is.
+    let (min_w, min_h) = (
+        WIDGET_W * text_zoom + 2.0 * pad,
+        WIDGET_H * text_zoom + 2.0 * pad,
+    );
+    let card = saved_size.unwrap_or(egui::vec2(WIDGET_W, WIDGET_H) * text_zoom);
     let (win_w, win_h) = (card.x + 2.0 * pad, card.y + 2.0 * pad);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Chronicle")
@@ -417,6 +426,8 @@ enum Action {
     SaveWorkspaceEdit(WorkspaceEdit),
     /// Open task-scoped chat for the task.
     ChatAboutTask(i64),
+    /// Select the task and show it in the timeline.
+    OpenTask(i64),
     /// Claim unassigned runs `(start_ms, end_ms)` for a task (triage).
     AssignRuns {
         runs: Vec<(i64, i64)>,
@@ -467,6 +478,15 @@ enum WorkspaceEdit {
         state: String,
         next_steps: String,
     },
+}
+
+/// An open task already owns the ticket key the declare form typed, so the
+/// form says so instead of opening a second task on the same ref (m29
+/// chunk 7: two open tasks on one ref file each other's blocks).
+struct DeclareConflict {
+    task_id: i64,
+    label: String,
+    key: String,
 }
 
 /// Declare-suggestion lifecycle (home view chip).
@@ -522,6 +542,8 @@ struct TimelineApp {
     suggestion: Option<SuggestionState>,
     /// Suggestion description carried into the next Declare.
     pending_declare_description: Option<String>,
+    /// The declare form's refusal: an open task already owns the typed key.
+    declare_conflict: Option<DeclareConflict>,
     spans: Vec<SpanRow>,
     groups: Vec<TaskGroup>,
     /// The shown day's activity overlapping no task (m22): calls between
@@ -626,6 +648,10 @@ struct TimelineApp {
     /// Last persisted card size (meta `ui_window_size`, logical px, shadow
     /// pad excluded); written when a resize settles.
     saved_size: Option<egui::Vec2>,
+    /// Zoom factor as of the previous frame; a change (Settings' text size,
+    /// Ctrl +/\u{2212}/0) resizes the window and persists `ui_zoom_factor`.
+    /// `None` until the first frame reads the boot zoom.
+    zoom_seen: Option<f32>,
     /// Pending "chat about task" click, consumed by the chat view.
     chat_task_request: Option<i64>,
     /// Resume card: newest checkpoint written since the previous UI open
@@ -737,6 +763,7 @@ impl TimelineApp {
             narrative_job: None,
             suggestion: None,
             pending_declare_description: None,
+            declare_conflict: None,
             spans: Vec::new(),
             groups: Vec::new(),
             unplaced: Vec::new(),
@@ -788,6 +815,7 @@ impl TimelineApp {
             positioned: false,
             saved_pos: prefs.saved_pos,
             saved_size: prefs.saved_size,
+            zoom_seen: None,
             chat_task_request: None,
             resume: None,
             resume_checked: false,
@@ -1145,7 +1173,7 @@ impl TimelineApp {
         let spans = storage::spans_in_range(conn, lo, hi)?;
         let apps = insights::top_apps(&spans, lo, hi, usize::MAX);
         let apps_total_ms = apps.iter().map(|(_, ms)| ms).sum();
-        let top_apps = apps.into_iter().take(3).collect();
+        let top_apps = apps.into_iter().take(5).collect();
         let delta = insights::prior_period(&r.days).and_then(|pd| {
             let plo = pd
                 .first()?
@@ -1625,6 +1653,21 @@ impl TimelineApp {
                     Some(key) if input == *key || input.starts_with("http") => key.clone(),
                     _ => input,
                 };
+                // Two open tasks on one ticket key file each other's blocks
+                // (m29 chunk 7), so the form points at the owner instead of
+                // opening a second one; the typed text stays for a retry.
+                self.declare_conflict = None;
+                if let Some(key) = &ticket
+                    && let Ok(owners) = chronicle_core::storage::open_tasks_by_ref(conn, key)
+                    && let Some(owner) = owners.first()
+                {
+                    self.declare_conflict = Some(DeclareConflict {
+                        task_id: owner.id,
+                        label: owner.label.clone(),
+                        key: key.clone(),
+                    });
+                    return;
+                }
                 let project = self.new_project.trim();
                 let project = (!project.is_empty()).then_some(project);
                 let result = chronicle_core::storage::insert_user_task(conn, now, &label, project);
@@ -1765,6 +1808,12 @@ impl TimelineApp {
             Action::ChatAboutTask(task_id) => {
                 self.chat_task_request = Some(task_id);
                 self.view = View::Chat;
+                return;
+            }
+            Action::OpenTask(task_id) => {
+                self.declare_conflict = None;
+                self.selected_task = Some(task_id);
+                self.view = View::Timeline;
                 return;
             }
             Action::UseSuggestion => {
@@ -1914,6 +1963,32 @@ impl eframe::App for TimelineApp {
             .input(|i| i.viewport().native_pixels_per_point)
             .unwrap_or(1.0)
             / ctx.pixels_per_point();
+        // A zoom change (Settings' text size, Ctrl +/\u{2212}/0) leaves the
+        // window at its pixel size, so the card silently loses or gains
+        // points: give it back the point size it had, and persist the new
+        // zoom for the next boot. `InnerSize`/`MinInnerSize` are points, so
+        // the floor is the plain widget size whatever the zoom.
+        let zoom = ctx.zoom_factor();
+        if let Some(seen) = self.zoom_seen
+            && (zoom - seen).abs() > 0.001
+        {
+            let pad = self.shadow_pad();
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                WIDGET_W + 2.0 * pad,
+                WIDGET_H + 2.0 * pad,
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                ctx.viewport_rect().size() * (zoom / seen),
+            ));
+            if let Some(conn) = self.conn.as_ref() {
+                let _ = chronicle_core::storage::set_meta(
+                    conn,
+                    "ui_zoom_factor",
+                    Some(&format!("{zoom:.2}")),
+                );
+            }
+        }
+        self.zoom_seen = Some(zoom);
         let placed_before = self.positioned;
         if !self.positioned
             && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
@@ -1927,7 +2002,9 @@ impl eframe::App for TimelineApp {
             // margins below meter the gap to the *card* edge, so the pad
             // cancels one margin-width per axis.
             let pad = self.shadow_pad();
-            let card = self.saved_size.unwrap_or(egui::vec2(WIDGET_W, WIDGET_H));
+            let card = self
+                .saved_size
+                .unwrap_or(egui::vec2(WIDGET_W, WIDGET_H) * ctx.zoom_factor());
             let (win_w, win_h) = (card.x + 2.0 * pad, card.y + 2.0 * pad);
             // On-screen = at least a grabbable slice of the top bar visible.
             let usable = |p: egui::Pos2| {
@@ -1966,8 +2043,8 @@ impl eframe::App for TimelineApp {
             && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
             && !ctx.input(|i| i.pointer.any_down())
             && let size = rect.size() / to_points - egui::Vec2::splat(2.0 * self.shadow_pad())
-            && size.x >= WIDGET_W - 1.0
-            && size.y >= WIDGET_H - 1.0
+            && size.x >= WIDGET_W * zoom - 1.0
+            && size.y >= WIDGET_H * zoom - 1.0
             && self.saved_size.is_none_or(|s| (s - size).length_sq() > 4.0)
             && let Some(conn) = self.conn.as_ref()
         {
