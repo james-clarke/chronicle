@@ -23,8 +23,20 @@ const MAX_GEN: usize = 600;
 
 pub use chronicle_core::types::{DeriveOutput, IntervalDraft};
 
+/// One derive call: the parsed intervals plus what it cost (m27 chunk 2
+/// instrumentation; `raw` feeds the inspector's "last output").
+#[derive(Debug)]
+pub struct DeriveRun {
+    pub intervals: Vec<IntervalDraft>,
+    pub raw: String,
+    pub prompt_tokens: usize,
+    pub gen_tokens: usize,
+    pub prompt_eval_ms: u64,
+    pub gen_ms: u64,
+}
+
 /// Raw model intervals; callers sanitize + link (chronicle_core::merge).
-pub fn infer_intervals(model_path: &Path, digest: &str) -> anyhow::Result<Vec<IntervalDraft>> {
+pub fn infer_intervals(model_path: &Path, digest: &str) -> anyhow::Result<DeriveRun> {
     // llama.cpp/ggml log via a C callback straight to stderr unless redirected;
     // send_logs_to_tracing must only ever run once per process (bench loops).
     static LLAMA_LOGS: std::sync::Once = std::sync::Once::new();
@@ -44,14 +56,9 @@ pub fn infer_intervals(model_path: &Path, digest: &str) -> anyhow::Result<Vec<In
 
     let limit = N_CTX as usize - MAX_GEN - 64;
     let tokens = crate::fit_prompt(digest, limit, |d| tokenize_prompt(&model, d))?;
-    tracing::info!(
-        tokens = tokens.len(),
-        limit,
-        digest_chars = digest.len(),
-        "derive prompt"
-    );
 
     // Prompt eval, N_BATCH tokens per decode; logits only for the last token.
+    let t_prompt = std::time::Instant::now();
     let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
     let last = tokens.len() - 1;
     let mut pos = 0i32;
@@ -70,23 +77,44 @@ pub fn infer_intervals(model_path: &Path, digest: &str) -> anyhow::Result<Vec<In
         LlamaSampler::greedy(),
     ]);
 
+    let prompt_eval_ms = t_prompt.elapsed().as_millis() as u64;
+    let t_gen = std::time::Instant::now();
     let mut out = String::new();
     let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let mut gen_tokens = 0usize;
     for _ in 0..MAX_GEN {
         let token = sampler.sample(&ctx, batch.n_tokens() - 1);
         if model.is_eog_token(token) {
             break;
         }
+        gen_tokens += 1;
         out.push_str(&model.token_to_piece(token, &mut decoder, false, None)?);
         batch.clear();
         batch.add(token, pos, &[0], true)?;
         pos += 1;
         ctx.decode(&mut batch)?;
     }
+    let gen_ms = t_gen.elapsed().as_millis() as u64;
+    tracing::info!(
+        prompt_tokens = tokens.len(),
+        limit,
+        digest_chars = digest.len(),
+        gen_tokens,
+        prompt_eval_ms,
+        gen_ms,
+        "derive run"
+    );
 
     let parsed: DeriveOutput = serde_json::from_str(&out)
         .with_context(|| format!("model output is not valid interval JSON: {out}"))?;
-    Ok(parsed.intervals)
+    Ok(DeriveRun {
+        intervals: parsed.intervals,
+        raw: out,
+        prompt_tokens: tokens.len(),
+        gen_tokens,
+        prompt_eval_ms,
+        gen_ms,
+    })
 }
 
 fn tokenize_prompt(

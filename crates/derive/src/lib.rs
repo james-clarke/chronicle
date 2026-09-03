@@ -7,7 +7,7 @@ pub mod model;
 pub mod runner;
 
 pub use chat::ChatModel;
-pub use runner::{IntervalDraft, infer_intervals};
+pub use runner::{DeriveRun, IntervalDraft, infer_intervals};
 
 /// Tokenize `text` inside its prompt, shrinking the text until the whole
 /// prompt fits `limit` tokens. The digest cap is a chars/4 heuristic and the

@@ -120,6 +120,19 @@ enum Cmd {
         /// Only run models whose preset name contains this substring.
         #[arg(long)]
         model: Option<String>,
+        /// Skip MCP context for --batch cases (offline; replay never gathers it).
+        #[arg(long)]
+        no_mcp: bool,
+        /// Re-derive every batch a correction touched and score the corrected
+        /// outcome (m27 chunk 2).
+        #[arg(long)]
+        replay: bool,
+        /// Replay: only corrections made in the last N days.
+        #[arg(long, default_value_t = 7)]
+        since: u64,
+        /// Replay: write the per-probe results as JSON here for diffing.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -168,14 +181,25 @@ fn main() -> anyhow::Result<()> {
             digest,
             only,
             model,
-        } => bench(
-            &data_dir,
-            &fixtures,
-            &batch,
-            digest,
-            only.as_deref(),
-            model.as_deref(),
-        ),
+            no_mcp,
+            replay,
+            since,
+            out,
+        } => {
+            if replay {
+                replay_eval(&data_dir, since, model.as_deref(), out.as_deref())
+            } else {
+                bench(
+                    &data_dir,
+                    &fixtures,
+                    &batch,
+                    digest,
+                    only.as_deref(),
+                    model.as_deref(),
+                    no_mcp,
+                )
+            }
+        }
         Cmd::ChatWorker { conversation, task } => chat_worker(&data_dir, conversation, task),
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
@@ -412,6 +436,7 @@ fn bench(
     digest_only: bool,
     only: Option<&str>,
     model_filter: Option<&str>,
+    no_mcp: bool,
 ) -> anyhow::Result<()> {
     use chronicle_core::eval::Expectations;
     use chronicle_core::types::{Event, OpenTask};
@@ -477,23 +502,19 @@ fn bench(
 
     if !batch_ids.is_empty() {
         let conn = storage::open(&data_dir.join("chronicle.db"))?;
-        let tz = TimeZone::system();
         for &id in batch_ids {
             let spans = storage::batch_spans(&conn, id)?;
             if spans.is_empty() {
                 println!("batch {id}: no spans, skipping");
                 continue;
             }
+            let Some(batch) = storage::batch_row(&conn, id)? else {
+                println!("batch {id}: no such batch, skipping");
+                continue;
+            };
             let open = storage::open_tasks(&conn, 8)?;
-            let corrections = storage::similar_corrections(&conn, &spans, 4)?;
-            let gaps = afk_gaps_min(&spans, spans[0].start.as_millisecond());
-            cases.push((
-                format!("batch:{id}"),
-                digest::build_digest(&spans, &tz, &open, &corrections, &[], &[], None),
-                open,
-                None,
-                gaps,
-            ));
+            let bd = build_batch_digest(&conn, &config, data_dir, &batch, open, !no_mcp)?;
+            cases.push((format!("batch:{id}"), bd.digest, bd.open, None, bd.gaps));
         }
     }
     if let Some(filter) = only {
@@ -512,19 +533,7 @@ fn bench(
         return Ok(());
     }
 
-    let models: Vec<_> = chronicle_derive::model::PRESETS
-        .iter()
-        .map(|p| {
-            (
-                p.name,
-                chronicle_derive::model::models_dir(data_dir).join(p.file),
-            )
-        })
-        .filter(|(name, path)| path.exists() && model_filter.is_none_or(|f| name.contains(f)))
-        .collect();
-    if models.is_empty() {
-        bail!("no matching models downloaded; run `chronicle model pull`");
-    }
+    let models = bench_models(data_dir, model_filter)?;
 
     for (case, digest_text, open, expect, gaps) in &cases {
         println!(
@@ -534,8 +543,9 @@ fn bench(
         for (name, path) in &models {
             let t0 = Instant::now();
             match chronicle_derive::infer_intervals(path, digest_text) {
-                Ok(raw) => {
-                    let drafts = chronicle_core::merge::sanitize_intervals(raw, open.len());
+                Ok(run) => {
+                    let drafts =
+                        chronicle_core::merge::sanitize_intervals(run.intervals, open.len());
                     let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, open);
                     let linked = chronicle_core::merge::coalesce(linked, gaps, COALESCE_GAP_MIN);
                     let resolved = chronicle_core::eval::resolve(&slots, &linked, open);
@@ -573,6 +583,258 @@ fn bench(
 
 /// Ephemeral derivation worker: claim batch → digest → infer → write tasks →
 /// exit. Any failure marks the batch failed (retry-once via attempts cap).
+/// Downloaded model presets, optionally filtered by name substring.
+fn bench_models(
+    data_dir: &Path,
+    model_filter: Option<&str>,
+) -> anyhow::Result<Vec<(&'static str, PathBuf)>> {
+    let models: Vec<_> = chronicle_derive::model::PRESETS
+        .iter()
+        .map(|p| {
+            (
+                p.name,
+                chronicle_derive::model::models_dir(data_dir).join(p.file),
+            )
+        })
+        .filter(|(name, path)| path.exists() && model_filter.is_none_or(|f| name.contains(f)))
+        .collect();
+    if models.is_empty() {
+        bail!("no matching models downloaded; run `chronicle model pull`");
+    }
+    Ok(models)
+}
+
+/// `chronicle bench --replay`: re-derive every done batch a recent correction
+/// touched, with the open-task list as it stood at the batch's end, and score
+/// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it
+/// is live data and would make runs incomparable.
+fn replay_eval(
+    data_dir: &Path,
+    since_days: u64,
+    model_filter: Option<&str>,
+    out: Option<&Path>,
+) -> anyhow::Result<()> {
+    use chronicle_core::replay::{self, Check};
+    use chronicle_core::types::TaskSlot;
+    use chronicle_core::{digest, merge, storage};
+
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let since_ms = Timestamp::now().as_millisecond() - since_days as i64 * 86_400_000;
+    let rows = storage::replay_rows(&conn, since_ms)?;
+    let view = replay::Rows {
+        corrections: &rows.corrections,
+        intervals: &rows.intervals,
+        tasks: &rows.tasks,
+        batches: &rows.batches,
+    };
+    let (probes, skipped) = replay::build_probes(&view);
+    for s in &skipped {
+        println!("skip {s}");
+    }
+    if probes.is_empty() {
+        bail!("no scorable corrections in the last {since_days} days");
+    }
+    let mut batch_ids: Vec<i64> = probes.iter().map(|p| p.batch_id).collect();
+    batch_ids.sort_unstable();
+    batch_ids.dedup();
+    let corrections: std::collections::BTreeSet<i64> =
+        probes.iter().map(|p| p.correction_id).collect();
+    println!(
+        "{} probes from {} corrections over {} batches ({} corrections skipped)",
+        probes.len(),
+        corrections.len(),
+        batch_ids.len(),
+        skipped.len()
+    );
+    let models = bench_models(data_dir, model_filter)?;
+
+    let mut report = Vec::new();
+    for (name, path) in &models {
+        let mut results: Vec<replay::ProbeResult> = Vec::new();
+        for &bid in &batch_ids {
+            let batch = storage::batch_row(&conn, bid)?
+                .with_context(|| format!("batch {bid} vanished mid-replay"))?;
+            let open_at = replay::open_tasks_at(
+                &rows.tasks,
+                &rows.intervals,
+                &rows.corrections,
+                batch.end_ts,
+                8,
+            );
+            let bd = build_batch_digest(&conn, &config, data_dir, &batch, open_at.clone(), false)?;
+            let bprobes: Vec<&replay::Probe> =
+                probes.iter().filter(|p| p.batch_id == bid).collect();
+            println!(
+                "\n=== batch:{bid} [{name}] ({} probes, {} open tasks then, digest ~{} tokens)",
+                bprobes.len(),
+                open_at.len(),
+                digest::approx_tokens(&bd.digest)
+            );
+            let t0 = Instant::now();
+            match chronicle_derive::infer_intervals(path, &bd.digest) {
+                Ok(run) => {
+                    let drafts = merge::sanitize_intervals(run.intervals, bd.open.len());
+                    let (slots, linked) = merge::link_intervals(&drafts, &bd.open);
+                    let linked = merge::coalesce(linked, &bd.gaps, COALESCE_GAP_MIN);
+                    let replayed: Vec<replay::Replayed> = linked
+                        .iter()
+                        .filter_map(|iv| {
+                            let (task_id, label) = match slots.get(iv.slot)? {
+                                TaskSlot::Existing(id) => (
+                                    Some(*id),
+                                    bd.open
+                                        .iter()
+                                        .find(|t| t.id == *id)
+                                        .map(|t| t.label.clone())
+                                        .unwrap_or_default(),
+                                ),
+                                TaskSlot::New { label, .. } => (None, label.clone()),
+                            };
+                            Some(replay::Replayed {
+                                task_id,
+                                label,
+                                start_offset_min: iv.start_offset_min,
+                                end_offset_min: iv.end_offset_min,
+                            })
+                        })
+                        .collect();
+                    println!(
+                        "--- {} intervals in {:.1}s",
+                        replayed.len(),
+                        t0.elapsed().as_secs_f64()
+                    );
+                    for r in &replayed {
+                        let how = match r.task_id {
+                            Some(id) => format!("#{id}"),
+                            None => "new".into(),
+                        };
+                        println!(
+                            "  {:>4}–{:<4} {how}  {}",
+                            r.start_offset_min, r.end_offset_min, r.label
+                        );
+                    }
+                    for p in bprobes {
+                        let r = replay::score(p, batch.start_ts, &replayed, &open_at);
+                        let verdict = if r.pass { "PASS" } else { "FAIL" };
+                        println!(
+                            "  [{verdict}] c{} {} {}: {}",
+                            r.correction_id,
+                            r.kind,
+                            r.check.name(),
+                            r.detail
+                        );
+                        results.push(r);
+                    }
+                }
+                Err(e) => {
+                    println!("--- FAILED in {:.1}s: {e:#}", t0.elapsed().as_secs_f64());
+                    for p in bprobes {
+                        results.push(replay::ProbeResult {
+                            correction_id: p.correction_id,
+                            batch_id: p.batch_id,
+                            kind: p.kind.clone(),
+                            check: p.check,
+                            pass: false,
+                            detail: format!("derive failed: {e:#}"),
+                        });
+                    }
+                }
+            }
+        }
+        let mut totals = serde_json::Map::new();
+        println!("\n=== {name} replay score");
+        let mut ok_all = 0;
+        for check in [Check::Placed, Check::Label, Check::NotEjected] {
+            let n = results.iter().filter(|r| r.check == check).count();
+            let ok = results
+                .iter()
+                .filter(|r| r.check == check && r.pass)
+                .count();
+            ok_all += ok;
+            if n > 0 {
+                println!("  {}: {ok}/{n}", check.name());
+            }
+            totals.insert(check.name().into(), serde_json::json!([ok, n]));
+        }
+        println!("  total: {ok_all}/{}", results.len());
+        totals.insert("total".into(), serde_json::json!([ok_all, results.len()]));
+        report.push(serde_json::json!({
+            "model": name,
+            "since_days": since_days,
+            "generated_ts": Timestamp::now().as_millisecond(),
+            "skipped": skipped,
+            "totals": totals,
+            "probes": results,
+        }));
+    }
+    if let Some(out) = out {
+        std::fs::write(out, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("writing {}", out.display()))?;
+        println!("wrote {}", out.display());
+    }
+    Ok(())
+}
+
+/// Everything the model sees for one batch, plus what post-processing needs.
+struct BatchDigest {
+    digest: String,
+    open: Vec<chronicle_core::types::OpenTask>,
+    spans: Vec<chronicle_core::sessionizer::SpanDraft>,
+    /// AFK gaps ≥ 5 min in window minutes (coalesce boundaries).
+    gaps: Vec<(i64, i64)>,
+    activity: Vec<chronicle_core::types::ActivityEvent>,
+}
+
+/// Build the batch prompt the way production builds it, so bench and the
+/// replay eval score the same digest the worker would send (m27 chunk 2
+/// parity). `open` is the caller's open-task list; pre-pass hints over the
+/// window are appended so the model can link to them by ref.
+fn build_batch_digest(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    batch: &chronicle_core::storage::BatchRow,
+    mut open: Vec<chronicle_core::types::OpenTask>,
+    mcp: bool,
+) -> anyhow::Result<BatchDigest> {
+    use chronicle_core::storage;
+    let spans = storage::batch_spans(conn, batch.id)?;
+    let hints = storage::prepass_hints(conn, batch.start_ts, batch.end_ts)?;
+    for h in &hints {
+        if !open.iter().any(|t| t.id == h.task_id)
+            && let Some(t) = storage::open_task_by_id(conn, h.task_id)?
+        {
+            open.push(t);
+        }
+    }
+    let corrections = storage::similar_corrections(conn, &spans, 4)?;
+    let tz = TimeZone::system();
+    let mcp_context = if mcp {
+        chronicle_mcp::gather_context(&config.mcp_path(data_dir))
+    } else {
+        None
+    };
+    let activity = storage::activity_in_range(conn, batch.start_ts, batch.end_ts)?;
+    let digest = chronicle_core::digest::build_digest(
+        &spans,
+        &tz,
+        &open,
+        &corrections,
+        &hints,
+        &activity,
+        mcp_context.as_deref(),
+    );
+    let gaps = afk_gaps_min(&spans, batch.start_ts);
+    Ok(BatchDigest {
+        digest,
+        open,
+        spans,
+        gaps,
+        activity,
+    })
+}
+
 fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
     use chronicle_core::storage;
     let _guard = init_logging(data_dir)?;
@@ -586,44 +848,35 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         bail!("batch {batch_id} is not eligible for derivation")
     };
     let result = (|| -> anyhow::Result<usize> {
-        let spans = storage::batch_spans(&conn, batch_id)?;
-        let mut open = storage::open_tasks(&conn, 8)?;
-        // Pre-pass placements over this window are hints in the prompt; a
-        // hinted task outside the open-task cap is appended so the model
-        // can link to it by ref.
-        let hints = storage::prepass_hints(&conn, batch.start_ts, batch.end_ts)?;
-        for h in &hints {
-            if !open.iter().any(|t| t.id == h.task_id)
-                && let Some(t) = storage::open_task_by_id(&conn, h.task_id)?
-            {
-                open.push(t);
-            }
-        }
-        let corrections = storage::similar_corrections(&conn, &spans, 4)?;
-        let tz = TimeZone::system();
-        let mcp_path = config.mcp_path(data_dir);
-        let mcp_context = chronicle_mcp::gather_context(&mcp_path);
-        let activity = storage::activity_in_range(&conn, batch.start_ts, batch.end_ts)?;
-        let digest = chronicle_core::digest::build_digest(
-            &spans,
-            &tz,
-            &open,
-            &corrections,
-            &hints,
-            &activity,
-            mcp_context.as_deref(),
-        );
-        let raw = chronicle_derive::infer_intervals(&model_path, &digest)?;
-        let drafts = chronicle_core::merge::sanitize_intervals(raw, open.len());
+        let t0 = Instant::now();
+        let open = storage::open_tasks(&conn, 8)?;
+        let BatchDigest {
+            digest,
+            open,
+            spans,
+            gaps,
+            activity,
+        } = build_batch_digest(&conn, &config, data_dir, &batch, open, true)?;
+        let run = chronicle_derive::infer_intervals(&model_path, &digest)?;
+        let drafts = chronicle_core::merge::sanitize_intervals(run.intervals, open.len());
         let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, &open);
-        let linked = chronicle_core::merge::coalesce(
-            linked,
-            &afk_gaps_min(&spans, batch.start_ts),
-            COALESCE_GAP_MIN,
-        );
+        let linked = chronicle_core::merge::coalesce(linked, &gaps, COALESCE_GAP_MIN);
         let intervals = clamp_intervals(linked, &spans, batch.start_ts, batch.end_ts);
         let n = intervals.len();
         let stored = storage::store_derivation(&mut conn, batch_id, &slots, &intervals)?;
+        storage::record_derive_metrics(
+            &conn,
+            &storage::DeriveMetrics {
+                batch_id,
+                derived_ts: Timestamp::now().as_millisecond(),
+                derive_ms: t0.elapsed().as_millis() as i64,
+                prompt_tokens: run.prompt_tokens as i64,
+                gen_tokens: run.gen_tokens as i64,
+            },
+        )?;
+        // The inspector's "last output" (chunk 7) reads these back.
+        storage::set_meta(&conn, "derive_last_output", Some(&run.raw))?;
+        storage::set_meta(&conn, "derive_last_batch", Some(&batch_id.to_string()))?;
         // Deterministic anchoring: majority branch names the ticket key.
         match regex::Regex::new(&config.ticket_regex) {
             Ok(re) => {
@@ -703,6 +956,11 @@ fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> {
             tracing::info!(job_id, kind = %job.kind, "ai job done");
             Ok(())
         }
+        Err(e) if e.is::<SkipJob>() => {
+            tracing::info!(job_id, kind = %job.kind, "ai job skipped: {e}");
+            storage::skip_ai_job(&conn, job_id, &e.to_string())?;
+            Ok(())
+        }
         Err(e) => {
             tracing::error!(job_id, kind = %job.kind, "ai job failed: {e:#}");
             storage::fail_ai_job(&conn, job_id, &format!("{e:#}"))?;
@@ -710,6 +968,18 @@ fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> {
         }
     }
 }
+
+/// An AI job whose premise no longer holds: terminal but not a failure.
+#[derive(Debug)]
+struct SkipJob(String);
+
+impl std::fmt::Display for SkipJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SkipJob {}
 
 fn run_ai_job(
     conn: &rusqlite::Connection,
@@ -790,7 +1060,12 @@ fn run_ai_job(
             let Some((evidence, interval_ids, lo, hi)) =
                 storage::task_batch_evidence(conn, task_id, batch_id)?
             else {
-                bail!("batch {batch_id} holds no intervals for task {task_id}")
+                // The batch was re-derived under other tasks since this job
+                // was queued; the re-derive queued its own journal jobs.
+                return Err(SkipJob(format!(
+                    "batch {batch_id} holds no intervals for task {task_id}"
+                ))
+                .into());
             };
             if evidence.trim().is_empty() {
                 bail!("no span evidence for task {task_id} in batch {batch_id}");
@@ -1816,6 +2091,12 @@ struct Scheduler {
 struct DaemonStatus {
     uptime_secs: u64,
     derive_active: bool,
+    /// What the inference slot is running ("derive batch 71", "ai job 12")
+    /// and for how long; absent when idle or from a pre-m27 daemon.
+    #[serde(default)]
+    worker: Option<String>,
+    #[serde(default)]
+    worker_secs: Option<u64>,
     idle_secs: Option<u64>,
     ui_open: bool,
 }
@@ -1829,6 +2110,14 @@ fn status_json(
     let status = DaemonStatus {
         uptime_secs: started.elapsed().as_secs(),
         derive_active: scheduler.worker.is_some(),
+        worker: scheduler.worker.as_ref().map(|(_, _, kind)| match kind {
+            WorkerKind::Batch(id) => format!("derive batch {id}"),
+            WorkerKind::AiJob(id) => format!("ai job {id}"),
+        }),
+        worker_secs: scheduler
+            .worker
+            .as_ref()
+            .map(|(_, started, _)| started.elapsed().as_secs()),
         idle_secs: idle_since
             .map(|since| ((Timestamp::now().as_millisecond() - since) / 1000).max(0) as u64),
         ui_open: ui_child
@@ -2360,14 +2649,30 @@ fn fmt_secs(secs: u64) -> String {
     }
 }
 
-fn format_status(
-    liveness: &Liveness,
+/// What `chronicle status` reads from the DB and the model dir (the daemon's
+/// own view arrives as `Liveness`).
+#[derive(Default)]
+struct DbStatus {
     last_event_age_secs: Option<u64>,
     last_batch_end_ms: Option<i64>,
-    model_present: bool,
-    server_error: Option<&str>,
+    /// Model file name plus preset name; None when no model is downloaded.
+    model_file: Option<String>,
+    server_error: Option<String>,
     last_prune_age_secs: Option<u64>,
-) -> String {
+    last_derive: Option<chronicle_core::storage::DeriveMetrics>,
+    pending_batches: i64,
+}
+
+fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
+    let DbStatus {
+        last_event_age_secs,
+        last_batch_end_ms,
+        model_file,
+        server_error,
+        last_prune_age_secs,
+        last_derive,
+        pending_batches,
+    } = db;
     let mut out = String::new();
     match liveness {
         Liveness::Running(s) => {
@@ -2375,10 +2680,13 @@ fn format_status(
                 "chronicle: healthy — daemon running (uptime {})\n",
                 fmt_secs(s.uptime_secs)
             ));
-            out.push_str(&format!(
-                "  derive worker: {}\n",
-                if s.derive_active { "running" } else { "idle" }
-            ));
+            let worker = match (&s.worker, s.worker_secs) {
+                (Some(w), Some(secs)) => format!("{w} ({})", fmt_secs(secs)),
+                (Some(w), None) => w.clone(),
+                (None, _) if s.derive_active => "running".into(),
+                (None, _) => "idle".into(),
+            };
+            out.push_str(&format!("  derive worker: {worker}\n"));
             out.push_str(&format!(
                 "  ui: {}\n",
                 if s.ui_open { "open" } else { "closed" }
@@ -2393,30 +2701,42 @@ fn format_status(
         }
     }
     match last_event_age_secs {
-        Some(age) => out.push_str(&format!("  last event: {} ago\n", fmt_secs(age))),
+        Some(age) => out.push_str(&format!("  last event: {} ago\n", fmt_secs(*age))),
         None => out.push_str("  last event: none recorded yet\n"),
     }
     if let Some(end_ms) = last_batch_end_ms
-        && let Ok(t) = local(end_ms)
+        && let Ok(t) = local(*end_ms)
     {
         out.push_str(&format!(
             "  last derived batch ended: {}\n",
             t.strftime("%Y-%m-%d %H:%M")
         ));
     }
+    match last_derive {
+        Some(d) => {
+            let when = local(d.derived_ts)
+                .map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  last derive: batch {} at {when}, {:.1}s, {} prompt + {} gen tokens\n",
+                d.batch_id,
+                d.derive_ms as f64 / 1000.0,
+                d.prompt_tokens,
+                d.gen_tokens
+            ));
+        }
+        None => out.push_str("  last derive: none instrumented yet\n"),
+    }
+    out.push_str(&format!("  pending batches: {pending_batches}\n"));
     out.push_str(&format!(
         "  model: {}\n",
-        if model_present {
-            "present"
-        } else {
-            "not downloaded"
-        }
+        model_file.as_deref().unwrap_or("not downloaded")
     ));
     if let Some(err) = server_error {
         out.push_str(&format!("  warning: {err}\n"));
     }
     if let Some(age) = last_prune_age_secs {
-        out.push_str(&format!("  last prune: {} ago\n", fmt_secs(age)));
+        out.push_str(&format!("  last prune: {} ago\n", fmt_secs(*age)));
     }
     out
 }
@@ -2427,14 +2747,32 @@ fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
     let config = Config::load(&data_dir.join("config.toml"))?;
     let now_ms = Timestamp::now().as_millisecond();
     let age = |ms: i64| ((now_ms - ms) / 1000).max(0) as u64;
-    let last_event_age_secs = chronicle_core::storage::latest_event_ts(&conn)?.map(age);
-    let last_batch_end_ms = chronicle_core::storage::latest_batch_end(&conn)?;
-    let model_present =
-        chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_some();
-    let server_error = chronicle_core::storage::get_meta(&conn, "server_error")?;
-    let last_prune_age_secs = chronicle_core::storage::get_meta(&conn, "last_prune_ts")?
-        .and_then(|v| v.parse::<i64>().ok())
-        .map(age);
+    let model_file =
+        chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).map(|p| {
+            let file = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            match chronicle_derive::model::PRESETS
+                .iter()
+                .find(|m| m.file == file)
+            {
+                Some(m) => format!("{file} ({})", m.name),
+                None => file,
+            }
+        });
+    let db = DbStatus {
+        last_event_age_secs: chronicle_core::storage::latest_event_ts(&conn)?.map(age),
+        last_batch_end_ms: chronicle_core::storage::latest_batch_end(&conn)?,
+        model_file,
+        server_error: chronicle_core::storage::get_meta(&conn, "server_error")?,
+        last_prune_age_secs: chronicle_core::storage::get_meta(&conn, "last_prune_ts")?
+            .and_then(|v| v.parse::<i64>().ok())
+            .map(age),
+        last_derive: chronicle_core::storage::last_derive(&conn)?,
+        pending_batches: chronicle_core::storage::pending_batch_count(&conn)?,
+    };
 
     if json {
         let (liveness_str, daemon) = match &liveness {
@@ -2445,25 +2783,18 @@ fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
         let doc = serde_json::json!({
             "liveness": liveness_str,
             "daemon": daemon,
-            "last_event_age_secs": last_event_age_secs,
-            "last_batch_end_ms": last_batch_end_ms,
-            "model_present": model_present,
-            "server_error": server_error,
-            "last_prune_age_secs": last_prune_age_secs,
+            "last_event_age_secs": db.last_event_age_secs,
+            "last_batch_end_ms": db.last_batch_end_ms,
+            "model_present": db.model_file.is_some(),
+            "model_file": db.model_file,
+            "server_error": db.server_error,
+            "last_prune_age_secs": db.last_prune_age_secs,
+            "last_derive": db.last_derive,
+            "pending_batches": db.pending_batches,
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
-        print!(
-            "{}",
-            format_status(
-                &liveness,
-                last_event_age_secs,
-                last_batch_end_ms,
-                model_present,
-                server_error.as_deref(),
-                last_prune_age_secs,
-            )
-        );
+        print!("{}", format_status(&liveness, &db));
     }
     if !matches!(liveness, Liveness::Running(_)) {
         // Scriptable failure code without anyhow's "Error:" noise on top of
@@ -2669,27 +3000,53 @@ mod tests {
             &Liveness::Running(DaemonStatus {
                 uptime_secs: 8000,
                 derive_active: true,
+                worker: Some("derive batch 71".into()),
+                worker_secs: Some(45),
                 idle_secs: Some(90),
                 ui_open: true,
             }),
-            Some(12),
-            None,
-            true,
-            None,
-            Some(3600),
+            &DbStatus {
+                last_event_age_secs: Some(12),
+                model_file: Some("Qwen3-4B-Q4_K_M.gguf (qwen3-4b)".into()),
+                last_prune_age_secs: Some(3600),
+                last_derive: Some(chronicle_core::storage::DeriveMetrics {
+                    batch_id: 70,
+                    derived_ts: 0,
+                    derive_ms: 61_500,
+                    prompt_tokens: 2100,
+                    gen_tokens: 140,
+                }),
+                pending_batches: 2,
+                ..DbStatus::default()
+            },
         );
         assert!(s.contains("healthy"));
         assert!(s.contains("uptime 2h 13m"));
-        assert!(s.contains("derive worker: running"));
+        assert!(s.contains("derive worker: derive batch 71 (45s)"));
         assert!(s.contains("user idle: 1m"));
         assert!(s.contains("last event: 12s ago"));
-        assert!(s.contains("model: present"));
+        assert!(s.contains("last derive: batch 70 at "), "{s}");
+        assert!(s.contains(", 61.5s, 2100 prompt + 140 gen tokens"), "{s}");
+        assert!(s.contains("pending batches: 2"));
+        assert!(s.contains("model: Qwen3-4B-Q4_K_M.gguf (qwen3-4b)"));
         assert!(s.contains("last prune: 1h 0m ago"));
     }
 
     #[test]
+    fn format_status_pre_m27_daemon_reports_running_worker() {
+        // An older daemon's status JSON lacks the worker fields.
+        let s: DaemonStatus = serde_json::from_str(
+            r#"{"uptime_secs":5,"derive_active":true,"idle_secs":null,"ui_open":false}"#,
+        )
+        .unwrap();
+        let s = format_status(&Liveness::Running(s), &DbStatus::default());
+        assert!(s.contains("derive worker: running"));
+        assert!(s.contains("last derive: none instrumented yet"));
+    }
+
+    #[test]
     fn format_status_stopped_still_reports_db_state() {
-        let s = format_status(&Liveness::Stopped, None, None, false, None, None);
+        let s = format_status(&Liveness::Stopped, &DbStatus::default());
         assert!(s.contains("stopped"));
         assert!(!s.contains("healthy"));
         assert!(s.contains("last event: none recorded yet"));
@@ -2700,11 +3057,12 @@ mod tests {
     fn format_status_unresponsive_and_server_error() {
         let s = format_status(
             &Liveness::Unresponsive,
-            Some(400),
-            None,
-            true,
-            Some("AW endpoint failed on port 5600: in use"),
-            None,
+            &DbStatus {
+                last_event_age_secs: Some(400),
+                model_file: Some("m.gguf".into()),
+                server_error: Some("AW endpoint failed on port 5600: in use".into()),
+                ..DbStatus::default()
+            },
         );
         assert!(s.contains("running but not responding"));
         assert!(s.contains("warning: AW endpoint failed on port 5600: in use"));

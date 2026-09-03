@@ -36,6 +36,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/011_interval_source.sql")),
         M::up(include_str!("../migrations/012_interval_tail.sql")),
         M::up(include_str!("../migrations/013_proposals.sql")),
+        M::up(include_str!("../migrations/014_derive_metrics.sql")),
     ])
 });
 
@@ -355,6 +356,150 @@ pub fn latest_batch_end(conn: &Connection) -> Result<Option<i64>, StorageError> 
     Ok(conn.query_row("SELECT MAX(end_ts) FROM batches", [], |r| r.get(0))?)
 }
 
+pub fn pending_batch_count(conn: &Connection) -> Result<i64, StorageError> {
+    Ok(conn.query_row(
+        &format!("SELECT COUNT(*) FROM batches WHERE {ELIGIBLE}"),
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Per-derive instrumentation (m27 chunk 2), written by the worker after
+/// `store_derivation`; `chronicle status` and the inspector read it back.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeriveMetrics {
+    pub batch_id: i64,
+    pub derived_ts: i64,
+    pub derive_ms: i64,
+    pub prompt_tokens: i64,
+    pub gen_tokens: i64,
+}
+
+pub fn record_derive_metrics(conn: &Connection, m: &DeriveMetrics) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE batches SET derived_ts=?2, derive_ms=?3, prompt_tokens=?4, gen_tokens=?5 WHERE id=?1",
+        params![m.batch_id, m.derived_ts, m.derive_ms, m.prompt_tokens, m.gen_tokens],
+    )?;
+    Ok(())
+}
+
+pub fn batch_row(conn: &Connection, id: i64) -> Result<Option<BatchRow>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT id, start_ts, end_ts, status, attempts FROM batches WHERE id=?1",
+            [id],
+            |r| {
+                Ok(BatchRow {
+                    id: r.get(0)?,
+                    start_ts: r.get(1)?,
+                    end_ts: r.get(2)?,
+                    status: r.get(3)?,
+                    attempts: r.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Owned rows for the corrections replay eval (`chronicle bench --replay`):
+/// corrections since `since_ms`, plus every task, interval, and done batch
+/// they could refer to.
+pub struct ReplayRows {
+    pub corrections: Vec<crate::replay::CorrectionRow>,
+    pub intervals: Vec<crate::replay::IntervalRow>,
+    pub tasks: Vec<crate::replay::TaskRow>,
+    pub batches: Vec<crate::replay::BatchRow>,
+}
+
+pub fn replay_rows(conn: &Connection, since_ms: i64) -> Result<ReplayRows, StorageError> {
+    use crate::replay;
+    let corrections = conn
+        .prepare(
+            "SELECT id, ts, kind, task_id, old_label, new_label, old_project, new_project, interval_id
+             FROM corrections WHERE ts >= ?1 ORDER BY ts, id",
+        )?
+        .query_map([since_ms], |r| {
+            Ok(replay::CorrectionRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                task_id: r.get(3)?,
+                old_label: r.get(4)?,
+                new_label: r.get(5)?,
+                old_project: r.get(6)?,
+                new_project: r.get(7)?,
+                interval_id: r.get(8)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let intervals = conn
+        .prepare(
+            "SELECT id, task_id, batch_id, start_ts, end_ts FROM intervals ORDER BY start_ts, id",
+        )?
+        .query_map([], |r| {
+            Ok(replay::IntervalRow {
+                id: r.get(0)?,
+                task_id: r.get(1)?,
+                batch_id: r.get(2)?,
+                start_ts: r.get(3)?,
+                end_ts: r.get(4)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let tasks = conn
+        .prepare("SELECT id, label, project, source, status, created_ts, closed_ts FROM tasks")?
+        .query_map([], |r| {
+            Ok(replay::TaskRow {
+                id: r.get(0)?,
+                label: r.get(1)?,
+                project: r.get(2)?,
+                declared: r.get::<_, String>(3)? == "user",
+                closed: r.get::<_, String>(4)? == "closed",
+                created_ts: r.get(5)?,
+                closed_ts: r.get(6)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let batches = conn
+        .prepare("SELECT id, start_ts, end_ts FROM batches WHERE status='done' ORDER BY start_ts")?
+        .query_map([], |r| {
+            Ok(replay::BatchRow {
+                id: r.get(0)?,
+                start_ts: r.get(1)?,
+                end_ts: r.get(2)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(ReplayRows {
+        corrections,
+        intervals,
+        tasks,
+        batches,
+    })
+}
+
+/// The most recently instrumented derive, if any batch has finished since 014.
+pub fn last_derive(conn: &Connection) -> Result<Option<DeriveMetrics>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT id, derived_ts, derive_ms, prompt_tokens, gen_tokens FROM batches
+             WHERE derived_ts IS NOT NULL ORDER BY derived_ts DESC LIMIT 1",
+            [],
+            |r| {
+                Ok(DeriveMetrics {
+                    batch_id: r.get(0)?,
+                    derived_ts: r.get(1)?,
+                    derive_ms: r.get(2)?,
+                    prompt_tokens: r.get(3)?,
+                    gen_tokens: r.get(4)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 pub fn load_events_from(conn: &Connection, from_ms: i64) -> Result<Vec<Event>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT ts, kind, app, title, url, idle FROM events WHERE ts >= ?1 ORDER BY ts, id",
@@ -547,9 +692,10 @@ pub fn next_eligible_ai_job(
 pub fn claim_ai_job(conn: &Connection, id: i64) -> Result<Option<AiJobRow>, StorageError> {
     let n = conn.execute(
         &format!(
-            "UPDATE ai_jobs SET status='running', attempts=attempts+1 WHERE id=?1 AND {ELIGIBLE}"
+            "UPDATE ai_jobs SET status='running', attempts=attempts+1, started_ts=?2
+             WHERE id=?1 AND {ELIGIBLE}"
         ),
-        [id],
+        params![id, now_ms()],
     )?;
     if n == 0 {
         return Ok(None);
@@ -568,18 +714,32 @@ pub fn claim_ai_job(conn: &Connection, id: i64) -> Result<Option<AiJobRow>, Stor
     Ok(Some(row))
 }
 
+fn now_ms() -> i64 {
+    jiff::Timestamp::now().as_millisecond()
+}
+
 pub fn complete_ai_job(conn: &Connection, id: i64, result: &str) -> Result<(), StorageError> {
     conn.execute(
-        "UPDATE ai_jobs SET status='done', result=?2, error=NULL WHERE id=?1",
-        params![id, result],
+        "UPDATE ai_jobs SET status='done', result=?2, error=NULL, finished_ts=?3 WHERE id=?1",
+        params![id, result, now_ms()],
     )?;
     Ok(())
 }
 
 pub fn fail_ai_job(conn: &Connection, id: i64, error: &str) -> Result<(), StorageError> {
     conn.execute(
-        "UPDATE ai_jobs SET status='failed', error=?2 WHERE id=?1",
-        params![id, error],
+        "UPDATE ai_jobs SET status='failed', error=?2, finished_ts=?3 WHERE id=?1",
+        params![id, error, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// The job's premise no longer holds (its batch was re-derived under other
+/// tasks): terminal, never retried, not a failure.
+pub fn skip_ai_job(conn: &Connection, id: i64, reason: &str) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE ai_jobs SET status='skipped', error=?2, finished_ts=?3 WHERE id=?1",
+        params![id, reason, now_ms()],
     )?;
     Ok(())
 }
@@ -719,7 +879,7 @@ pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, Sto
          AND id NOT IN (SELECT conversation_id FROM chat_messages WHERE conversation_id IS NOT NULL) \
          LIMIT ?2)",
         "DELETE FROM ai_jobs WHERE id IN (SELECT id FROM ai_jobs WHERE created_ts < ?1 \
-         AND status IN ('done','failed') LIMIT ?2)",
+         AND status IN ('done','failed','skipped') LIMIT ?2)",
         "DELETE FROM narratives WHERE rowid IN (SELECT rowid FROM narratives WHERE created_ts < ?1 \
          LIMIT ?2)",
     ];
@@ -2631,6 +2791,77 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         assert!(super::MIGRATIONS.validate().is_ok());
+    }
+
+    // 014: intervals get an insert timestamp from the trigger, derive metrics
+    // round-trip, and a skipped AI job is terminal with both timestamps set.
+    #[test]
+    fn migration_014_metrics_trigger_and_skipped_jobs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, created_ts) VALUES (1, 't', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (7, 0, 60000, 'done')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (1, 7, 0, 60000, 0.9)",
+            [],
+        )
+        .unwrap();
+        let created: Option<i64> = conn
+            .query_row("SELECT created_ts FROM intervals", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            created.is_some_and(|c| c > 1_700_000_000_000),
+            "{created:?}"
+        );
+
+        assert!(super::last_derive(&conn).unwrap().is_none());
+        super::record_derive_metrics(
+            &conn,
+            &super::DeriveMetrics {
+                batch_id: 7,
+                derived_ts: 5,
+                derive_ms: 61_500,
+                prompt_tokens: 2100,
+                gen_tokens: 140,
+            },
+        )
+        .unwrap();
+        let d = super::last_derive(&conn).unwrap().unwrap();
+        assert_eq!(
+            (d.batch_id, d.derive_ms, d.prompt_tokens, d.gen_tokens),
+            (7, 61_500, 2100, 140)
+        );
+        assert_eq!(super::pending_batch_count(&conn).unwrap(), 0);
+        conn.execute(
+            "INSERT INTO batches (id, start_ts, end_ts) VALUES (8, 60000, 120000)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(super::pending_batch_count(&conn).unwrap(), 1);
+
+        let ts = crate::types::ms_to_ts(1_000);
+        let id = super::enqueue_ai_job(&conn, ts, "journal", 0, "{}").unwrap();
+        super::claim_ai_job(&conn, id).unwrap().unwrap();
+        super::skip_ai_job(&conn, id, "gone").unwrap();
+        let (status, started, finished): (String, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT status, started_ts, finished_ts FROM ai_jobs WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "skipped");
+        assert!(started.is_some() && finished.is_some());
+        assert!(super::claim_ai_job(&conn, id).unwrap().is_none());
     }
 
     // 004 rebuilds `tasks` under live children: existing rows must migrate
