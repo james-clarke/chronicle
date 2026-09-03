@@ -33,7 +33,15 @@ impl TimelineApp {
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     week_chart(ui, content_w, r, &today);
-                    if let Some(wi) = week_insights {
+                    if !r.projects.is_empty() && r.grand_total_ms > 0 {
+                        ui.add_space(theme::SPACE_SM);
+                        project_mix(ui, content_w, r);
+                    }
+                    // Focus tiles only once the week has something in it
+                    // (six zeros are not a report).
+                    if let Some(wi) = week_insights
+                        && r.grand_total_ms > 0
+                    {
                         ui.add_space(theme::SECTION_GAP);
                         theme::section_header_with(ui, "Focus", None, |ui| {
                             narrative_control(ui, wi, narrative_busy, model_missing, &mut pending);
@@ -64,8 +72,6 @@ impl TimelineApp {
                         );
                         return;
                     }
-                    ui.add_space(theme::SPACE_SM);
-                    project_mix(ui, content_w, r);
                     for p in &r.projects {
                         ui.add_space(theme::SPACE_SM);
                         project_group(ui, content_w, r, p, &mut jump);
@@ -278,11 +284,17 @@ fn apps_bar(ui: &mut egui::Ui, width: f32, wi: &WeekInsights) {
     );
 }
 
+/// A report task's identity colour: its project's hue, shaded by id.
+fn task_color(t: &TaskRow) -> egui::Color32 {
+    let project = (t.project != UNTAGGED).then_some(t.project.as_str());
+    theme::task_color(t.task_id, project)
+}
+
 fn project_color(project: &str) -> egui::Color32 {
     if project == UNTAGGED {
         theme::palette::TEXT_DIM
     } else {
-        theme::series_color_for_key(project)
+        theme::project_hue(project)
     }
 }
 
@@ -294,8 +306,9 @@ fn project_name(project: &str) -> &str {
     }
 }
 
-/// Single-row project mix: the week's total split by project, biggest
-/// first; hover a segment for the project's total and share.
+/// Single-row project mix under the week chart: the week's total split by
+/// project, biggest first, over a one-line legend (name and share) — the
+/// chart's colour key. Hover a segment for the project's total.
 fn project_mix(ui: &mut egui::Ui, width: f32, r: &RangeReport) {
     let total = r.grand_total_ms.max(1) as f32;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 8.0), egui::Sense::hover());
@@ -324,6 +337,29 @@ fn project_mix(ui: &mut egui::Ui, width: f32, r: &RangeReport) {
             (p.total_ms as f32 / total * 100.0).round()
         ));
     }
+    ui.add_space(theme::SPACE_XS);
+    let legend = r
+        .projects
+        .iter()
+        .map(|p| {
+            format!(
+                "{} {}%",
+                project_name(&p.project),
+                (p.total_ms as f32 / total * 100.0).round()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    theme::truncated_label(
+        ui,
+        egui::Label::new(
+            egui::RichText::new(&legend)
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        )
+        .truncate(),
+        &legend,
+    );
 }
 
 /// Project header (chip, thin share bar, share %, total in the number
@@ -371,7 +407,7 @@ fn project_group(
             let resp = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
                     theme::ListRow::new(&t.label)
-                        .dot(theme::series_color_for(t.task_id))
+                        .dot(task_color(t))
                         .num(fmt_dur(t.total_ms))
                         .show(ui, width - indent, |_| {});
                 })
@@ -407,7 +443,6 @@ fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civi
     const CHART_H: f32 = 110.0;
     const LABEL_H: f32 = 16.0;
     const LIFT: f32 = 2.0;
-    let width = width.min(680.0);
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(width, CHART_H + LABEL_H + 14.0),
         egui::Sense::hover(),
@@ -421,6 +456,9 @@ fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civi
         .map(|p| (((p.x - rect.left()) / slot) as usize).min(r.days.len() - 1))
         .filter(|&d| day_totals[d] > 0);
     let painter = ui.painter();
+    // The segment under the pointer (task index, its ms), for the tooltip.
+    let hover_pos = resp.hover_pos();
+    let mut hovered_seg: Option<(usize, i64)> = None;
     for (d, day) in r.days.iter().enumerate() {
         let cx = rect.left() + slot * (d as f32 + 0.5);
         let base = rect.top() + CHART_H;
@@ -431,7 +469,7 @@ fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civi
         // Stack biggest-task-first, bottom-up; LIFT headroom stays reserved
         // so a lifted full-height bar never leaves the allocated rect.
         let mut y = base - raise;
-        for t in &r.tasks {
+        for (ti, t) in r.tasks.iter().enumerate() {
             let ms = t.by_day[d];
             if ms == 0 {
                 continue;
@@ -441,13 +479,16 @@ fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civi
                 egui::pos2(cx - bar_w / 2.0, y - h),
                 egui::pos2(cx + bar_w / 2.0, y - 1.0),
             );
-            let color = theme::series_color_for(t.task_id);
+            let color = task_color(t);
             let color = if hovered {
                 color.gamma_multiply(1.2)
             } else {
                 color
             };
             painter.rect_filled(seg, egui::CornerRadius::same(2), color);
+            if hovered && hover_pos.is_some_and(|p| seg.expand2(egui::vec2(0.0, 0.5)).contains(p)) {
+                hovered_seg = Some((ti, ms));
+            }
             y -= h;
         }
         let label_color = if day == today {
@@ -474,6 +515,29 @@ fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civi
                 );
                 ui.weak(fmt_dur(day_totals[d]));
             });
+            // The segment under the pointer first: label, project, its time
+            // that day — the bar's own legend.
+            if let Some((ti, ms)) = hovered_seg {
+                let t = &r.tasks[ti];
+                ui.horizontal(|ui| {
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.0, task_color(t));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&t.label).color(theme::palette::TEXT))
+                            .truncate(),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.weak(format!(
+                        "{} \u{b7} {}",
+                        project_name(&t.project),
+                        fmt_dur(ms)
+                    ));
+                });
+                ui.add_space(theme::SPACE_XS);
+            }
             // Top tasks only; a 15-task day would fill the whole widget.
             let mut day_tasks: Vec<&TaskRow> = r.tasks.iter().filter(|t| t.by_day[d] > 0).collect();
             day_tasks.sort_by_key(|t| std::cmp::Reverse(t.by_day[d]));
@@ -483,11 +547,7 @@ fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civi
                 ui.horizontal(|ui| {
                     let (dot, _) =
                         ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(
-                        dot.center(),
-                        3.0,
-                        theme::series_color_for(t.task_id),
-                    );
+                    ui.painter().circle_filled(dot.center(), 3.0, task_color(t));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.weak(egui::RichText::new(fmt_dur(ms)).monospace());
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {

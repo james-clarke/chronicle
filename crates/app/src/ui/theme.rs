@@ -17,12 +17,20 @@ pub(super) mod palette {
     /// Window edge stroke; a step brighter than SURFACE_2 so the card edge
     /// reads against an arbitrary desktop.
     pub const BORDER: Color32 = Color32::from_rgb(0x32, 0x34, 0x3e);
-    /// Categorical task-identity colors (CVD-checked on BG); cycles by
-    /// group index. Status colors below stay out of this set.
-    pub const SERIES: [Color32; 3] = [
-        Color32::from_rgb(0x5e, 0x87, 0xea),
-        Color32::from_rgb(0x27, 0xa9, 0x7f),
-        Color32::from_rgb(0xbd, 0x88, 0x27),
+    /// Categorical identity hues (m25: eight, so unrelated projects stop
+    /// sharing a colour on the band and in lanes); a project hashes to one,
+    /// its tasks are shades of it. Status colors below stay out of this set.
+    /// Ordered so neighbours are far apart in hue: projects are handed
+    /// hues by position, and the first few must never look alike.
+    pub const SERIES: [Color32; 8] = [
+        Color32::from_rgb(0x5e, 0x87, 0xea), // blue
+        Color32::from_rgb(0xd9, 0x80, 0x3c), // orange
+        Color32::from_rgb(0x27, 0xa9, 0x7f), // green
+        Color32::from_rgb(0x9b, 0x7b, 0xe6), // violet
+        Color32::from_rgb(0x3a, 0xa9, 0xc4), // teal
+        Color32::from_rgb(0xbd, 0x88, 0x27), // gold
+        Color32::from_rgb(0xd4, 0x6a, 0x8a), // rose
+        Color32::from_rgb(0x8f, 0xb3, 0x39), // lime
     ];
     pub const AMBER: Color32 = Color32::from_rgb(0xd9, 0xa4, 0x41);
     pub const ORANGE: Color32 = Color32::from_rgb(0xe0, 0x78, 0x4f);
@@ -60,6 +68,15 @@ pub(super) const SECTION_GAP: f32 = SPACE_LG;
 /// it) sits inside `symmetric(PAGE_MARGIN, 8)` — the top bar's own margin,
 /// so cards, rows and the bar's tabs share one left edge.
 pub(super) const PAGE_MARGIN: i8 = 12;
+/// Window width (points, shadow pad included) from which views spread out:
+/// the timeline keeps its detail pane beside the cards, Home puts the feed
+/// in a second column. Below it every view is the one-column widget.
+pub(super) const WIDE_W: f32 = 720.0;
+
+pub(super) fn wide(ctx: &egui::Context) -> bool {
+    ctx.viewport_rect().width() >= WIDE_W
+}
+
 /// Fixed-width, right-aligned number column at the end of list rows, so
 /// durations line up across rows whatever the title and chip widths.
 pub(super) const NUM_COL: f32 = 64.0;
@@ -271,7 +288,50 @@ fn style(style: &mut egui::Style) {
     v.widgets.open.weak_bg_fill = palette::SURFACE_2;
 }
 
-/// Identity color for a task, stable across views (dot, band, report bars).
+/// Projects in first-seen order (see `storage::project_order`), refreshed on
+/// every data reload: a project's hue is its position here, so the first
+/// eight projects never share one. Empty until the first load, when names
+/// fall back to hashing.
+static PROJECT_ORDER: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+pub(super) fn set_project_order(order: Vec<String>) {
+    if let Ok(mut cur) = PROJECT_ORDER.write()
+        && *cur != order
+    {
+        *cur = order;
+    }
+}
+
+/// Identity hue for a project name: its first-seen position when known,
+/// else hashed.
+pub(super) fn project_hue(project: &str) -> Color32 {
+    let known = PROJECT_ORDER
+        .read()
+        .ok()
+        .and_then(|o| o.iter().position(|p| p == project));
+    match known {
+        Some(i) => series_color_for(i as i64),
+        None => series_color_for_key(project),
+    }
+}
+
+/// Identity color for a task, stable across views (dot, band, report bars):
+/// the project's hue (see [`project_hue`]) in one of three shades picked by
+/// task id, so tasks of one project read as a family and two projects never
+/// share a swatch. Untagged tasks cycle the hues by id.
+pub(super) fn task_color(task_id: i64, project: Option<&str>) -> Color32 {
+    let hue = match project.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => project_hue(p),
+        None => series_color_for(task_id),
+    };
+    match task_id.rem_euclid(3) {
+        0 => hue,
+        1 => blend(hue, Color32::WHITE, 0.18),
+        _ => blend(hue, palette::BG, 0.22),
+    }
+}
+
+/// Identity hue by id, cycling the series palette.
 pub(super) fn series_color_for(task_id: i64) -> Color32 {
     palette::SERIES[task_id.rem_euclid(palette::SERIES.len() as i64) as usize]
 }
@@ -283,6 +343,49 @@ pub(super) fn series_color_for_key(key: &str) -> Color32 {
     let mut h = std::hash::DefaultHasher::new();
     key.hash(&mut h);
     series_color_for((h.finish() % 1024) as i64)
+}
+
+/// A window title as shown on cards and rows: Claude Code prefixes its
+/// terminal title with a spinner/status glyph (✳ ◑ ☐ …) that means nothing
+/// to a reader here, so the leading run of such glyphs is dropped. Stored
+/// titles (and the digest) keep it.
+pub(super) fn display_title(title: &str) -> &str {
+    const STATUS_GLYPHS: &[char] = &[
+        '\u{2733}', '\u{273b}', '\u{273d}', '\u{2736}', '\u{2722}', '\u{2749}', '\u{25d0}',
+        '\u{25d1}', '\u{25d2}', '\u{25d3}', '\u{2610}', '\u{23fa}', '\u{00b7}', '\u{2731}',
+        '\u{2732}',
+    ];
+    title.trim_start_matches(|c: char| c.is_whitespace() || STATUS_GLYPHS.contains(&c))
+}
+
+/// Cut `text` to whole sentences fitting `max_chars` (at least one). Returns
+/// the cut text and whether anything was dropped.
+pub(super) fn cap_sentences(text: &str, max_chars: usize) -> (&str, bool) {
+    let text = text.trim();
+    if text.chars().count() <= max_chars {
+        return (text, false);
+    }
+    let mut end = 0;
+    let mut prev = None;
+    for (i, c) in text.char_indices() {
+        if matches!(prev, Some('.' | '!' | '?')) && c.is_whitespace() {
+            if text[..i].chars().count() > max_chars && end > 0 {
+                break;
+            }
+            end = i;
+        }
+        prev = Some(c);
+    }
+    if end == 0 {
+        // No sentence boundary inside the budget: cut at the last word.
+        let byte = text
+            .char_indices()
+            .nth(max_chars)
+            .map(|(b, _)| b)
+            .unwrap_or(text.len());
+        end = text[..byte].rfind(' ').unwrap_or(byte);
+    }
+    (text[..end].trim_end(), true)
 }
 
 /// Confidence bucket for an interval's task assignment.
@@ -346,20 +449,28 @@ pub(super) fn section_header_with(
 /// truncates against the containing cell so a long project name can never
 /// widen a grid column past the 400pt window.
 pub(super) fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.18))
-        .corner_radius(egui::CornerRadius::same(RADIUS_SM))
-        .inner_margin(egui::Margin::symmetric(6, 1))
-        .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(text)
-                        .color(color)
-                        .text_style(egui::TextStyle::Small),
-                )
-                .truncate(),
-            );
-        });
+    // Painted by hand rather than as a Frame around a label: inside a
+    // horizontal layout a frame's content ui spans the row's full height,
+    // so on a two-line row the chip stretched to two lines too.
+    let pad = egui::vec2(6.0, 1.0);
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let max_w = (ui.available_width() - 2.0 * pad.x).max(16.0);
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, f32::INFINITY);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let elided = galley.elided;
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + 2.0 * pad, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(RADIUS_SM),
+            color.gamma_multiply(0.18),
+        );
+        ui.painter().galley(rect.min + pad, galley, color);
+    }
+    if elided {
+        resp.on_hover_text(text.to_owned());
+    }
 }
 
 /// The one card chrome: SURFACE fill, radius 8, inner margin 12. Accent
@@ -444,6 +555,39 @@ pub(super) fn truncated_label(ui: &mut egui::Ui, label: egui::Label, full: &str)
         .is_some_and(|s| s.x > resp.rect.width() + 0.5)
     {
         resp.clone().on_hover_text(full.to_owned());
+    }
+    resp
+}
+
+/// On/off switch: a pill track with a sliding knob, ACCENT when on. For
+/// settings that flip a source or a behaviour (a checkbox reads as a tick
+/// mark, not a state). Returns the response; `on` flips on click.
+pub(super) fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let size = egui::vec2(30.0, 16.0);
+    let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool(resp.id, *on);
+        let track = if *on {
+            blend(palette::SURFACE_2, palette::ACCENT, t)
+        } else {
+            palette::SURFACE_2
+        };
+        let track = if resp.hovered() {
+            blend(track, Color32::WHITE, 0.06)
+        } else {
+            track
+        };
+        let radius = rect.height() / 2.0;
+        ui.painter().rect_filled(rect, radius, track);
+        let knob_r = radius - 3.0;
+        let cx = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        let knob = if *on { palette::BG } else { palette::TEXT_DIM };
+        ui.painter()
+            .circle_filled(egui::pos2(cx, rect.center().y), knob_r, knob);
     }
     resp
 }
@@ -559,6 +703,7 @@ pub(super) struct ListRow<'a> {
     dot: Option<Color32>,
     chips: Vec<(String, Color32)>,
     num: Option<String>,
+    lines: usize,
 }
 
 impl<'a> ListRow<'a> {
@@ -569,7 +714,16 @@ impl<'a> ListRow<'a> {
             dot: None,
             chips: Vec::new(),
             num: None,
+            lines: 1,
         }
+    }
+
+    /// Let the title wrap onto up to `n` lines before it truncates (m25:
+    /// chips and the number column used to leave a 30-character title).
+    /// The row grows by whole text lines only when the title needs them.
+    pub(super) fn lines(mut self, n: usize) -> Self {
+        self.lines = n.max(1);
+        self
     }
 
     /// Medium-weight title: the row is a primary item (an open task).
@@ -604,7 +758,48 @@ impl<'a> ListRow<'a> {
         width: f32,
         trailing: impl FnOnce(&mut egui::Ui),
     ) -> egui::Response {
-        let h = ui.spacing().interact_size.y;
+        let mut h = ui.spacing().interact_size.y;
+        let font = if self.emphasis {
+            egui::FontId::new(
+                egui::TextStyle::Body.resolve(ui.style()).size,
+                egui::FontFamily::Name(MEDIUM.into()),
+            )
+        } else {
+            egui::TextStyle::Body.resolve(ui.style())
+        };
+        // Multi-line titles: the width left for the title is estimated up
+        // front (chip and number widths from their text), and the galley is
+        // laid out once at that width so the row can be allocated at its
+        // real height — a taller child inside a 24pt row would overlap the
+        // row above it.
+        let title_galley = (self.lines > 1).then(|| {
+            let mut reserved = 48.0 + self.num.as_ref().map_or(0.0, |_| NUM_COL + 6.0);
+            if self.dot.is_some() {
+                reserved += 14.0;
+            }
+            let small = egui::TextStyle::Small.resolve(ui.style());
+            for (text, _) in &self.chips {
+                let chip =
+                    ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), small.clone(), palette::TEXT));
+                reserved += chip.size().x + 12.0 + 6.0;
+            }
+            let title_w = (width - reserved).max(60.0);
+            let mut job = egui::text::LayoutJob::simple(
+                self.title.to_owned(),
+                font.clone(),
+                palette::TEXT,
+                title_w,
+            );
+            job.wrap.max_rows = self.lines;
+            job.wrap.break_anywhere = false;
+            job.wrap.overflow_character = Some('\u{2026}');
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            let line_h = ui.text_style_height(&egui::TextStyle::Body);
+            if galley.rows.len() > 1 {
+                h += line_h * (galley.rows.len() as f32 - 1.0) + 2.0;
+            }
+            (galley, title_w)
+        });
         ui.allocate_ui_with_layout(
             egui::vec2(width, h),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -625,11 +820,23 @@ impl<'a> ListRow<'a> {
                         badge(ui, text, *color);
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let mut text = egui::RichText::new(self.title).color(palette::TEXT);
-                        if self.emphasis {
-                            text = text.family(egui::FontFamily::Name(MEDIUM.into()));
+                        match title_galley {
+                            Some((galley, title_w)) => {
+                                ui.set_max_width(title_w.min(ui.available_width()));
+                                let elided = galley.elided;
+                                let resp = ui.add(egui::Label::new(galley).selectable(false));
+                                if elided {
+                                    resp.on_hover_text(self.title.to_owned());
+                                }
+                            }
+                            None => {
+                                let mut text = egui::RichText::new(self.title).color(palette::TEXT);
+                                if self.emphasis {
+                                    text = text.family(egui::FontFamily::Name(MEDIUM.into()));
+                                }
+                                truncated_label(ui, egui::Label::new(text).truncate(), self.title);
+                            }
                         }
-                        truncated_label(ui, egui::Label::new(text).truncate(), self.title);
                     });
                 });
             },

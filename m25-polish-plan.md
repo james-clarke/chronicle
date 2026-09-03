@@ -71,6 +71,54 @@ there. Candidates below come from the current site screenshots (all views,
 6. Visual acceptance: screenshot walk of all views at 400×640 and at the
    wide breakpoint, before/after pairs, James signs off.
 
+## Shipped (2026-09-02)
+
+All of 1–11 plus the empty-state walk (12), one commit. Decisions taken
+while building, for James to strike:
+
+- **1 duration:** `fmt_dur` in `ui/mod.rs` is the one rule (`2h41m`,
+  `30m`, `41s`, `0m` for nothing); digest/chat/CLI formatters untouched
+  (prompt text is out of scope).
+- **2 resize:** decoration-less window, so a corner grip
+  (`ViewportCommand::BeginResize`) is the handle; 400×640 stays the minimum
+  and default, last size in meta `ui_window_size`. `theme::WIDE_W` = 720 pt:
+  timeline keeps its side pane (was 700), Home puts the feed in a resizable
+  right column (`feed_section_ui`), settings gets a sticky section index,
+  reports spread the chart and mix bar over the width. Chat unchanged
+  (bubbles already cap at 85%).
+- **3 standup:** first task block + "N more" / "show less" (session state);
+  the Next line is cut to whole sentences at 180 chars, full text on hover.
+- **4 truncation:** `ListRow::lines(2)` on Working-on rows, timeline card
+  titles and feed rows — the row grows by a text line only when needed;
+  hover shows the whole title when it still elides. Badges are painted by
+  hand now (a Frame inside a horizontal layout stretched to the row height).
+- **5 vocabulary:** rows say `placed by the model` / `placed by a rule ·
+  repo chronicle` / `kept by you` / `placed by you` / `moved out of X` /
+  `not placed by the model` / `waiting for the model`; chips `to confirm`,
+  `new`, `unsorted`, `moved out`; source + confidence + rule on the sub
+  line's hover.
+- **6 glyphs:** the ✳ ◑ ☐ were Claude Code's own terminal-title status
+  glyphs, not ours — `theme::display_title` strips them for display
+  (stored titles and the digest keep them). The activity-row Phosphor
+  glyphs now name their kind on hover.
+- **7 sessions:** sessions under 2 min fold into one "and N short sessions"
+  row (when two or more) after the real ones; `move` lives in each row's
+  `…` menu.
+- **8 colours:** eight hues; a project takes the hue at its first-seen
+  position (`storage::project_order`, refreshed on every reload, so the
+  first eight projects never collide), tasks within it are three shades by
+  id; untagged tasks cycle hues by id. Palette order interleaves warm and
+  cool so neighbours differ.
+- **9 reports:** project mix bar + legend sit under the week chart; the
+  day tooltip leads with the segment under the pointer.
+- **10 settings:** the restart note is a caption; Local sources and the
+  two window toggles are switches (`theme::toggle`).
+- **11 meta line:** the time range leads the card's meta line in the
+  session-row `RANGE_COL`, so digits align card to card.
+- **12 empty states:** Reports hides the six zero tiles until the week has
+  time; Home says where tasks come from when there are none; timeline,
+  chat and connections empties were already fine.
+
 ## Out of scope
 
 Light theme, notifications, tray, any change to derivation or prompts.

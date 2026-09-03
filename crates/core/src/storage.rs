@@ -746,6 +746,19 @@ pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, Sto
 
 /// Open tasks offered to the model for linking: user-declared first (stable
 /// declaration order), then derived-open by most recent interval, `cap` total.
+/// Every project name ever put on a task, in first-seen order (by the id of
+/// the first task carrying it). Stable across days — new projects only
+/// append — so a UI can hand out identity colours by position.
+pub fn project_order(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT project FROM tasks
+         WHERE project IS NOT NULL AND TRIM(project) <> ''
+         GROUP BY project ORDER BY MIN(id)",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn open_tasks(conn: &Connection, cap: usize) -> Result<Vec<OpenTask>, StorageError> {
     let mut out = Vec::new();
     let mut stmt = conn.prepare(

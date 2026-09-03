@@ -91,6 +91,7 @@ impl TimelineApp {
         let model_missing = self.model_missing;
         let drafting = self.standup_job.is_some();
         let mut open = self.standup_open;
+        let mut show_all = self.standup_show_all;
         theme::hover_card(ui, "standup_card", |ui| {
             // Redraft lives on the header line so the body's height never
             // depends on it (the old bottom-row button made the text jump).
@@ -106,12 +107,19 @@ impl TimelineApp {
                 if drafting {
                     ui.weak("drafting from yesterday's journals\u{2026}");
                 } else if let Some(standup) = &self.standup {
-                    standup_body_ui(ui, standup, &self.open_tasks, &self.closed_tasks);
+                    standup_body_ui(
+                        ui,
+                        standup,
+                        &self.open_tasks,
+                        &self.closed_tasks,
+                        &mut show_all,
+                    );
                 }
                 self.standup_error_ui(ui);
             });
         });
         self.standup_open = open;
+        self.standup_show_all = show_all;
         ui.add_space(theme::CARD_GAP);
         generate
     }
@@ -166,6 +174,42 @@ impl TimelineApp {
 
         let mut pending: Option<Action> = None;
         let mut open_triage = false;
+        // Wide window: the feed gets its own column beside the cards and
+        // task list (a side panel, added before the central page).
+        let wide = theme::wide(ui.ctx());
+        if wide && self.error.is_none() {
+            let frame = theme::page_frame();
+            egui::Panel::right("home_feed")
+                .frame(frame)
+                .resizable(true)
+                .default_size((ui.available_width() * 0.5).clamp(320.0, 520.0))
+                .size_range(300.0..=640.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("home_feed_scroll")
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            let content_w = theme::content_width(ui);
+                            feed_section_ui(
+                                ui,
+                                content_w,
+                                FeedSection {
+                                    tz: &self.tz,
+                                    feed: &self.feed,
+                                    feed_vis: &feed_vis,
+                                    proposals: &self.proposals,
+                                    feed_seen: &self.feed_seen,
+                                    feed_ejected: &self.feed_ejected,
+                                    unassigned_ms: self.unassigned_ms,
+                                    candidates: &candidates,
+                                },
+                                &mut self.new_label,
+                                &mut pending,
+                                &mut open_triage,
+                            );
+                        });
+                });
+        }
         theme::page().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
@@ -249,18 +293,25 @@ impl TimelineApp {
                             );
                         });
                     });
+                    if open_tasks.is_empty() && q.is_empty() {
+                        ui.add_space(theme::SPACE_XS);
+                        ui.weak("no open tasks yet \u{2014} declare one above, or accept what the feed proposes");
+                    }
                     for &o in &open_vis {
                         let t = &open_tasks[o];
-                        let color = theme::series_color_for(t.task_id);
-                        task_row(t, color).emphasis().show(ui, content_w, |ui| {
-                            ui.menu_button("\u{2026}", |ui| {
-                                if ui.button("close").clicked() {
-                                    pending = Some(Action::Close(t.task_id));
-                                    ui.close();
-                                }
-                                merge_item(ui, t.task_id, merge_pick);
+                        let color = theme::task_color(t.task_id, t.project.as_deref());
+                        task_row(t, color)
+                            .emphasis()
+                            .lines(2)
+                            .show(ui, content_w, |ui| {
+                                ui.menu_button("\u{2026}", |ui| {
+                                    if ui.button("close").clicked() {
+                                        pending = Some(Action::Close(t.task_id));
+                                        ui.close();
+                                    }
+                                    merge_item(ui, t.task_id, merge_pick);
+                                });
                             });
-                        });
                         if *merge_pick == Some(t.task_id)
                             && !merge_picker(
                                 ui,
@@ -344,7 +395,7 @@ impl TimelineApp {
                         theme::fade_body(ui, "recently_closed_body", *show_closed, |ui| {
                             for &c in &closed_vis {
                                 let t = &closed_tasks[c];
-                                let color = theme::series_color_for(t.task_id);
+                                let color = theme::task_color(t.task_id, t.project.as_deref());
                                 task_row(t, color).show(ui, content_w, |ui| {
                                     if theme::ghost_button(ui, "reopen").clicked() {
                                         pending = Some(Action::Reopen(t.task_id));
@@ -354,47 +405,24 @@ impl TimelineApp {
                         });
                     }
 
-                    // The feed: the day's blocks newest first, each with who
-                    // placed it and why; the header carries the day's whole
-                    // unassigned total.
-                    if !feed_vis.is_empty() || !proposals.is_empty() || unassigned_ms > 0 {
-                        ui.add_space(theme::SECTION_GAP);
-                        theme::section_header_with(ui, "Feed", None, |ui| {
-                            if theme::ghost_button(ui, "organize")
-                                .on_hover_text("assign the day's unassigned time to tasks")
-                                .clicked()
-                            {
-                                open_triage = true;
-                            }
-                            ui.label(theme::num(fmt_dur(unassigned_ms)))
-                                .on_hover_text("unassigned today");
-                        });
-                        ui.add_space(theme::SPACE_XS);
-                        for p in proposals {
-                            proposal_card(ui, tz, p, &mut pending);
-                        }
-                        for &f in &feed_vis {
-                            let block = &feed[f];
-                            let age = feed_seen
-                                .get(&super::feed_key(block))
-                                .map_or(1.0, |t| t.elapsed().as_secs_f32() / super::FEED_FADE_SECS);
-                            if age < 1.0 {
-                                ui.ctx().request_repaint();
-                            }
-                            ui.scope(|ui| {
-                                ui.multiply_opacity(age.clamp(0.0, 1.0));
-                                feed_row(
-                                    ui,
-                                    content_w,
-                                    tz,
-                                    block,
-                                    feed_ejected.get(&block.start_ts).map(String::as_str),
-                                    &candidates,
-                                    new_label,
-                                    &mut pending,
-                                );
-                            });
-                        }
+                    if !wide {
+                        feed_section_ui(
+                            ui,
+                            content_w,
+                            FeedSection {
+                                tz,
+                                feed,
+                                feed_vis: &feed_vis,
+                                proposals,
+                                feed_seen,
+                                feed_ejected,
+                                unassigned_ms,
+                                candidates: &candidates,
+                            },
+                            new_label,
+                            &mut pending,
+                            &mut open_triage,
+                        );
                     }
 
                     // Debug-grade raw spans; hidden unless enabled in settings.
@@ -509,6 +537,7 @@ fn proposal_card(
                 }
             });
             for (app, title, ms) in p.lines.iter().take(2) {
+                let title = theme::display_title(title);
                 let line = if title.is_empty() {
                     format!("{} \u{b7} {app}", fmt_dur(*ms))
                 } else {
@@ -569,33 +598,66 @@ fn feed_row(
             }
         })
         .unwrap_or("");
-    let (title, reason): (&str, String) = match &block.claim {
+    let top_title = theme::display_title(top_title);
+    // Human words on the row; the pipeline's own vocabulary (source,
+    // confidence, rule) goes in `detail`, the hover on the row's sub line.
+    let (title, reason, detail): (&str, String, String) = match &block.claim {
         Some(c) => {
-            let reason = match c.source.as_str() {
-                "prepass" => c.reason.clone().unwrap_or_else(|| "pre-pass".to_owned()),
-                "user" => match &c.reason {
-                    Some(r) => format!("you kept it \u{b7} {r}"),
-                    None => "you".to_owned(),
-                },
-                _ => format!("model, {:.0}%", c.confidence * 100.0),
+            let (reason, detail) = match c.source.as_str() {
+                "prepass" => (
+                    match &c.reason {
+                        Some(r) => format!("placed by a rule \u{b7} {r}"),
+                        None => "placed by a rule".to_owned(),
+                    },
+                    format!(
+                        "pre-pass rule{}; not confirmed by the model yet",
+                        c.reason
+                            .as_deref()
+                            .map(|r| format!(" ({r})"))
+                            .unwrap_or_default()
+                    ),
+                ),
+                "user" => (
+                    match &c.reason {
+                        Some(r) => format!("kept by you \u{b7} {r}"),
+                        None => "placed by you".to_owned(),
+                    },
+                    "source: user".to_owned(),
+                ),
+                _ => (
+                    "placed by the model".to_owned(),
+                    format!(
+                        "source: model \u{b7} confidence {:.0}%",
+                        c.confidence * 100.0
+                    ),
+                ),
             };
-            (c.label.as_str(), reason)
+            (c.label.as_str(), reason, detail)
         }
         None => {
-            let reason = match ejected_from {
-                Some(label) => format!("ejected from {label}"),
-                None if block.derived => "derive left it".to_owned(),
-                None => "no batch yet".to_owned(),
+            let (reason, detail) = match ejected_from {
+                Some(label) => (
+                    format!("moved out of {label}"),
+                    "ejected by you; the model will not re-place it".to_owned(),
+                ),
+                None if block.derived => (
+                    "not placed by the model".to_owned(),
+                    "the model's pass over this stretch left it unassigned".to_owned(),
+                ),
+                None => (
+                    "waiting for the model".to_owned(),
+                    "no derive batch has covered this stretch yet".to_owned(),
+                ),
             };
-            (top_title, reason)
+            (top_title, reason, detail)
         }
     };
-    let mut row = theme::ListRow::new(title).num(fmt_dur(block.ms));
+    let mut row = theme::ListRow::new(title).lines(2).num(fmt_dur(block.ms));
     match &block.claim {
         Some(c) => {
-            row = row.dot(theme::series_color_for(c.task_id));
+            row = row.dot(theme::task_color(c.task_id, c.project.as_deref()));
             if c.source == "prepass" {
-                row = row.chip("provisional", theme::palette::AMBER);
+                row = row.chip("to confirm", theme::palette::AMBER);
             }
         }
         None => {
@@ -603,11 +665,11 @@ fn feed_row(
                 row = row.chip(app, theme::palette::TEXT_DIM);
             }
             let state = if ejected_from.is_some() {
-                "ejected"
+                "moved out"
             } else if block.derived {
-                "unmatched"
+                "unsorted"
             } else {
-                "fresh"
+                "new"
             };
             row = row.chip(state, theme::palette::TEXT_DIM);
         }
@@ -682,13 +744,90 @@ fn feed_row(
         ui.add_space(16.0);
         ui.add(
             egui::Label::new(
-                egui::RichText::new(sub)
+                egui::RichText::new(&sub)
                     .text_style(egui::TextStyle::Small)
                     .color(theme::palette::TEXT_DIM),
             )
-            .truncate(),
-        );
+            .truncate()
+            .show_tooltip_when_elided(false),
+        )
+        .on_hover_text(format!("{sub}\n{detail}"));
     });
+}
+
+/// Arguments of the feed section, which renders in place on the narrow
+/// widget and in its own right-hand column when the window is wide.
+struct FeedSection<'a> {
+    tz: &'a jiff::tz::TimeZone,
+    feed: &'a [FeedBlock],
+    feed_vis: &'a [usize],
+    proposals: &'a [Proposal],
+    feed_seen: &'a std::collections::HashMap<super::FeedKey, std::time::Instant>,
+    feed_ejected: &'a std::collections::HashMap<i64, String>,
+    unassigned_ms: i64,
+    candidates: &'a [(i64, String)],
+}
+
+fn feed_section_ui(
+    ui: &mut egui::Ui,
+    content_w: f32,
+    f: FeedSection<'_>,
+    new_label: &mut String,
+    pending: &mut Option<Action>,
+    open_triage: &mut bool,
+) {
+    let FeedSection {
+        tz,
+        feed,
+        feed_vis,
+        proposals,
+        feed_seen,
+        feed_ejected,
+        unassigned_ms,
+        candidates,
+    } = f;
+    // The feed: the day's blocks newest first, each with who
+    // placed it and why; the header carries the day's whole
+    // unassigned total.
+    if !feed_vis.is_empty() || !proposals.is_empty() || unassigned_ms > 0 {
+        ui.add_space(theme::SECTION_GAP);
+        theme::section_header_with(ui, "Feed", None, |ui| {
+            if theme::ghost_button(ui, "organize")
+                .on_hover_text("assign the day's unassigned time to tasks")
+                .clicked()
+            {
+                *open_triage = true;
+            }
+            ui.label(theme::num(fmt_dur(unassigned_ms)))
+                .on_hover_text("unassigned today");
+        });
+        ui.add_space(theme::SPACE_XS);
+        for p in proposals {
+            proposal_card(ui, tz, p, pending);
+        }
+        for &f in feed_vis {
+            let block = &feed[f];
+            let age = feed_seen
+                .get(&super::feed_key(block))
+                .map_or(1.0, |t| t.elapsed().as_secs_f32() / super::FEED_FADE_SECS);
+            if age < 1.0 {
+                ui.ctx().request_repaint();
+            }
+            ui.scope(|ui| {
+                ui.multiply_opacity(age.clamp(0.0, 1.0));
+                feed_row(
+                    ui,
+                    content_w,
+                    tz,
+                    block,
+                    feed_ejected.get(&block.start_ts).map(String::as_str),
+                    candidates,
+                    new_label,
+                    pending,
+                );
+            });
+        }
+    }
 }
 
 /// "2026-09-01" → "Mon 1 Sep"; the raw string when it doesn't parse.
@@ -786,14 +925,31 @@ fn next_marker(line: &str) -> Option<(usize, usize)> {
 }
 
 /// The draft as blocks: label line (Medium), prose lines, then the next
-/// step indented behind a caret; 8pt between blocks.
-fn standup_body_ui(ui: &mut egui::Ui, standup: &StandupRow, open: &[OpenRow], closed: &[OpenRow]) {
+/// step indented behind a caret; 8pt between blocks. Only the first task
+/// block shows until `show_all` (m25: a seven-task draft buried the feed
+/// below the fold); the next-step line is cut to whole sentences.
+fn standup_body_ui(
+    ui: &mut egui::Ui,
+    standup: &StandupRow,
+    open: &[OpenRow],
+    closed: &[OpenRow],
+    show_all: &mut bool,
+) {
     let labels: Vec<&str> = open
         .iter()
         .chain(closed)
         .map(|t| t.label.as_str())
         .collect();
-    for (i, block) in standup_blocks(&standup.content, &labels).iter().enumerate() {
+    let blocks = standup_blocks(&standup.content, &labels);
+    let task_blocks = blocks.iter().filter(|b| !b.meta).count();
+    let mut shown_tasks = 0;
+    for (i, block) in blocks.iter().enumerate() {
+        if !block.meta {
+            shown_tasks += 1;
+            if shown_tasks > 1 && !*show_all {
+                continue;
+            }
+        }
         if i > 0 {
             ui.add_space(theme::SPACE_SM);
         }
@@ -824,6 +980,7 @@ fn standup_body_ui(ui: &mut egui::Ui, standup: &StandupRow, open: &[OpenRow], cl
             ui.add(egui::Label::new(egui::RichText::new(line).color(theme::palette::TEXT)).wrap());
         }
         if let Some(next) = &block.next {
+            let (cut, capped) = theme::cap_sentences(next, NEXT_MAX_CHARS);
             ui.horizontal(|ui| {
                 ui.add_space(theme::SPACE_SM);
                 ui.label(
@@ -831,16 +988,36 @@ fn standup_body_ui(ui: &mut egui::Ui, standup: &StandupRow, open: &[OpenRow], cl
                         .text_style(egui::TextStyle::Small)
                         .color(theme::palette::TEXT_DIM),
                 );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!("Next: {next}")).color(theme::palette::TEXT),
-                    )
-                    .wrap(),
+                let text = if capped {
+                    format!("Next: {cut}\u{2026}")
+                } else {
+                    format!("Next: {cut}")
+                };
+                let resp = ui.add(
+                    egui::Label::new(egui::RichText::new(text).color(theme::palette::TEXT)).wrap(),
                 );
+                if capped {
+                    resp.on_hover_text(next.clone());
+                }
             });
         }
     }
+    if task_blocks > 1 {
+        ui.add_space(theme::SPACE_XS);
+        let label = if *show_all {
+            "show less".to_owned()
+        } else {
+            format!("{} more", task_blocks - 1)
+        };
+        if theme::ghost_button(ui, label).clicked() {
+            *show_all = !*show_all;
+        }
+    }
 }
+
+/// Longest next-step line on the standup card before it is cut to whole
+/// sentences (the full text stays on hover).
+const NEXT_MAX_CHARS: usize = 180;
 
 fn span_row(ui: &mut egui::Ui, span: &SpanRow) {
     let time = format!(

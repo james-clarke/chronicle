@@ -94,15 +94,44 @@ impl SettingsPanel {
 }
 
 /// Section heading inside the settings window.
-fn section(ui: &mut egui::Ui, title: &str, first: bool) {
+/// Switch + label on one row; true when the switch flipped this frame.
+fn switch_row(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
+    ui.horizontal(|ui| {
+        let changed = theme::toggle(ui, on).changed();
+        ui.label(label);
+        changed
+    })
+    .inner
+}
+
+/// Section titles in form order; the wide-window index lists them.
+const SECTIONS: &[&str] = &[
+    "Connections",
+    "Model",
+    "Capture",
+    "Derivation",
+    "Standup & journal",
+    "Storage & server",
+    "Window & appearance",
+];
+const SECTION_INDEX_W: f32 = 132.0;
+
+/// Section heading; scrolls itself to the top when it is the `jump` target.
+fn section(ui: &mut egui::Ui, title: &str, first: bool, jump: Option<&str>) {
     if !first {
         ui.add_space(12.0);
     }
-    ui.label(
+    let resp = ui.label(
         egui::RichText::new(title)
             .text_style(egui::TextStyle::Heading)
             .color(theme::palette::TEXT),
     );
+    if jump == Some(title) {
+        ui.scroll_to_rect(
+            resp.rect.expand2(egui::vec2(0.0, 12.0)),
+            Some(egui::Align::Min),
+        );
+    }
     ui.add_space(2.0);
 }
 
@@ -171,17 +200,43 @@ impl TimelineApp {
                 });
             });
             ui.add_space(8.0);
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    // Center the form; cap width so it stays readable when wide.
-                    let max_w = ui.available_width().min(520.0);
-                    let pad = ((ui.available_width() - max_w) / 2.0).max(0.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(pad);
-                        ui.vertical(|ui| {
+            // Center the form; cap width so it stays readable when wide. A
+            // wide window also gets a section index beside it (sticky: it
+            // sits outside the scroll area) that scrolls the form.
+            let wide = theme::wide(ui.ctx());
+            let mut jump: Option<&str> = None;
+            ui.horizontal_top(|ui| {
+                let avail = ui.available_width();
+                let max_w = avail.min(520.0);
+                let index_w = if wide {
+                    SECTION_INDEX_W + theme::SPACE_LG
+                } else {
+                    0.0
+                };
+                let pad = ((avail - max_w - index_w) / 2.0).max(0.0);
+                ui.add_space(pad);
+                if wide {
+                    ui.vertical(|ui| {
+                        ui.set_width(SECTION_INDEX_W);
+                        ui.add_space(2.0);
+                        for name in SECTIONS {
+                            let text = egui::RichText::new(*name)
+                                .text_style(egui::TextStyle::Small)
+                                .color(theme::palette::TEXT_DIM);
+                            if theme::ghost_button(ui, text).clicked() {
+                                jump = Some(name);
+                            }
+                        }
+                    });
+                    ui.add_space(theme::SPACE_LG);
+                }
+                ui.vertical(|ui| {
+                    ui.set_width(max_w);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
                             ui.set_max_width(max_w);
-                            section(ui, "Connections", true);
+                            section(ui, "Connections", true, jump);
                             panel.connections.ui(
                                 ui,
                                 conn,
@@ -189,7 +244,7 @@ impl TimelineApp {
                                 &mut panel.sources,
                             );
 
-                            section(ui, "Model", false);
+                            section(ui, "Model", false, jump);
                             ui.label("model path (empty = default preset)");
                             ui.text_edit_singleline(&mut panel.model_path);
                             match chronicle_derive::model::resolve(
@@ -217,7 +272,7 @@ impl TimelineApp {
                                 },
                             }
 
-                            section(ui, "Capture", false);
+                            section(ui, "Capture", false, jump);
                             egui::Grid::new("settings_capture")
                                 .num_columns(3)
                                 .show(ui, |ui| {
@@ -248,7 +303,7 @@ impl TimelineApp {
                                     .font(egui::TextStyle::Monospace),
                             );
 
-                            section(ui, "Derivation", false);
+                            section(ui, "Derivation", false, jump);
                             egui::Grid::new("settings_derive")
                                 .num_columns(3)
                                 .show(ui, |ui| {
@@ -275,7 +330,7 @@ impl TimelineApp {
                                     ui.end_row();
                                 });
 
-                            section(ui, "Standup & journal", false);
+                            section(ui, "Standup & journal", false, jump);
                             egui::Grid::new("settings_journal")
                                 .num_columns(3)
                                 .show(ui, |ui| {
@@ -296,7 +351,7 @@ impl TimelineApp {
                                     ui.end_row();
                                 });
 
-                            section(ui, "Storage & server", false);
+                            section(ui, "Storage & server", false, jump);
                             egui::Grid::new("settings_storage")
                                 .num_columns(3)
                                 .show(ui, |ui| {
@@ -317,7 +372,7 @@ impl TimelineApp {
 
                             // UI-only prefs: applied immediately, stored in
                             // db meta (not config.toml), no daemon restart.
-                            section(ui, "Window & appearance", false);
+                            section(ui, "Window & appearance", false, jump);
                             ui.horizontal(|ui| {
                                 ui.label("ui scale");
                                 for (label, z) in
@@ -332,14 +387,11 @@ impl TimelineApp {
                             });
                             ui.weak("Ctrl +/\u{2212}/0 also works anywhere");
                             let mut dbg = spans_debug_now;
-                            if ui.checkbox(&mut dbg, "show raw spans on home").changed() {
+                            if switch_row(ui, &mut dbg, "show raw spans on home") {
                                 spans_toggle = Some(dbg);
                             }
                             let mut hide = autohide_now;
-                            if ui
-                                .checkbox(&mut hide, "hide when focus leaves the window")
-                                .changed()
-                            {
+                            if switch_row(ui, &mut hide, "hide when focus leaves the window") {
                                 autohide_toggle = Some(hide);
                             }
 
@@ -371,8 +423,8 @@ impl TimelineApp {
                                 }
                             });
                         });
-                    });
                 });
+            });
         });
         if close {
             self.settings = None;

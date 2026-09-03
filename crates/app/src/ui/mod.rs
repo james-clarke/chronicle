@@ -37,7 +37,9 @@ use settings::SettingsPanel;
 const RELOAD_EVERY: Duration = Duration::from_secs(5);
 /// Idle wake-up cadence; the only repaint source besides user input.
 const WAKE_EVERY: Duration = Duration::from_secs(10);
-/// Fixed widget size (logical px); the window is not resizable.
+/// Default and minimum widget size (logical px). The window resizes from
+/// the corner grip (m25); the last size is remembered in meta
+/// `ui_window_size` and restored at boot.
 const WIDGET_W: f32 = 400.0;
 const WIDGET_H: f32 = 640.0;
 /// Transparent margin around the card when composited: room for the drop
@@ -75,7 +77,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     }
     let db_path = data_dir.join("chronicle.db");
     let config_path = data_dir.join("config.toml");
-    // Zoom factor is remembered in `meta`; window size is fixed.
+    // Zoom factor, window position and size are remembered in `meta`.
     let boot_conn = chronicle_core::storage::open(&db_path).ok();
     let zoom = boot_conn
         .as_ref()
@@ -100,6 +102,20 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
             let (x, y) = s.split_once(',')?;
             Some(egui::pos2(x.parse().ok()?, y.parse().ok()?))
         });
+    // Last resized-to card size ("w,h" logical px, shadow pad excluded),
+    // never below the widget default.
+    let saved_size = boot_conn
+        .as_ref()
+        .and_then(|c| {
+            chronicle_core::storage::get_meta(c, "ui_window_size")
+                .ok()
+                .flatten()
+        })
+        .and_then(|s| {
+            let (w, h) = s.split_once(',')?;
+            Some(egui::vec2(w.parse().ok()?, h.parse().ok()?))
+        })
+        .map(|v| egui::vec2(v.x.max(WIDGET_W), v.y.max(WIDGET_H)));
     // Popover hide is opt-in: the settings toggle (meta `ui_autohide`) or
     // `CHRONICLE_UI_AUTOHIDE=1` for test runs.
     let autohide = std::env::var_os("CHRONICLE_UI_AUTOHIDE").is_some()
@@ -114,15 +130,15 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     drop(boot_conn);
     let composited = compositor_active();
     let pad = if composited { SHADOW_PAD } else { 0.0 };
-    let (win_w, win_h) = (WIDGET_W + 2.0 * pad, WIDGET_H + 2.0 * pad);
+    let (min_w, min_h) = (WIDGET_W + 2.0 * pad, WIDGET_H + 2.0 * pad);
+    let card = saved_size.unwrap_or(egui::vec2(WIDGET_W, WIDGET_H));
+    let (win_w, win_h) = (card.x + 2.0 * pad, card.y + 2.0 * pad);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Chronicle")
         .with_inner_size([win_w, win_h])
-        // min == max == inner: some X11 WMs ignore resizable(false) but
-        // honor WM_SIZE_HINTS, so pin all three.
-        .with_min_inner_size([win_w, win_h])
-        .with_max_inner_size([win_w, win_h])
-        .with_resizable(false)
+        // The widget size is the floor (WM_SIZE_HINTS); no ceiling.
+        .with_min_inner_size([min_w, min_h])
+        .with_resizable(true)
         .with_decorations(false)
         .with_transparent(composited)
         .with_always_on_top()
@@ -156,6 +172,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                 visible,
                 BootPrefs {
                     saved_pos,
+                    saved_size,
                     autohide,
                 },
                 composited,
@@ -511,6 +528,9 @@ struct TimelineApp {
     /// Last persisted window position (meta `ui_window_pos`); written when a
     /// drag settles, restored at boot.
     saved_pos: Option<egui::Pos2>,
+    /// Last persisted card size (meta `ui_window_size`, logical px, shadow
+    /// pad excluded); written when a resize settles.
+    saved_size: Option<egui::Vec2>,
     /// Pending "chat about task" click, consumed by the chat view.
     chat_task_request: Option<i64>,
     /// Resume card: newest checkpoint written since the previous UI open
@@ -526,6 +546,8 @@ struct TimelineApp {
     standup_error: Option<String>,
     /// Standup card expanded (collapsible; long drafts otherwise bury Home).
     standup_open: bool,
+    /// Standup card shows every task block (else the first plus "N more").
+    standup_show_all: bool,
     /// X11 compositor present at boot: transparent window, rounded card,
     /// shadow. False = square opaque fallback (bare WM / Wayland).
     composited: bool,
@@ -552,6 +574,7 @@ struct ResumeRow {
 /// Per-user prefs read from `meta` before the window exists.
 struct BootPrefs {
     saved_pos: Option<egui::Pos2>,
+    saved_size: Option<egui::Vec2>,
     autohide: bool,
 }
 
@@ -631,6 +654,7 @@ impl TimelineApp {
             autohide: prefs.autohide,
             positioned: false,
             saved_pos: prefs.saved_pos,
+            saved_size: prefs.saved_size,
             chat_task_request: None,
             resume: None,
             resume_checked: false,
@@ -638,6 +662,7 @@ impl TimelineApp {
             standup_job: None,
             standup_error: None,
             standup_open: true,
+            standup_show_all: false,
             composited,
         }
     }
@@ -701,6 +726,11 @@ impl TimelineApp {
                 self.error = None;
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+        if let Some(conn) = self.conn.as_ref()
+            && let Ok(order) = chronicle_core::storage::project_order(conn)
+        {
+            theme::set_project_order(order);
         }
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
@@ -1532,7 +1562,8 @@ impl eframe::App for TimelineApp {
             // margins below meter the gap to the *card* edge, so the pad
             // cancels one margin-width per axis.
             let pad = self.shadow_pad();
-            let (win_w, win_h) = (WIDGET_W + 2.0 * pad, WIDGET_H + 2.0 * pad);
+            let card = self.saved_size.unwrap_or(egui::vec2(WIDGET_W, WIDGET_H));
+            let (win_w, win_h) = (card.x + 2.0 * pad, card.y + 2.0 * pad);
             // On-screen = at least a grabbable slice of the top bar visible.
             let usable = |p: egui::Pos2| {
                 p.x > -(win_w - 60.0)
@@ -1564,6 +1595,20 @@ impl eframe::App for TimelineApp {
             let val = format!("{},{}", pos.x.round(), pos.y.round());
             let _ = chronicle_core::storage::set_meta(conn, "ui_window_pos", Some(&val));
             self.saved_pos = Some(pos);
+        }
+        // Likewise the card size once a resize settles (same unit dance).
+        if placed_before
+            && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
+            && !ctx.input(|i| i.pointer.any_down())
+            && let size = rect.size() / to_points - egui::Vec2::splat(2.0 * self.shadow_pad())
+            && size.x >= WIDGET_W - 1.0
+            && size.y >= WIDGET_H - 1.0
+            && self.saved_size.is_none_or(|s| (s - size).length_sq() > 4.0)
+            && let Some(conn) = self.conn.as_ref()
+        {
+            let val = format!("{},{}", size.x.round(), size.y.round());
+            let _ = chronicle_core::storage::set_meta(conn, "ui_window_size", Some(&val));
+            self.saved_size = Some(size);
         }
         let hide = |app: &Self| {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -1621,6 +1666,33 @@ impl eframe::App for TimelineApp {
         ui.painter().rect_filled(card, radius, theme::palette::BG);
         let mut content = ui.new_child(egui::UiBuilder::new().max_rect(card));
         self.window_ui(&mut content);
+        // Resize grip in the card's bottom-right corner: the decoration-less
+        // window has no frame to grab, so a drag here hands the WM a
+        // south-east resize (the same route the top bar uses to move).
+        let grip = egui::Rect::from_min_max(card.max - egui::Vec2::splat(18.0), card.max);
+        let grip_resp = ui.interact(grip, ui.id().with("resize_grip"), egui::Sense::drag());
+        if grip_resp.drag_started() {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                    egui::ResizeDirection::SouthEast,
+                ));
+        }
+        let grip_color = if grip_resp.hovered() || grip_resp.dragged() {
+            theme::palette::TEXT_DIM
+        } else {
+            theme::palette::BORDER
+        };
+        let grip_resp = grip_resp.on_hover_cursor(egui::CursorIcon::ResizeSouthEast);
+        let _ = grip_resp;
+        let painter = ui.painter();
+        for (i, inset) in [5.0, 9.0].iter().enumerate() {
+            let a = egui::pos2(card.max.x - 4.0 - inset, card.max.y - 4.0);
+            let b = egui::pos2(card.max.x - 4.0, card.max.y - 4.0 - inset);
+            painter.line_segment(
+                [a, b],
+                egui::Stroke::new(if i == 0 { 1.5 } else { 1.0 }, grip_color),
+            );
+        }
         // Border last so panel/card fills can't overpaint the 1px edge.
         ui.painter().rect_stroke(
             card,
@@ -1886,13 +1958,16 @@ impl TimelineApp {
     }
 }
 
+/// The one duration rule for every UI surface: `2h41m` from an hour up,
+/// `30m` from a minute up (seconds dropped — they were noise on every row),
+/// `41s` under a minute.
 fn fmt_dur(ms: i64) -> String {
     let s = ms / 1000;
     let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
     if h > 0 {
         format!("{h}h{m:02}m")
-    } else if m > 0 {
-        format!("{m}m{sec:02}s")
+    } else if m > 0 || sec == 0 {
+        format!("{m}m")
     } else {
         format!("{sec}s")
     }

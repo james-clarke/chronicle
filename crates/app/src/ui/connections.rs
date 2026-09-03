@@ -617,7 +617,11 @@ impl Connections {
         self.repos_ui(ui, git_repos);
         ui.add_space(theme::SPACE_SM);
         self.sources_ui(ui, sources);
-        ui.weak("repo and source changes apply on the daemon's next start");
+        caption(
+            ui,
+            "repo and source changes apply on the daemon's next start".to_owned(),
+            None,
+        );
     }
 
     fn poll_probes(&mut self, conn: Option<&Connection>) {
@@ -1176,7 +1180,7 @@ impl Connections {
                 .dot(dot)
                 .chip(chip, color)
                 .show(ui, width, |ui| {
-                    ui.checkbox(on, "");
+                    theme::toggle(ui, on);
                 });
             ui.horizontal(|ui| {
                 ui.add_space(16.0);

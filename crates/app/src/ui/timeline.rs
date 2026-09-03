@@ -4,7 +4,9 @@
 use eframe::egui;
 use jiff::{ToSpan, Zoned};
 
-use super::{Action, EditState, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, fmt_dur, theme};
+use super::{
+    Action, EditState, SessionRow, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, fmt_dur, theme,
+};
 
 impl TimelineApp {
     pub(super) fn timeline_ui(&mut self, ui: &mut egui::Ui) {
@@ -33,7 +35,7 @@ impl TimelineApp {
         );
         // Detail pane for the selected task: side panel when wide, the whole
         // central panel when the window is widget-narrow.
-        let narrow = ui.ctx().viewport_rect().width() < 700.0;
+        let narrow = !theme::wide(ui.ctx());
         if let Some(sel) = self.selected_task {
             match self.groups.iter().position(|g| g.task_id == sel) {
                 Some(gi) => {
@@ -43,7 +45,7 @@ impl TimelineApp {
                     let merge_pick = &mut self.merge_pick;
                     let spans = &self.spans;
                     let mut close_detail = false;
-                    let color = theme::series_color_for(group.task_id);
+                    let color = theme::task_color(group.task_id, group.project.as_deref());
                     if narrow {
                         // Actions pinned to the widget's bottom edge; the
                         // bottom panel must be added before the CentralPanel.
@@ -169,7 +171,7 @@ impl TimelineApp {
                             ui,
                             content_w,
                             &groups[g],
-                            theme::series_color_for(groups[g].task_id),
+                            theme::task_color(groups[g].task_id, groups[g].project.as_deref()),
                             edit,
                             merge_pick,
                             selected_task,
@@ -179,7 +181,7 @@ impl TimelineApp {
                             && !merge_picker(
                                 ui,
                                 content_w,
-                                theme::series_color_for(groups[g].task_id),
+                                theme::task_color(groups[g].task_id, groups[g].project.as_deref()),
                                 groups[g].task_id,
                                 &candidates,
                                 &mut pending,
@@ -205,7 +207,10 @@ impl TimelineApp {
                                     ui,
                                     content_w,
                                     &groups[g],
-                                    theme::series_color_for(groups[g].task_id),
+                                    theme::task_color(
+                                        groups[g].task_id,
+                                        groups[g].project.as_deref(),
+                                    ),
                                     edit,
                                     merge_pick,
                                     selected_task,
@@ -215,7 +220,10 @@ impl TimelineApp {
                                     && !merge_picker(
                                         ui,
                                         content_w,
-                                        theme::series_color_for(groups[g].task_id),
+                                        theme::task_color(
+                                            groups[g].task_id,
+                                            groups[g].project.as_deref(),
+                                        ),
                                         groups[g].task_id,
                                         &candidates,
                                         &mut pending,
@@ -243,7 +251,7 @@ impl TimelineApp {
                             for a in unplaced {
                                 activity_row(
                                     ui,
-                                    activity_glyph(a.kind),
+                                    a.kind,
                                     &a.time.strftime("%H:%M").to_string(),
                                     a.duration_ms.map(super::fmt_dur).as_deref(),
                                     &a.summary,
@@ -431,7 +439,10 @@ impl DayChart {
 }
 
 fn seg_color(groups: &[TaskGroup], seg: &Segment, hovered: bool) -> egui::Color32 {
-    let color = theme::series_color_for(groups[seg.group].task_id);
+    let color = theme::task_color(
+        groups[seg.group].task_id,
+        groups[seg.group].project.as_deref(),
+    );
     if hovered {
         color.gamma_multiply(1.2)
     } else {
@@ -450,7 +461,7 @@ fn segment_tooltip(resp: egui::Response, groups: &[TaskGroup], seg: &Segment) {
                 ui.painter().circle_filled(
                     dot.center(),
                     3.0,
-                    theme::series_color_for(group.task_id),
+                    theme::task_color(group.task_id, group.project.as_deref()),
                 );
                 ui.add(egui::Label::new(&group.label).truncate());
             });
@@ -692,7 +703,7 @@ fn activity_hours(
         let mut y = rect.bottom();
         for (g, h) in heights {
             let top = y - h * scale;
-            let color = theme::series_color_for(groups[g].task_id);
+            let color = theme::task_color(groups[g].task_id, groups[g].project.as_deref());
             painter.rect_filled(
                 egui::Rect::from_min_max(egui::pos2(x0, top), egui::pos2(x1, y)),
                 0,
@@ -738,7 +749,7 @@ fn activity_hours(
                         ui.painter().circle_filled(
                             dot.center(),
                             3.0,
-                            theme::series_color_for(groups[g].task_id),
+                            theme::task_color(groups[g].task_id, groups[g].project.as_deref()),
                         );
                         ui.add(egui::Label::new(&groups[g].label).truncate());
                         ui.label(theme::num(fmt_dur(m)));
@@ -934,6 +945,7 @@ fn card_frame(
             // column, menu pinned right, so every card's numbers align.
             theme::ListRow::new(&group.label)
                 .emphasis()
+                .lines(2)
                 .dot(color)
                 .num(fmt_dur(group.total_ms))
                 .show(ui, content_w - 20.0, |ui| {
@@ -941,7 +953,19 @@ fn card_frame(
                     confidence_dot(ui, group);
                 });
             ui.horizontal(|ui| {
-                // Flush with the dot, chips 4pt apart.
+                // The time range leads in a fixed column so the monospace
+                // digits line up card to card; chips follow, 4pt apart.
+                if let (Some(first), Some(last)) = (group.sessions.first(), group.sessions.last()) {
+                    time_col(
+                        ui,
+                        RANGE_COL,
+                        &format!(
+                            "{}\u{2013}{}",
+                            first.start.strftime("%H:%M"),
+                            last.end.strftime("%H:%M")
+                        ),
+                    );
+                }
                 ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
                 if let Some(project) = &group.project {
                     theme::badge(ui, project, color);
@@ -950,18 +974,12 @@ fn card_frame(
                     theme::badge(ui, "declared", theme::palette::TEXT_DIM);
                 }
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if let (Some(first), Some(last)) = (group.sessions.first(), group.sessions.last()) {
-                    ui.label(theme::num(format!(
-                        "{}\u{2013}{}",
-                        first.start.strftime("%H:%M"),
-                        last.end.strftime("%H:%M")
-                    )));
-                }
                 if let Some(e) = group.evidence.first() {
-                    let text = if e.top_title.is_empty() {
+                    let title = theme::display_title(&e.top_title);
+                    let text = if title.is_empty() {
                         e.app.clone()
                     } else {
-                        format!("{} \u{b7} {}", e.app, e.top_title)
+                        format!("{} \u{b7} {title}", e.app)
                     };
                     ui.add(
                         egui::Label::new(
@@ -1120,7 +1138,7 @@ fn detail_ui(
                 );
                 painter.rect_filled(fill, egui::CornerRadius::same(4), color);
                 if !e.top_title.is_empty() {
-                    resp.on_hover_text(&e.top_title);
+                    resp.on_hover_text(theme::display_title(&e.top_title));
                 }
                 ui.label(
                     egui::RichText::new(dur_text)
@@ -1138,7 +1156,7 @@ fn detail_ui(
         for a in &group.activity {
             activity_row(
                 ui,
-                activity_glyph(a.kind),
+                a.kind,
                 &a.time.strftime("%H:%M").to_string(),
                 a.duration_ms.map(super::fmt_dur).as_deref(),
                 &a.summary,
@@ -1338,10 +1356,16 @@ fn ms(z: &Zoned) -> i64 {
     z.timestamp().as_millisecond()
 }
 
+/// Sessions shorter than this fold into one "short sessions" row when
+/// there are two or more of them.
+const SHORT_SESSION_MS: i64 = 2 * 60_000;
+
 /// Session strips: time column, a strip sized against the longest session
 /// and filled with per-app focus segments (confidence as opacity; commit
-/// and journal ticks), the duration, and the whole-session "move" menu.
-/// Hover a segment for app · title · duration.
+/// and journal ticks), the duration, and the whole-session move in the
+/// row's `…` menu. Hover a segment for app · title · duration. Short
+/// sessions fold into one summary row (m25) so seven rows of one-minute
+/// slivers do not bury the real ones.
 fn sessions_ui(
     ui: &mut egui::Ui,
     content_w: f32,
@@ -1359,9 +1383,36 @@ fn sessions_ui(
         .max(1);
     // Room left after the range column, duration and menu (+ gaps).
     let strip_max = (content_w - RANGE_COL - 44.0 - 48.0 - 3.0 * 6.0).max(40.0);
+    let short: Vec<&SessionRow> = group
+        .sessions
+        .iter()
+        .filter(|s| ms(&s.end) - ms(&s.start) < SHORT_SESSION_MS)
+        .collect();
+    let fold = short.len() >= 2;
+    let move_menu = |ui: &mut egui::Ui, interval_ids: &[i64], pending: &mut Option<Action>| {
+        ui.menu_button("\u{2026}", |ui| {
+            ui.menu_button("move to", |ui| {
+                for (task_id, label) in candidates {
+                    if *task_id == group.task_id {
+                        continue;
+                    }
+                    if ui.button(label).clicked() {
+                        *pending = Some(Action::ReassignSession {
+                            interval_ids: interval_ids.to_vec(),
+                            to_task: *task_id,
+                        });
+                        ui.close();
+                    }
+                }
+            });
+        });
+    };
     for s in &group.sessions {
         let (lo, hi) = (ms(&s.start), ms(&s.end));
         let dur = (hi - lo).max(1);
+        if fold && dur < SHORT_SESSION_MS {
+            continue;
+        }
         ui.horizontal(|ui| {
             time_col(
                 ui,
@@ -1398,7 +1449,7 @@ fn sessions_ui(
                     hover = Some(format!(
                         "{} \u{b7} {} \u{b7} {}",
                         sp.app,
-                        sp.title,
+                        theme::display_title(&sp.title),
                         fmt_dur(b - a)
                     ));
                 }
@@ -1430,20 +1481,33 @@ fn sessions_ui(
             }));
             ui.label(theme::num(fmt_dur(dur)));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("move", |ui| {
-                    for (task_id, label) in candidates {
-                        if *task_id == group.task_id {
-                            continue;
-                        }
-                        if ui.button(label).clicked() {
-                            *pending = Some(Action::ReassignSession {
-                                interval_ids: s.interval_ids.clone(),
-                                to_task: *task_id,
-                            });
-                            ui.close();
-                        }
-                    }
-                });
+                move_menu(ui, &s.interval_ids, pending);
+            });
+        });
+    }
+    if fold {
+        let total: i64 = short.iter().map(|s| ms(&s.end) - ms(&s.start)).sum();
+        let ids: Vec<i64> = short
+            .iter()
+            .flat_map(|s| s.interval_ids.iter().copied())
+            .collect();
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("and {} short sessions", short.len()))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                )
+                .selectable(false),
+            )
+            .on_hover_text(format!(
+                "sessions under {}, {} together",
+                fmt_dur(SHORT_SESSION_MS),
+                fmt_dur(total)
+            ));
+            ui.label(theme::num(fmt_dur(total)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                move_menu(ui, &ids, pending);
             });
         });
     }
@@ -1461,13 +1525,34 @@ fn activity_glyph(kind: chronicle_core::types::ActivityKind) -> &'static str {
 
 /// One activity row: kind glyph, clock time, optional duration, summary
 /// (truncates).
-fn activity_row(ui: &mut egui::Ui, glyph: &str, time: &str, duration: Option<&str>, summary: &str) {
+/// What an activity glyph stands for, for the hover on the glyph itself —
+/// the row's only legend.
+fn activity_kind_name(kind: chronicle_core::types::ActivityKind) -> &'static str {
+    use chronicle_core::types::ActivityKind as K;
+    match kind {
+        K::Checkout => "branch checkout",
+        K::Commit => "commit",
+        K::AiSession => "AI session",
+        K::PrAuthored => "pull request you opened",
+        K::PrReviewed => "pull request you reviewed",
+        K::Call => "call",
+    }
+}
+
+fn activity_row(
+    ui: &mut egui::Ui,
+    kind: chronicle_core::types::ActivityKind,
+    time: &str,
+    duration: Option<&str>,
+    summary: &str,
+) {
     ui.horizontal(|ui| {
-        ui.label(
-            theme::glyph(glyph)
+        ui.add(egui::Label::new(
+            theme::glyph(activity_glyph(kind))
                 .text_style(egui::TextStyle::Small)
                 .color(theme::palette::TEXT_DIM),
-        );
+        ))
+        .on_hover_text(activity_kind_name(kind));
         time_col(ui, TIME_COL, time);
         if let Some(d) = duration {
             ui.label(
