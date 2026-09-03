@@ -335,6 +335,17 @@ struct OpenRow {
     next_step: Option<String>,
 }
 
+/// `s` cut to `max` chars with an ellipsis (chip text stays chip-sized).
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
 impl OpenRow {
     fn from_task(t: chronicle_core::types::OpenTask) -> Self {
         Self {
@@ -826,7 +837,7 @@ impl TimelineApp {
                     .map(|(_, content)| StandupRow { day, content })
             });
             // A draft first seen this pass starts collapsed when an earlier
-            // launch already showed it (`standup_read:<day>`).
+            // launch already showed it (`standup_read:<day>`), open when new.
             if let Some(s) = &self.standup
                 && prev_day.as_deref() != Some(s.day.as_str())
             {
@@ -835,10 +846,8 @@ impl TimelineApp {
                         .ok()
                         .flatten()
                         .is_some();
-                if read {
-                    self.standup_read_day = Some(s.day.clone());
-                    self.standup_open = false;
-                }
+                self.standup_read_day = read.then(|| s.day.clone());
+                self.standup_open = !read;
             }
         }
         if let Some(conn) = self.conn.as_ref() {
@@ -1174,21 +1183,47 @@ impl TimelineApp {
     fn load_open(&mut self, groups: &[TaskGroup]) -> anyhow::Result<Vec<OpenRow>> {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let open = chronicle_core::storage::open_tasks(conn, 8)?;
+        // "Today" is the calendar day, not the shown day: the timeline's day
+        // nav leaves `self.day` on a past day, and the groups follow it.
+        let today = jiff::Timestamp::now().to_zoned(self.tz.clone()).date();
+        let today_start = today.to_zoned(self.tz.clone())?;
+        let lo = today_start.timestamp().as_millisecond();
+        let hi = today_start
+            .checked_add(1.day())?
+            .timestamp()
+            .as_millisecond();
+        let mut today_ms: HashMap<i64, (i64, i64)> = HashMap::new();
+        for t in chronicle_core::storage::tasks_in_range(conn, lo, hi)? {
+            let (s, e) = (
+                t.start_ts.as_millisecond().max(lo),
+                t.end_ts.as_millisecond().min(hi),
+            );
+            if e > s {
+                let cell = today_ms.entry(t.id).or_insert((0, e));
+                cell.0 += e - s;
+                cell.1 = cell.1.max(e);
+            }
+        }
+        let groups_today = self.day == today;
         let mut rows: Vec<OpenRow> = open
             .into_iter()
             .map(|t| {
                 let mut row = OpenRow::from_task(t);
-                // Today's time, last touch and branch come from the day's
-                // groups (loaded just before, same day range).
-                if let Some(g) = groups.iter().find(|g| g.task_id == row.task_id) {
-                    row.today_ms = g.total_ms;
-                    row.last_touched = g.intervals.iter().map(|i| i.end.clone()).max();
+                if let Some(&(ms, end)) = today_ms.get(&row.task_id) {
+                    row.today_ms = ms;
+                    row.last_touched = jiff::Timestamp::from_millisecond(end)
+                        .ok()
+                        .map(|ts| ts.to_zoned(self.tz.clone()));
+                }
+                // Branch fallback from today's activity (groups are the
+                // shown day's; only trusted when that is today).
+                if groups_today && let Some(g) = groups.iter().find(|g| g.task_id == row.task_id) {
                     row.anchor = g
                         .activity
                         .iter()
                         .rev()
                         .find(|a| !a.branch.is_empty())
-                        .map(|a| a.branch.clone());
+                        .map(|a| clip_chars(&a.branch, 24));
                 }
                 if let Ok(Some(key)) = chronicle_core::storage::task_external_ref(conn, row.task_id)
                 {

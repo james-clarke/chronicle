@@ -926,44 +926,41 @@ impl<'a> ListRow<'a> {
                     badge(ui, text, *color);
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        match title_galley {
-                            Some((galley, title_w)) => {
-                                let actual_w = ui.available_width();
-                                ui.set_max_width(title_w.min(actual_w));
-                                // Estimate too generous: re-lay at the real
-                                // width so the title truncates instead of
-                                // running under the trailing controls.
-                                let galley = if actual_w + 0.5 < title_w {
-                                    let mut job = egui::text::LayoutJob::simple(
-                                        self.title.to_owned(),
-                                        font.clone(),
-                                        palette::TEXT,
-                                        actual_w.max(20.0),
-                                    );
-                                    job.wrap.max_rows = galley.rows.len().max(1);
-                                    job.wrap.break_anywhere = false;
-                                    job.wrap.overflow_character = Some('\u{2026}');
-                                    ui.fonts_mut(|f| f.layout_job(job))
-                                } else {
-                                    galley
-                                };
-                                let elided = galley.elided;
-                                let resp = ui.add(egui::Label::new(galley).selectable(false));
-                                if elided {
-                                    resp.on_hover_text(self.title.to_owned());
-                                }
-                            }
-                            None => {
-                                let mut text = egui::RichText::new(self.title).color(palette::TEXT);
-                                if self.emphasis {
-                                    text = text.family(egui::FontFamily::Name(MEDIUM.into()));
-                                }
-                                truncated_label(ui, egui::Label::new(text).truncate(), self.title);
+                    match title_galley {
+                        Some((galley, title_w)) => {
+                            let actual_w = ui.available_width();
+                            ui.set_max_width(title_w.min(actual_w));
+                            // Estimate too generous: re-lay at the real
+                            // width so the title truncates instead of
+                            // running under the trailing controls.
+                            let galley = if actual_w + 0.5 < title_w {
+                                let mut job = egui::text::LayoutJob::simple(
+                                    self.title.to_owned(),
+                                    font.clone(),
+                                    palette::TEXT,
+                                    actual_w.max(20.0),
+                                );
+                                job.wrap.max_rows = galley.rows.len().max(1);
+                                job.wrap.break_anywhere = false;
+                                job.wrap.overflow_character = Some('\u{2026}');
+                                ui.fonts_mut(|f| f.layout_job(job))
+                            } else {
+                                galley
+                            };
+                            let elided = galley.elided;
+                            let resp = ui.add(egui::Label::new(galley).selectable(false));
+                            if elided {
+                                resp.on_hover_text(self.title.to_owned());
                             }
                         }
-                    });
+                        None => {
+                            let mut text = egui::RichText::new(self.title).color(palette::TEXT);
+                            if self.emphasis {
+                                text = text.family(egui::FontFamily::Name(MEDIUM.into()));
+                            }
+                            truncated_label(ui, egui::Label::new(text).truncate(), self.title);
+                        }
+                    }
                 });
             });
         };
