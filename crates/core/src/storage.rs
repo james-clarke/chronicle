@@ -2125,6 +2125,116 @@ pub fn insert_prepass(conn: &Connection, p: &Placement) -> Result<(), StorageErr
     Ok(())
 }
 
+/// One live-tier interval (m27 chunk 4): `source='live'`, over the tail
+/// (`batch_id` NULL), replacing pre-pass rows in its window. The batch
+/// derive later replaces it like a pre-pass row; `keep` promotes it the same
+/// way. A `New` slot creates a derived task (orphan-pruned if the batch
+/// disagrees).
+pub fn insert_live_interval(
+    conn: &mut Connection,
+    slot: &TaskSlot,
+    lo: i64,
+    hi: i64,
+    confidence: f64,
+) -> Result<i64, StorageError> {
+    let tx = conn.transaction()?;
+    let task_id = match slot {
+        TaskSlot::Existing(id) => *id,
+        TaskSlot::New { label, project } => {
+            tx.execute(
+                "INSERT INTO tasks (label, project, status, source, created_ts)
+                 VALUES (?1, ?2, 'open', 'derived', ?3)",
+                params![label, project, lo],
+            )?;
+            tx.last_insert_rowid()
+        }
+    };
+    clear_prepass(&tx, lo, hi)?;
+    tx.execute(
+        "DELETE FROM intervals WHERE source='live' AND start_ts >= ?1 AND start_ts < ?2",
+        [lo, hi],
+    )?;
+    tx.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason)
+         VALUES (?1, NULL, ?2, ?3, ?4, 'live', 'live')",
+        params![task_id, lo, hi, confidence],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    Ok(task_id)
+}
+
+/// Where the current stretch starts for the live tier: the latest interval
+/// end (any source) or the end of the latest AFK gap ≥ 5 min inside
+/// `[floor, now)`, else `floor`.
+pub fn live_window_start(conn: &Connection, floor: i64, now: i64) -> Result<i64, StorageError> {
+    let iv: Option<i64> = conn.query_row(
+        "SELECT MAX(MIN(end_ts, ?2)) FROM intervals WHERE end_ts > ?1 AND start_ts < ?2",
+        [floor, now],
+        |r| r.get(0),
+    )?;
+    let afk: Option<i64> = conn.query_row(
+        "SELECT MAX(MIN(end_ts, ?2)) FROM spans
+         WHERE kind='afk' AND end_ts - start_ts >= 300000 AND end_ts > ?1 AND start_ts < ?2",
+        [floor, now],
+        |r| r.get(0),
+    )?;
+    Ok(floor.max(iv.unwrap_or(0)).max(afk.unwrap_or(0)))
+}
+
+/// Focus ms inside `[lo, hi)`.
+pub fn focus_ms_in(conn: &Connection, lo: i64, hi: i64) -> Result<i64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)), 0) FROM spans
+         WHERE kind='focus' AND start_ts < ?2 AND end_ts > ?1",
+        [lo, hi],
+        |r| r.get(0),
+    )?)
+}
+
+/// The label of the interval ending last before `ts` (the live prompt's
+/// "Previously" line).
+pub fn label_before(conn: &Connection, ts: i64) -> Result<Option<String>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT t.label FROM intervals i JOIN tasks t ON t.id = i.task_id
+             WHERE i.end_ts <= ?1 ORDER BY i.end_ts DESC LIMIT 1",
+            [ts],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// What the resident worker is deriving right now, for the feed's
+/// "deriving…" row (meta `derive_progress`; absent when idle).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeriveProgress {
+    /// `batch` | `live`.
+    pub kind: String,
+    pub batch_id: Option<i64>,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub started_ts: i64,
+    /// The label being typed, or "linking to <task>"; empty until the model
+    /// says something.
+    pub label: String,
+}
+
+pub const DERIVE_PROGRESS_KEY: &str = "derive_progress";
+
+pub fn set_derive_progress(
+    conn: &Connection,
+    progress: Option<&DeriveProgress>,
+) -> Result<(), StorageError> {
+    let json = progress.map(|p| serde_json::to_string(p).unwrap_or_default());
+    set_meta(conn, DERIVE_PROGRESS_KEY, json.as_deref())
+}
+
+pub fn derive_progress(conn: &Connection) -> Result<Option<DeriveProgress>, StorageError> {
+    Ok(get_meta(conn, DERIVE_PROGRESS_KEY)?.and_then(|v| serde_json::from_str(&v).ok()))
+}
+
 /// The open task anchored to `key` (`tasks.external_ref`), if any.
 pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>, StorageError> {
     use rusqlite::OptionalExtension;

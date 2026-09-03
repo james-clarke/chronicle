@@ -503,6 +503,8 @@ struct TimelineApp {
     /// total.
     feed: Vec<FeedBlock>,
     unassigned_ms: i64,
+    /// What the resident worker is deriving right now (m27), or None.
+    progress: Option<chronicle_core::storage::DeriveProgress>,
     /// Open proposed tasks of the shown day (m24), newest first.
     proposals: Vec<Proposal>,
     /// When each feed block was first seen (drives the arrival fade).
@@ -666,6 +668,7 @@ impl TimelineApp {
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
             feed: Vec::new(),
+            progress: None,
             unassigned_ms: 0,
             proposals: Vec::new(),
             feed_seen: HashMap::new(),
@@ -783,6 +786,10 @@ impl TimelineApp {
         {
             theme::set_project_order(order);
         }
+        self.progress = self
+            .conn
+            .as_ref()
+            .and_then(|c| chronicle_core::storage::derive_progress(c).ok().flatten());
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
         }

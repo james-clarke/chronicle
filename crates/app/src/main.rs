@@ -249,7 +249,14 @@ pub(crate) mod deriveproto {
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     #[serde(tag = "t", rename_all = "snake_case")]
     pub enum Request {
-        Derive { batch_id: i64 },
+        Derive {
+            batch_id: i64,
+        },
+        /// Live tier (chunk 4): label the stretch `[lo, hi)` of the tail.
+        Live {
+            lo: i64,
+            hi: i64,
+        },
     }
 
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -257,12 +264,13 @@ pub(crate) mod deriveproto {
     pub enum Reply {
         /// Model loaded and prefix cached; requests accepted.
         Ready,
-        /// A piece of generated text (the feed's "deriving…" row).
-        Tok {
-            text: String,
-        },
+        /// What the model is saying so far, already resolved for humans
+        /// ("<label being typed>…" or "linking to <open task>"); sent when
+        /// it changes. The feed's "deriving…" row shows it.
+        Progress { label: String },
+        /// `batch_id` None = a live pass.
         Done {
-            batch_id: i64,
+            batch_id: Option<i64>,
             intervals: usize,
         },
         Err {
@@ -816,6 +824,147 @@ fn replay_eval(
     Ok(())
 }
 
+/// Accumulates the model's raw output and reports the human-readable
+/// progress label whenever it changes.
+#[derive(Default)]
+struct ProgressRelay {
+    raw: String,
+    last: String,
+}
+
+impl ProgressRelay {
+    fn push(
+        &mut self,
+        piece: &str,
+        open: &[chronicle_core::types::OpenTask],
+        on_progress: &mut dyn FnMut(&str),
+    ) {
+        self.raw.push_str(piece);
+        if let Some(label) = progress_label(&self.raw, open)
+            && label != self.last
+        {
+            self.last = label;
+            on_progress(&self.last);
+        }
+    }
+}
+
+/// What the partial JSON says so far: the newest `label` being typed
+/// (with an ellipsis while its string is still open), else "linking to
+/// <task>" for the newest `ref`. None until the model has said either.
+fn progress_label(partial: &str, open: &[chronicle_core::types::OpenTask]) -> Option<String> {
+    let label_at = partial.rfind("\"label\"");
+    let ref_at = partial.rfind("\"ref\"");
+    if let Some(at) = label_at
+        && ref_at.is_none_or(|r| r < at)
+    {
+        let rest = partial[at + "\"label\"".len()..].trim_start_matches([':', ' ', '\n', '\t']);
+        if let Some(body) = rest.strip_prefix('"') {
+            let mut text = String::new();
+            let mut chars = body.chars();
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    '\\' => {
+                        if let Some(n) = chars.next() {
+                            text.push(n);
+                        }
+                    }
+                    c => text.push(c),
+                }
+            }
+            if text.is_empty() {
+                return None;
+            }
+            return Some(if closed {
+                text
+            } else {
+                format!("{text}\u{2026}")
+            });
+        }
+        // `null` (or the start of it) means the ref names the task.
+        if (rest.starts_with("null") || "null".starts_with(rest))
+            && let Some(r) = ref_at
+        {
+            return ref_label(&partial[r..], open);
+        }
+        return None;
+    }
+    ref_at.and_then(|r| ref_label(&partial[r..], open))
+}
+
+fn ref_label(from_ref: &str, open: &[chronicle_core::types::OpenTask]) -> Option<String> {
+    let rest = from_ref["\"ref\"".len()..].trim_start_matches([':', ' ', '\n', '\t']);
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let n: usize = digits.parse().ok()?;
+    let task = open.get(n.checked_sub(1)?)?;
+    Some(format!("linking to {}", task.label))
+}
+
+/// Live tier (m27 chunk 4): label the stretch `[lo, hi)` of the tail with
+/// the live prompt and store one `source='live'` interval (confidence ×
+/// 0.8). Returns the task it landed on, None when the window holds no spans.
+fn live_pass(
+    conn: &mut rusqlite::Connection,
+    session: &mut chronicle_derive::DeriveSession<'_>,
+    lo: i64,
+    hi: i64,
+    on_progress: &mut dyn FnMut(&str),
+) -> anyhow::Result<Option<i64>> {
+    use chronicle_core::types::IntervalDraft;
+    use chronicle_core::{merge, storage};
+    let spans = storage::spans_in_range(conn, lo, hi)?;
+    if spans.is_empty() {
+        return Ok(None);
+    }
+    let mut open = storage::open_tasks(conn, LIVE_OPEN_CAP)?;
+    let hints = storage::prepass_hints(conn, lo, hi)?;
+    for h in &hints {
+        if !open.iter().any(|t| t.id == h.task_id)
+            && let Some(t) = storage::open_task_by_id(conn, h.task_id)?
+        {
+            open.push(t);
+        }
+    }
+    let activity = storage::activity_in_range(conn, lo, hi)?;
+    let tz = TimeZone::system();
+    let mut digest =
+        chronicle_core::digest::build_digest(&spans, &tz, &open, &[], &hints, &activity, None);
+    if let Some(prev) = storage::label_before(conn, lo)? {
+        digest.push_str(&format!("\n## Previously\n{prev}\n"));
+    }
+    let mut relay = ProgressRelay::default();
+    let run = session.infer_live(&digest, &mut |piece| relay.push(piece, &open, on_progress))?;
+    let mins = ((hi - lo) / 60_000).max(1);
+    let draft = IntervalDraft {
+        task_ref: run.draft.task_ref,
+        label: run.draft.label,
+        project: run.draft.project,
+        start_offset_min: 0,
+        end_offset_min: mins,
+        confidence: run.draft.confidence,
+    };
+    let drafts = merge::sanitize_intervals(vec![draft], open.len());
+    let (slots, linked) = merge::link_intervals(&drafts, &open);
+    let Some(iv) = linked.first() else {
+        bail!("live output rejected: {}", run.raw.trim())
+    };
+    let slot = &slots[iv.slot];
+    let confidence = (iv.confidence * LIVE_CONFIDENCE_SCALE).clamp(0.0, 1.0);
+    let task_id = storage::insert_live_interval(conn, slot, lo, hi, confidence)?;
+    tracing::info!(task_id, lo, hi, confidence, "live pass placed");
+    Ok(Some(task_id))
+}
+
+/// Open tasks offered to the live prompt (the batch tier offers 8).
+const LIVE_OPEN_CAP: usize = 16;
+/// A live label is a guess over a short window; the batch tier confirms it.
+const LIVE_CONFIDENCE_SCALE: f64 = 0.8;
+
 /// Everything the model sees for one batch, plus what post-processing needs.
 struct BatchDigest {
     digest: String,
@@ -943,6 +1092,8 @@ fn derive_resident(data_dir: &Path) -> anyhow::Result<()> {
         }
     };
     let mut session = model.session()?;
+    let mut live_session =
+        model.session_with(chronicle_derive::Prompt::Live, chronicle_derive::LIVE_N_CTX)?;
 
     let (tx, rx) = crossbeam_channel::unbounded::<Request>();
     std::thread::Builder::new()
@@ -978,15 +1129,36 @@ fn derive_resident(data_dir: &Path) -> anyhow::Result<()> {
                     data_dir,
                     &mut session,
                     batch_id,
-                    &mut |text| send(&Reply::Tok { text: text.into() }),
+                    &mut |label| {
+                        send(&Reply::Progress {
+                            label: label.into(),
+                        })
+                    },
                 );
                 match result {
                     Ok(intervals) => send(&Reply::Done {
-                        batch_id,
+                        batch_id: Some(batch_id),
                         intervals,
                     }),
                     Err(e) => send(&Reply::Err {
                         batch_id: Some(batch_id),
+                        message: format!("{e:#}"),
+                    }),
+                }
+            }
+            Request::Live { lo, hi } => {
+                let result = live_pass(&mut conn, &mut live_session, lo, hi, &mut |label| {
+                    send(&Reply::Progress {
+                        label: label.into(),
+                    })
+                });
+                match result {
+                    Ok(placed) => send(&Reply::Done {
+                        batch_id: None,
+                        intervals: usize::from(placed.is_some()),
+                    }),
+                    Err(e) => send(&Reply::Err {
+                        batch_id: None,
                         message: format!("{e:#}"),
                     }),
                 }
@@ -1007,7 +1179,7 @@ fn derive_batch(
     data_dir: &Path,
     session: &mut chronicle_derive::DeriveSession<'_>,
     batch_id: i64,
-    on_token: &mut dyn FnMut(&str),
+    on_progress: &mut dyn FnMut(&str),
 ) -> anyhow::Result<usize> {
     use chronicle_core::storage;
     let Some(batch) = storage::claim_batch(conn, batch_id)? else {
@@ -1023,7 +1195,8 @@ fn derive_batch(
             gaps,
             activity,
         } = build_batch_digest(conn, config, data_dir, &batch, open, true)?;
-        let run = session.infer(&digest, on_token)?;
+        let mut relay = ProgressRelay::default();
+        let run = session.infer(&digest, &mut |piece| relay.push(piece, &open, on_progress))?;
         let drafts = chronicle_core::merge::sanitize_intervals(run.intervals, open.len());
         let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, &open);
         let linked = chronicle_core::merge::coalesce(linked, &gaps, COALESCE_GAP_MIN);
@@ -2051,6 +2224,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
         toggle_ui(&mut ui_child);
     }
     let mut scheduler = Scheduler::new();
+    let _ = chronicle_core::storage::set_derive_progress(&conn, None);
     let mut idle_since: Option<i64> = None;
     // Fires once per idle stretch: remembers which idle_since epoch already
     // queued checkpoints, cleared when the user comes back.
@@ -2059,7 +2233,13 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     let mut last_prepass = Instant::now();
     let exit_reason = 'daemon: loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
+        // Cloned per iteration so the select borrow does not pin the scheduler.
+        let resident_rx = scheduler.resident_rx();
         crossbeam_channel::select! {
+            recv(resident_rx) -> reply => match reply {
+                Ok(reply) => scheduler.on_reply(&conn, reply),
+                Err(_) => scheduler.resident_disconnected(&conn),
+            },
             recv(rx) -> event => {
                 let Ok(event) = event else { break 'daemon ExitReason::CaptureDied };
                 if filters.excluded(&event) {
@@ -2113,6 +2293,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                     if let Err(e) = chronicle_core::proposals::refresh(&mut conn, now) {
                         tracing::error!("proposals refresh failed: {e}");
                     }
+                    scheduler.maybe_live(&conn, &config, data_dir, idle_since);
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
@@ -2236,10 +2417,25 @@ struct Resident {
     stdin: std::process::ChildStdin,
     rx: crossbeam_channel::Receiver<deriveproto::Reply>,
     ready: bool,
-    /// The batch in flight and when it was requested.
-    busy: Option<(i64, Instant)>,
+    /// The request in flight and when it was sent.
+    busy: Option<(Job, Instant)>,
     last_used: Instant,
+    /// The feed's "deriving…" row, mirrored to meta `derive_progress`.
+    progress: Option<chronicle_core::storage::DeriveProgress>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Job {
+    Batch(i64),
+    Live { lo: i64, hi: i64 },
+}
+
+/// The live tier looks back at most this far for the current stretch.
+const LIVE_LOOKBACK_MS: i64 = 15 * 60_000;
+/// A live pass needs this much focus in its window.
+const LIVE_MIN_FOCUS_MS: i64 = 5 * 60_000;
+/// A live pass slower than this skips the next one (self-throttle).
+const LIVE_SLOW: Duration = Duration::from_secs(60);
 
 /// Daemon-side backstop over the worker's own idle exit.
 const RESIDENT_IDLE_GRACE_SECS: u64 = 60;
@@ -2249,7 +2445,13 @@ struct Scheduler {
     /// one inference process works at a time, derive or ai-job.
     ai_job: Option<(Child, Instant, i64)>,
     resident: Option<Resident>,
+    last_live: Option<Instant>,
+    /// Wall time of the last live pass; over `LIVE_SLOW` skips one pass.
+    last_live_took: Option<Duration>,
 }
+
+static NEVER_REPLY: std::sync::LazyLock<crossbeam_channel::Receiver<deriveproto::Reply>> =
+    std::sync::LazyLock::new(crossbeam_channel::never);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DaemonStatus {
@@ -2319,6 +2521,17 @@ impl Scheduler {
         Self {
             ai_job: None,
             resident: None,
+            last_live: None,
+            last_live_took: None,
+        }
+    }
+
+    /// The resident worker's reply channel for the daemon's select loop (a
+    /// never-ready channel when no worker is up).
+    fn resident_rx(&self) -> crossbeam_channel::Receiver<deriveproto::Reply> {
+        match &self.resident {
+            Some(r) => r.rx.clone(),
+            None => NEVER_REPLY.clone(),
         }
     }
 
@@ -2328,11 +2541,65 @@ impl Scheduler {
             return Some((format!("ai job {id}"), *started));
         }
         if let Some(r) = &self.resident
-            && let Some((id, since)) = r.busy
+            && let Some((job, since)) = r.busy
         {
-            return Some((format!("derive batch {id}"), since));
+            let what = match job {
+                Job::Batch(id) => format!("derive batch {id}"),
+                Job::Live { .. } => "live pass".to_owned(),
+            };
+            return Some((what, since));
         }
         None
+    }
+
+    /// Live tier (chunk 4), on the pre-pass timer: while the user is active
+    /// and the slot is free, label the stretch since the last boundary.
+    fn maybe_live(
+        &mut self,
+        conn: &rusqlite::Connection,
+        config: &Config,
+        data_dir: &Path,
+        idle_since: Option<i64>,
+    ) {
+        use chronicle_core::storage;
+        if config.live_secs == 0 || idle_since.is_some() || self.busy().is_some() {
+            return;
+        }
+        let every = Duration::from_secs(u64::from(config.live_secs));
+        if self.last_live.is_some_and(|t| t.elapsed() < every) {
+            return;
+        }
+        if let Some(took) = self.last_live_took.take()
+            && took > LIVE_SLOW
+        {
+            tracing::info!(took_secs = took.as_secs(), "live pass slow; skipping one");
+            self.last_live = Some(Instant::now());
+            return;
+        }
+        if !load_1min().is_some_and(|l| l < LOW_LOAD) || on_low_battery() {
+            return;
+        }
+        if chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).is_none() {
+            return;
+        }
+        let now = Timestamp::now().as_millisecond();
+        // The live tier labels the tail only: a stretch inside a closed batch
+        // belongs to that batch's derive, which replaces live rows it covers.
+        let tail_start = storage::latest_batch_end(conn).ok().flatten().unwrap_or(0);
+        let floor = (now - LIVE_LOOKBACK_MS).max(tail_start);
+        let lo = match storage::live_window_start(conn, floor, now) {
+            Ok(lo) => lo,
+            Err(e) => {
+                tracing::error!("live window query failed: {e}");
+                return;
+            }
+        };
+        let focus = storage::focus_ms_in(conn, lo, now).unwrap_or(0);
+        if focus < LIVE_MIN_FOCUS_MS {
+            return;
+        }
+        self.last_live = Some(Instant::now());
+        self.dispatch(conn, Job::Live { lo, hi: now });
     }
 
     fn tick(
@@ -2373,7 +2640,7 @@ impl Scheduler {
         // Derivation stays ahead of background summarization.
         match storage::next_eligible_batch(conn) {
             Ok(Some(batch_id)) => {
-                self.dispatch_batch(batch_id);
+                self.dispatch(conn, Job::Batch(batch_id));
                 return;
             }
             Ok(None) => {}
@@ -2428,49 +2695,78 @@ impl Scheduler {
         }
     }
 
-    /// Relay the resident worker's replies, then apply the timeout/idle rule.
-    fn poll_resident(&mut self, conn: &rusqlite::Connection, config: &Config) {
+    /// One reply from the resident worker (the daemon's select loop feeds
+    /// these as they arrive; `poll_resident` drains stragglers).
+    fn on_reply(&mut self, conn: &rusqlite::Connection, msg: deriveproto::Reply) {
         use chronicle_core::storage;
         use deriveproto::Reply;
         let Some(r) = &mut self.resident else {
             return;
         };
-        while let Ok(msg) = r.rx.try_recv() {
-            match msg {
-                Reply::Ready => {
-                    r.ready = true;
-                    // The request queued behind model load; the timeout
-                    // clock covers inference only.
-                    if let Some((_, since)) = &mut r.busy {
-                        *since = Instant::now();
+        match msg {
+            Reply::Ready => {
+                r.ready = true;
+                // The request queued behind model load; the timeout clock
+                // covers inference only.
+                if let Some((_, since)) = &mut r.busy {
+                    *since = Instant::now();
+                }
+                tracing::info!("derive worker ready");
+            }
+            Reply::Progress { label } => {
+                if let Some(p) = &mut r.progress {
+                    p.label = label;
+                    if let Err(e) = storage::set_derive_progress(conn, Some(p)) {
+                        tracing::warn!("derive progress write failed: {e}");
                     }
-                    tracing::info!("derive worker ready");
                 }
-                // Chunk 4 streams these into the feed's "deriving…" row.
-                Reply::Tok { .. } => {}
-                Reply::Done {
-                    batch_id,
-                    intervals,
-                } => {
-                    tracing::info!(batch_id, intervals, "derive worker done");
-                    r.busy = None;
-                    r.last_used = Instant::now();
-                }
-                Reply::Err { batch_id, message } => {
-                    tracing::warn!(?batch_id, "derive worker: {message}");
-                    r.busy = None;
-                    r.last_used = Instant::now();
-                }
+            }
+            Reply::Done {
+                batch_id,
+                intervals,
+            } => {
+                tracing::info!(?batch_id, intervals, "derive worker done");
+                self.finish_job(conn);
+            }
+            Reply::Err { batch_id, message } => {
+                tracing::warn!(?batch_id, "derive worker: {message}");
+                self.finish_job(conn);
             }
         }
-        // A batch the worker never answered for keeps its `running` row;
-        // count that as the failed attempt it was.
-        let fail_stuck = |conn: &rusqlite::Connection, busy: Option<(i64, Instant)>| {
-            if let Some((id, _)) = busy
-                && matches!(storage::batch_status(conn, id), Ok(Some(ref s)) if s == "running")
-            {
-                let _ = storage::fail_batch(conn, id);
-            }
+    }
+
+    /// The in-flight request is over: free the slot, clear the feed row,
+    /// remember how long a live pass took.
+    fn finish_job(&mut self, conn: &rusqlite::Connection) {
+        let Some(r) = &mut self.resident else {
+            return;
+        };
+        if let Some((Job::Live { .. }, since)) = r.busy.take() {
+            self.last_live_took = Some(since.elapsed());
+        }
+        r.last_used = Instant::now();
+        r.progress = None;
+        let _ = chronicle_core::storage::set_derive_progress(conn, None);
+    }
+
+    /// The reader thread ended (worker stdout closed): treat as dead.
+    fn resident_disconnected(&mut self, conn: &rusqlite::Connection) {
+        if let Some(mut r) = self.resident.take() {
+            tracing::warn!(busy = ?r.busy.map(|b| b.0), "derive worker disconnected");
+            let _ = r.child.kill();
+            let _ = r.child.wait();
+            fail_stuck(conn, r.busy);
+            let _ = chronicle_core::storage::set_derive_progress(conn, None);
+        }
+    }
+
+    /// Drain stragglers, then apply the timeout/idle rule.
+    fn poll_resident(&mut self, conn: &rusqlite::Connection, config: &Config) {
+        while let Some(msg) = self.resident.as_ref().and_then(|r| r.rx.try_recv().ok()) {
+            self.on_reply(conn, msg);
+        }
+        let Some(r) = &mut self.resident else {
+            return;
         };
         let action = resident_action(
             r.busy.map(|(_, since)| since),
@@ -2487,6 +2783,7 @@ impl Scheduler {
                     tracing::info!("derive worker exited (idle)");
                 }
                 fail_stuck(conn, r.busy);
+                let _ = chronicle_core::storage::set_derive_progress(conn, None);
                 self.resident = None;
             }
             Ok(None) => match action {
@@ -2496,6 +2793,7 @@ impl Scheduler {
                     let _ = r.child.kill();
                     let _ = r.child.wait();
                     fail_stuck(conn, r.busy);
+                    let _ = chronicle_core::storage::set_derive_progress(conn, None);
                     self.resident = None;
                 }
                 ResidentAction::KillIdle => {
@@ -2509,6 +2807,7 @@ impl Scheduler {
                 tracing::error!("derive worker wait failed: {e}");
                 let _ = r.child.kill();
                 fail_stuck(conn, r.busy);
+                let _ = chronicle_core::storage::set_derive_progress(conn, None);
                 self.resident = None;
             }
         }
@@ -2524,11 +2823,42 @@ impl Scheduler {
         }
     }
 
-    /// Send a batch to the resident worker, spawning it first if needed. The
-    /// request queues in the pipe behind model load; `Ready` restarts the
+    /// Send a request to the resident worker, spawning it first if needed.
+    /// The request queues in the pipe behind model load; `Ready` restarts the
     /// timeout clock so it covers inference only.
-    fn dispatch_batch(&mut self, batch_id: i64) {
+    fn dispatch(&mut self, conn: &rusqlite::Connection, job: Job) {
+        use chronicle_core::storage;
         use std::io::Write;
+        let (request, progress) = match job {
+            Job::Batch(batch_id) => {
+                let (start_ts, end_ts) = storage::batch_row(conn, batch_id)
+                    .ok()
+                    .flatten()
+                    .map_or((0, 0), |b| (b.start_ts, b.end_ts));
+                (
+                    deriveproto::Request::Derive { batch_id },
+                    storage::DeriveProgress {
+                        kind: "batch".into(),
+                        batch_id: Some(batch_id),
+                        start_ts,
+                        end_ts,
+                        started_ts: Timestamp::now().as_millisecond(),
+                        label: String::new(),
+                    },
+                )
+            }
+            Job::Live { lo, hi } => (
+                deriveproto::Request::Live { lo, hi },
+                storage::DeriveProgress {
+                    kind: "live".into(),
+                    batch_id: None,
+                    start_ts: lo,
+                    end_ts: hi,
+                    started_ts: Timestamp::now().as_millisecond(),
+                    label: String::new(),
+                },
+            ),
+        };
         if self.resident.is_none() {
             match spawn_resident() {
                 Ok(r) => {
@@ -2544,8 +2874,7 @@ impl Scheduler {
         let Some(r) = self.resident.as_mut() else {
             return;
         };
-        let mut line = serde_json::to_string(&deriveproto::Request::Derive { batch_id })
-            .expect("request serializes");
+        let mut line = serde_json::to_string(&request).expect("request serializes");
         line.push('\n');
         match r
             .stdin
@@ -2553,11 +2882,15 @@ impl Scheduler {
             .and_then(|()| r.stdin.flush())
         {
             Ok(()) => {
-                tracing::info!(batch_id, "derive requested");
-                r.busy = Some((batch_id, Instant::now()));
+                tracing::info!(?job, "derive requested");
+                r.busy = Some((job, Instant::now()));
+                if let Err(e) = storage::set_derive_progress(conn, Some(&progress)) {
+                    tracing::warn!("derive progress write failed: {e}");
+                }
+                r.progress = Some(progress);
             }
             Err(e) => {
-                tracing::error!(batch_id, "derive worker pipe broken: {e}");
+                tracing::error!(?job, "derive worker pipe broken: {e}");
                 let _ = r.child.kill();
                 let _ = r.child.wait();
                 self.resident = None;
@@ -2578,10 +2911,20 @@ impl Scheduler {
         if let Some(mut r) = self.resident.take() {
             let _ = r.child.kill();
             let _ = r.child.wait();
-            if let Some((id, _)) = r.busy {
-                let _ = storage::fail_batch(conn, id);
-            }
+            fail_stuck(conn, r.busy);
+            let _ = storage::set_derive_progress(conn, None);
         }
+    }
+}
+
+/// A batch the worker never answered for keeps its `running` row; count
+/// that as the failed attempt it was. Live passes have no row to repair.
+fn fail_stuck(conn: &rusqlite::Connection, busy: Option<(Job, Instant)>) {
+    use chronicle_core::storage;
+    if let Some((Job::Batch(id), _)) = busy
+        && matches!(storage::batch_status(conn, id), Ok(Some(ref s)) if s == "running")
+    {
+        let _ = storage::fail_batch(conn, id);
     }
 }
 
@@ -2617,6 +2960,7 @@ fn spawn_resident() -> std::io::Result<Resident> {
         ready: false,
         busy: None,
         last_used: Instant::now(),
+        progress: None,
     })
 }
 
@@ -3426,14 +3770,20 @@ mod tests {
             serde_json::from_str::<Request>(&req).unwrap(),
             Request::Derive { batch_id: 71 }
         );
+        let live = serde_json::to_string(&Request::Live { lo: 1, hi: 2 }).unwrap();
+        assert_eq!(live, r#"{"t":"live","lo":1,"hi":2}"#);
         for reply in [
             Reply::Ready,
-            Reply::Tok {
-                text: "{\"in".into(),
+            Reply::Progress {
+                label: "fixing checkout\u{2026}".into(),
             },
             Reply::Done {
-                batch_id: 71,
+                batch_id: Some(71),
                 intervals: 3,
+            },
+            Reply::Done {
+                batch_id: None,
+                intervals: 1,
             },
             Reply::Err {
                 batch_id: None,
@@ -3455,6 +3805,45 @@ mod tests {
         assert!(!s.model_resident);
         let s = format_status(&Liveness::Running(s), &DbStatus::default());
         assert!(s.contains("derive worker: idle\n"), "{s}");
+    }
+
+    #[test]
+    fn progress_label_follows_the_partial_json() {
+        use chronicle_core::types::OpenTask;
+        let open = vec![OpenTask {
+            id: 5,
+            label: "fixing checkout crash".into(),
+            project: None,
+            declared: true,
+        }];
+        assert_eq!(progress_label("{\"intervals\": [{\"re", &open), None);
+        assert_eq!(
+            progress_label("{\"intervals\": [{\"ref\": 1, \"label\": null", &open).as_deref(),
+            Some("linking to fixing checkout crash")
+        );
+        assert_eq!(
+            progress_label("{\"intervals\": [{\"ref\": 3, ", &open),
+            None
+        );
+        assert_eq!(
+            progress_label("{\"ref\": null, \"label\": \"redesign", &open).as_deref(),
+            Some("redesign\u{2026}")
+        );
+        assert_eq!(
+            progress_label(
+                "{\"ref\": null, \"label\": \"redesigning blog\", \"proj",
+                &open
+            )
+            .as_deref(),
+            Some("redesigning blog")
+        );
+        // Second interval supersedes the first.
+        let two = "{\"intervals\": [{\"ref\": null, \"label\": \"blog\", \"start\": 0, \"end\": 5, \"confidence\": 0.9}, {\"ref\": 1, \"label\": nu";
+        assert_eq!(
+            progress_label(two, &open).as_deref(),
+            Some("linking to fixing checkout crash")
+        );
+        assert_eq!(progress_label("{\"ref\": null, \"label\": \"", &open), None);
     }
 
     #[test]

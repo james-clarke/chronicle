@@ -237,6 +237,7 @@ impl TimelineApp {
                                     feed_ejected: &self.feed_ejected,
                                     unassigned_ms: self.unassigned_ms,
                                     candidates: &candidates,
+                                    progress: self.progress.as_ref(),
                                 },
                                 &mut self.new_label,
                                 &mut pending,
@@ -449,6 +450,7 @@ impl TimelineApp {
                                 feed_ejected,
                                 unassigned_ms,
                                 candidates: &candidates,
+                                progress: self.progress.as_ref(),
                             },
                             new_label,
                             &mut pending,
@@ -702,6 +704,13 @@ fn feed_row(
                     },
                     "source: user".to_owned(),
                 ),
+                "live" => (
+                    "placed live by the model".to_owned(),
+                    format!(
+                        "live pass, not confirmed by the batch yet \u{b7} confidence {:.0}%",
+                        c.confidence * 100.0
+                    ),
+                ),
                 _ => (
                     "placed by the model".to_owned(),
                     format!(
@@ -739,6 +748,8 @@ fn feed_row(
             row = row.dot(theme::task_color(c.task_id, c.project.as_deref()));
             if c.source == "prepass" {
                 row = row.chip("to confirm", theme::palette::AMBER);
+            } else if c.source == "live" {
+                row = row.chip("live", theme::palette::AMBER);
             }
         }
         None => {
@@ -758,7 +769,7 @@ fn feed_row(
     row.show(ui, width, |ui| {
         ui.menu_button("\u{2026}", |ui| match &block.claim {
             Some(c) => {
-                if c.source == "prepass" && ui.button("keep").clicked() {
+                if (c.source == "prepass" || c.source == "live") && ui.button("keep").clicked() {
                     *pending = Some(Action::KeepBlock(c.interval_id));
                     ui.close();
                 }
@@ -847,7 +858,12 @@ struct FeedSection<'a> {
     feed_ejected: &'a std::collections::HashMap<i64, String>,
     unassigned_ms: i64,
     candidates: &'a [(i64, String)],
+    /// The resident worker's in-flight derive (m27): the "deriving…" row.
+    progress: Option<&'a chronicle_core::storage::DeriveProgress>,
 }
+
+/// A progress row older than this is a stale meta value from a dead worker.
+const PROGRESS_STALE_MS: i64 = 10 * 60_000;
 
 fn feed_section_ui(
     ui: &mut egui::Ui,
@@ -866,11 +882,14 @@ fn feed_section_ui(
         feed_ejected,
         unassigned_ms,
         candidates,
+        progress,
     } = f;
+    let progress = progress
+        .filter(|p| jiff::Timestamp::now().as_millisecond() - p.started_ts < PROGRESS_STALE_MS);
     // The feed: the day's blocks newest first, each with who
     // placed it and why; the header carries the day's whole
     // unassigned total.
-    if !feed_vis.is_empty() || !proposals.is_empty() || unassigned_ms > 0 {
+    if !feed_vis.is_empty() || !proposals.is_empty() || unassigned_ms > 0 || progress.is_some() {
         ui.add_space(theme::SECTION_GAP);
         theme::section_header_with(ui, "Feed", None, |ui| {
             if theme::ghost_button(ui, "organize")
@@ -887,6 +906,9 @@ fn feed_section_ui(
         ui.add_space(theme::SPACE_XS);
         for p in proposals {
             proposal_card(ui, tz, p, pending);
+        }
+        if let Some(p) = progress {
+            progress_row(ui, content_w, tz, p);
         }
         for &f in feed_vis {
             let block = &feed[f];
@@ -911,6 +933,39 @@ fn feed_section_ui(
             });
         }
     }
+}
+
+/// The "deriving 09:18–09:51 · <label>…" row above the newest block while
+/// the resident worker types (m27 chunk 4); the 5 s reload carries updates.
+fn progress_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    tz: &jiff::tz::TimeZone,
+    p: &chronicle_core::storage::DeriveProgress,
+) {
+    let hm = |ms: i64| {
+        chronicle_core::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .strftime("%H:%M")
+            .to_string()
+    };
+    let title = format!("deriving {}\u{2013}{}", hm(p.start_ts), hm(p.end_ts));
+    let sub = if p.label.is_empty() {
+        "the model is reading the window".to_owned()
+    } else {
+        p.label.clone()
+    };
+    let chip = if p.kind == "live" { "live" } else { "batch" };
+    theme::ListRow::new(&title)
+        .lines(2)
+        .padded()
+        .subtitle(sub)
+        .chip(chip, theme::palette::AMBER)
+        .show(ui, width, |ui| {
+            ui.add(egui::Spinner::new().size(12.0));
+        });
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
 }
 
 /// "2026-09-01" → "Mon 1 Sep"; the raw string when it doesn't parse.

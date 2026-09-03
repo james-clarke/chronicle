@@ -1,0 +1,10 @@
+# Live tier (m27 chunk 4): one object naming the task of the current stretch.
+# Same key words as task_output_v4 so linking code is shared; no start/end —
+# the daemon owns the window.
+root ::= "{" ws "\"ref\"" ws ":" ws (int | "null") ws "," ws "\"label\"" ws ":" ws (string | "null") ws "," ws "\"project\"" ws ":" ws (string | "null") ws "," ws "\"confidence\"" ws ":" ws confidence ws "}"
+
+string ::= "\"" char{0,120} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+int ::= [0-9]{1,4}
+confidence ::= ("0" | "1") ("." [0-9]{1,3})?
+ws ::= [ \n\t]{0,4}

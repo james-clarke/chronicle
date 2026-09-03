@@ -17,10 +17,16 @@ pub enum ConfigError {
 pub struct Config {
     /// Batch = this many minutes of non-AFK activity.
     pub batch_minutes: u32,
+    /// A batch may also close at an AFK gap of 5 minutes or more once it
+    /// holds this many minutes of activity, so windows end at natural breaks.
+    pub batch_min_minutes: u32,
     /// Close spans when idle at least this long.
     pub afk_close_secs: u32,
     /// Derivation may start when idle at least this long.
     pub derive_idle_secs: u32,
+    /// Live tier (m27): while active, the resident worker labels the current
+    /// stretch this often. 0 = off.
+    pub live_secs: u32,
     /// The resident derive worker (model loaded, prompt prefix cached) exits
     /// after this long without a request. 0 = exit after each request.
     pub worker_idle_secs: u32,
@@ -85,8 +91,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             batch_minutes: 30,
+            batch_min_minutes: 10,
             afk_close_secs: 120,
             derive_idle_secs: 300,
+            live_secs: 300,
             worker_idle_secs: 1200,
             prepass_secs: 60,
             title_similarity: 0.8,

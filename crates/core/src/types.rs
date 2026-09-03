@@ -202,6 +202,18 @@ pub struct IntervalDraft {
     pub confidence: f64,
 }
 
+/// The live tier's answer (m27 chunk 4): the one task of the current
+/// stretch. Same fields as an `IntervalDraft` minus the offsets, which the
+/// daemon owns.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LiveDraft {
+    #[serde(rename = "ref")]
+    pub task_ref: Option<i64>,
+    pub label: Option<String>,
+    pub project: Option<String>,
+    pub confidence: f64,
+}
+
 /// A declare-suggestion from the model: what the user seems to be working on
 /// right now, offered as a pre-fill for the declare-a-task row.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -14,6 +14,10 @@ use crate::types::Event;
 pub const MIN_SPAN_SECS: i64 = 5;
 /// An AFK gap at least this long force-closes the open batch.
 pub const BATCH_BREAK_MINS: i64 = 30;
+/// An AFK gap at least this long closes a batch that already holds
+/// `batch_min_minutes` of activity (m27: windows end at natural breaks). Same
+/// threshold as the interval split rule.
+pub const AFK_SPLIT_MINS: i64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpanKind {
@@ -226,18 +230,22 @@ fn collapse_short(spans: Vec<SpanDraft>) -> Vec<SpanDraft> {
     out
 }
 
-/// A batch closes once it accumulates `batch_minutes` of non-AFK time, or at
-/// the start of an AFK gap ≥ `BATCH_BREAK_MINS`. The tail stays unbatched.
+/// A batch closes once it accumulates `batch_minutes` of non-AFK time, at
+/// the start of an AFK gap ≥ `BATCH_BREAK_MINS`, or at the start of an AFK
+/// gap ≥ `AFK_SPLIT_MINS` once it holds `batch_min_minutes` of activity. The
+/// tail stays unbatched.
 pub fn assign_batches(spans: &[SpanDraft], config: &Config) -> Vec<BatchDraft> {
     let target_ms = i64::from(config.batch_minutes) * 60_000;
+    let min_ms = i64::from(config.batch_min_minutes) * 60_000;
     let mut batches = Vec::new();
     let mut accum = 0i64;
     let mut start_idx: Option<usize> = None;
     for (i, span) in spans.iter().enumerate() {
         if span.kind == SpanKind::Afk {
-            if span.duration_ms() >= BATCH_BREAK_MINS * 60_000
-                && let Some(s) = start_idx.take()
-            {
+            let afk_ms = span.duration_ms();
+            let breaks = afk_ms >= BATCH_BREAK_MINS * 60_000
+                || (afk_ms >= AFK_SPLIT_MINS * 60_000 && accum >= min_ms);
+            if breaks && let Some(s) = start_idx.take() {
                 batches.push(BatchDraft {
                     start: spans[s].start,
                     end: span.start,

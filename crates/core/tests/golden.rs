@@ -79,9 +79,50 @@ fn day1_batches() {
     assert_eq!(batches.len(), 1, "fixture should close exactly one batch");
     let batch = &batches[0];
     assert_eq!(batch.start.to_string(), "2026-08-26T17:00:00Z");
-    assert_eq!(batch.end.to_string(), "2026-08-26T17:40:00Z");
-    // The tail span after the closed batch stays unbatched.
-    assert_eq!(batch.spans.end, spans.len() - 1);
+    // m27: the 7-minute AFK gap at 17:28 closes the batch (28 active minutes
+    // ≥ batch_min_minutes) instead of the 30-minute cap at 17:40.
+    assert_eq!(batch.end.to_string(), "2026-08-26T17:28:00Z");
+    assert_eq!(spans[batch.spans.end].kind, SpanKind::Afk);
+    // The spans after the gap stay unbatched.
+    assert!(batch.spans.end < spans.len() - 1);
+}
+
+// m27: an AFK gap ≥ 5 min closes a batch that already holds
+// `batch_min_minutes`; a shorter gap or a younger batch does not.
+#[test]
+fn batch_closes_at_afk_split_after_min_minutes() {
+    let ms = |m: i64| chronicle_core::types::ms_to_ts(m * 60_000);
+    let span = |lo: i64, hi: i64, kind: SpanKind| SpanDraft {
+        start: ms(lo),
+        end: ms(hi),
+        app: "code".into(),
+        title: "t".into(),
+        kind,
+        url: None,
+    };
+    let config = Config {
+        batch_minutes: 30,
+        batch_min_minutes: 10,
+        ..Config::default()
+    };
+    // 12 min focus, 6 min afk, 5 min focus, 6 min afk (young batch), tail.
+    let spans = vec![
+        span(0, 12, SpanKind::Focus),
+        span(12, 18, SpanKind::Afk),
+        span(18, 23, SpanKind::Focus),
+        span(23, 29, SpanKind::Afk),
+        span(29, 31, SpanKind::Focus),
+    ];
+    let batches = assign_batches(&spans, &config);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].end, ms(12));
+    // A 4-minute gap never closes.
+    let spans = vec![
+        span(0, 12, SpanKind::Focus),
+        span(12, 16, SpanKind::Afk),
+        span(16, 20, SpanKind::Focus),
+    ];
+    assert!(assign_batches(&spans, &config).is_empty());
 }
 
 #[test]
