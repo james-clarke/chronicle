@@ -63,6 +63,7 @@ impl TimelineApp {
                 .date();
             self.set_day(day);
             self.loaded_at = None;
+            self.declare_conflict = None;
             self.view = super::View::Timeline;
         } else if dismiss {
             self.resume = None;
@@ -361,7 +362,7 @@ impl TimelineApp {
                     let new_project = &mut self.new_project;
                     let merge_pick = &mut self.merge_pick;
                     let suggestion = &self.suggestion;
-                    let declare_conflict = &self.declare_conflict;
+                    let declare_conflict = &mut self.declare_conflict;
                     let model_missing = self.model_missing;
 
                     theme::section_header_with(ui, "Working on", None, |ui| {
@@ -398,11 +399,18 @@ impl TimelineApp {
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
-                                    ui.add(
-                                        egui::TextEdit::singleline(new_label)
-                                            .desired_width(ui.available_width())
-                                            .hint_text("declare a task\u{2026}"),
-                                    );
+                                    // Retyping the label drops the "already
+                                    // owns" notice: it is about what was typed.
+                                    if ui
+                                        .add(
+                                            egui::TextEdit::singleline(new_label)
+                                                .desired_width(ui.available_width())
+                                                .hint_text("declare a task\u{2026}"),
+                                        )
+                                        .changed()
+                                    {
+                                        *declare_conflict = None;
+                                    }
                                 },
                             );
                         });
@@ -902,27 +910,28 @@ fn feed_row(
     }
     // The state word says what it means on hover; the two words that stand
     // for a decision the user can take now are also buttons.
-    if let Some((tip, action)) = state.map(|(word, _)| match word {
-        "to confirm" => (
+    if let Some((tip, action)) = state.and_then(|(word, _)| match word {
+        "to confirm" => Some((
             "A rule placed this from the branch name. The model re-reads this batch in about 35 minutes. Click to keep it as it is.",
             true,
-        ),
-        "live" => (
+        )),
+        "live" => Some((
             "The model placed this as the work happened; the batch re-reads the stretch in about 35 minutes and can move it.",
             false,
-        ),
-        "kept" => (
+        )),
+        "kept" => Some((
             "You placed or kept this block, so no later pass moves it.",
             false,
-        ),
-        "moved out" => (
+        )),
+        "moved out" => Some((
             "You took this out of that task, so the model will not place it back.",
             false,
-        ),
-        _ => (
+        )),
+        "unsorted" | "new" => Some((
             "No task owns this stretch yet. Click to assign it to one.",
             true,
-        ),
+        )),
+        _ => None,
     }) {
         row = if action {
             row.meta_action(tip)
@@ -979,7 +988,10 @@ fn feed_row(
     });
     if let Some(state) = shown.state {
         match &block.claim {
-            Some(c) if state.clicked() => *pending = Some(Action::KeepBlock(c.interval_id)),
+            // Only `to confirm` (a pre-pass placement) is the one-click keep.
+            Some(c) if c.source == "prepass" && state.clicked() => {
+                *pending = Some(Action::KeepBlock(c.interval_id));
+            }
             None => {
                 egui::Popup::menu(&state).show(|ui| {
                     for (task_id, label) in candidates {

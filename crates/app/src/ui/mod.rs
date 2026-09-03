@@ -196,6 +196,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                     saved_pos,
                     saved_size,
                     autohide,
+                    zoom: text_zoom,
                 },
                 composited,
             )))
@@ -649,9 +650,11 @@ struct TimelineApp {
     /// pad excluded); written when a resize settles.
     saved_size: Option<egui::Vec2>,
     /// Zoom factor as of the previous frame; a change (Settings' text size,
-    /// Ctrl +/\u{2212}/0) resizes the window and persists `ui_zoom_factor`.
-    /// `None` until the first frame reads the boot zoom.
-    zoom_seen: Option<f32>,
+    /// Ctrl +/\u{2212}/0) resizes the window to keep the card's point size.
+    zoom_seen: f32,
+    /// Zoom last written to meta `ui_zoom_factor`; the write waits for the
+    /// zoom to stop moving (Ctrl+scroll steps it every frame).
+    zoom_saved: f32,
     /// Pending "chat about task" click, consumed by the chat view.
     chat_task_request: Option<i64>,
     /// Resume card: newest checkpoint written since the previous UI open
@@ -717,6 +720,8 @@ struct BootPrefs {
     saved_pos: Option<egui::Pos2>,
     saved_size: Option<egui::Vec2>,
     autohide: bool,
+    /// Zoom the window was sized for (meta `ui_zoom_factor`, 1.0 unset).
+    zoom: f32,
 }
 
 impl TimelineApp {
@@ -815,7 +820,8 @@ impl TimelineApp {
             positioned: false,
             saved_pos: prefs.saved_pos,
             saved_size: prefs.saved_size,
-            zoom_seen: None,
+            zoom_seen: prefs.zoom,
+            zoom_saved: prefs.zoom,
             chat_task_request: None,
             resume: None,
             resume_checked: false,
@@ -1965,30 +1971,32 @@ impl eframe::App for TimelineApp {
             / ctx.pixels_per_point();
         // A zoom change (Settings' text size, Ctrl +/\u{2212}/0) leaves the
         // window at its pixel size, so the card silently loses or gains
-        // points: give it back the point size it had, and persist the new
-        // zoom for the next boot. `InnerSize`/`MinInnerSize` are points, so
-        // the floor is the plain widget size whatever the zoom.
+        // points: give it back the point size it had. The size commands are
+        // points, and the shadow pad is fixed px like the boot floor, so it
+        // goes in divided by the zoom.
         let zoom = ctx.zoom_factor();
-        if let Some(seen) = self.zoom_seen
-            && (zoom - seen).abs() > 0.001
-        {
-            let pad = self.shadow_pad();
+        if (zoom - self.zoom_seen).abs() > 0.001 {
+            let pad = 2.0 * self.shadow_pad() / zoom;
             ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-                WIDGET_W + 2.0 * pad,
-                WIDGET_H + 2.0 * pad,
+                WIDGET_W + pad,
+                WIDGET_H + pad,
             )));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
-                ctx.viewport_rect().size() * (zoom / seen),
+                ctx.viewport_rect().size() * (zoom / self.zoom_seen),
             ));
-            if let Some(conn) = self.conn.as_ref() {
-                let _ = chronicle_core::storage::set_meta(
-                    conn,
-                    "ui_zoom_factor",
-                    Some(&format!("{zoom:.2}")),
-                );
-            }
+            self.zoom_seen = zoom;
+        } else if (zoom - self.zoom_saved).abs() > 0.001
+            && let Some(conn) = self.conn.as_ref()
+        {
+            // Settled (a Ctrl+scroll ramp steps the zoom every frame): one
+            // write, not one per step.
+            let _ = chronicle_core::storage::set_meta(
+                conn,
+                "ui_zoom_factor",
+                Some(&format!("{zoom:.2}")),
+            );
+            self.zoom_saved = zoom;
         }
-        self.zoom_seen = Some(zoom);
         let placed_before = self.positioned;
         if !self.positioned
             && let Some(monitor) = ctx.input(|i| i.viewport().monitor_size)
@@ -2226,6 +2234,7 @@ impl TimelineApp {
                                                 self.chat = None;
                                             }
                                             self.view = view;
+                                            self.declare_conflict = None;
                                             self.loaded_at = None;
                                         }
                                     }

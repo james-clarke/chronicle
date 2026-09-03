@@ -461,12 +461,15 @@ fn project_group(
     for t in r.tasks.iter().filter(|t| t.project == p.project) {
         ui.horizontal(|ui| {
             ui.add_space(indent);
+            // The header's percent cell sits right of its duration, so the
+            // task rows reserve it (empty) to share the duration column.
+            let row_w = width - indent - LEGEND_PCT_COL - ui.spacing().item_spacing.x;
             let resp = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
                     theme::ListRow::new(&t.label)
                         .dot(task_color(t))
                         .num(fmt_dur(t.total_ms))
-                        .show(ui, width - indent, |_| {});
+                        .show(ui, row_w, |_| {});
                 })
                 .response;
             if resp.clicked() {
