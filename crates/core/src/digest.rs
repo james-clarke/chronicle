@@ -45,16 +45,17 @@ pub fn build_digest(
     ticket_re: Option<&regex::Regex>,
     plan: Option<&str>,
 ) -> String {
+    let Some(agg) = aggregate(spans, tz, vcs, ticket_re) else {
+        return String::new();
+    };
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
         let out = render(
-            spans,
+            &agg,
             tz,
             open_tasks,
             corrections,
             hints,
-            vcs,
             mcp_context,
-            ticket_re,
             plan,
             apps_cap,
             title_chars,
@@ -64,42 +65,67 @@ pub fn build_digest(
         }
     }
     let mut out = render(
-        spans,
+        &agg,
         tz,
         open_tasks,
         corrections,
         hints,
-        vcs,
         mcp_context,
-        ticket_re,
         plan,
         3,
         24,
     );
-    let mut cut = max_chars(MAX_TOKENS).min(out.len());
-    while !out.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    out.truncate(cut);
+    truncate_chars(&mut out, max_chars(MAX_TOKENS));
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render(
-    spans: &[SpanDraft],
+/// Cut `s` to at most `max` bytes, backing off to the nearest preceding
+/// char boundary — the hard size cap once the render ladder's cheapest rung
+/// still overflows the token budget. No ellipsis: the caller already chose
+/// this size on purpose.
+pub(crate) fn truncate_chars(s: &mut String, max: usize) {
+    let mut cut = max.min(s.len());
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+}
+
+/// Dual-entry minutes: a focus runner-up holding ≥ ~25% of a minute renders
+/// alongside the dominant activity, so interleaved work stays visible
+/// instead of being hidden by dominant-minute RLE.
+const RUNNER_UP_MS: i64 = 15_000;
+type MinuteKey<'a> = (u8, &'a str, &'a str);
+
+/// The aggregates every render-ladder rung needs, computed once from `spans`
+/// regardless of how the rung will cap/clip them — `render` only re-does the
+/// truncation and title clipping per rung.
+struct Agg<'a> {
+    start: jiff::Zoned,
+    end: jiff::Zoned,
+    active_ms: i64,
+    afk_ms: i64,
+    switches: usize,
+    /// Sorted, full (not capped to a rung's `apps_cap`).
+    apps: Vec<(&'a str, i64)>,
+    /// Sorted, full (not capped).
+    sites: Vec<(String, i64)>,
+    in_window: Vec<&'a ActivityEvent>,
+    keys: Vec<crate::evidence::KeySeen>,
+    cwds: Vec<(String, i64)>,
+    win_start: i64,
+    mins: usize,
+    minute: Vec<Option<(MinuteKey<'a>, Option<MinuteKey<'a>>)>>,
+}
+
+fn aggregate<'a>(
+    spans: &'a [SpanDraft],
     tz: &TimeZone,
-    open_tasks: &[OpenTask],
-    corrections: &[Correction],
-    hints: &[Placement],
-    vcs: &[ActivityEvent],
-    mcp_context: Option<&str>,
+    vcs: &'a [ActivityEvent],
     ticket_re: Option<&regex::Regex>,
-    plan: Option<&str>,
-    apps_cap: usize,
-    title_chars: usize,
-) -> String {
+) -> Option<Agg<'a>> {
     let (Some(first), Some(last)) = (spans.first(), spans.last()) else {
-        return String::new();
+        return None;
     };
 
     let mut active_ms = 0i64;
@@ -121,37 +147,14 @@ fn render(
             SpanKind::Afk => afk_ms += dur,
         }
     }
-
     let mut apps: Vec<(&str, i64)> = app_ms.into_iter().collect();
     apps.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    apps.truncate(apps_cap);
 
     let start = first.start.to_zoned(tz.clone());
     let end = last.end.to_zoned(tz.clone());
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "# Activity {} {}\u{2013}{} ({})",
-        start.strftime("%Y-%m-%d"),
-        start.strftime("%H:%M"),
-        end.strftime("%H:%M"),
-        tz.iana_name().unwrap_or("local"),
-    );
-    let _ = writeln!(
-        out,
-        "active {} \u{b7} afk {} \u{b7} {switches} switches",
-        fmt_dur(active_ms),
-        fmt_dur(afk_ms),
-    );
-
-    let _ = writeln!(out, "\n## Apps by time");
-    for (app, ms) in &apps {
-        let _ = writeln!(out, "- {app}: {}", fmt_dur(*ms));
-    }
 
     // Domain + first path segment groups browser time per site regardless of
-    // page-title churn. Omitted entirely when no spans carry URLs, so
-    // pre-M6 fixtures and their goldens are unchanged.
+    // page-title churn.
     let mut site_ms: HashMap<String, i64> = HashMap::new();
     for span in spans {
         if span.kind == SpanKind::Focus
@@ -160,20 +163,11 @@ fn render(
             *site_ms.entry(site_key(url)).or_default() += span.duration_ms();
         }
     }
-    if !site_ms.is_empty() {
-        let mut sites: Vec<(String, i64)> = site_ms.into_iter().collect();
-        sites.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        sites.truncate(apps_cap);
-        let _ = writeln!(out, "\n## Sites by time");
-        for (site, ms) in &sites {
-            let _ = writeln!(out, "- {site}: {}", fmt_dur(*ms));
-        }
-    }
+    let mut sites: Vec<(String, i64)> = site_ms.into_iter().collect();
+    sites.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     // Branch names, commit subjects, AI sessions, PR events and calls are
-    // the strongest task-identity signal in the window. Last 10 inside it;
-    // omitted when empty so evidence-less digests (and their goldens) are
-    // unchanged.
+    // the strongest task-identity signal in the window.
     let win_lo = first.start.as_millisecond();
     let win_hi = last.end.as_millisecond();
     let in_window: Vec<&ActivityEvent> = vcs
@@ -183,49 +177,21 @@ fn render(
             ms >= win_lo && ms < win_hi
         })
         .collect();
-    if !in_window.is_empty() {
-        let _ = writeln!(out, "\n## Activity");
-        let skip = in_window.len().saturating_sub(10);
-        for v in &in_window[skip..] {
-            let _ = writeln!(out, "{}", activity_line(v, tz, title_chars));
-        }
-    }
 
     // Ticket keys on screen and the working directories titles name (m27
     // chunk 5): deterministic identity evidence the model would otherwise
-    // have to spot in the timeline. Omitted when empty so evidence-less
-    // digests (and their goldens) are unchanged.
+    // have to spot in the timeline.
     let keys = ticket_re
         .map(|re| crate::evidence::keys_in_spans(spans, re, win_lo, win_hi))
         .unwrap_or_default();
     let cwds = crate::evidence::cwd_repos(spans, win_lo, win_hi);
-    if !keys.is_empty() || !cwds.is_empty() {
-        let _ = writeln!(out, "\n## Keys seen");
-        if !keys.is_empty() {
-            let line: Vec<String> = keys
-                .iter()
-                .take(6)
-                .map(|k| format!("{} {} ({})", k.key, fmt_dur(k.ms), k.app))
-                .collect();
-            let _ = writeln!(out, "{}", line.join(", "));
-        }
-        if !cwds.is_empty() {
-            let line: Vec<String> = cwds
-                .iter()
-                .take(4)
-                .map(|(repo, ms)| format!("{repo} {}", fmt_dur(*ms)))
-                .collect();
-            let _ = writeln!(out, "cwd {}", line.join(", "));
-        }
-    }
 
     // Chronological view: without it the model has only aggregates and must
     // guess task offsets. Dominant activity per minute, run-length encoded —
     // smooths sub-minute interleaving into readable stretches while every
     // minute stays covered; sliver time still counts in the stats above.
-    let win_start = first.start.as_millisecond();
-    let win_end = last.end.as_millisecond();
-    let mins = ((win_end - win_start + 59_999) / 60_000).max(0) as usize;
+    let win_start = win_lo;
+    let mins = ((win_hi - win_start + 59_999) / 60_000).max(0) as usize;
     let mut buckets: Vec<BTreeMap<(u8, &str, &str), i64>> = vec![BTreeMap::new(); mins];
     for span in spans {
         let key = match span.kind {
@@ -244,11 +210,6 @@ fn render(
             m += 1;
         }
     }
-    // Dual-entry minutes: a focus runner-up holding ≥ ~25% of a minute renders
-    // alongside the dominant activity, so interleaved work stays visible
-    // instead of being hidden by dominant-minute RLE.
-    const RUNNER_UP_MS: i64 = 15_000;
-    type MinuteKey<'a> = (u8, &'a str, &'a str);
     let minute: Vec<Option<(MinuteKey, Option<MinuteKey>)>> = buckets
         .iter()
         .map(|b| {
@@ -262,15 +223,115 @@ fn render(
             Some((dom, runner))
         })
         .collect();
+
+    Some(Agg {
+        start,
+        end,
+        active_ms,
+        afk_ms,
+        switches,
+        apps,
+        sites,
+        in_window,
+        keys,
+        cwds,
+        win_start,
+        mins,
+        minute,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render(
+    agg: &Agg,
+    tz: &TimeZone,
+    open_tasks: &[OpenTask],
+    corrections: &[Correction],
+    hints: &[Placement],
+    mcp_context: Option<&str>,
+    plan: Option<&str>,
+    apps_cap: usize,
+    title_chars: usize,
+) -> String {
+    let mut apps = agg.apps.clone();
+    apps.truncate(apps_cap);
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# Activity {} {}\u{2013}{} ({})",
+        agg.start.strftime("%Y-%m-%d"),
+        agg.start.strftime("%H:%M"),
+        agg.end.strftime("%H:%M"),
+        tz.iana_name().unwrap_or("local"),
+    );
+    let _ = writeln!(
+        out,
+        "active {} \u{b7} afk {} \u{b7} {} switches",
+        fmt_dur(agg.active_ms),
+        fmt_dur(agg.afk_ms),
+        agg.switches,
+    );
+
+    let _ = writeln!(out, "\n## Apps by time");
+    for (app, ms) in &apps {
+        let _ = writeln!(out, "- {app}: {}", fmt_dur(*ms));
+    }
+
+    // Omitted entirely when no spans carry URLs, so pre-M6 fixtures and
+    // their goldens are unchanged.
+    if !agg.sites.is_empty() {
+        let mut sites = agg.sites.clone();
+        sites.truncate(apps_cap);
+        let _ = writeln!(out, "\n## Sites by time");
+        for (site, ms) in &sites {
+            let _ = writeln!(out, "- {site}: {}", fmt_dur(*ms));
+        }
+    }
+
+    // Last 10 inside the window; omitted when empty so evidence-less
+    // digests (and their goldens) are unchanged.
+    if !agg.in_window.is_empty() {
+        let _ = writeln!(out, "\n## Activity");
+        let skip = agg.in_window.len().saturating_sub(10);
+        for v in &agg.in_window[skip..] {
+            let _ = writeln!(out, "{}", activity_line(v, tz, title_chars));
+        }
+    }
+
+    // Omitted when empty so evidence-less digests (and their goldens) are
+    // unchanged.
+    if !agg.keys.is_empty() || !agg.cwds.is_empty() {
+        let _ = writeln!(out, "\n## Keys seen");
+        if !agg.keys.is_empty() {
+            let line: Vec<String> = agg
+                .keys
+                .iter()
+                .take(6)
+                .map(|k| format!("{} {} ({})", k.key, fmt_dur(k.ms), k.app))
+                .collect();
+            let _ = writeln!(out, "{}", line.join(", "));
+        }
+        if !agg.cwds.is_empty() {
+            let line: Vec<String> = agg
+                .cwds
+                .iter()
+                .take(4)
+                .map(|(repo, ms)| format!("{repo} {}", fmt_dur(*ms)))
+                .collect();
+            let _ = writeln!(out, "cwd {}", line.join(", "));
+        }
+    }
+
     let _ = writeln!(out, "\n## Timeline (minute offsets from window start)");
     let mut m = 0usize;
-    while m < mins {
-        let Some((dom, runner)) = minute[m] else {
+    while m < agg.mins {
+        let Some((dom, runner)) = agg.minute[m] else {
             m += 1;
             continue;
         };
         let mut end = m + 1;
-        while end < mins && minute[end] == Some((dom, runner)) {
+        while end < agg.mins && agg.minute[end] == Some((dom, runner)) {
             end += 1;
         }
         match dom.0 {
@@ -328,12 +389,20 @@ fn render(
     // deterministic guess instead of starting cold. A hint whose task is not
     // in the list (the worker appends them, so only a race) is skipped.
     // Omitted when empty so hint-free digests (and their goldens) are unchanged.
+    let task_idx: HashMap<i64, usize> = {
+        let mut m = HashMap::new();
+        for (i, t) in open_tasks.iter().enumerate() {
+            m.entry(t.id).or_insert(i + 1);
+        }
+        m
+    };
     let hint_lines: Vec<String> = hints
         .iter()
         .filter_map(|h| {
-            let idx = open_tasks.iter().position(|t| t.id == h.task_id)? + 1;
-            let lo = ((h.start_ts - win_start).max(0) / 60_000) as usize;
-            let hi = (((h.end_ts - win_start) + 59_999) / 60_000).clamp(0, mins as i64) as usize;
+            let idx = *task_idx.get(&h.task_id)?;
+            let lo = ((h.start_ts - agg.win_start).max(0) / 60_000) as usize;
+            let hi =
+                (((h.end_ts - agg.win_start) + 59_999) / 60_000).clamp(0, agg.mins as i64) as usize;
             (hi > lo).then(|| {
                 format!(
                     "- {lo}\u{2013}{hi}m \u{2192} {idx} ({}: {})",
@@ -514,7 +583,7 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
     }
 }
 
-fn clip(s: &str, max_chars: usize) -> String {
+pub(crate) fn clip(s: &str, max_chars: usize) -> String {
     let mut it = s.chars();
     let head: String = it.by_ref().take(max_chars).collect();
     if it.next().is_some() {

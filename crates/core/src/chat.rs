@@ -40,11 +40,7 @@ pub fn build_context(
             }
         }
     };
-    let mut cut = MAX_CHARS.min(out.len());
-    while !out.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    out.truncate(cut);
+    digest::truncate_chars(&mut out, MAX_CHARS);
     Ok(out)
 }
 
@@ -100,11 +96,7 @@ pub fn build_task_context(
             let _ = writeln!(out, "\n## Screen evidence\n{}", evidence.trim());
         }
     }
-    let mut cut = MAX_CHARS.min(out.len());
-    while !out.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    out.truncate(cut);
+    digest::truncate_chars(&mut out, MAX_CHARS);
     Ok(out)
 }
 
@@ -189,7 +181,7 @@ fn range_context(
 
     let _ = writeln!(out, "\n## Windows by time");
     for ((app, title), ms) in top(title_ms, 15) {
-        let _ = writeln!(out, "- {}: {app}: {}", fmt_dur(ms), clip(title, 80));
+        let _ = writeln!(out, "- {}: {app}: {}", fmt_dur(ms), digest::clip(title, 80));
     }
     Ok(out)
 }
@@ -225,7 +217,7 @@ fn fts_context(conn: &Connection, question: &str, tz: &TimeZone) -> Result<Strin
                 start.strftime("%H:%M"),
                 end.strftime("%H:%M"),
                 s.app,
-                clip(&s.title, 80),
+                digest::clip(&s.title, 80),
             );
         }
     }
@@ -261,16 +253,6 @@ where
     v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     v.truncate(n);
     v
-}
-
-fn clip(s: &str, max_chars: usize) -> String {
-    let mut it = s.chars();
-    let head: String = it.by_ref().take(max_chars).collect();
-    if it.next().is_some() {
-        head + "\u{2026}"
-    } else {
-        head
-    }
 }
 
 fn fmt_dur(ms: i64) -> String {

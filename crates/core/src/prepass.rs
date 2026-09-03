@@ -11,6 +11,8 @@
 //! similar work out of is skipped by every rule, so the pre-pass cannot put
 //! the same block back on the next tick.
 
+use std::collections::HashMap;
+
 use jiff::Timestamp;
 use regex::Regex;
 use rusqlite::Connection;
@@ -64,16 +66,43 @@ pub fn run(
         .start_of_day()
         .map(|z| z.timestamp().as_millisecond())
         .unwrap_or(hi);
+    // Runs actually eligible for placement: long enough to settle, not a
+    // distraction stretch. Filtered once so the branch anchor batch below
+    // (indexed by position in this list) lines up with the run loop.
+    let candidates: Vec<&UnassignedRun> = runs
+        .iter()
+        .filter(|r| r.ms >= MIN_RUN_MS)
+        .filter(|r| {
+            !r.lines
+                .first()
+                .is_some_and(|l| crate::evidence::is_distraction(&l.0, &l.1, &distractions))
+        })
+        .collect();
+    // Branch-anchor hits for every candidate run in one pass: `anchor_tasks`
+    // aggregates independently per task id, so indexing runs as task ids
+    // batches the whole tick's checkout timeline instead of rebuilding it
+    // once per run.
+    let anchors: HashMap<i64, String> = ticket_re
+        .as_ref()
+        .map(|re| {
+            let intervals: Vec<(i64, i64, i64)> = candidates
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (i as i64, r.start_ts, r.end_ts))
+                .collect();
+            anchor_tasks(&intervals, &prior, &vcs, re)
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    // Repo rule's recency inputs, batched once for the whole open-task list;
+    // a run placed onto a task this tick updates its own last-end so a later
+    // run in the same tick still sees it (the rule's within-tick
+    // reinforcement — the same effect the per-pair queries had).
+    let ids: Vec<i64> = open.iter().map(|t| t.id).collect();
+    let mut recency = storage::task_recency(&tx, &ids)?;
     let mut placed = Vec::new();
-    for run in runs.iter().filter(|r| r.ms >= MIN_RUN_MS) {
-        // A distraction stretch (video, social) never seeds a placement.
-        if run
-            .lines
-            .first()
-            .is_some_and(|l| crate::evidence::is_distraction(&l.0, &l.1, &distractions))
-        {
-            continue;
-        }
+    for (i, run) in candidates.iter().enumerate() {
         let hints = storage::correction_hints(&tx, &run_text(run))?;
         let ejected: Vec<&Correction> = hints.iter().filter(|c| c.kind == "eject").collect();
         let allowed = |t: &OpenTask| {
@@ -82,14 +111,11 @@ pub fn run(
                 .any(|c| c.old_label.eq_ignore_ascii_case(&t.label) && c.old_project == t.project)
         };
         let mut hit = None;
-        if let Some(re) = &ticket_re {
-            let anchored = anchor_tasks(&[(0, run.start_ts, run.end_ts)], &prior, &vcs, re);
-            if let Some((_, key)) = anchored.first()
-                && let Some(t) = storage::open_task_by_ref(&tx, key)?
-                && allowed(&t)
-            {
-                hit = Some((t.id, format!("branch {key}")));
-            }
+        if let Some(key) = anchors.get(&(i as i64))
+            && let Some(t) = storage::open_task_by_ref(&tx, key)?
+            && allowed(&t)
+        {
+            hit = Some((t.id, format!("branch {key}")));
         }
         // Titles feed the next two rules; a branch hit never needs them.
         let spans = if hit.is_none() {
@@ -128,9 +154,10 @@ pub fn run(
                         .is_some_and(|p| p.eq_ignore_ascii_case(repo))
                         && allowed(t)
                 }) {
-                    let last = storage::task_last_end(&tx, t.id)?.unwrap_or(0);
+                    let (last_end, created_ts) = recency.get(&t.id).copied().unwrap_or((None, 0));
+                    let last = last_end.unwrap_or(0);
                     let recent = last >= run.start_ts - REPO_RECENT_MS
-                        || (t.declared && storage::task_created_ts(&tx, t.id)? >= today_start);
+                        || (t.declared && created_ts >= today_start);
                     if !recent {
                         continue;
                     }
@@ -165,6 +192,10 @@ pub fn run(
                 reason,
             };
             storage::insert_prepass(&tx, &p)?;
+            // Keep the recency map current: a later run's repo rule must see
+            // this tick's own placements, same as the per-pair queries did.
+            let e = recency.entry(task_id).or_insert((None, 0));
+            e.0 = Some(e.0.map_or(run.end_ts, |v| v.max(run.end_ts)));
             placed.push(p);
         }
     }

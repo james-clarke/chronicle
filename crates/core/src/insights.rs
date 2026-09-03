@@ -126,32 +126,6 @@ pub fn top_apps(spans: &[SpanDraft], lo: i64, hi: i64, cap: usize) -> Vec<(Strin
     totals
 }
 
-/// Focus time in spans whose app or browser site key matches any of the
-/// configured distraction regexes. Empty patterns = 0 (feature off).
-pub fn distraction_ms(spans: &[SpanDraft], patterns: &[regex::Regex], lo: i64, hi: i64) -> i64 {
-    if patterns.is_empty() {
-        return 0;
-    }
-    let mut total = 0i64;
-    for s in spans {
-        if s.kind != SpanKind::Focus {
-            continue;
-        }
-        let ms = (s.end.as_millisecond().min(hi) - s.start.as_millisecond().max(lo)).max(0);
-        if ms == 0 {
-            continue;
-        }
-        let site = s.url.as_deref().map(crate::digest::site_key);
-        let hit = patterns
-            .iter()
-            .any(|p| p.is_match(&s.app) || site.as_deref().is_some_and(|k| p.is_match(k)));
-        if hit {
-            total += ms;
-        }
-    }
-    total
-}
-
 /// The contiguous date range of the same length immediately before `days`
 /// (for period-over-period deltas). None if `days` is empty or the shift
 /// leaves the calendar.

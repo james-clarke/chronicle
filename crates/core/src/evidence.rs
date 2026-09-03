@@ -3,6 +3,7 @@
 //! names, distraction matching, and the status glyphs Claude Code prefixes
 //! to terminal titles.
 
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -31,18 +32,18 @@ pub fn cwd_repo(title: &str) -> Option<String> {
 
 /// Focus time per repo named by titles inside `[lo, hi)`, most first.
 pub fn cwd_repos(spans: &[SpanDraft], lo: i64, hi: i64) -> Vec<(String, i64)> {
-    let mut ms: Vec<(String, i64)> = Vec::new();
+    let mut ms: HashMap<String, i64> = HashMap::new();
     for s in focus_in(spans, lo, hi) {
         let Some(repo) = cwd_repo(&s.0.title) else {
             continue;
         };
-        match ms.iter_mut().find(|(r, _)| *r == repo) {
-            Some(e) => e.1 += s.1,
-            None => ms.push((repo, s.1)),
-        }
+        *ms.entry(repo).or_default() += s.1;
     }
-    ms.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    ms
+    // Fully ordered by (ms, name), so the map's iteration order can't leak
+    // into the result.
+    let mut out: Vec<(String, i64)> = ms.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
 }
 
 /// A ticket key seen in titles or URLs: minutes on screen and the app that
@@ -57,37 +58,50 @@ pub struct KeySeen {
 /// Ticket keys (`ticket_regex`) in focus titles/URLs inside `[lo, hi)`, most
 /// time first. A span contributes to the first key its title or URL names.
 pub fn keys_in_spans(spans: &[SpanDraft], re: &Regex, lo: i64, hi: i64) -> Vec<KeySeen> {
-    let mut seen: Vec<(KeySeen, Vec<(String, i64)>)> = Vec::new();
+    // `apps` stays first-seen ordered (not a map) because `max_by_key` below
+    // breaks a time tie by taking the last-iterated app; a map's order is
+    // unspecified and would make that tie-break nondeterministic.
+    struct Agg {
+        key: KeySeen,
+        apps: Vec<(String, i64)>,
+        app_idx: HashMap<String, usize>,
+    }
+    let mut seen: Vec<Agg> = Vec::new();
+    let mut key_idx: HashMap<String, usize> = HashMap::new();
     for (s, ms) in focus_in(spans, lo, hi) {
         let key = re
             .find(&s.title)
             .or_else(|| s.url.as_deref().and_then(|u| re.find(u)))
             .map(|m| m.as_str().to_owned());
         let Some(key) = key else { continue };
-        let entry = match seen.iter_mut().find(|(k, _)| k.key == key) {
-            Some(e) => e,
+        let idx = *key_idx.entry(key.clone()).or_insert_with(|| {
+            seen.push(Agg {
+                key: KeySeen {
+                    key,
+                    ms: 0,
+                    app: String::new(),
+                },
+                apps: Vec::new(),
+                app_idx: HashMap::new(),
+            });
+            seen.len() - 1
+        });
+        let entry = &mut seen[idx];
+        entry.key.ms += ms;
+        match entry.app_idx.get(s.app.as_str()) {
+            Some(&ai) => entry.apps[ai].1 += ms,
             None => {
-                seen.push((
-                    KeySeen {
-                        key,
-                        ms: 0,
-                        app: String::new(),
-                    },
-                    Vec::new(),
-                ));
-                seen.last_mut().expect("just pushed")
+                entry.app_idx.insert(s.app.clone(), entry.apps.len());
+                entry.apps.push((s.app.clone(), ms));
             }
-        };
-        entry.0.ms += ms;
-        match entry.1.iter_mut().find(|(a, _)| *a == s.app) {
-            Some(a) => a.1 += ms,
-            None => entry.1.push((s.app.clone(), ms)),
         }
     }
     let mut out: Vec<KeySeen> = seen
         .into_iter()
-        .map(|(mut k, apps)| {
-            k.app = apps
+        .map(|agg| {
+            let mut k = agg.key;
+            k.app = agg
+                .apps
                 .into_iter()
                 .max_by_key(|(_, ms)| *ms)
                 .map(|(a, _)| a)

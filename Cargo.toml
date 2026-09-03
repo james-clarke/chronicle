@@ -51,3 +51,11 @@ chronicle-mcp = { path = "crates/mcp" }
 [profile.dev.package.llama-cpp-sys-2]
 opt-level = 3
 debug = false
+
+# Installed binary embeds llama.cpp; thin LTO + one codegen unit + stripped symbols
+# cut size and keep link time bounded. No panic = "abort": capture pollers and the
+# server rely on a panicking thread dying alone (see server's poison recovery).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

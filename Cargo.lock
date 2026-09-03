@@ -814,7 +814,6 @@ dependencies = [
  "strsim",
  "thiserror 2.0.20",
  "toml",
- "tracing",
 ]
 
 [[package]]

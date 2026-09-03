@@ -203,19 +203,20 @@ pub fn score(tasks: &[TaskDraft], exp: &Expectations) -> Report {
     // Groups are distinct expected tasks: two cohesive groups landing on one
     // identity = over-linking (everything dumped onto a declared task).
     for (gi, a) in exp.groups.iter().enumerate() {
+        let ident_of = |g: &GroupExpect| {
+            let idents: Vec<_> = g
+                .ranges
+                .iter()
+                .filter_map(|&r| dominant(tasks, r))
+                .map(ident)
+                .collect();
+            (idents.len() == g.ranges.len() && idents.windows(2).all(|w| w[0] == w[1]))
+                .then(|| idents.into_iter().next())
+                .flatten()
+        };
+        let ia = ident_of(a);
         for b in &exp.groups[gi + 1..] {
-            let ident_of = |g: &GroupExpect| {
-                let idents: Vec<_> = g
-                    .ranges
-                    .iter()
-                    .filter_map(|&r| dominant(tasks, r))
-                    .map(ident)
-                    .collect();
-                (idents.len() == g.ranges.len() && idents.windows(2).all(|w| w[0] == w[1]))
-                    .then(|| idents.into_iter().next())
-                    .flatten()
-            };
-            if let (Some(ia), Some(ib)) = (ident_of(a), ident_of(b)) {
+            if let (Some(ia), Some(ib)) = (ia.clone(), ident_of(b)) {
                 check(
                     format!("distinct:{}|{}", a.name, b.name),
                     ia != ib,

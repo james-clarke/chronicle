@@ -211,10 +211,8 @@ pub fn refresh(
         })
         .collect();
     let titles = day_titles(conn, lo, hi)?;
-    let mut repos = Vec::with_capacity(runs.len());
-    for r in &runs {
-        repos.push(storage::repos_active_in(conn, r.start_ts, r.end_ts)?);
-    }
+    let ranges: Vec<(i64, i64)> = runs.iter().map(|r| (r.start_ts, r.end_ts)).collect();
+    let repos = storage::repos_active_in_many(conn, &ranges)?;
     let clusters = cluster_runs(&runs, &titles, &repos);
     let tx = conn.transaction()?;
     let heads: Vec<i64> = clusters
@@ -304,15 +302,15 @@ pub fn open_proposals(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Proposa
     )?;
     let mut out = Vec::new();
     let mut rows = stmt.query([lo, hi])?;
+    let mut ls = conn.prepare_cached(
+        "SELECT app, title, SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)) FROM spans
+         WHERE kind='focus' AND start_ts < ?2 AND end_ts > ?1 GROUP BY app, title",
+    )?;
     while let Some(r) = rows.next()? {
         let runs_json: String = r.get(4)?;
         let runs: Vec<(i64, i64)> = serde_json::from_str(&runs_json).unwrap_or_default();
         let mut lines: Vec<(String, String, i64)> = Vec::new();
         for &(s, e) in &runs {
-            let mut ls = conn.prepare(
-                "SELECT app, title, SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)) FROM spans
-                 WHERE kind='focus' AND start_ts < ?2 AND end_ts > ?1 GROUP BY app, title",
-            )?;
             let mut sp = ls.query([s, e])?;
             while let Some(l) = sp.next()? {
                 let (app, title, ms): (String, String, i64) = (l.get(0)?, l.get(1)?, l.get(2)?);

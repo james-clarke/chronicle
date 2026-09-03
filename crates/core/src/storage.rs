@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -37,6 +38,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/012_interval_tail.sql")),
         M::up(include_str!("../migrations/013_proposals.sql")),
         M::up(include_str!("../migrations/014_derive_metrics.sql")),
+        M::up(include_str!("../migrations/015_extra_indexes.sql")),
     ])
 });
 
@@ -1432,8 +1434,10 @@ pub fn standup_digest(
 ) -> Result<Vec<StandupDigestRow>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT j.task_id, t.label, t.project, t.external_ref,
-                j.id, j.batch_id, j.start_ts, j.end_ts, j.entry
+                j.id, j.batch_id, j.start_ts, j.end_ts, j.entry,
+                c.ts, c.state, c.next_steps
          FROM journal_entries j JOIN tasks t ON t.id = j.task_id
+         LEFT JOIN checkpoints c ON c.task_id = j.task_id
          WHERE j.start_ts < ?2 AND j.end_ts > ?1
          ORDER BY j.task_id, j.start_ts, j.id",
     )?;
@@ -1450,18 +1454,25 @@ pub fn standup_digest(
         };
         match out.last_mut() {
             Some(row) if row.task_id == task_id => row.entries.push(entry),
-            _ => out.push(StandupDigestRow {
-                task_id,
-                label: r.get(1)?,
-                project: r.get(2)?,
-                external_ref: r.get(3)?,
-                entries: vec![entry],
-                checkpoint: None,
-            }),
+            _ => {
+                let checkpoint = match r.get::<_, Option<i64>>(9)? {
+                    Some(ts) if ts >= lo => Some(Checkpoint {
+                        ts,
+                        state: r.get(10)?,
+                        next_steps: r.get(11)?,
+                    }),
+                    _ => None,
+                };
+                out.push(StandupDigestRow {
+                    task_id,
+                    label: r.get(1)?,
+                    project: r.get(2)?,
+                    external_ref: r.get(3)?,
+                    entries: vec![entry],
+                    checkpoint,
+                })
+            }
         }
-    }
-    for row in &mut out {
-        row.checkpoint = get_checkpoint(conn, row.task_id)?.filter(|c| c.ts >= lo);
     }
     Ok(out)
 }
@@ -2536,19 +2547,18 @@ pub fn tail_placements(
 pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>, StorageError> {
     use rusqlite::OptionalExtension;
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT id, label, project, source='user' FROM tasks
              WHERE status='open' AND external_ref=?1 ORDER BY id LIMIT 1",
-            [key],
-            |r| {
-                Ok(OpenTask {
-                    id: r.get(0)?,
-                    label: r.get(1)?,
-                    project: r.get(2)?,
-                    declared: r.get(3)?,
-                })
-            },
-        )
+        )?
+        .query_row([key], |r| {
+            Ok(OpenTask {
+                id: r.get(0)?,
+                label: r.get(1)?,
+                project: r.get(2)?,
+                declared: r.get(3)?,
+            })
+        })
         .optional()?)
 }
 
@@ -2575,6 +2585,38 @@ pub fn repos_active_in(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<String
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// [`repos_active_in`] for several ranges at once, in one query over their
+/// union — the proposals refresh loop's per-run repo signal, batched.
+pub fn repos_active_in_many(
+    conn: &Connection,
+    ranges: &[(i64, i64)],
+) -> Result<Vec<Vec<String>>, StorageError> {
+    let Some(lo) = ranges.iter().map(|r| r.0).min() else {
+        return Ok(Vec::new());
+    };
+    let hi = ranges.iter().map(|r| r.1).max().unwrap_or(lo);
+    let mut stmt = conn.prepare(
+        "SELECT repo, ts, COALESCE(end_ts, ts) FROM activity_events
+         WHERE repo != '' AND ts < ?2 AND COALESCE(end_ts, ts) >= ?1",
+    )?;
+    let events: Vec<(String, i64, i64)> = stmt
+        .query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(ranges
+        .iter()
+        .map(|&(rlo, rhi)| {
+            let mut repos: Vec<String> = events
+                .iter()
+                .filter(|(_, ts, end)| *ts < rhi && *end >= rlo)
+                .map(|(r, _, _)| r.clone())
+                .collect();
+            repos.sort();
+            repos.dedup();
+            repos
+        })
+        .collect())
+}
+
 /// End of the task's latest interval (its last activity), if any.
 pub fn task_created_ts(conn: &Connection, task_id: i64) -> Result<i64, StorageError> {
     Ok(
@@ -2590,6 +2632,41 @@ pub fn task_last_end(conn: &Connection, task_id: i64) -> Result<Option<i64>, Sto
         [task_id],
         |r| r.get(0),
     )?)
+}
+
+/// `(last interval end, created_ts)` for a batch of tasks in two grouped
+/// queries — the pre-pass repo rule's recency inputs, read once for the
+/// whole open-task list instead of per (repo, task) pair.
+pub fn task_recency(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, (Option<i64>, i64)>, StorageError> {
+    let mut out: HashMap<i64, (Option<i64>, i64)> = HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let in_list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, created_ts FROM tasks WHERE id IN ({in_list})"
+    ))?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (id, created_ts) = row?;
+        out.insert(id, (None, created_ts));
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT task_id, MAX(end_ts) FROM intervals WHERE task_id IN ({in_list}) GROUP BY task_id"
+    ))?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+    })?;
+    for row in rows {
+        let (id, last_end) = row?;
+        if let Some(e) = out.get_mut(&id) {
+            e.0 = last_end;
+        }
+    }
+    Ok(out)
 }
 
 /// The pre-pass's provisional intervals overlapping `[lo, hi)` (a batch's
@@ -2898,17 +2975,34 @@ fn distinctive_fts_query(conn: &Connection, text: &str) -> Result<String, Storag
     push_fts_terms(text, &mut terms);
     terms.truncate(32);
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM corrections", [], |r| r.get(0))?;
-    if total >= IDF_MIN_ROWS {
-        let mut df =
-            conn.prepare("SELECT COUNT(*) FROM corrections_fts WHERE corrections_fts MATCH ?1")?;
-        let mut kept = Vec::new();
-        for t in terms {
-            let n: i64 = df.query_row([format!("\"{t}\"")], |r| r.get(0))?;
-            if n * 2 <= total {
-                kept.push(t);
-            }
+    if total >= IDF_MIN_ROWS && !terms.is_empty() {
+        // One term's document frequency per term, via a UNION ALL of the
+        // same MATCH subquery instead of a round trip per term (up to 32).
+        let sql = (1..=terms.len())
+            .map(|i| {
+                format!(
+                    "SELECT {i} AS i, (SELECT COUNT(*) FROM corrections_fts \
+                     WHERE corrections_fts MATCH ?{i}) AS n"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        let mut stmt = conn.prepare(&sql)?;
+        let quoted: Vec<String> = terms.iter().map(|t| format!("\"{t}\"")).collect();
+        let mut df = vec![0i64; terms.len()];
+        let rows = stmt.query_map(rusqlite::params_from_iter(&quoted), |r| {
+            Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (i, n) = row?;
+            df[i - 1] = n;
         }
-        terms = kept;
+        terms = terms
+            .into_iter()
+            .zip(df)
+            .filter(|(_, n)| n * 2 <= total)
+            .map(|(t, _)| t)
+            .collect();
     }
     Ok(join_fts_terms(terms))
 }
