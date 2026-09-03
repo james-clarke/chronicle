@@ -56,8 +56,9 @@ impl ChatMsg {
     }
 }
 
-/// The day's own rows behind the suggested questions, read once per reload:
-/// the empty state and the follow-ups name work the user recognizes.
+/// The day's own rows behind the suggested questions, read on spawn and
+/// after each answer: the empty state and the follow-ups name work the user
+/// recognizes.
 #[derive(Default, Clone)]
 struct Seeds {
     /// Ticket ref (else label) of the task with the most time today.
@@ -99,8 +100,21 @@ pub(super) struct ChatPanel {
     /// Past conversations for the history menu (id, last_ts, snippet);
     /// refreshed with the 5 s reload, not queried per frame.
     history: Vec<(i64, i64, String)>,
-    /// Suggested-question material, refreshed with the same reload.
+    /// Suggested-question material, rebuilt when an answer finishes.
     seeds: Seeds,
+}
+
+/// Distinctive enough to link on its own in a sentence: a ticket ref, or a
+/// label of two words and eight characters. A bare "email" or "call" is a
+/// word the model uses, not a name.
+fn linkable(text: &str) -> bool {
+    let ticket = text.split_once('-').is_some_and(|(head, tail)| {
+        !head.is_empty()
+            && head.chars().all(|c| c.is_ascii_alphanumeric())
+            && !tail.is_empty()
+            && tail.chars().all(|c| c.is_ascii_digit())
+    });
+    ticket || (text.len() >= 8 && text.split_whitespace().count() >= 2)
 }
 
 impl Seeds {
@@ -133,18 +147,13 @@ impl Seeds {
             .find(|e| e.kind == ActivityKind::Call)
             .map(|e| e.ts.to_zoned(tz.clone()).strftime("%H:%M").to_string());
         let mut labels: Vec<(String, i64)> = Vec::new();
-        let open = storage::open_tasks(conn, 20).unwrap_or_default();
-        let candidates = tasks
-            .iter()
-            .map(|t| (t.label.clone(), t.id))
-            .chain(
-                tasks
-                    .iter()
-                    .filter_map(|t| Some((t.external_ref.clone()?, t.id))),
-            )
-            .chain(open.iter().map(|t| (t.label.clone(), t.id)));
+        let candidates = tasks.iter().map(|t| (t.label.clone(), t.id)).chain(
+            tasks
+                .iter()
+                .filter_map(|t| Some((t.external_ref.clone()?, t.id))),
+        );
         for (text, id) in candidates {
-            if text.len() >= 4 && !labels.iter().any(|(t, _)| *t == text) {
+            if linkable(&text) && !labels.iter().any(|(t, _)| *t == text) {
                 labels.push((text, id));
             }
         }
@@ -282,19 +291,29 @@ impl ChatPanel {
         })
     }
 
-    /// Refreshes the history-menu and suggestion caches; called from
-    /// `reload_if_stale`.
+    /// Refreshes the history-menu cache; called from `reload_if_stale`.
+    /// The suggestion seeds are not on this tick: they cost a day of
+    /// activity and task rows, and only an answer can move them.
     pub(super) fn refresh_history(&mut self, conn: &Connection) {
         self.history = chronicle_core::storage::list_conversations(conn, 12).unwrap_or_default();
-        self.seeds = Seeds::build(conn);
     }
 
     /// Kill the worker mid-answer and bring a fresh one up on the same
     /// conversation: the worker reads stdin only between questions and
     /// llama's token callback has no abort, so there is nothing to cancel
-    /// short of the process. The partial answer stays on screen; it was
-    /// never stored.
+    /// short of the process. The old child goes first — two resident models
+    /// do not fit. The partial answer stays on screen; it was never stored.
     fn restart(&mut self, ctx: &egui::Context, conn: Option<&Connection>) -> anyhow::Result<()> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        // Stopped before the first token: nothing to show for the answer.
+        if self
+            .transcript
+            .last()
+            .is_some_and(|m| !m.user && m.text.is_empty())
+        {
+            self.transcript.pop();
+        }
         let mut fresh = Self::spawn(ctx, conn, self.conversation_id, self.task_scope.clone())?;
         std::mem::swap(&mut fresh.transcript, &mut self.transcript);
         std::mem::swap(&mut fresh.input, &mut self.input);
@@ -302,7 +321,7 @@ impl ChatPanel {
         Ok(())
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, conn: Option<&Connection>) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 ChatEvent::Ready => self.warming = false,
@@ -315,7 +334,14 @@ impl ChatPanel {
                         m.context = Some(context);
                     }
                 }
-                ChatEvent::Done => self.busy = false,
+                ChatEvent::Done => {
+                    self.busy = false;
+                    // An answer is the only thing that moves the day's top
+                    // task or its last call.
+                    if let Some(conn) = conn {
+                        self.seeds = Seeds::build(conn);
+                    }
+                }
                 ChatEvent::Err(message) => {
                     self.busy = false;
                     self.warming = false;
@@ -585,6 +611,8 @@ impl TimelineApp {
         if let Some(day) = day {
             self.set_day(day);
         }
+        // Leaving chat kills the warm worker, as the tab bar does.
+        self.chat = None;
         self.loaded_at = None;
         self.view = super::View::Timeline;
     }
@@ -632,7 +660,7 @@ impl TimelineApp {
             });
             return;
         };
-        chat.drain_events();
+        chat.drain_events(conn);
         let mut start_dl = false;
         let mut clear_scope = false;
         let mut stop = false;
@@ -697,9 +725,15 @@ impl TimelineApp {
                             };
                             // Enter sends, shift+enter is a newline: the key
                             // has to be taken off the queue before the
-                            // multiline edit sees it and inserts one.
+                            // multiline edit sees it and inserts one. Under
+                            // an IME the same Enter commits the composition,
+                            // so leave that frame's key alone.
                             let id = egui::Id::new("chat_composer");
+                            let composing = ui.input(|i| {
+                                i.events.iter().any(|e| matches!(e, egui::Event::Ime(_)))
+                            });
                             let entered = can_send
+                                && !composing
                                 && ui.memory(|m| m.has_focus(id))
                                 && ui.input_mut(|i| {
                                     i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
@@ -831,16 +865,29 @@ impl Drop for ChatPanel {
 }
 
 /// Render the model's answer with the light markdown it tends to emit:
-/// `**bold**`, `*italic*`, `` `code` ``, `-`/`*`/`1.` list items and `#`
-/// headings. Anything else is plain text; unmatched markers stay literal.
-/// Clock times and known task labels in it become links; a clicked one
-/// lands in `nav`.
+/// `**bold**`, `*italic*`, `` `code` ``, `-`/`*`/`1.` list items, `#`
+/// headings and `| a | b |` tables. Anything else is plain text; unmatched
+/// markers stay literal. Clock times and known task labels in it become
+/// links; a clicked one lands in `nav`.
 fn markdown(ui: &mut egui::Ui, text: &str, links: &LinkCtx, nav: &mut Option<ChatLink>) {
     let base = egui::TextStyle::Body.resolve(ui.style());
     let color = ui.visuals().text_color();
     let width = ui.available_width();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        // A run of pipe lines is one table (the totals table the prompt
+        // tells the model to quote), not five lines of literal pipes.
+        if trimmed.starts_with('|') {
+            let start = i;
+            while i < lines.len() && lines[i].trim_start().starts_with('|') {
+                i += 1;
+            }
+            table(ui, &lines[start..i], &base, color, links, nav);
+            continue;
+        }
+        i += 1;
         if trimmed.is_empty() {
             ui.add_space(4.0);
             continue;
@@ -865,9 +912,61 @@ fn markdown(ui: &mut egui::Ui, text: &str, links: &LinkCtx, nav: &mut Option<Cha
     }
 }
 
-/// One line of an answer. Without links it is a single wrapped label; with
-/// them the line is laid out as alternating text and link widgets, the
-/// inline `**`/`*`/`` ` `` state carrying across the pieces.
+/// A markdown pipe table as a grid: the `|---|` rule row dropped, header
+/// row in Medium, last column right-aligned mono like the report legends.
+/// Cells still go through [`link_spans`], so a task label in one links.
+fn table(
+    ui: &mut egui::Ui,
+    lines: &[&str],
+    base: &egui::FontId,
+    color: egui::Color32,
+    links: &LinkCtx,
+    nav: &mut Option<ChatLink>,
+) {
+    let rows: Vec<Vec<&str>> = lines
+        .iter()
+        .map(|line| cells(line))
+        .filter(|row| !row.iter().any(|cell| is_rule(cell)))
+        .collect();
+    let Some(columns) = rows.iter().map(Vec::len).max() else {
+        return;
+    };
+    egui::Grid::new(ui.next_auto_id())
+        .num_columns(columns)
+        .striped(false)
+        .spacing([theme::SPACE_SM, 2.0])
+        .show(ui, |ui| {
+            for (r, row) in rows.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    if c + 1 == columns {
+                        theme::num_cell(ui, theme::NUM_COL, theme::num(*cell));
+                    } else {
+                        line_body(ui, cell, base, color, r == 0, f32::INFINITY, links, nav);
+                    }
+                }
+                ui.end_row();
+            }
+        });
+}
+
+/// `| a | b |` → `["a", "b"]`.
+fn cells(line: &str) -> Vec<&str> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect()
+}
+
+/// `---`, `:--`, `--:`: a table's rule row, not data.
+fn is_rule(cell: &str) -> bool {
+    !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':')
+}
+
+/// One line of an answer (or one table cell, at infinite `width`). Without
+/// links it is a single label; with them the line is laid out as
+/// alternating text and link widgets, the inline `**`/`*`/`` ` `` state
+/// carrying across the pieces.
 #[allow(clippy::too_many_arguments)]
 fn line_body(
     ui: &mut egui::Ui,
@@ -885,10 +984,20 @@ fn line_body(
         let mut job = egui::text::LayoutJob::default();
         job.wrap.max_width = width;
         inline(&mut job, body, base, color, &mut state);
-        ui.add(egui::Label::new(job).wrap());
+        let label = egui::Label::new(job);
+        ui.add(if width.is_finite() {
+            label.wrap()
+        } else {
+            label.extend()
+        });
         return;
     }
-    ui.horizontal_wrapped(|ui| {
+    // `horizontal_wrapped` centres its items on the row: a text piece that
+    // wraps to two lines is twice as tall as the single-line link beside
+    // it, and the link floats to the middle of it. Same wrapping, top
+    // alignment, so every piece shares the first line's baseline.
+    let layout = egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true);
+    ui.with_layout(layout, |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         let mut at = 0;
         for (start, end, link) in spans {
@@ -1028,82 +1137,95 @@ fn inline(
 }
 
 /// What a line's links are resolved against: the task labels to spot, and
-/// the day a bare `HH:MM` belongs to.
+/// the day a bare `HH:MM` belongs to — None when no single day does, and
+/// clock times then stay plain text.
 struct LinkCtx<'a> {
     labels: &'a [(String, i64)],
-    day: Zoned,
+    day: Option<Zoned>,
 }
 
 /// The day an answer's clock times belong to: the range it was built from,
-/// else the day the app is showing.
-fn link_day(context: Option<&AnswerContext>, shown: civil::Date, tz: &TimeZone) -> Zoned {
-    context
-        .and_then(|c| c.start_ms)
-        .map(|ms| ms_to_ts(ms).to_zoned(tz.clone()))
-        .or_else(|| shown.to_zoned(tz.clone()).ok())
-        .unwrap_or_else(|| Timestamp::now().to_zoned(tz.clone()))
+/// else the day the app is showing. A range covering more than one local
+/// day answers for none of them — a bare `13:54` in it could be either.
+fn link_day(context: Option<&AnswerContext>, shown: civil::Date, tz: &TimeZone) -> Option<Zoned> {
+    let Some(context) = context else {
+        return shown.to_zoned(tz.clone()).ok();
+    };
+    let start = ms_to_ts(context.start_ms?).to_zoned(tz.clone());
+    match context.end_ms {
+        Some(end) if ms_to_ts(end).to_zoned(tz.clone()).date() != start.date() => None,
+        _ => Some(start),
+    }
 }
 
-/// Link spans in one line as byte ranges: clock times (a `HH:MM–HH:MM`
-/// range opens its start) and known task labels or ticket refs, longest
-/// label first, no two spans overlapping.
+/// Link spans in one line as byte ranges: known task labels or ticket refs
+/// first (longest label first, every occurrence), then clock times in what
+/// is left (a `HH:MM–HH:MM` range opens its start). No two spans overlap.
 fn link_spans(line: &str, ctx: &LinkCtx) -> Vec<(usize, usize, ChatLink)> {
     let mut out: Vec<(usize, usize, ChatLink)> = Vec::new();
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i + 5 <= bytes.len() {
-        let boundary = i == 0 || !(bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b':');
-        if !boundary || !is_clock(&bytes[i..]) {
-            i += 1;
-            continue;
-        }
-        let mut end = i + 5;
-        for sep in ["\u{2013}", "\u{2014}", "-"] {
-            if let Some(rest) = line[end..].strip_prefix(sep)
-                && is_clock(rest.as_bytes())
-            {
-                end += sep.len() + 5;
-                break;
+    for (label, task_id) in ctx.labels {
+        let mut from = 0;
+        while let Some(start) = find_ci(line, label, from) {
+            let end = start + label.len();
+            from = end;
+            if !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+                continue;
+            }
+            let edges = line[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+                && line[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric());
+            if edges && !out.iter().any(|(s, e, _)| start < *e && end > *s) {
+                out.push((start, end, ChatLink::Task(*task_id)));
             }
         }
-        let hour = (bytes[i] - b'0') * 10 + (bytes[i + 1] - b'0');
-        let minute = (bytes[i + 3] - b'0') * 10 + (bytes[i + 4] - b'0');
-        if let Some(ms) = clock_ms(&ctx.day, i64::from(hour), i64::from(minute)) {
-            out.push((i, end, ChatLink::Time(ms)));
-        }
-        i = end;
     }
-    for (label, task_id) in ctx.labels {
-        let Some(start) = find_ci(line, label) else {
-            continue;
-        };
-        let end = start + label.len();
-        if !line.is_char_boundary(start) || !line.is_char_boundary(end) {
-            continue;
-        }
-        let edges = line[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric())
-            && line[end..]
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric());
-        if edges && !out.iter().any(|(s, e, _)| start < *e && end > *s) {
-            out.push((start, end, ChatLink::Task(*task_id)));
+    if let Some(day) = ctx.day.as_ref() {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i + 5 <= bytes.len() {
+            let boundary = i == 0 || !(bytes[i - 1].is_ascii_digit() || bytes[i - 1] == b':');
+            if !boundary || !is_clock(&bytes[i..]) {
+                i += 1;
+                continue;
+            }
+            let mut end = i + 5;
+            for sep in ["\u{2013}", "\u{2014}", "-"] {
+                if let Some(rest) = line[end..].strip_prefix(sep)
+                    && is_clock(rest.as_bytes())
+                {
+                    end += sep.len() + 5;
+                    break;
+                }
+            }
+            let hour = (bytes[i] - b'0') * 10 + (bytes[i + 1] - b'0');
+            let minute = (bytes[i + 3] - b'0') * 10 + (bytes[i + 4] - b'0');
+            if !out.iter().any(|(s, e, _)| i < *e && end > *s)
+                && let Some(ms) = clock_ms(day, i64::from(hour), i64::from(minute))
+            {
+                out.push((i, end, ChatLink::Time(ms)));
+            }
+            i = end;
         }
     }
     out.sort_by_key(|(start, _, _)| *start);
     out
 }
 
-/// `HH:MM` at the head of `bytes`, with no digit running on after it.
+/// `HH:MM` at the head of `bytes`, with no digit or `:` running on after it
+/// (`08:00:00` is a timestamp, not a clock time to link).
 fn is_clock(bytes: &[u8]) -> bool {
     if bytes.len() < 5
         || !bytes[..2].iter().all(u8::is_ascii_digit)
         || bytes[2] != b':'
         || !bytes[3..5].iter().all(u8::is_ascii_digit)
-        || bytes.get(5).is_some_and(u8::is_ascii_digit)
+        || bytes
+            .get(5)
+            .is_some_and(|b| b.is_ascii_digit() || *b == b':')
     {
         return false;
     }
@@ -1118,13 +1240,15 @@ fn clock_ms(day: &Zoned, hour: i64, minute: i64) -> Option<i64> {
     Some(ts_to_ms(at.timestamp()))
 }
 
-/// First ASCII-case-insensitive occurrence of `needle` in `hay`.
-fn find_ci(hay: &str, needle: &str) -> Option<usize> {
+/// First ASCII-case-insensitive occurrence of `needle` in `hay` at or after
+/// the byte offset `from`.
+fn find_ci(hay: &str, needle: &str, from: usize) -> Option<usize> {
     let (hay, needle) = (hay.as_bytes(), needle.as_bytes());
-    if needle.is_empty() || needle.len() > hay.len() {
+    if needle.is_empty() || from + needle.len() > hay.len() {
         return None;
     }
-    (0..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()].eq_ignore_ascii_case(needle))
+    (from..=hay.len() - needle.len())
+        .find(|&i| hay[i..i + needle.len()].eq_ignore_ascii_case(needle))
 }
 
 /// "Read 14 blocks · Thu 3 Sep 08:00–14:56" under an answer, expanding to
