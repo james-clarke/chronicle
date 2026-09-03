@@ -1,0 +1,10 @@
+# Day-tier consolidation (m27 chunk 6): merges among today's derived tasks
+# and renames of fresh ones. Ids are task ids from the input; code guards
+# every merge (locked tasks, projects, ticket keys, caps) before applying.
+root ::= "{" ws "\"merges\"" ws ":" ws "[" ws (merge (ws "," ws merge){0,5})? ws "]" ws "," ws "\"renames\"" ws ":" ws "[" ws (rename (ws "," ws rename){0,7})? ws "]" ws "}"
+merge ::= "{" ws "\"into\"" ws ":" ws int ws "," ws "\"from\"" ws ":" ws "[" ws int (ws "," ws int){0,5} ws "]" ws "}"
+rename ::= "{" ws "\"id\"" ws ":" ws int ws "," ws "\"label\"" ws ":" ws string ws "}"
+string ::= "\"" char{1,120} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+int ::= [0-9]{1,7}
+ws ::= [ \n\t]{0,4}

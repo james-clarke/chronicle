@@ -238,6 +238,7 @@ impl TimelineApp {
                                     unassigned_ms: self.unassigned_ms,
                                     candidates: &candidates,
                                     progress: self.progress.as_ref(),
+                                    tidy: self.tidy,
                                 },
                                 &mut self.new_label,
                                 &mut pending,
@@ -451,6 +452,7 @@ impl TimelineApp {
                                 unassigned_ms,
                                 candidates: &candidates,
                                 progress: self.progress.as_ref(),
+                                tidy: self.tidy,
                             },
                             new_label,
                             &mut pending,
@@ -860,6 +862,8 @@ struct FeedSection<'a> {
     candidates: &'a [(i64, String)],
     /// The resident worker's in-flight derive (m27): the "deriving…" row.
     progress: Option<&'a chronicle_core::storage::DeriveProgress>,
+    /// Today's consolidation stamp (see `HomeData::tidy`); None off today.
+    tidy: Option<Option<i64>>,
 }
 
 /// A progress row older than this is a stale meta value from a dead worker.
@@ -883,6 +887,7 @@ fn feed_section_ui(
         unassigned_ms,
         candidates,
         progress,
+        tidy,
     } = f;
     let progress = progress
         .filter(|p| jiff::Timestamp::now().as_millisecond() - p.started_ts < PROGRESS_STALE_MS);
@@ -897,6 +902,25 @@ fn feed_section_ui(
                 .clicked()
             {
                 *open_triage = true;
+            }
+            match tidy {
+                Some(Some(id)) if id > 0 => {
+                    if theme::ghost_button(ui, "undo tidy")
+                        .on_hover_text("put back the tasks today's tidy merged or renamed")
+                        .clicked()
+                    {
+                        *pending = Some(Action::UndoTidy(id));
+                    }
+                }
+                Some(_) if theme::ghost_button(ui, "tidy")
+                    .on_hover_text(
+                        "merge today's duplicate model tasks and fold stray minutes into the work around them",
+                    )
+                    .clicked() =>
+                {
+                    *pending = Some(Action::TidyToday);
+                }
+                _ => {}
             }
             ui.label(theme::num(fmt_dur(unassigned_ms)))
                 .on_hover_text("unassigned today");
@@ -949,13 +973,21 @@ fn progress_row(
             .strftime("%H:%M")
             .to_string()
     };
-    let title = format!("deriving {}\u{2013}{}", hm(p.start_ts), hm(p.end_ts));
+    let title = if p.kind == "day" {
+        "tidying today".to_owned()
+    } else {
+        format!("deriving {}\u{2013}{}", hm(p.start_ts), hm(p.end_ts))
+    };
     let sub = if p.label.is_empty() {
         "the model is reading the window".to_owned()
     } else {
         p.label.clone()
     };
-    let chip = if p.kind == "live" { "live" } else { "batch" };
+    let chip = match p.kind.as_str() {
+        "live" => "live",
+        "day" => "day",
+        _ => "batch",
+    };
     theme::ListRow::new(&title)
         .lines(2)
         .padded()

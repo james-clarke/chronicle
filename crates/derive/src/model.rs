@@ -28,6 +28,13 @@ pub const PRESETS: &[ModelSpec] = &[
         repo: "unsloth/Qwen3-1.7B-GGUF",
         file: "Qwen3-1.7B-Q4_K_M.gguf",
     },
+    // Day-tier candidate (m27 chunk 6): about 5 GB, opt-in via
+    // `model_path_heavy`; never the default until the replay eval says so.
+    ModelSpec {
+        name: "qwen3-8b",
+        repo: "unsloth/Qwen3-8B-GGUF",
+        file: "Qwen3-8B-Q4_K_M.gguf",
+    },
 ];
 
 pub fn default_preset() -> &'static ModelSpec {

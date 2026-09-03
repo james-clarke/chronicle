@@ -2235,6 +2235,255 @@ pub fn derive_progress(conn: &Connection) -> Result<Option<DeriveProgress>, Stor
     Ok(get_meta(conn, DERIVE_PROGRESS_KEY)?.and_then(|v| serde_json::from_str(&v).ok()))
 }
 
+/// The day's tasks for consolidation (m27 chunk 6): every open task with an
+/// interval overlapping `[lo, hi)`, with totals, batch spread, notes and
+/// rename flags, and the three strongest app/title lines under it.
+pub fn day_tasks(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<crate::consolidate::DayTask>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.label, t.project, t.external_ref, t.source,
+                SUM(MIN(i.end_ts, ?2) - MAX(i.start_ts, ?1)), COUNT(i.id),
+                COUNT(DISTINCT COALESCE(i.batch_id, -i.id)),
+                EXISTS(SELECT 1 FROM journal_entries j WHERE j.task_id = t.id)
+                  OR EXISTS(SELECT 1 FROM checkpoints c WHERE c.task_id = t.id),
+                EXISTS(SELECT 1 FROM corrections c WHERE c.task_id = t.id AND c.kind = 'rename')
+         FROM tasks t JOIN intervals i ON i.task_id = t.id
+         WHERE t.status = 'open' AND i.start_ts < ?2 AND i.end_ts > ?1
+         GROUP BY t.id ORDER BY 6 DESC, t.id",
+    )?;
+    let mut evidence = conn.prepare(
+        "SELECT s.app, s.title, SUM(MIN(s.end_ts, i.end_ts) - MAX(s.start_ts, i.start_ts)) AS ms
+         FROM intervals i JOIN spans s ON s.kind = 'focus' AND s.start_ts < i.end_ts AND s.end_ts > i.start_ts
+         WHERE i.task_id = ?1 AND i.start_ts < ?3 AND i.end_ts > ?2
+         GROUP BY s.app, s.title ORDER BY ms DESC LIMIT 3",
+    )?;
+    let mut out = Vec::new();
+    let mut rows = stmt.query([lo, hi])?;
+    while let Some(r) = rows.next()? {
+        let id: i64 = r.get(0)?;
+        let source: String = r.get(4)?;
+        let ev = evidence
+            .query_map(params![id, lo, hi], |e| {
+                Ok((e.get(0)?, e.get(1)?, e.get(2)?))
+            })?
+            .collect::<Result<Vec<(String, String, i64)>, _>>()?;
+        out.push(crate::consolidate::DayTask {
+            id,
+            label: r.get(1)?,
+            project: r.get(2)?,
+            external_ref: r.get(3)?,
+            locked: source == "user",
+            total_ms: r.get(5)?,
+            intervals: r.get::<_, i64>(6)? as usize,
+            batches: r.get::<_, i64>(7)? as usize,
+            has_notes: r.get(8)?,
+            user_renamed: r.get(9)?,
+            evidence: ev,
+        });
+    }
+    Ok(out)
+}
+
+/// `(task_id, start_ts, end_ts)` for every interval overlapping `[lo, hi)`,
+/// in time order — the orphan fold's neighbour test.
+pub fn day_intervals(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(i64, i64, i64)>, StorageError> {
+    Ok(conn
+        .prepare(
+            "SELECT task_id, start_ts, end_ts FROM intervals
+             WHERE start_ts < ?2 AND end_ts > ?1 ORDER BY start_ts, id",
+        )?
+        .query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?)
+}
+
+/// Apply a consolidation plan in one transaction and record it as a single
+/// `consolidate` correction whose `ctx` is the before-state (JSON) for
+/// undo. Folded tasks lose their intervals and close (an orphan derived row
+/// nothing references is removed); no `merge`/`rename` correction rows are
+/// written — those mean the user spoke. Returns the correction id.
+pub fn consolidate_apply(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    day: &str,
+    plan: &crate::consolidate::Plan,
+) -> Result<i64, StorageError> {
+    use crate::consolidate::{Before, MergeBefore, RenameBefore};
+    let tx = conn.transaction()?;
+    let mut before = Before {
+        day: day.to_owned(),
+        ..Before::default()
+    };
+    for &(from, into) in &plan.merges {
+        let (label, project, source, created_ts, external_ref): (
+            String,
+            Option<String>,
+            String,
+            i64,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT label, project, source, created_ts, external_ref FROM tasks WHERE id=?1",
+            [from],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        let interval_ids: Vec<i64> = tx
+            .prepare("SELECT id FROM intervals WHERE task_id=?1")?
+            .query_map([from], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        tx.execute(
+            "UPDATE intervals SET task_id=?1 WHERE task_id=?2",
+            params![into, from],
+        )?;
+        tx.execute(
+            "UPDATE tasks SET status='closed', closed_ts=?1 WHERE id=?2",
+            params![ts_to_ms(ts), from],
+        )?;
+        before.merges.push(MergeBefore {
+            from,
+            into,
+            label,
+            project,
+            source,
+            created_ts,
+            external_ref,
+            interval_ids,
+        });
+    }
+    for (id, new_label) in &plan.renames {
+        let old_label: String =
+            tx.query_row("SELECT label FROM tasks WHERE id=?1", [id], |r| r.get(0))?;
+        tx.execute(
+            "UPDATE tasks SET label=?1 WHERE id=?2",
+            params![new_label, id],
+        )?;
+        before.renames.push(RenameBefore {
+            id: *id,
+            old_label,
+            new_label: new_label.clone(),
+        });
+    }
+    // The row hangs off a task the run kept (a merge target, else a renamed
+    // task) so the foreign key holds.
+    let anchor = plan
+        .merges
+        .iter()
+        .map(|m| m.1)
+        .find(|into| !plan.merges.iter().any(|m| m.0 == *into))
+        .or_else(|| plan.renames.first().map(|r| r.0))
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let ctx = serde_json::to_string(&before).unwrap_or_default();
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
+         VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, 'consolidate')",
+        params![
+            ts_to_ms(ts),
+            anchor,
+            format!("{} merges", plan.merges.len()),
+            format!("{} renames", plan.renames.len()),
+            ctx
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    set_meta(&tx, &format!("consolidated:{day}"), Some(&id.to_string()))?;
+    tx.commit()?;
+    Ok(id)
+}
+
+/// Reverse one consolidation run: renamed tasks get their labels back,
+/// folded tasks are reopened (or recreated under their old id) and their
+/// intervals moved home, the correction row and the day's stamp go.
+pub fn consolidate_undo(conn: &mut Connection, correction_id: i64) -> Result<(), StorageError> {
+    use crate::consolidate::Before;
+    use rusqlite::OptionalExtension;
+    let tx = conn.transaction()?;
+    let Some(ctx) = tx
+        .query_row(
+            "SELECT ctx FROM corrections WHERE id=?1 AND kind='consolidate'",
+            [correction_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let before: Before = serde_json::from_str(&ctx).unwrap_or_default();
+    for r in &before.renames {
+        tx.execute(
+            "UPDATE tasks SET label=?1 WHERE id=?2 AND label=?3",
+            params![r.old_label, r.id, r.new_label],
+        )?;
+    }
+    for m in before.merges.iter().rev() {
+        // `tasks.id` has no AUTOINCREMENT: a freed id can have been reused by
+        // an unrelated task since. Only a row matching the snapshot is ours;
+        // otherwise the task comes back under a fresh id.
+        let same: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM tasks WHERE id=?1 AND label=?2 AND created_ts=?3 AND source=?4",
+                params![m.from, m.label, m.created_ts, m.source],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let home = match same {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE tasks SET status='open', closed_ts=NULL WHERE id=?1",
+                    [id],
+                )?;
+                id
+            }
+            None => {
+                let taken: bool =
+                    tx.query_row("SELECT COUNT(*) FROM tasks WHERE id=?1", [m.from], |r| {
+                        Ok(r.get::<_, i64>(0)? > 0)
+                    })?;
+                if taken {
+                    tx.execute(
+                        "INSERT INTO tasks (label, project, status, source, created_ts, external_ref)
+                         VALUES (?1, ?2, 'open', ?3, ?4, ?5)",
+                        params![m.label, m.project, m.source, m.created_ts, m.external_ref],
+                    )?;
+                } else {
+                    tx.execute(
+                        "INSERT INTO tasks (id, label, project, status, source, created_ts, external_ref)
+                         VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6)",
+                        params![m.from, m.label, m.project, m.source, m.created_ts, m.external_ref],
+                    )?;
+                }
+                tx.last_insert_rowid()
+            }
+        };
+        for iv in &m.interval_ids {
+            tx.execute(
+                "UPDATE intervals SET task_id=?1 WHERE id=?2 AND task_id=?3",
+                params![home, iv, m.into],
+            )?;
+        }
+    }
+    tx.execute("DELETE FROM corrections WHERE id=?1", [correction_id])?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    set_meta(&tx, &format!("consolidated:{}", before.day), None)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The day's consolidation stamp: None = not run, Some(0) = ran and changed
+/// nothing, Some(id) = the correction to undo.
+pub fn consolidation_of_day(conn: &Connection, day: &str) -> Result<Option<i64>, StorageError> {
+    Ok(get_meta(conn, &format!("consolidated:{day}"))?.and_then(|v| v.parse().ok()))
+}
+
+pub fn stamp_consolidated(conn: &Connection, day: &str, id: i64) -> Result<(), StorageError> {
+    set_meta(conn, &format!("consolidated:{day}"), Some(&id.to_string()))
+}
+
 /// The open task anchored to `key` (`tasks.external_ref`), if any.
 pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>, StorageError> {
     use rusqlite::OptionalExtension;
@@ -2539,7 +2788,8 @@ pub fn similar_corrections(
     spans: &[SpanDraft],
     k: usize,
 ) -> Result<Vec<Correction>, StorageError> {
-    let ranked = corrections_matching(conn, &fts_or_query(spans), k * 2)?;
+    let mut ranked = corrections_matching(conn, &fts_or_query(spans), k * 2)?;
+    ranked.retain(|c| c.kind != "consolidate");
     let mut out: Vec<Correction> = ranked
         .iter()
         .filter(|c| c.kind != "eject")
@@ -2588,7 +2838,9 @@ pub fn suggest_correction(
 /// terms, best first, ejects included — the pre-pass reads the ejects as
 /// "never this task for work like this".
 pub fn correction_hints(conn: &Connection, text: &str) -> Result<Vec<Correction>, StorageError> {
-    corrections_matching(conn, &distinctive_fts_query(conn, text)?, 16)
+    let mut ranked = corrections_matching(conn, &distinctive_fts_query(conn, text)?, 16)?;
+    ranked.retain(|c| c.kind != "consolidate");
+    Ok(ranked)
 }
 
 /// OR-of-terms FTS5 query from free text with the corpus-common terms
@@ -2916,6 +3168,95 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         assert!(super::MIGRATIONS.validate().is_ok());
+    }
+
+    // m27 chunk 6: a consolidation run moves intervals and renames in one
+    // transaction, records one `consolidate` row, and undo restores the
+    // folded task — under a fresh id when its old id was reused meanwhile.
+    #[test]
+    fn consolidate_apply_and_undo_round_trip() {
+        use crate::consolidate::Plan;
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        for (id, label) in [(1, "keeper"), (2, "dupe"), (3, "vague")] {
+            conn.execute(
+                "INSERT INTO tasks (id, label, status, source, created_ts) VALUES (?1, ?2, 'open', 'derived', ?1)",
+                rusqlite::params![id, label],
+            )
+            .unwrap();
+        }
+        for (id, task, lo) in [(10, 1, 0), (11, 2, 100), (12, 2, 200), (13, 3, 300)] {
+            conn.execute(
+                "INSERT INTO intervals (id, task_id, start_ts, end_ts, confidence) VALUES (?1, ?2, ?3, ?3 + 50, 0.9)",
+                rusqlite::params![id, task, lo],
+            )
+            .unwrap();
+        }
+        let plan = Plan {
+            merges: vec![(2, 1)],
+            renames: vec![(3, "investigating vague thing".into())],
+        };
+        let ts = crate::types::ms_to_ts(1_000);
+        let id = super::consolidate_apply(&mut conn, ts, "2026-09-03", &plan).unwrap();
+        assert_eq!(
+            super::consolidation_of_day(&conn, "2026-09-03").unwrap(),
+            Some(id)
+        );
+        let owner = |conn: &Connection, iv: i64| -> i64 {
+            conn.query_row("SELECT task_id FROM intervals WHERE id=?1", [iv], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!((owner(&conn, 11), owner(&conn, 12)), (1, 1));
+        let label3: String = conn
+            .query_row("SELECT label FROM tasks WHERE id=3", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label3, "investigating vague thing");
+        // The folded derived task, referenced by nothing, was pruned …
+        let gone: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE id=2", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gone, 0);
+        // … and its id reused by an unrelated task before undo.
+        conn.execute(
+            "INSERT INTO tasks (id, label, status, source, created_ts) VALUES (2, 'newcomer', 'open', 'user', 5000)",
+            [],
+        )
+        .unwrap();
+        super::consolidate_undo(&mut conn, id).unwrap();
+        assert_eq!(
+            super::consolidation_of_day(&conn, "2026-09-03").unwrap(),
+            None
+        );
+        let label3: String = conn
+            .query_row("SELECT label FROM tasks WHERE id=3", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label3, "vague");
+        let newcomer: (String, String) = conn
+            .query_row("SELECT label, status FROM tasks WHERE id=2", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(newcomer, ("newcomer".into(), "open".into()));
+        let home = owner(&conn, 11);
+        assert_ne!(home, 1);
+        assert_ne!(home, 2);
+        assert_eq!(owner(&conn, 12), home);
+        let restored: (String, String) = conn
+            .query_row("SELECT label, status FROM tasks WHERE id=?1", [home], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(restored, ("dupe".into(), "open".into()));
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM corrections WHERE kind='consolidate'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     // 014: intervals get an insert timestamp from the trigger, derive metrics

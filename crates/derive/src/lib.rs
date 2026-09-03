@@ -8,8 +8,8 @@ pub mod runner;
 
 pub use chat::ChatModel;
 pub use runner::{
-    DeriveModel, DeriveRun, DeriveSession, IntervalDraft, LIVE_N_CTX, LiveDraft, LiveRun, Prompt,
-    RunStats, infer_intervals,
+    ConsolidateRun, DeriveModel, DeriveRun, DeriveSession, IntervalDraft, LIVE_N_CTX, LiveDraft,
+    LiveRun, N_CTX, Prompt, RunStats, infer_intervals,
 };
 
 /// Tokenize `text` inside its prompt, shrinking the text until the whole

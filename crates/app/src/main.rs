@@ -257,6 +257,11 @@ pub(crate) mod deriveproto {
             lo: i64,
             hi: i64,
         },
+        /// Day tier (chunk 6): merge and rename the day's derived tasks.
+        Consolidate {
+            lo: i64,
+            hi: i64,
+        },
     }
 
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -914,6 +919,75 @@ fn ref_label(from_ref: &str, open: &[chronicle_core::types::OpenTask]) -> Option
     Some(format!("linking to {}", task.label))
 }
 
+/// Day tier (m27 chunk 6): fold the day's orphans, then let the model merge
+/// duplicates and rename fresh labels among today's derived tasks; every
+/// suggestion passes `consolidate::guard`. One `consolidate` correction
+/// records the run for undo. Returns the number of changes applied.
+fn consolidate_day(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    model: &chronicle_derive::DeriveModel,
+    lo: i64,
+    hi: i64,
+    on_progress: &mut dyn FnMut(&str),
+) -> anyhow::Result<usize> {
+    use chronicle_core::consolidate::{self, Plan};
+    use chronicle_core::storage;
+    let day = chronicle_core::types::ms_to_ts(lo)
+        .to_zoned(TimeZone::system())
+        .date()
+        .to_string();
+    let tasks = storage::day_tasks(conn, lo, hi)?;
+    let intervals = storage::day_intervals(conn, lo, hi)?;
+    let mut plan = Plan {
+        merges: consolidate::orphan_folds(&tasks, &intervals),
+        renames: Vec::new(),
+    };
+    let folded: std::collections::BTreeSet<i64> = plan.merges.iter().map(|m| m.0).collect();
+    let remaining: Vec<consolidate::DayTask> = tasks
+        .iter()
+        .filter(|t| !folded.contains(&t.id))
+        .cloned()
+        .collect();
+    if remaining.iter().filter(|t| !t.locked).count() >= 2 {
+        let input = consolidate::render_input(&remaining);
+        // The heavy model, when configured, is loaded for this run only.
+        let heavy = config
+            .model_path_heavy
+            .as_deref()
+            .filter(|p| p.exists())
+            .map(chronicle_derive::DeriveModel::load)
+            .transpose()?;
+        let m = heavy.as_ref().unwrap_or(model);
+        let mut session = m.session_with(
+            chronicle_derive::Prompt::Consolidate,
+            chronicle_derive::N_CTX,
+        )?;
+        let mut relay = ProgressRelay::default();
+        let run =
+            session.infer_consolidate(&input, &mut |piece| relay.push(piece, &[], on_progress))?;
+        storage::set_meta(conn, "consolidate_last_output", Some(&run.raw))?;
+        let guarded = consolidate::guard(&remaining, &run.plan, consolidate::MAX_MERGES);
+        tracing::info!(
+            model_merges = run.plan.merges.len(),
+            model_renames = run.plan.renames.len(),
+            kept_merges = guarded.merges.len(),
+            kept_renames = guarded.renames.len(),
+            "consolidation guarded"
+        );
+        plan.merges.extend(guarded.merges);
+        plan.renames = guarded.renames;
+    }
+    if plan.is_empty() {
+        storage::stamp_consolidated(conn, &day, 0)?;
+        tracing::info!(%day, "consolidation: nothing to change");
+        return Ok(0);
+    }
+    let id = storage::consolidate_apply(conn, Timestamp::now(), &day, &plan)?;
+    tracing::info!(%day, correction = id, merges = plan.merges.len(), renames = plan.renames.len(), "consolidation applied");
+    Ok(plan.merges.len() + plan.renames.len())
+}
+
 /// Live tier (m27 chunk 4): label the stretch `[lo, hi)` of the tail with
 /// the live prompt and store one `source='live'` interval (confidence ×
 /// 0.8). Returns the task it landed on, None when the window holds no spans.
@@ -1166,6 +1240,23 @@ fn derive_resident(data_dir: &Path) -> anyhow::Result<()> {
                     }),
                     Err(e) => send(&Reply::Err {
                         batch_id: Some(batch_id),
+                        message: format!("{e:#}"),
+                    }),
+                }
+            }
+            Request::Consolidate { lo, hi } => {
+                let result = consolidate_day(&mut conn, &config, &model, lo, hi, &mut |label| {
+                    send(&Reply::Progress {
+                        label: label.into(),
+                    })
+                });
+                match result {
+                    Ok(changes) => send(&Reply::Done {
+                        batch_id: None,
+                        intervals: changes,
+                    }),
+                    Err(e) => send(&Reply::Err {
+                        batch_id: None,
                         message: format!("{e:#}"),
                     }),
                 }
@@ -1939,6 +2030,7 @@ pub(crate) fn send_ctrl(sock: &Path, msg: &str) -> bool {
 enum CtrlMsg {
     Toggle,
     DeriveNow,
+    Consolidate,
     /// One-shot reply channel; the listener writes the JSON back to the client.
     Status(Sender<String>),
     /// Only in-process senders (signal thread, tray "Quit") — not part of the
@@ -1950,6 +2042,8 @@ enum CtrlMsg {
 enum CtrlCmd {
     Toggle,
     DeriveNow,
+    /// Home's "tidy today": run the day tier now.
+    Consolidate,
     Status,
 }
 
@@ -1957,6 +2051,7 @@ fn parse_ctrl_cmd(line: &str) -> Option<CtrlCmd> {
     match line.trim() {
         "toggle" => Some(CtrlCmd::Toggle),
         "derive" => Some(CtrlCmd::DeriveNow),
+        "consolidate" => Some(CtrlCmd::Consolidate),
         "status" => Some(CtrlCmd::Status),
         _ => None,
     }
@@ -1987,6 +2082,11 @@ fn spawn_ctrl_listener(
                     }
                     Some(CtrlCmd::DeriveNow) => {
                         if tx.send(CtrlMsg::DeriveNow).is_err() {
+                            return;
+                        }
+                    }
+                    Some(CtrlCmd::Consolidate) => {
+                        if tx.send(CtrlMsg::Consolidate).is_err() {
                             return;
                         }
                     }
@@ -2299,6 +2399,10 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                         toggle_ui(&mut ui_child);
                     }
                     Ok(CtrlMsg::DeriveNow) => scheduler.tick(&conn, &config, data_dir, idle_since, true),
+                    Ok(CtrlMsg::Consolidate) => {
+                        scheduler.consolidate_requested = true;
+                        scheduler.tick(&conn, &config, data_dir, idle_since, true);
+                    }
                     Ok(CtrlMsg::Status(reply)) => {
                         let _ = reply.send(status_json(&scheduler, idle_since, &mut ui_child, started));
                     }
@@ -2462,7 +2566,13 @@ struct Resident {
 enum Job {
     Batch(i64),
     Live { lo: i64, hi: i64 },
+    Consolidate { lo: i64, hi: i64 },
 }
+
+/// The day tier runs at the first long AFK after this local hour …
+const CONSOLIDATE_AFTER_HOUR: i8 = 14;
+/// … or unconditionally (under the batch gates) after this one.
+const CONSOLIDATE_FALLBACK_HOUR: i8 = 18;
 
 /// The live tier looks back at most this far for the current stretch.
 const LIVE_LOOKBACK_MS: i64 = 15 * 60_000;
@@ -2482,6 +2592,10 @@ struct Scheduler {
     last_live: Option<Instant>,
     /// Wall time of the last live pass; over `LIVE_SLOW` skips one pass.
     last_live_took: Option<Duration>,
+    /// Home's "tidy today" asked for a run regardless of time or stamp.
+    consolidate_requested: bool,
+    /// A run failed today; wait for a request rather than retrying.
+    consolidate_failed_day: Option<String>,
 }
 
 static NEVER_REPLY: std::sync::LazyLock<crossbeam_channel::Receiver<deriveproto::Reply>> =
@@ -2557,6 +2671,8 @@ impl Scheduler {
             resident: None,
             last_live: None,
             last_live_took: None,
+            consolidate_requested: false,
+            consolidate_failed_day: None,
         }
     }
 
@@ -2580,6 +2696,7 @@ impl Scheduler {
             let what = match job {
                 Job::Batch(id) => format!("derive batch {id}"),
                 Job::Live { .. } => "live pass".to_owned(),
+                Job::Consolidate { .. } => "tidying today".to_owned(),
             };
             return Some((what, since));
         }
@@ -2683,9 +2800,53 @@ impl Scheduler {
                 return;
             }
         }
+        if self.maybe_consolidate(conn, config, idle_since) {
+            return;
+        }
         if let Ok(Some(job_id)) = storage::next_eligible_ai_job(conn, i64::MIN) {
             self.spawn_ai_job(job_id);
         }
+    }
+
+    /// Day tier (chunk 6): once per local day, at the first AFK ≥
+    /// `checkpoint_afk_secs` after 14:00, at 18:00 regardless, or when Home
+    /// asked. Returns true when a run was dispatched.
+    fn maybe_consolidate(
+        &mut self,
+        conn: &rusqlite::Connection,
+        config: &Config,
+        idle_since: Option<i64>,
+    ) -> bool {
+        use chronicle_core::storage;
+        let now = Timestamp::now();
+        let local = now.to_zoned(TimeZone::system());
+        let day = local.date().to_string();
+        let requested = std::mem::take(&mut self.consolidate_requested);
+        if !requested {
+            if self.consolidate_failed_day.as_deref() == Some(&day)
+                || matches!(storage::consolidation_of_day(conn, &day), Ok(Some(_)))
+            {
+                return false;
+            }
+            let idle_long = config.checkpoint_afk_secs > 0
+                && idle_since.is_some_and(|since| {
+                    now.as_millisecond() - since >= i64::from(config.checkpoint_afk_secs) * 1000
+                });
+            let hour = local.hour();
+            let due =
+                (hour >= CONSOLIDATE_AFTER_HOUR && idle_long) || hour >= CONSOLIDATE_FALLBACK_HOUR;
+            if !due {
+                return false;
+            }
+        }
+        let Ok(start) = local.start_of_day() else {
+            return false;
+        };
+        let lo = start.timestamp().as_millisecond();
+        let hi = now.as_millisecond();
+        tracing::info!(%day, requested, "consolidation dispatched");
+        self.dispatch(conn, Job::Consolidate { lo, hi });
+        true
     }
 
     fn reap_ai_job(&mut self, conn: &rusqlite::Connection) {
@@ -2764,6 +2925,14 @@ impl Scheduler {
             }
             Reply::Err { batch_id, message } => {
                 tracing::warn!(?batch_id, "derive worker: {message}");
+                if let Some((Job::Consolidate { lo, .. }, _)) = r.busy {
+                    self.consolidate_failed_day = Some(
+                        chronicle_core::types::ms_to_ts(lo)
+                            .to_zoned(TimeZone::system())
+                            .date()
+                            .to_string(),
+                    );
+                }
                 self.finish_job(conn);
             }
         }
@@ -2789,7 +2958,9 @@ impl Scheduler {
             tracing::warn!(busy = ?r.busy.map(|b| b.0), "derive worker disconnected");
             let _ = r.child.kill();
             let _ = r.child.wait();
-            fail_stuck(conn, r.busy);
+            if let Some(day) = fail_stuck(conn, r.busy) {
+                self.consolidate_failed_day = Some(day);
+            }
             let _ = chronicle_core::storage::set_derive_progress(conn, None);
         }
     }
@@ -2816,9 +2987,12 @@ impl Scheduler {
                 } else {
                     tracing::info!("derive worker exited (idle)");
                 }
-                fail_stuck(conn, r.busy);
+                let lost = fail_stuck(conn, r.busy);
                 let _ = chronicle_core::storage::set_derive_progress(conn, None);
                 self.resident = None;
+                if lost.is_some() {
+                    self.consolidate_failed_day = lost;
+                }
             }
             Ok(None) => match action {
                 ResidentAction::Keep => {}
@@ -2826,9 +3000,12 @@ impl Scheduler {
                     tracing::warn!(busy = ?r.busy.map(|b| b.0), "derive worker timed out; killing");
                     let _ = r.child.kill();
                     let _ = r.child.wait();
-                    fail_stuck(conn, r.busy);
+                    let lost = fail_stuck(conn, r.busy);
                     let _ = chronicle_core::storage::set_derive_progress(conn, None);
                     self.resident = None;
+                    if lost.is_some() {
+                        self.consolidate_failed_day = lost;
+                    }
                 }
                 ResidentAction::KillIdle => {
                     tracing::info!("derive worker idle past grace; killing");
@@ -2840,9 +3017,12 @@ impl Scheduler {
             Err(e) => {
                 tracing::error!("derive worker wait failed: {e}");
                 let _ = r.child.kill();
-                fail_stuck(conn, r.busy);
+                let lost = fail_stuck(conn, r.busy);
                 let _ = chronicle_core::storage::set_derive_progress(conn, None);
                 self.resident = None;
+                if lost.is_some() {
+                    self.consolidate_failed_day = lost;
+                }
             }
         }
     }
@@ -2885,6 +3065,17 @@ impl Scheduler {
                 deriveproto::Request::Live { lo, hi },
                 storage::DeriveProgress {
                     kind: "live".into(),
+                    batch_id: None,
+                    start_ts: lo,
+                    end_ts: hi,
+                    started_ts: Timestamp::now().as_millisecond(),
+                    label: String::new(),
+                },
+            ),
+            Job::Consolidate { lo, hi } => (
+                deriveproto::Request::Consolidate { lo, hi },
+                storage::DeriveProgress {
+                    kind: "day".into(),
                     batch_id: None,
                     start_ts: lo,
                     end_ts: hi,
@@ -2945,20 +3136,32 @@ impl Scheduler {
         if let Some(mut r) = self.resident.take() {
             let _ = r.child.kill();
             let _ = r.child.wait();
-            fail_stuck(conn, r.busy);
+            let _ = fail_stuck(conn, r.busy);
             let _ = storage::set_derive_progress(conn, None);
         }
     }
 }
 
 /// A batch the worker never answered for keeps its `running` row; count
-/// that as the failed attempt it was. Live passes have no row to repair.
-fn fail_stuck(conn: &rusqlite::Connection, busy: Option<(Job, Instant)>) {
+/// that as the failed attempt it was. A lost consolidation returns its day
+/// so the scheduler stops retrying it until asked. Live passes have no row
+/// to repair.
+fn fail_stuck(conn: &rusqlite::Connection, busy: Option<(Job, Instant)>) -> Option<String> {
     use chronicle_core::storage;
-    if let Some((Job::Batch(id), _)) = busy
-        && matches!(storage::batch_status(conn, id), Ok(Some(ref s)) if s == "running")
-    {
-        let _ = storage::fail_batch(conn, id);
+    match busy {
+        Some((Job::Batch(id), _)) => {
+            if matches!(storage::batch_status(conn, id), Ok(Some(ref s)) if s == "running") {
+                let _ = storage::fail_batch(conn, id);
+            }
+            None
+        }
+        Some((Job::Consolidate { lo, .. }, _)) => Some(
+            chronicle_core::types::ms_to_ts(lo)
+                .to_zoned(TimeZone::system())
+                .date()
+                .to_string(),
+        ),
+        _ => None,
     }
 }
 
@@ -3806,6 +4009,8 @@ mod tests {
         );
         let live = serde_json::to_string(&Request::Live { lo: 1, hi: 2 }).unwrap();
         assert_eq!(live, r#"{"t":"live","lo":1,"hi":2}"#);
+        let day = serde_json::to_string(&Request::Consolidate { lo: 1, hi: 2 }).unwrap();
+        assert_eq!(day, r#"{"t":"consolidate","lo":1,"hi":2}"#);
         for reply in [
             Reply::Ready,
             Reply::Progress {

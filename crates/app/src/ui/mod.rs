@@ -420,6 +420,10 @@ enum Action {
     DismissProposal(i64),
     /// Confirm a provisional feed block (m24): its interval becomes a user row.
     KeepBlock(i64),
+    /// Home's "tidy today": ask the daemon for a day-tier run (m27).
+    TidyToday,
+    /// Reverse today's consolidation run (its `consolidate` correction id).
+    UndoTidy(i64),
     /// Pull a feed block out of its task ('eject' correction).
     EjectBlock {
         interval_id: i64,
@@ -505,6 +509,9 @@ struct TimelineApp {
     unassigned_ms: i64,
     /// What the resident worker is deriving right now (m27), or None.
     progress: Option<chronicle_core::storage::DeriveProgress>,
+    /// Today's consolidation stamp when the shown day is today: None = not
+    /// run, Some(0) = ran with no change, Some(id) = undoable.
+    tidy: Option<Option<i64>>,
     /// Open proposed tasks of the shown day (m24), newest first.
     proposals: Vec<Proposal>,
     /// When each feed block was first seen (drives the arrival fade).
@@ -669,6 +676,7 @@ impl TimelineApp {
             closed_tasks: Vec::new(),
             feed: Vec::new(),
             progress: None,
+            tidy: None,
             unassigned_ms: 0,
             proposals: Vec::new(),
             feed_seen: HashMap::new(),
@@ -790,6 +798,16 @@ impl TimelineApp {
             .conn
             .as_ref()
             .and_then(|c| chronicle_core::storage::derive_progress(c).ok().flatten());
+        let today = jiff::Zoned::now().with_time_zone(self.tz.clone()).date();
+        self.tidy = if self.day == today {
+            self.conn.as_ref().map(|c| {
+                chronicle_core::storage::consolidation_of_day(c, &today.to_string())
+                    .ok()
+                    .flatten()
+            })
+        } else {
+            None
+        };
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
         }
@@ -1332,6 +1350,11 @@ impl TimelineApp {
                 chronicle_core::proposals::accept(conn, now, id, &label).map(|_| ())
             }
             Action::DismissProposal(id) => chronicle_core::proposals::dismiss(conn, id),
+            Action::TidyToday => {
+                let _ = crate::send_ctrl(&self.sock_path, "consolidate");
+                Ok(())
+            }
+            Action::UndoTidy(id) => chronicle_core::storage::consolidate_undo(conn, id),
             Action::KeepBlock(interval_id) => {
                 chronicle_core::storage::keep_interval(conn, now, interval_id)
             }

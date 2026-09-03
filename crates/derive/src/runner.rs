@@ -26,6 +26,8 @@ const BATCH_GRAMMAR: &str = include_str!("../../../grammars/task_output_v4.gbnf"
 const BATCH_PROMPT: &str = include_str!("../../../prompts/derive_v5.txt");
 const LIVE_GRAMMAR: &str = include_str!("../../../grammars/live_output_v1.gbnf");
 const LIVE_PROMPT: &str = include_str!("../../../prompts/live_v1.txt");
+const CONSOLIDATE_GRAMMAR: &str = include_str!("../../../grammars/consolidate_v1.gbnf");
+const CONSOLIDATE_PROMPT: &str = include_str!("../../../prompts/consolidate_v1.txt");
 
 /// Batch tier context. The live tier gets a smaller one (`LIVE_N_CTX`) so
 /// its KV cache stays cheap to hold; it still clears `digest::MAX_TOKENS`
@@ -41,6 +43,8 @@ pub use chronicle_core::types::{DeriveOutput, IntervalDraft, LiveDraft};
 pub enum Prompt {
     Batch,
     Live,
+    /// Day-tier consolidation (chunk 6): merges and renames over the day.
+    Consolidate,
 }
 
 impl Prompt {
@@ -48,12 +52,14 @@ impl Prompt {
         match self {
             Prompt::Batch => BATCH_PROMPT,
             Prompt::Live => LIVE_PROMPT,
+            Prompt::Consolidate => CONSOLIDATE_PROMPT,
         }
     }
     fn grammar(self) -> &'static str {
         match self {
             Prompt::Batch => BATCH_GRAMMAR,
             Prompt::Live => LIVE_GRAMMAR,
+            Prompt::Consolidate => CONSOLIDATE_GRAMMAR,
         }
     }
     /// 8 intervals × ~35 tokens under the v4 keys, with room for long
@@ -63,6 +69,7 @@ impl Prompt {
         match self {
             Prompt::Batch => 600,
             Prompt::Live => 80,
+            Prompt::Consolidate => 400,
         }
     }
 }
@@ -96,6 +103,14 @@ pub struct DeriveRun {
 #[derive(Debug)]
 pub struct LiveRun {
     pub draft: LiveDraft,
+    pub raw: String,
+    pub stats: RunStats,
+}
+
+/// One consolidation pass: the model's plan (unguarded) plus stats.
+#[derive(Debug)]
+pub struct ConsolidateRun {
+    pub plan: chronicle_core::consolidate::ModelPlan,
     pub raw: String,
     pub stats: RunStats,
 }
@@ -198,6 +213,23 @@ impl DeriveSession<'_> {
         let draft: LiveDraft = serde_json::from_str(&raw)
             .with_context(|| format!("model output is not valid live JSON: {raw}"))?;
         Ok(LiveRun { draft, raw, stats })
+    }
+
+    /// Merges and renames over the day's tasks (day tier).
+    pub fn infer_consolidate(
+        &mut self,
+        input: &str,
+        on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<ConsolidateRun> {
+        anyhow::ensure!(
+            self.prompt == Prompt::Consolidate,
+            "consolidate on a {:?} session",
+            self.prompt
+        );
+        let (raw, stats) = self.generate(input, on_token)?;
+        let plan = serde_json::from_str(&raw)
+            .with_context(|| format!("model output is not valid consolidation JSON: {raw}"))?;
+        Ok(ConsolidateRun { plan, raw, stats })
     }
 
     fn generate(
@@ -328,7 +360,11 @@ mod tests {
 
     #[test]
     fn prompts_carry_the_digest_marker() {
-        for p in [super::Prompt::Batch, super::Prompt::Live] {
+        for p in [
+            super::Prompt::Batch,
+            super::Prompt::Live,
+            super::Prompt::Consolidate,
+        ] {
             assert!(p.text().contains("{digest}"), "{p:?}");
             assert!(p.grammar().contains("root ::="), "{p:?}");
         }

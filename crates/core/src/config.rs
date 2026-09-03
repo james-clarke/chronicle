@@ -83,6 +83,10 @@ pub struct Config {
     pub checkpoint_afk_secs: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
+    /// A larger model for the day-tier consolidation only (m27 chunk 6);
+    /// unset = the same model as everything else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_path_heavy: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<PathBuf>,
 }
@@ -128,6 +132,7 @@ impl Default for Config {
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
             model_path: None,
+            model_path_heavy: None,
             mcp_config: None,
         }
     }
