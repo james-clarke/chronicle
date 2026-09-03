@@ -77,6 +77,59 @@ pub(super) fn wide(ctx: &egui::Context) -> bool {
     ctx.viewport_rect().width() >= WIDE_W
 }
 
+/// Row spacing on Home (Working on + feed): meta `ui_density`, read at
+/// boot and written from Settings › Window & appearance. Comfortable pads
+/// each [`ListRow::padded`] row by [`ROW_PAD`] top and bottom; compact
+/// keeps rows flush.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Density {
+    Comfortable,
+    Compact,
+}
+
+impl Density {
+    pub(super) const META_KEY: &'static str = "ui_density";
+
+    pub(super) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "comfortable" => Some(Self::Comfortable),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+static DENSITY_COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn set_density(d: Density) {
+    DENSITY_COMPACT.store(d == Density::Compact, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(super) fn density() -> Density {
+    if DENSITY_COMPACT.load(std::sync::atomic::Ordering::Relaxed) {
+        Density::Compact
+    } else {
+        Density::Comfortable
+    }
+}
+
+/// Vertical padding a padded row gets on each side under Comfortable.
+const ROW_PAD: f32 = 5.0;
+
+fn row_pad() -> f32 {
+    match density() {
+        Density::Comfortable => ROW_PAD,
+        Density::Compact => 0.0,
+    }
+}
+
 /// Fixed-width, right-aligned number column at the end of list rows, so
 /// durations line up across rows whatever the title and chip widths.
 pub(super) const NUM_COL: f32 = 64.0;
@@ -704,6 +757,9 @@ pub(super) struct ListRow<'a> {
     chips: Vec<(String, Color32)>,
     num: Option<String>,
     lines: usize,
+    bar: Option<Color32>,
+    subtitle: Option<String>,
+    padded: bool,
 }
 
 impl<'a> ListRow<'a> {
@@ -715,7 +771,33 @@ impl<'a> ListRow<'a> {
             chips: Vec::new(),
             num: None,
             lines: 1,
+            bar: None,
+            subtitle: None,
+            padded: false,
         }
+    }
+
+    /// 3pt identity bar down the row's left edge (full row height,
+    /// padding included) instead of the dot.
+    pub(super) fn bar(mut self, color: Color32) -> Self {
+        self.bar = Some(color);
+        self
+    }
+
+    /// Small dim second line under the title, truncated with the whole
+    /// text on hover. Chips and the trailing control stay on the title line.
+    pub(super) fn subtitle(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        if !text.is_empty() {
+            self.subtitle = Some(text);
+        }
+        self
+    }
+
+    /// Give the row the Home density padding ([`density`]).
+    pub(super) fn padded(mut self) -> Self {
+        self.padded = true;
+        self
     }
 
     /// Let the title wrap onto up to `n` lines before it truncates (m25:
@@ -780,6 +862,9 @@ impl<'a> ListRow<'a> {
             if self.dot.is_some() {
                 reserved += 14.0;
             }
+            if self.bar.is_some() {
+                reserved += BAR_INSET;
+            }
             let small = egui::TextStyle::Small.resolve(ui.style());
             for (text, _) in &self.chips {
                 let chip =
@@ -803,11 +888,28 @@ impl<'a> ListRow<'a> {
             }
             (galley, title_w)
         });
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, h),
-            egui::Layout::left_to_right(egui::Align::Center),
+        if self.subtitle.is_some() {
+            h += ui.text_style_height(&egui::TextStyle::Small) + 2.0;
+        }
+        let pad = if self.padded { row_pad() } else { 0.0 };
+        // The row is allocated at its full height (padding included) so the
+        // bar spans it; content lays out in the inset rect.
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(width, h + 2.0 * pad), egui::Sense::hover());
+        let mut inner = rect.shrink2(egui::vec2(0.0, pad));
+        if let Some(color) = self.bar {
+            let bar = egui::Rect::from_min_size(rect.min, egui::vec2(BAR_W, rect.height()));
+            ui.painter()
+                .rect_filled(bar, egui::CornerRadius::same(1), color);
+            inner.min.x += BAR_INSET;
+        }
+        let subtitle = self.subtitle;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                ui.set_width(width);
+                ui.set_width(inner.width());
                 ui.style_mut().interaction.selectable_labels = false;
                 if let Some(color) = self.dot {
                     let (dot, _) =
@@ -823,41 +925,55 @@ impl<'a> ListRow<'a> {
                         badge(ui, text, *color);
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        match title_galley {
-                            Some((galley, title_w)) => {
-                                let actual_w = ui.available_width();
-                                ui.set_max_width(title_w.min(actual_w));
-                                // Estimate too generous: re-lay at the real
-                                // width so the title truncates instead of
-                                // running under the trailing controls.
-                                let galley = if actual_w + 0.5 < title_w {
-                                    let mut job = egui::text::LayoutJob::simple(
-                                        self.title.to_owned(),
-                                        font.clone(),
-                                        palette::TEXT,
-                                        actual_w.max(20.0),
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            match title_galley {
+                                Some((galley, title_w)) => {
+                                    let actual_w = ui.available_width();
+                                    ui.set_max_width(title_w.min(actual_w));
+                                    // Estimate too generous: re-lay at the real
+                                    // width so the title truncates instead of
+                                    // running under the trailing controls.
+                                    let galley = if actual_w + 0.5 < title_w {
+                                        let mut job = egui::text::LayoutJob::simple(
+                                            self.title.to_owned(),
+                                            font.clone(),
+                                            palette::TEXT,
+                                            actual_w.max(20.0),
+                                        );
+                                        job.wrap.max_rows = galley.rows.len().max(1);
+                                        job.wrap.break_anywhere = false;
+                                        job.wrap.overflow_character = Some('\u{2026}');
+                                        ui.fonts_mut(|f| f.layout_job(job))
+                                    } else {
+                                        galley
+                                    };
+                                    let elided = galley.elided;
+                                    let resp = ui.add(egui::Label::new(galley).selectable(false));
+                                    if elided {
+                                        resp.on_hover_text(self.title.to_owned());
+                                    }
+                                }
+                                None => {
+                                    let mut text =
+                                        egui::RichText::new(self.title).color(palette::TEXT);
+                                    if self.emphasis {
+                                        text = text.family(egui::FontFamily::Name(MEDIUM.into()));
+                                    }
+                                    truncated_label(
+                                        ui,
+                                        egui::Label::new(text).truncate(),
+                                        self.title,
                                     );
-                                    job.wrap.max_rows = galley.rows.len().max(1);
-                                    job.wrap.break_anywhere = false;
-                                    job.wrap.overflow_character = Some('\u{2026}');
-                                    ui.fonts_mut(|f| f.layout_job(job))
-                                } else {
-                                    galley
-                                };
-                                let elided = galley.elided;
-                                let resp = ui.add(egui::Label::new(galley).selectable(false));
-                                if elided {
-                                    resp.on_hover_text(self.title.to_owned());
                                 }
                             }
-                            None => {
-                                let mut text = egui::RichText::new(self.title).color(palette::TEXT);
-                                if self.emphasis {
-                                    text = text.family(egui::FontFamily::Name(MEDIUM.into()));
-                                }
-                                truncated_label(ui, egui::Label::new(text).truncate(), self.title);
+                            if let Some(sub) = &subtitle {
+                                let text = egui::RichText::new(sub.as_str())
+                                    .text_style(egui::TextStyle::Small)
+                                    .color(palette::TEXT_DIM);
+                                truncated_label(ui, egui::Label::new(text).truncate(), sub);
                             }
-                        }
+                        });
                     });
                 });
             },
@@ -865,6 +981,10 @@ impl<'a> ListRow<'a> {
         .response
     }
 }
+
+/// Identity bar width and the gap it plus its margin take from the title.
+const BAR_W: f32 = 3.0;
+const BAR_INSET: f32 = BAR_W + 8.0;
 
 /// Card title row: Heading/TEXT title flush with the card body, an optional
 /// disclosure caret (the whole row toggles `open`; the caret brightens on

@@ -178,6 +178,7 @@ impl TimelineApp {
         let mut start_dl = false;
         let mut close = false;
         let mut zoom_pick: Option<f32> = None;
+        let mut density_pick: Option<theme::Density> = None;
         let mut spans_toggle: Option<bool> = None;
         let spans_debug_now = self.spans_debug;
         let autohide_now = self.autohide;
@@ -386,6 +387,18 @@ impl TimelineApp {
                                 }
                             });
                             ui.weak("Ctrl +/\u{2212}/0 also works anywhere");
+                            ui.horizontal(|ui| {
+                                ui.label("row spacing");
+                                let now = theme::density();
+                                for d in [theme::Density::Comfortable, theme::Density::Compact] {
+                                    let active = now == d;
+                                    if theme::selectable(ui, active, d.as_str()).clicked()
+                                        && !active
+                                    {
+                                        density_pick = Some(d);
+                                    }
+                                }
+                            });
                             let mut dbg = spans_debug_now;
                             if switch_row(ui, &mut dbg, "show raw spans on home") {
                                 spans_toggle = Some(dbg);
@@ -432,6 +445,16 @@ impl TimelineApp {
         if let (Some(z), Some(conn)) = (zoom_pick, self.conn.as_ref()) {
             let _ =
                 chronicle_core::storage::set_meta(conn, "ui_zoom_factor", Some(&format!("{z:.2}")));
+        }
+        if let Some(d) = density_pick {
+            theme::set_density(d);
+            if let Some(conn) = self.conn.as_ref() {
+                let _ = chronicle_core::storage::set_meta(
+                    conn,
+                    theme::Density::META_KEY,
+                    Some(d.as_str()),
+                );
+            }
         }
         if let (Some(on), Some(conn)) = (spans_toggle, self.conn.as_ref()) {
             let value = on.then_some("1");

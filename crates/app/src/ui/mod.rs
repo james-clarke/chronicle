@@ -127,6 +127,17 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                     .flatten()
             })
             .is_some_and(|v| v == "1");
+    if let Some(d) = boot_conn
+        .as_ref()
+        .and_then(|c| {
+            chronicle_core::storage::get_meta(c, theme::Density::META_KEY)
+                .ok()
+                .flatten()
+        })
+        .and_then(|s| theme::Density::parse(&s))
+    {
+        theme::set_density(d);
+    }
     drop(boot_conn);
     let composited = compositor_active();
     let pad = if composited { SHADOW_PAD } else { 0.0 };
