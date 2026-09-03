@@ -138,6 +138,16 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Sign in to Google Calendar (loopback OAuth) and store the refresh
+    /// token in `<data dir>/google.toml`.
+    GcalLogin {
+        /// OAuth client id; falls back to $CHRONICLE_GOOGLE_CLIENT_ID.
+        #[arg(long)]
+        client_id: Option<String>,
+        /// OAuth client secret; falls back to $CHRONICLE_GOOGLE_CLIENT_SECRET.
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -209,6 +219,10 @@ fn main() -> anyhow::Result<()> {
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
+        Cmd::GcalLogin {
+            client_id,
+            client_secret,
+        } => gcal_login(&data_dir, client_id, client_secret),
     }
 }
 
@@ -2033,7 +2047,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     spawn_signal_handler(ctrl_tx.clone())?;
     spawn_tray(ctrl_tx.clone())?;
     spawn_ctrl_listener(listener, ctrl_tx)?;
-    spawn_capture(&config, tx.clone())?;
+    spawn_capture(&config, data_dir, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
     let api_key = wakapi_api_key(&conn)?;
     let server_error = match chronicle_server::spawn(&config, tx, api_key) {
@@ -2736,7 +2750,7 @@ fn on_low_battery() -> bool {
 const SESSIONIZE_EVERY: Duration = Duration::from_secs(15);
 
 #[cfg(target_os = "linux")]
-fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+fn spawn_capture(config: &Config, data_dir: &Path, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
     use chronicle_capture::FocusProvider;
     use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
 
@@ -2761,7 +2775,8 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
     spawn_ai_sessions_capture(config, tx.clone())?;
     spawn_github_capture(config, tx.clone())?;
     spawn_shell_capture(config, tx.clone())?;
-    spawn_mic_capture(config, tx)
+    spawn_mic_capture(config, tx.clone())?;
+    spawn_gcal_capture(config, data_dir, tx)
 }
 
 /// Mic-in-use watcher via `pw-dump`: optional, never load-bearing.
@@ -2897,8 +2912,164 @@ fn spawn_shell_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Res
     Ok(())
 }
 
+/// Google Calendar poller: opt-in and only once `chronicle gcal-login` has
+/// written the token file; never load-bearing.
+fn spawn_gcal_capture(
+    config: &Config,
+    data_dir: &Path,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::gcal::{GcalProvider, Tokens, token_path};
+
+    if !config.google_calendar {
+        return Ok(());
+    }
+    let path = token_path(data_dir);
+    if !path.exists() {
+        tracing::warn!(
+            "google_calendar = true but no {}: run `chronicle gcal-login`",
+            path.display()
+        );
+        return Ok(());
+    }
+    let tokens = match Tokens::load(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("google_calendar: {} unreadable: {e}", path.display());
+            return Ok(());
+        }
+    };
+    let provider = GcalProvider::new(tokens);
+    std::thread::Builder::new()
+        .name("gcal".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("google calendar provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// `chronicle gcal-login`: OAuth desktop flow. Opens the consent screen in
+/// the browser, takes the code off an ephemeral loopback port, exchanges it
+/// and writes `<data dir>/google.toml` (mode 0600).
+fn gcal_login(
+    data_dir: &Path,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::gcal;
+
+    let client_id = flag_or_env(client_id, "CHRONICLE_GOOGLE_CLIENT_ID")
+        .context("no OAuth client id: pass --client-id or set CHRONICLE_GOOGLE_CLIENT_ID")?;
+    let client_secret = flag_or_env(client_secret, "CHRONICLE_GOOGLE_CLIENT_SECRET").context(
+        "no OAuth client secret: pass --client-secret or set CHRONICLE_GOOGLE_CLIENT_SECRET",
+    )?;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let redirect_uri = format!("http://{}", listener.local_addr()?);
+    let state = random_hex(16)?;
+    let endpoints = gcal::Endpoints::default();
+    let url = gcal::auth_url(&endpoints, &client_id, &redirect_uri, &state);
+    let _ = Command::new("xdg-open")
+        .arg(&url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    println!("waiting for Google on {redirect_uri}; if no browser opened, visit:\n{url}");
+
+    let code = wait_for_oauth_code(&listener, &state)?;
+    let grant = gcal::exchange_code(&endpoints, &client_id, &client_secret, &code, &redirect_uri)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let refresh_token = grant.refresh_token.context(
+        "Google returned no refresh token: remove Chronicle under \
+         myaccount.google.com/permissions and sign in again",
+    )?;
+    let email = gcal::account_email(&endpoints, &grant.access_token).unwrap_or_default();
+    std::fs::create_dir_all(data_dir)?;
+    let path = gcal::token_path(data_dir);
+    gcal::Tokens {
+        client_id,
+        client_secret,
+        refresh_token,
+        email: email.clone(),
+    }
+    .save(&path)
+    .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+    let who = if email.is_empty() {
+        "the primary calendar".to_owned()
+    } else {
+        email
+    };
+    println!(
+        "signed in as {who} \u{b7} token in {} \u{b7} turn Google Calendar on in \
+         Settings \u{203a} Connections and restart the daemon",
+        path.display()
+    );
+    Ok(())
+}
+
+fn flag_or_env(flag: Option<String>, var: &str) -> Option<String> {
+    flag.or_else(|| std::env::var(var).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// `n` bytes from the OS CSPRNG, hex-encoded.
+fn random_hex(n: usize) -> anyhow::Result<String> {
+    use std::io::Read;
+
+    let mut buf = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The browser's redirect carries the code; anything else on the port (a
+/// favicon probe, a stray hit) is answered and ignored.
+fn wait_for_oauth_code(listener: &std::net::TcpListener, state: &str) -> anyhow::Result<String> {
+    use chronicle_capture::gcal::redirect_param;
+    use std::io::{BufRead, BufReader, Write};
+
+    for stream in listener.incoming() {
+        let mut stream = stream?;
+        let mut line = String::new();
+        BufReader::new(&stream).read_line(&mut line)?;
+        let code = redirect_param(&line, "code");
+        let error = redirect_param(&line, "error");
+        let body = match (&code, &error) {
+            (Some(_), _) => "Chronicle is signed in. You can close this tab.",
+            (_, Some(_)) => "Google refused the sign-in; check the terminal.",
+            _ => "Waiting for Google.",
+        };
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.flush();
+        if let Some(err) = error {
+            bail!("Google returned {err}");
+        }
+        if let Some(code) = code {
+            if redirect_param(&line, "state").as_deref() != Some(state) {
+                bail!("OAuth state mismatch \u{2014} ignoring the redirect");
+            }
+            return Ok(code);
+        }
+    }
+    bail!("the loopback listener closed before the code arrived")
+}
+
 #[cfg(not(target_os = "linux"))]
-fn spawn_capture(_config: &Config, _tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+fn spawn_capture(
+    _config: &Config,
+    _data_dir: &Path,
+    _tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
     bail!("capture on this platform lands in M9/M10")
 }
 

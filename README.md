@@ -84,6 +84,29 @@ pub trait AfkProvider:  Send { fn idle_ms(&self) -> Result<u64>; }              
 
 Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(ActivityEvent)` into `activity_events`, never `events`: git (`git_repos`), Claude Code transcripts (`ai_session_dirs`, default `~/.claude/projects`, first prompt clipped to 120 chars is all that is stored), GitHub PRs via the user's `gh` (`github_prs = true`, off by default), mic-in-use via `pw-dump` (`mic_capture`, Linux), atuin shell history (`shell_history = true`, off by default: install atuin and run `atuin import auto` once, then Chronicle reads `~/.local/share/atuin/history.db` read-only every 60 s and keeps only cwd, program name and duration — never the command line). Each runs on its own thread and is never load-bearing.
 
+## Local sources
+
+Opt-in collectors with a setup step of their own. Each runs on its own thread
+and is never load-bearing.
+
+**Google Calendar** (`google_calendar = true`, or the Local sources switch in
+Settings › Connections): the primary calendar only, polled every 5 min over
+yesterday → tomorrow with the read-only `calendar.events.readonly` scope.
+Timed events become `meeting` spans (event id, title, start/end — nothing
+else); all-day events and events declined in the invite are skipped, and a
+cancelled event is tombstoned to zero length so it stops covering time.
+
+1. In Google Cloud, create an OAuth client of type **Desktop app** in the
+   workspace that owns the calendar. Publish it as an **Internal** Workspace
+   app: refresh tokens of an external app in "testing" expire after 7 days.
+2. `chronicle gcal-login --client-id … --client-secret …` (or set
+   `CHRONICLE_GOOGLE_CLIENT_ID` / `CHRONICLE_GOOGLE_CLIENT_SECRET`). It opens
+   the consent screen, takes the redirect on `127.0.0.1:<ephemeral port>` and
+   writes `<data dir>/google.toml` at mode 0600 (client id/secret, refresh
+   token, account email).
+3. Turn Google Calendar on under Settings › Connections → Local sources and
+   restart the daemon.
+
 ## Storage
 
 SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks` (identity: label, project, open/closed, user/derived), `intervals` (time blocks, FK task+batch), `corrections` (kind: rename/reassign/merge), `chat_messages`, `meta`; FTS5 over `spans.title` + `tasks.label`. Data dir: XDG / `%APPDATA%` / `~/Library/Application Support`.

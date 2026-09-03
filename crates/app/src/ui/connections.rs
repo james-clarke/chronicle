@@ -436,6 +436,7 @@ pub(super) struct LocalSources {
     pub github_prs: bool,
     pub mic_capture: bool,
     pub shell_history: bool,
+    pub google_calendar: bool,
 }
 
 impl LocalSources {
@@ -445,6 +446,7 @@ impl LocalSources {
             github_prs: c.github_prs,
             mic_capture: c.mic_capture,
             shell_history: c.shell_history,
+            google_calendar: c.google_calendar,
         }
     }
 
@@ -453,6 +455,7 @@ impl LocalSources {
         c.github_prs = self.github_prs;
         c.mic_capture = self.mic_capture;
         c.shell_history = self.shell_history;
+        c.google_calendar = self.google_calendar;
     }
 }
 
@@ -571,10 +574,13 @@ pub(super) struct Connections {
     repo_add: String,
     repo_error: Option<String>,
     repo_arm_remove: Option<usize>,
+    /// `google.toml` as found at load: `None` = not signed in, the string is
+    /// the account (empty when the login could not read it).
+    google_account: Option<String>,
 }
 
 impl Connections {
-    pub(super) fn load(mcp_path: PathBuf, conn: Option<&Connection>) -> Self {
+    pub(super) fn load(mcp_path: PathBuf, data_dir: &Path, conn: Option<&Connection>) -> Self {
         let (mcp, mcp_error) = match McpConfig::load(&mcp_path) {
             Ok(cfg) => (cfg, None),
             Err(e) => (McpConfig::default(), Some(e.to_string())),
@@ -617,6 +623,11 @@ impl Connections {
             repo_add: String::new(),
             repo_error: None,
             repo_arm_remove: None,
+            google_account: chronicle_capture::gcal::Tokens::load(
+                &chronicle_capture::gcal::token_path(data_dir),
+            )
+            .ok()
+            .map(|t| t.email),
         }
     }
 
@@ -1148,7 +1159,12 @@ impl Connections {
         // The heartbeat routes run with the daemon's endpoint: no config key
         // to switch, so the row's switch is a local always-on flag.
         let mut heartbeats_on = true;
-        let mut rows: [SourceRow; 5] = [
+        let gcal_detail = match self.google_account.as_deref() {
+            Some("") => "primary calendar every 5 min".to_owned(),
+            Some(email) => format!("primary calendar every 5 min \u{b7} {email}"),
+            None => "primary calendar every 5 min \u{b7} read-only, events scope".to_owned(),
+        };
+        let mut rows: [SourceRow; 6] = [
             (
                 "Claude Code sessions",
                 &mut sessions_on,
@@ -1184,6 +1200,15 @@ impl Connections {
                 &[ActivityKind::Edit],
                 "vim-wakatime and friends post to this machine \u{b7} folded into edit spans per project"
                     .to_owned(),
+            ),
+            (
+                "Google Calendar",
+                &mut src.google_calendar,
+                self.google_account
+                    .is_none()
+                    .then(|| "not signed in: run `chronicle gcal-login`".to_owned()),
+                &[ActivityKind::Meeting],
+                gcal_detail,
             ),
         ];
         for (name, on, blocker, kinds, detail) in rows.iter_mut() {

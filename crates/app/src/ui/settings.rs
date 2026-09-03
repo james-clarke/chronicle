@@ -42,7 +42,8 @@ impl SettingsPanel {
     ) -> Result<Self, String> {
         let config =
             chronicle_core::config::Config::load(config_path).map_err(|e| e.to_string())?;
-        let connections = super::connections::Connections::load(config.mcp_path(data_dir), conn);
+        let connections =
+            super::connections::Connections::load(config.mcp_path(data_dir), data_dir, conn);
         Ok(Self {
             batch_minutes: config.batch_minutes,
             afk_close_secs: config.afk_close_secs,
