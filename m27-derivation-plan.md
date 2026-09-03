@@ -250,7 +250,7 @@ What landed: `DeriveModel` (backend + mmap'd model) and `DeriveSession` (one con
 
 Deviations: the idle exit is the worker's own `recv_timeout`, with the daemon's kill as a backstop, as written. No stub-model feature flag: the protocol has a serde round-trip test and the timeout/idle rule is a pure function with tests; the end-to-end check was a manual `derive-worker` run against a DB copy (ready → 196 progress pieces → done → idle exit after the configured 5 s).
 
-Numbers (release build, this box loaded by the replay baseline and a concurrent build, so absolute times are 2–4× production): bench batch 67 then 68 through one session — 67: 2126 prompt tokens, 0 cached; 68: 2733 prompt tokens, 1276 cached (the rendered instruction prefix), same intervals as the one-shot runs. `batches.derive_ms` after a day of soak goes here.
+Numbers (release build, this box loaded by the replay baseline and a concurrent build, so absolute times are 2–4× production): bench batch 67 then 68 through one session — 67: 2126 prompt tokens, 0 cached; 68: 2733 prompt tokens, 1276 cached (the rendered instruction prefix), same intervals as the one-shot runs. First two production derives after the deploy (14:00, load 8–10 from the replay baseline running alongside): batch 72 — 3237 prompt tokens, 0 cached, prompt eval 151 s, 179 gen tokens in 49 s; batch 73 through the same resident worker — 2889 prompt tokens, 1382 cached, prompt eval 76 s, 198 gen tokens in 60 s, 139.9 s wall (`batches.derive_ms`). The cache halves prompt eval; generation is the rest, and the day of soak on a quiet box is still to come.
 
 ### Chunk 4 — batch boundaries, live tier, streaming row (2026-09-03)
 
