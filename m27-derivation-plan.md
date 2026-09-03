@@ -1,6 +1,6 @@
 # M27 — Derivation: accurate, fast, visible
 
-Status: **planned** (2026-09-03), no code. Research session: four sub-agents (daemon scheduling + logs, live DB statistics, feed/timeline surfaces, eval history) plus live benches of both model presets on batches 66–68. Every "today" claim below is verified in code or data with a `file:line`; every number comes from the live DB, the daemon log, or a bench run on this machine (Ryzen 5 5625U, 6 cores, 14 GB, Vega iGPU, no discrete GPU).
+Status: **chunk 1 shipped** (2026-09-03, a899606), chunks 2–7 planned. Research session: four sub-agents (daemon scheduling + logs, live DB statistics, feed/timeline surfaces, eval history) plus live benches of both model presets on batches 66–68. Every "today" claim below is verified in code or data with a `file:line`; every number comes from the live DB, the daemon log, or a bench run on this machine (Ryzen 5 5625U, 6 cores, 14 GB, Vega iGPU, no discrete GPU).
 
 Numbering: m26 (daily driver) is in flight in another session. The teams doc reserved m27 for "publish outward" and framed derivation quality as the gate for it (`teams-direction.md:289`); this milestone takes m27 and publishing slides to m28. None of the chunks below touch m26's files (Home layout, calendar, Wakapi, atuin, intent, Jira write-back). m26 chunks 3–4 will add cwd/file evidence that chunk 5 here should consume once both land.
 
@@ -210,4 +210,25 @@ Read the live DB read-only only: `python3 -c 'import sqlite3; sqlite3.connect("f
 
 ## Shipped
 
-(nothing yet)
+### Chunk 1 — interval hygiene (2026-09-03, a899606 + backfill fix)
+
+What landed: `merge::coalesce` (overlap repair, then adjacent same-slot join across unlabelled gaps under 2 min with no AFK ≥ 5 min or user row between; unit-agnostic so the backfill reuses it in ms), called between `link_intervals` and `clamp_intervals` in the worker and before `resolve` in bench; `task_output_v4.gbnf` + `derive_v4.txt` (cap 8, worked merged-lines example, "an interval under 3 minutes needs a goal change on both sides"); `MAX_GEN` 600, `digest::MAX_TOKENS` 2200; hidden `chronicle backfill-coalesce --since YYYY-MM-DD [--dry-run]`; `max_intervals` eval check (day3_sms cap 4). Overlap trimming already existed in `clamp_intervals`; the finding above overstated that.
+
+Two deviations from the plan text, both from bench evidence:
+
+- Keys are `ref,label,project,start,end,confidence`, not `r,l,p,s,e,c`. With one-letter keys 4B reads `r` as an ordinal (second interval → `r: 2` → whichever open task is listed second): day3_sms fell from 8/10 to 5/9 with the 19–26 SMS range linked to the chronicle task. With the words restored it is back to 8/10, identical failures to v3. Only the two offset keys shortened (about 8 tokens per interval).
+- `/no_think` stays as line 1: the 1.7B preset is the thinking-mode Qwen3, and the line costs three tokens.
+- The worked example uses a neutral shop repo, not chronicle evidence, so the example cannot bleed into labels.
+
+Numbers (4B, this box, load 10–14 from a concurrent release bench in another session, so wall times are inflated ~2× against the 120 s production median):
+
+| case | v3 (same binary, prompt/grammar swapped) | v4 |
+|---|---|---|
+| day3_sms | 2 intervals, 8/10 | 2 intervals (0–26 SMS, 26–27 chronicle), 8/10 |
+| day4_heroku | 3 intervals, 5/6 | 2 intervals, 5/6 |
+| batch 67 | 12 intervals / 3 tasks (plan bench) | 3 intervals / 3 tasks, 224 s under load |
+| batch 68 | 3 intervals / 3 tasks (plan bench) | 2 intervals / 2 tasks, 141 s under load |
+
+Backfill on the live DB (`.bak-m27c1` taken first, 2026-08-20 onward): 35 batches changed, derived rows 370 → 186 (13 pinned by `corrections.interval_id` stay put), median interval 2.0 → 6.0 min, share under 5 min 71% → 41%. The one overlap left (batch 64, a user row over a derived one) predates the backfill.
+
+Still open after chunk 1, on purpose: labels on batches 66–68 remain wrong the way findings 2 and 5 describe (declared-task magnet, poisoned corrections) — that is chunk 5, scored by chunk 2's replay. Acceptance check pending a day of soak: feed shows no adjacent same-task rows; `batches.derive_ms` does not exist until chunk 2, so the speed claim is bench-only for now.
