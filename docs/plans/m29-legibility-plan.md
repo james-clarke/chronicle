@@ -194,3 +194,31 @@ diagnosis. 8 last. Each chunk: tests + clippy, screenshot check, deploy via
 - Standup body layout beyond what chunk 1 changes.
 - Mac / Windows builds. The site shows placement; the footer still says
   Linux today.
+
+## Shipped
+
+### Chunk 1 — row grammar (2026-09-03)
+
+What landed: `ListRow` (`theme.rs`) rebuilt on the grammar above — an
+optional mono `.time()` column (`TIME_COL` 44), an always-reserved status
+slot (`STATUS_COL` 12: `.dot()`, `.ring()` for unclaimed, `.bar()` painted
+inside the slot rather than at the row edge), titles wrap to two lines by
+default, chips moved to their own line under the title, and a `.meta(state,
+text)` line (tinted Medium state word, then dim text) with `.hover()` for the
+pipeline detail; `.subtitle()` is `.meta(None, ..)`. Feed rows lead with the
+block start, claim rows wear the task dot, unclaimed rows a hollow ring; the
+state word is `to confirm` / `live` (amber), `kept` (green), `unsorted` /
+`new` / `moved out` (dim); the span and source/confidence moved to the meta
+hover. `theme::humanize_title` turns a shell-prompt title
+(`sam@workstation:~/dev/contoso`) into `contoso · Terminator`; other raw
+titles keep one line. `ai_summary_line` → `summary_line`: Body, `TEXT_DIM`,
+no italics, two lines then `…` with the whole text on hover (cards), full
+wrap in the detail pane. Timeline cards use the same builder (range and top
+evidence as the meta line, project/declared as chips, summary indented to
+the title x); the detail pane's chips start at the title x too. Working on
+(bar) and Recently closed (dot) share one title x.
+
+Verified in the sandbox at 400×640 and 900×700: Home (Working on, Recently
+closed expanded, feed with claimed and unclaimed rows), timeline lanes with
+cards. Shots in `site/img/src/` (`home`, `home-wide`, `timeline-lanes`,
+`timeline-wide`) for chunk 8. 168 tests, clippy clean.
