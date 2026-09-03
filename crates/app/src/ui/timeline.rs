@@ -13,7 +13,7 @@ impl TimelineApp {
     pub(super) fn timeline_ui(&mut self, ui: &mut egui::Ui) {
         // Filtered index sets; empty query keeps everything. Background
         // scraps leave the card list for the collapsed strip below it.
-        let q = self.filter.trim().to_lowercase();
+        let q = self.filter_lc.clone();
         let (bg_vis, group_vis): (Vec<usize>, Vec<usize>) = (0..self.groups.len())
             .filter(|&g| {
                 let t = &self.groups[g];

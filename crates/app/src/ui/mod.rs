@@ -213,10 +213,8 @@ fn spawn_stdin_listener(ctx: egui::Context, visible: Arc<AtomicBool>) {
 
 /// mcp.toml as the daemon resolves it: the config override when set, else
 /// the data dir's copy.
-fn mcp_path(config_path: &Path, data_dir: &Path) -> PathBuf {
-    chronicle_core::config::Config::load(config_path)
-        .map(|c| c.mcp_path(data_dir))
-        .unwrap_or_else(|_| data_dir.join("mcp.toml"))
+fn mcp_path(config: Option<&chronicle_core::config::Config>, data_dir: &Path) -> PathBuf {
+    config.map_or_else(|| data_dir.join("mcp.toml"), |c| c.mcp_path(data_dir))
 }
 
 struct SpanRow {
@@ -507,9 +505,14 @@ struct TimelineApp {
     conn: Option<Connection>,
     tz: TimeZone,
     day: civil::Date,
+    /// `day.strftime("%a %-d %b %Y")`, cached by `set_day`.
+    day_header: String,
     view: View,
     /// Monday of the week the Reports view shows.
     week_anchor: civil::Date,
+    /// The week's date range as shown in the nav row, cached by
+    /// `set_week_anchor`.
+    week_range: String,
     report: Option<chronicle_core::report::RangeReport>,
     /// Insight strip + narrative state for the shown report week.
     week_insights: Option<WeekInsights>,
@@ -526,6 +529,9 @@ struct TimelineApp {
     unplaced: Vec<ActivityRow>,
     open_tasks: Vec<OpenRow>,
     closed_tasks: Vec<OpenRow>,
+    /// Reassignment targets (open tasks + today's groups, deduped): rebuilt
+    /// with the reload, not per frame.
+    merge_candidates: Vec<(i64, String)>,
     /// The shown day's feed (m24): newest blocks first, intervals of any
     /// source and unassigned runs alike; plus the day's whole unassigned
     /// total.
@@ -562,6 +568,9 @@ struct TimelineApp {
     spans_debug: bool,
     /// Case-insensitive substring filter over the day's rows.
     filter: String,
+    /// `filter.trim().to_lowercase()`, recomputed only when `filter`
+    /// changes rather than every frame.
+    filter_lc: String,
     new_label: String,
     new_project: String,
     edit: Option<EditState>,
@@ -578,6 +587,8 @@ struct TimelineApp {
     /// Some = chat panel open, warm worker child alive.
     chat: Option<ChatPanel>,
     config_path: PathBuf,
+    /// config.toml as of the last reload; None when it failed to parse.
+    config: Option<chronicle_core::config::Config>,
     /// Some = settings window open.
     settings: Option<SettingsPanel>,
     /// Some = unassigned-triage takeover open (Home → Unassigned → organize).
@@ -659,6 +670,9 @@ struct StandupRow {
     /// Civil day the draft summarizes (ISO).
     day: String,
     content: String,
+    /// Non-meta task blocks in `content`, against the tasks known when the
+    /// draft loaded; the collapsed title's count (avoids reparsing per frame).
+    task_count: usize,
 }
 
 /// Home resume card data.
@@ -691,6 +705,16 @@ impl TimelineApp {
     ) -> Self {
         let tz = TimeZone::system();
         let day = Zoned::now().with_time_zone(tz.clone()).date();
+        let day_header = day.strftime("%a %-d %b %Y").to_string();
+        let week_anchor = chronicle_core::timeref::week_start(day).unwrap_or(day);
+        let week_range = match week_anchor.checked_add(6.days()) {
+            Ok(sun) => format!(
+                "{} \u{2013} {}",
+                week_anchor.strftime("%-d %b"),
+                sun.strftime("%-d %b %Y")
+            ),
+            Err(_) => week_anchor.to_string(),
+        };
         Self {
             data_dir,
             db_path,
@@ -698,6 +722,7 @@ impl TimelineApp {
             conn: None,
             tz,
             day,
+            day_header,
             // `CHRONICLE_UI_VIEW` picks the start tab (visual-test loop).
             view: match std::env::var("CHRONICLE_UI_VIEW").as_deref() {
                 Ok("timeline") => View::Timeline,
@@ -705,7 +730,8 @@ impl TimelineApp {
                 Ok("chat") => View::Chat,
                 _ => View::Home,
             },
-            week_anchor: chronicle_core::timeref::week_start(day).unwrap_or(day),
+            week_anchor,
+            week_range,
             report: None,
             week_insights: None,
             narrative_job: None,
@@ -716,6 +742,7 @@ impl TimelineApp {
             unplaced: Vec::new(),
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
+            merge_candidates: Vec::new(),
             feed: Vec::new(),
             progress: None,
             tidy: None,
@@ -732,6 +759,7 @@ impl TimelineApp {
             band_mode: timeline::BandMode::default(),
             spans_debug: false,
             filter: String::new(),
+            filter_lc: String::new(),
             new_label: String::new(),
             new_project: String::new(),
             edit: None,
@@ -743,6 +771,7 @@ impl TimelineApp {
             warning: None,
             chat: None,
             config_path,
+            config: None,
             settings: None,
             triage: None,
             triage_requested: false,
@@ -783,22 +812,51 @@ impl TimelineApp {
         if self.composited { SHADOW_PAD } else { 0.0 }
     }
 
+    /// Sets the shown day and its cached header string together — the
+    /// timeline nav row reads `day_header` instead of formatting per frame.
+    fn set_day(&mut self, day: civil::Date) {
+        self.day = day;
+        self.day_header = day.strftime("%a %-d %b %Y").to_string();
+    }
+
+    /// Sets the shown week and its cached range string together — the
+    /// reports nav row reads `week_range` instead of formatting per frame.
+    fn set_week_anchor(&mut self, anchor: civil::Date) {
+        self.week_anchor = anchor;
+        self.week_range = match anchor.checked_add(6.days()) {
+            Ok(sun) => format!(
+                "{} \u{2013} {}",
+                anchor.strftime("%-d %b"),
+                sun.strftime("%-d %b %Y")
+            ),
+            Err(_) => anchor.to_string(),
+        };
+    }
+
     fn shift_day(&mut self, days: i64) {
         if let Ok(day) = self.day.checked_add(days.days()) {
-            self.day = day;
+            self.set_day(day);
             self.loaded_at = None;
         }
     }
 
     fn shift_week(&mut self, weeks: i64) {
         if let Ok(anchor) = self.week_anchor.checked_add((weeks * 7).days()) {
-            self.week_anchor = anchor;
+            self.set_week_anchor(anchor);
             self.loaded_at = None;
         }
     }
 
-    /// Reassignment targets: every task in sight (open + today's).
+    /// Reassignment targets: every task in sight (open + today's). Cheap
+    /// clone of the cache rebuilt in `reload_if_stale` — call sites need an
+    /// owned copy (they hold it alongside other `&mut self` field borrows).
     fn merge_candidates(&self) -> Vec<(i64, String)> {
+        self.merge_candidates.clone()
+    }
+
+    /// Rebuilds the `merge_candidates` cache from the current groups/open
+    /// tasks. Called from `reload_if_stale`, not per frame.
+    fn rebuild_merge_candidates(&mut self) {
         let mut candidates: Vec<(i64, String)> = Vec::new();
         for t in &self.open_tasks {
             candidates.push((t.task_id, t.label.clone()));
@@ -808,7 +866,7 @@ impl TimelineApp {
                 candidates.push((g.task_id, g.label.clone()));
             }
         }
-        candidates
+        self.merge_candidates = candidates;
     }
 
     /// The posting thread's verdict (m26): the dialog's result line, and a
@@ -843,6 +901,7 @@ impl TimelineApp {
             return;
         }
         self.loaded_at = Some(Instant::now());
+        self.config = chronicle_core::config::Config::load(&self.config_path).ok();
         match self.load_spans().and_then(|spans| {
             self.load_intent()?;
             let groups = self.load_groups()?;
@@ -866,6 +925,7 @@ impl TimelineApp {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+        self.rebuild_merge_candidates();
         if let Some(conn) = self.conn.as_ref()
             && let Ok(order) = chronicle_core::storage::project_order(conn)
         {
@@ -879,6 +939,9 @@ impl TimelineApp {
             self.pipeline = self.conn.as_ref().map(|c| {
                 settings::PipelineInfo::load(c, &self.data_dir, &self.sock_path, panel.config())
             });
+        }
+        if let (Some(conn), Some(chat)) = (self.conn.as_ref(), self.chat.as_mut()) {
+            chat.refresh_history(conn);
         }
         let today = jiff::Zoned::now().with_time_zone(self.tz.clone()).date();
         self.tidy = if self.day == today {
@@ -894,7 +957,7 @@ impl TimelineApp {
             self.open_triage();
         }
         self.mcp_actions =
-            chronicle_mcp::McpConfig::load(&mcp_path(&self.config_path, &self.data_dir))
+            chronicle_mcp::McpConfig::load(&mcp_path(self.config.as_ref(), &self.data_dir))
                 .map(|c| c.action_calls)
                 .unwrap_or_default();
         self.poll_ai_jobs();
@@ -948,11 +1011,24 @@ impl TimelineApp {
                 .checked_sub(1.day())
                 .map(|d| d.to_string());
             let prev_day = self.standup.as_ref().map(|s| s.day.clone());
+            let labels: Vec<&str> = self
+                .open_tasks
+                .iter()
+                .chain(&self.closed_tasks)
+                .map(|t| t.label.as_str())
+                .collect();
             self.standup = yesterday.ok().and_then(|day| {
                 chronicle_core::storage::get_standup_draft(conn, &day)
                     .ok()
                     .flatten()
-                    .map(|(_, content)| StandupRow { day, content })
+                    .map(|(_, content)| {
+                        let task_count = home::standup_task_count(&content, &labels);
+                        StandupRow {
+                            day,
+                            content,
+                            task_count,
+                        }
+                    })
             });
             // A draft first seen this pass starts collapsed when an earlier
             // launch already showed it (`standup_read:<day>`), open when new.
@@ -982,9 +1058,7 @@ impl TimelineApp {
                 .and_then(|s| timeline::BandMode::parse(&s))
                 .unwrap_or_default();
         }
-        let model_path = chronicle_core::config::Config::load(&self.config_path)
-            .ok()
-            .and_then(|c| c.model_path);
+        let model_path = self.config.as_ref().and_then(|c| c.model_path.clone());
         self.model_missing =
             chronicle_derive::model::resolve(model_path.as_deref(), &self.data_dir).is_none();
         if let Some(conn) = self.conn.as_ref()
@@ -1252,11 +1326,8 @@ impl TimelineApp {
                 chronicle_core::storage::get_checkpoint(conn, group.task_id).unwrap_or(None);
         }
         // Background classification last: it needs journal/checkpoint state.
-        let background_ms = i64::from(
-            chronicle_core::config::Config::load(&self.config_path)
-                .map(|c| c.background_minutes)
-                .unwrap_or(10),
-        ) * 60_000;
+        let background_ms =
+            i64::from(self.config.as_ref().map_or(10, |c| c.background_minutes)) * 60_000;
         if background_ms > 0 {
             for group in &mut groups {
                 group.background = !group.declared
@@ -1303,9 +1374,10 @@ impl TimelineApp {
     /// nothing has moved for `task_stuck_days`. Both decorate the Working-on
     /// rows and the detail pane, so they load before either.
     fn load_intent(&mut self) -> anyhow::Result<()> {
-        let stuck_days = chronicle_core::config::Config::load(&self.config_path)
-            .unwrap_or_default()
-            .task_stuck_days;
+        let stuck_days = self.config.as_ref().map_or_else(
+            || chronicle_core::config::Config::default().task_stuck_days,
+            |c| c.task_stuck_days,
+        );
         let now = jiff::Timestamp::now();
         let today = now.to_zoned(self.tz.clone()).date().to_string();
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
@@ -1544,8 +1616,9 @@ impl TimelineApp {
                 // The declare input also accepts a ticket key or ticket URL:
                 // the key becomes the anchor (and the label, when the input
                 // is nothing but the key/URL) and context fetch starts.
-                let ticket = chronicle_core::config::Config::load(&self.config_path)
-                    .ok()
+                let ticket = self
+                    .config
+                    .as_ref()
                     .and_then(|c| regex::Regex::new(&c.ticket_regex).ok())
                     .and_then(|re| re.find(&input).map(|m| m.as_str().to_owned()));
                 let label = match &ticket {
@@ -1638,7 +1711,7 @@ impl TimelineApp {
                 result.map(|_| ())
             }
             Action::Post => {
-                let path = mcp_path(&self.config_path, &self.data_dir);
+                let path = mcp_path(self.config.as_ref(), &self.data_dir);
                 let Some(dialog) = self.post.as_mut() else {
                     return;
                 };
@@ -2096,15 +2169,24 @@ impl TimelineApp {
                                     ui.menu_button("\u{2026}", |ui| {
                                         if matches!(self.view, View::Timeline | View::Home) {
                                             ui.horizontal(|ui| {
-                                                ui.add(
-                                                    egui::TextEdit::singleline(&mut self.filter)
+                                                if ui
+                                                    .add(
+                                                        egui::TextEdit::singleline(
+                                                            &mut self.filter,
+                                                        )
                                                         .desired_width(120.0)
                                                         .hint_text("filter\u{2026}"),
-                                                );
+                                                    )
+                                                    .changed()
+                                                {
+                                                    self.filter_lc =
+                                                        self.filter.trim().to_lowercase();
+                                                }
                                                 if !self.filter.is_empty()
                                                     && ui.small_button("\u{d7}").clicked()
                                                 {
                                                     self.filter.clear();
+                                                    self.filter_lc.clear();
                                                 }
                                             });
                                             ui.separator();
@@ -2128,6 +2210,7 @@ impl TimelineApp {
                                             .clicked()
                                         {
                                             self.filter.clear();
+                                            self.filter_lc.clear();
                                         }
                                     }
                                 },
@@ -2158,17 +2241,16 @@ impl TimelineApp {
                                             self.shift_day(1);
                                         }
                                         if ui.button("today").clicked() {
-                                            self.day =
+                                            let today =
                                                 Zoned::now().with_time_zone(self.tz.clone()).date();
+                                            self.set_day(today);
                                             self.loaded_at = None;
                                         }
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(
-                                                    self.day.strftime("%a %-d %b %Y").to_string(),
-                                                )
-                                                .text_style(egui::TextStyle::Heading)
-                                                .color(theme::palette::TEXT),
+                                                egui::RichText::new(&self.day_header)
+                                                    .text_style(egui::TextStyle::Heading)
+                                                    .color(theme::palette::TEXT),
                                             )
                                             .truncate(),
                                         );
@@ -2204,22 +2286,13 @@ impl TimelineApp {
                                         if ui.button("this week").clicked() {
                                             let today =
                                                 Zoned::now().with_time_zone(self.tz.clone()).date();
-                                            self.week_anchor =
-                                                chronicle_core::timeref::week_start(today)
-                                                    .unwrap_or(today);
+                                            let anchor = chronicle_core::timeref::week_start(today)
+                                                .unwrap_or(today);
+                                            self.set_week_anchor(anchor);
                                             self.loaded_at = None;
                                         }
-                                        let sunday = self.week_anchor.checked_add(6.days()).ok();
-                                        let range = match sunday {
-                                            Some(sun) => format!(
-                                                "{} \u{2013} {}",
-                                                self.week_anchor.strftime("%-d %b"),
-                                                sun.strftime("%-d %b %Y")
-                                            ),
-                                            None => self.week_anchor.to_string(),
-                                        };
                                         ui.label(
-                                            egui::RichText::new(range)
+                                            egui::RichText::new(&self.week_range)
                                                 .text_style(egui::TextStyle::Heading)
                                                 .color(theme::palette::TEXT),
                                         );

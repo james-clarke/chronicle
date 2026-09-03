@@ -29,10 +29,13 @@ impl TimelineApp {
             };
             let today = Zoned::now().with_time_zone(self.tz.clone()).date();
             let content_w = theme::content_width(ui);
+            let day_totals: Vec<i64> = (0..r.days.len())
+                .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
+                .collect();
             egui::ScrollArea::vertical()
                 .auto_shrink(false)
                 .show(ui, |ui| {
-                    week_chart(ui, content_w, r, &today);
+                    week_chart(ui, content_w, r, &today, &day_totals);
                     if !r.projects.is_empty() && r.grand_total_ms > 0 {
                         ui.add_space(theme::SPACE_SM);
                         project_mix(ui, content_w, r);
@@ -51,7 +54,7 @@ impl TimelineApp {
                             narrative_card(ui, text);
                             ui.add_space(theme::CARD_GAP);
                         }
-                        focus_tiles(ui, content_w, wi, r);
+                        focus_tiles(ui, content_w, wi, r, &day_totals);
                         if !wi.top_apps.is_empty() {
                             ui.add_space(theme::SPACE_SM);
                             apps_bar(ui, content_w, wi);
@@ -80,7 +83,7 @@ impl TimelineApp {
         });
         if let Some((task_id, day)) = jump {
             self.selected_task = Some(task_id);
-            self.day = day;
+            self.set_day(day);
             self.loaded_at = None;
             self.view = super::View::Timeline;
         }
@@ -135,12 +138,15 @@ fn narrative_card(ui: &mut egui::Ui, text: &str) {
 
 /// Six stat tiles, three (two when narrow) across: Display value over icon +
 /// caption.
-fn focus_tiles(ui: &mut egui::Ui, width: f32, wi: &WeekInsights, r: &RangeReport) {
+fn focus_tiles(
+    ui: &mut egui::Ui,
+    width: f32,
+    wi: &WeekInsights,
+    r: &RangeReport,
+    day_totals: &[i64],
+) {
     use theme::icon;
     let m = &wi.metrics;
-    let day_totals: Vec<i64> = (0..r.days.len())
-        .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
-        .collect();
     let busiest = day_totals
         .iter()
         .enumerate()
@@ -432,10 +438,13 @@ fn busiest_day(r: &RangeReport, t: &TaskRow) -> jiff::civil::Date {
 /// Stacked per-day bars in task identity colors; today's label accented.
 /// Day totals live in the hover tooltip (a painted max-value label clipped at
 /// the widget's top edge); the hovered day's stack lightens and lifts.
-fn week_chart(ui: &mut egui::Ui, width: f32, r: &RangeReport, today: &jiff::civil::Date) {
-    let day_totals: Vec<i64> = (0..r.days.len())
-        .map(|d| r.tasks.iter().map(|t| t.by_day[d]).sum())
-        .collect();
+fn week_chart(
+    ui: &mut egui::Ui,
+    width: f32,
+    r: &RangeReport,
+    today: &jiff::civil::Date,
+    day_totals: &[i64],
+) {
     let max_ms = day_totals.iter().copied().max().unwrap_or(0);
     if max_ms == 0 {
         return;

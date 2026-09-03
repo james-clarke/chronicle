@@ -514,6 +514,19 @@ fn on_path(cmd: &str) -> bool {
     chronicle_core::config::resolve_command(cmd).contains('/')
 }
 
+/// `resolve_git_dir(repo).is_some()` per repo, index aligned with `repos`.
+fn repo_status(repos: &[String]) -> Vec<bool> {
+    repos
+        .iter()
+        .map(|p| chronicle_capture::git::resolve_git_dir(&expand_home(p)).is_some())
+        .collect()
+}
+
+/// First `ai_session_dirs` entry that doesn't exist, if any.
+fn missing_session_dir(dirs: &[String]) -> Option<String> {
+    dirs.iter().find(|d| !expand_home(d).is_dir()).cloned()
+}
+
 /// `mcpServers` JSON import: a path, the entries it parsed, a tick per row.
 struct ImportState {
     path: String,
@@ -607,10 +620,28 @@ pub(super) struct Connections {
     /// `google.toml` as found at load: `None` = not signed in, the string is
     /// the account (empty when the login could not read it).
     google_account: Option<String>,
+    /// `resolve_git_dir(repo).is_some()` per `git_repos` entry (index
+    /// aligned); refreshed at load and after add/remove, not per frame.
+    repo_resolved: Vec<bool>,
+    /// `gh`/`pw-dump` on PATH and the atuin db present; filesystem/PATH
+    /// checks that don't change within a settings session, so cached at
+    /// load instead of probed every frame.
+    gh_on_path: bool,
+    pw_dump_on_path: bool,
+    atuin_present: bool,
+    /// First `ai_session_dirs` entry that doesn't exist, if any; refreshed
+    /// at load and whenever the sessions toggle changes the dirs.
+    session_dir_missing: Option<String>,
 }
 
 impl Connections {
-    pub(super) fn load(mcp_path: PathBuf, data_dir: &Path, conn: Option<&Connection>) -> Self {
+    pub(super) fn load(
+        mcp_path: PathBuf,
+        data_dir: &Path,
+        conn: Option<&Connection>,
+        git_repos: &[String],
+        ai_session_dirs: &[String],
+    ) -> Self {
         let (mcp, mcp_error) = match McpConfig::load(&mcp_path) {
             Ok(cfg) => (cfg, None),
             Err(e) => (McpConfig::default(), Some(e.to_string())),
@@ -658,7 +689,18 @@ impl Connections {
             )
             .ok()
             .map(|t| t.email),
+            repo_resolved: repo_status(git_repos),
+            gh_on_path: on_path("gh"),
+            pw_dump_on_path: on_path("pw-dump"),
+            atuin_present: chronicle_capture::shell::default_db_path().is_file(),
+            session_dir_missing: missing_session_dir(ai_session_dirs),
         }
+    }
+
+    /// Re-derives `repo_resolved` after an add/remove; O(repos), not per
+    /// frame.
+    fn refresh_repo_status(&mut self, git_repos: &[String]) {
+        self.repo_resolved = repo_status(git_repos);
     }
 
     pub(super) fn ui(
@@ -938,7 +980,6 @@ impl Connections {
         let Some(state) = &mut self.import else {
             return;
         };
-        let existing = self.mcp.servers.clone();
         let mut close = false;
         let mut import = false;
         ui.add_space(theme::SPACE_XS);
@@ -957,7 +998,7 @@ impl Connections {
                         .hint_text("~/.claude.json"),
                 );
                 if theme::secondary_button(ui, "load").clicked() {
-                    state.load(&existing);
+                    state.load(&self.mcp.servers);
                 }
             });
             if let Some(e) = &state.error {
@@ -1146,7 +1187,7 @@ impl Connections {
         for (i, path) in git_repos.iter().enumerate() {
             let expanded = expand_home(path);
             let name = repo_name(&expanded);
-            let resolved = chronicle_capture::git::resolve_git_dir(&expanded).is_some();
+            let resolved = self.repo_resolved.get(i).copied().unwrap_or(false);
             // Chip stays short (kind + age) so the title survives at zoom
             // 1.15; the branch rides the path line, where it can truncate.
             let last = self.repo_last.get(&name);
@@ -1189,6 +1230,7 @@ impl Connections {
         if let Some(i) = remove {
             git_repos.remove(i);
             self.repo_arm_remove = None;
+            self.refresh_repo_status(git_repos);
         }
         ui.horizontal(|ui| {
             let w = ui.available_width();
@@ -1200,6 +1242,9 @@ impl Connections {
             );
             if theme::secondary_button(ui, "add").clicked() {
                 self.repo_error = self.add_repo(git_repos).err();
+                if self.repo_error.is_none() {
+                    self.refresh_repo_status(git_repos);
+                }
             }
         });
         if let Some(e) = &self.repo_error {
@@ -1214,17 +1259,12 @@ impl Connections {
         subhead(ui, "Local sources", |_| {});
         let width = ui.available_width();
         let mut sessions_on = !src.ai_session_dirs.is_empty();
-        let missing_dir = src
-            .ai_session_dirs
-            .iter()
-            .find(|d| !expand_home(d).is_dir())
-            .cloned();
+        let missing_dir = self.session_dir_missing.clone();
         let session_detail = if sessions_on {
             src.ai_session_dirs.join(", ")
         } else {
             "Claude Code transcripts under ~/.claude/projects".to_owned()
         };
-        let atuin_db = chronicle_capture::shell::default_db_path();
         let gcal_detail = match self.google_account.as_deref() {
             Some("") => "primary calendar every 5 min".to_owned(),
             Some(email) => format!("primary calendar every 5 min \u{b7} {email}"),
@@ -1241,21 +1281,21 @@ impl Connections {
             (
                 "GitHub pull requests",
                 &mut src.github_prs,
-                (!on_path("gh")).then(|| "gh not on PATH".to_owned()),
+                (!self.gh_on_path).then(|| "gh not on PATH".to_owned()),
                 &[ActivityKind::PrAuthored, ActivityKind::PrReviewed],
                 "gh search prs, authored + reviewed, every 5 min".to_owned(),
             ),
             (
                 "Calls (microphone in use)",
                 &mut src.mic_capture,
-                (!on_path("pw-dump")).then(|| "pw-dump not on PATH".to_owned()),
+                (!self.pw_dump_on_path).then(|| "pw-dump not on PATH".to_owned()),
                 &[ActivityKind::Call],
                 "pw-dump every 20 s \u{b7} each stretch becomes a call".to_owned(),
             ),
             (
                 "Shell history (atuin)",
                 &mut src.shell_history,
-                (!atuin_db.is_file()).then(|| "no atuin history.db".to_owned()),
+                (!self.atuin_present).then(|| "no atuin history.db".to_owned()),
                 &[ActivityKind::Shell],
                 "atuin history.db every 60 s \u{b7} cwd, program name and duration only".to_owned(),
             ),
@@ -1331,6 +1371,7 @@ impl Connections {
             } else {
                 Vec::new()
             };
+            self.session_dir_missing = missing_session_dir(&src.ai_session_dirs);
         }
     }
 

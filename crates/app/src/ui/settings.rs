@@ -119,8 +119,13 @@ impl SettingsPanel {
     ) -> Result<Self, String> {
         let config =
             chronicle_core::config::Config::load(config_path).map_err(|e| e.to_string())?;
-        let connections =
-            super::connections::Connections::load(config.mcp_path(data_dir), data_dir, conn);
+        let connections = super::connections::Connections::load(
+            config.mcp_path(data_dir),
+            data_dir,
+            conn,
+            &config.git_repos,
+            &config.ai_session_dirs,
+        );
         let counter = |prefix: &str| -> i64 {
             conn.and_then(|c| {
                 chronicle_core::storage::get_meta(c, &crate::day_counter_key(prefix))
@@ -412,7 +417,7 @@ impl TimelineApp {
         let autohide_now = self.autohide;
         let mut autohide_toggle: Option<bool> = None;
         let conn = self.conn.as_ref();
-        let pipeline = self.pipeline.clone();
+        let pipeline = self.pipeline.as_ref();
         let tz = self.tz.clone();
         let Some(panel) = &mut self.settings else {
             return;
@@ -560,7 +565,7 @@ impl TimelineApp {
                                     ui.weak("minutes (0 = off)");
                                     ui.end_row();
                                 });
-                            pipeline_card(ui, pipeline.as_ref(), &tz, panel, conn, &data_dir);
+                            pipeline_card(ui, pipeline, &tz, panel, conn, &data_dir);
 
                             section(ui, "Standup & journal", false, jump);
                             egui::Grid::new("settings_journal")

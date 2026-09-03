@@ -56,9 +56,10 @@ impl TimelineApp {
             let resume = self.resume.take().expect("checked above");
             self.selected_task = Some(resume.task_id);
             // The checkpointed work may be yesterday's — show its day.
-            self.day = chronicle_core::types::ms_to_ts(resume.ts)
+            let day = chronicle_core::types::ms_to_ts(resume.ts)
                 .to_zoned(self.tz.clone())
                 .date();
+            self.set_day(day);
             self.loaded_at = None;
             self.view = super::View::Timeline;
         } else if dismiss {
@@ -159,16 +160,7 @@ impl TimelineApp {
         // Collapsed: one line that says what is inside and that it was read.
         let title = match &self.standup {
             Some(s) if !open => {
-                let labels: Vec<&str> = self
-                    .open_tasks
-                    .iter()
-                    .chain(&self.closed_tasks)
-                    .map(|t| t.label.as_str())
-                    .collect();
-                let n = standup_blocks(&s.content, &labels)
-                    .iter()
-                    .filter(|b| !b.meta)
-                    .count();
+                let n = s.task_count;
                 let read = if self.standup_read_day.as_deref() == Some(s.day.as_str()) {
                     " \u{b7} read"
                 } else {
@@ -243,37 +235,55 @@ impl TimelineApp {
     }
 
     pub(super) fn home_ui(&mut self, ui: &mut egui::Ui) {
-        // Filtered index sets; empty query keeps everything.
-        let q = self.filter.trim().to_lowercase();
-        let open_vis: Vec<usize> = (0..self.open_tasks.len())
-            .filter(|&o| {
-                let t = &self.open_tasks[o];
-                matches_filter(&q, &t.label, t.project.as_deref())
-            })
-            .collect();
-        let closed_vis: Vec<usize> = (0..self.closed_tasks.len())
-            .filter(|&c| {
-                let t = &self.closed_tasks[c];
-                matches_filter(&q, &t.label, t.project.as_deref())
-            })
-            .collect();
-        let feed_vis: Vec<usize> = (0..self.feed.len())
-            .filter(|&f| {
-                let b = &self.feed[f];
-                b.claim
-                    .as_ref()
-                    .is_some_and(|c| matches_filter(&q, &c.label, c.project.as_deref()))
-                    || b.lines
-                        .iter()
-                        .any(|(app, title, _)| matches_filter(&q, title, Some(app)))
-            })
-            .collect();
-        let span_vis: Vec<usize> = (0..self.spans.len())
-            .filter(|&s| {
-                let sp = &self.spans[s];
-                matches_filter(&q, &sp.title, Some(&sp.app))
-            })
-            .collect();
+        // Filtered index sets; empty query keeps everything without a scan.
+        // Owned (not borrowed): later code in this fn calls `&mut self`
+        // methods while `q` is still in scope.
+        let q = self.filter_lc.clone();
+        let open_vis: Vec<usize> = if q.is_empty() {
+            (0..self.open_tasks.len()).collect()
+        } else {
+            (0..self.open_tasks.len())
+                .filter(|&o| {
+                    let t = &self.open_tasks[o];
+                    matches_filter(&q, &t.label, t.project.as_deref())
+                })
+                .collect()
+        };
+        let closed_vis: Vec<usize> = if q.is_empty() {
+            (0..self.closed_tasks.len()).collect()
+        } else {
+            (0..self.closed_tasks.len())
+                .filter(|&c| {
+                    let t = &self.closed_tasks[c];
+                    matches_filter(&q, &t.label, t.project.as_deref())
+                })
+                .collect()
+        };
+        let feed_vis: Vec<usize> = if q.is_empty() {
+            (0..self.feed.len()).collect()
+        } else {
+            (0..self.feed.len())
+                .filter(|&f| {
+                    let b = &self.feed[f];
+                    b.claim
+                        .as_ref()
+                        .is_some_and(|c| matches_filter(&q, &c.label, c.project.as_deref()))
+                        || b.lines
+                            .iter()
+                            .any(|(app, title, _)| matches_filter(&q, title, Some(app)))
+                })
+                .collect()
+        };
+        let span_vis: Vec<usize> = if q.is_empty() {
+            (0..self.spans.len()).collect()
+        } else {
+            (0..self.spans.len())
+                .filter(|&s| {
+                    let sp = &self.spans[s];
+                    matches_filter(&q, &sp.title, Some(&sp.app))
+                })
+                .collect()
+        };
         let candidates = self.merge_candidates();
 
         let mut pending: Option<Action> = None;
@@ -1108,6 +1118,16 @@ struct StandupBlock {
 /// (LLM drafts) or a `Task:` line (fallback); a `Next steps:` / `Next:`
 /// sentence is lifted out of the prose. `labels` are the known task labels,
 /// matched longest first so "foo bar" wins over "foo".
+/// Count of task blocks (non-meta) in a draft; the collapsed card title's
+/// count, cached on `StandupRow` when the draft loads instead of reparsed
+/// every frame.
+pub(super) fn standup_task_count(content: &str, labels: &[&str]) -> usize {
+    standup_blocks(content, labels)
+        .iter()
+        .filter(|b| !b.meta)
+        .count()
+}
+
 fn standup_blocks(content: &str, labels: &[&str]) -> Vec<StandupBlock> {
     let mut labels: Vec<&str> = labels.iter().copied().filter(|l| !l.is_empty()).collect();
     labels.sort_by_key(|l| std::cmp::Reverse(l.len()));

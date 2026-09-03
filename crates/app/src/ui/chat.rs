@@ -45,6 +45,9 @@ pub(super) struct ChatPanel {
     error: Option<String>,
     /// History row whose "×" was clicked once; the next click deletes.
     delete_arm: Option<i64>,
+    /// Past conversations for the history menu (id, last_ts, snippet);
+    /// refreshed with the 5 s reload, not queried per frame.
+    history: Vec<(i64, i64, String)>,
 }
 
 impl ChatPanel {
@@ -84,6 +87,9 @@ impl ChatPanel {
                 ctx.request_repaint();
             })?;
         let transcript = load_transcript(conn, conversation_id);
+        let history = conn
+            .map(|c| chronicle_core::storage::list_conversations(c, 12).unwrap_or_default())
+            .unwrap_or_default();
         Ok(Self {
             child,
             rx,
@@ -95,7 +101,13 @@ impl ChatPanel {
             busy: false,
             error: None,
             delete_arm: None,
+            history,
         })
+    }
+
+    /// Refreshes the history-menu cache; called from `reload_if_stale`.
+    pub(super) fn refresh_history(&mut self, conn: &Connection) {
+        self.history = chronicle_core::storage::list_conversations(conn, 12).unwrap_or_default();
     }
 
     fn drain_events(&mut self) {
@@ -309,7 +321,7 @@ impl TimelineApp {
         let (Some(conn), Some(chat)) = (self.conn.as_mut(), self.chat.as_mut()) else {
             return;
         };
-        let items = chronicle_core::storage::list_conversations(conn, 12).unwrap_or_default();
+        let items = chat.history.clone();
         let tz = self.tz.clone();
         let mut error: Option<String> = None;
         // Default menus close on any inner click, which would drop the armed
@@ -362,8 +374,11 @@ impl TimelineApp {
                             if let Err(e) = chronicle_core::storage::delete_conversation(conn, *id)
                             {
                                 error = Some(format!("delete failed: {e}"));
-                            } else if current {
-                                chat.switch_conversation(Some(&*conn), None, None);
+                            } else {
+                                chat.history.retain(|(hid, _, _)| hid != id);
+                                if current {
+                                    chat.switch_conversation(Some(&*conn), None, None);
+                                }
                             }
                         });
                     });
