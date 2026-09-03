@@ -47,6 +47,12 @@ pub enum ActivityKind {
     PrAuthored,
     PrReviewed,
     Call,
+    /// Calendar event (m26 chunk 2): `ts`/`end_ts` = scheduled start/end.
+    Meeting,
+    /// Editor heartbeats folded per (project, branch) (m26 chunk 3).
+    Edit,
+    /// Shell commands folded per cwd repo (m26 chunk 4); never the command line.
+    Shell,
 }
 
 /// How a repeated observation of the same `ext_id` is stored.
@@ -56,7 +62,7 @@ pub enum Dedupe {
     LatestCheckout,
     /// Every observation is a row.
     None,
-    /// One row per `(kind, ext_id)`; a repeat refreshes `end_ts` (and fills
+    /// One row per `(kind, ext_id)`; a repeat rewrites `ts`/`end_ts` (and
     /// an empty summary).
     Upsert,
     /// One row per `(kind, ext_id, ts)`; repeats are ignored.
@@ -64,13 +70,16 @@ pub enum Dedupe {
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 6] = [
+    pub const ALL: [ActivityKind; 9] = [
         ActivityKind::Checkout,
         ActivityKind::Commit,
         ActivityKind::AiSession,
         ActivityKind::PrAuthored,
         ActivityKind::PrReviewed,
         ActivityKind::Call,
+        ActivityKind::Meeting,
+        ActivityKind::Edit,
+        ActivityKind::Shell,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -81,6 +90,9 @@ impl ActivityKind {
             ActivityKind::PrAuthored => "pr_authored",
             ActivityKind::PrReviewed => "pr_reviewed",
             ActivityKind::Call => "call",
+            ActivityKind::Meeting => "meeting",
+            ActivityKind::Edit => "edit",
+            ActivityKind::Shell => "shell",
         }
     }
 
@@ -102,7 +114,11 @@ impl ActivityKind {
         match self {
             ActivityKind::Checkout => Dedupe::LatestCheckout,
             ActivityKind::Commit => Dedupe::None,
-            ActivityKind::AiSession | ActivityKind::Call => Dedupe::Upsert,
+            ActivityKind::AiSession
+            | ActivityKind::Call
+            | ActivityKind::Meeting
+            | ActivityKind::Edit
+            | ActivityKind::Shell => Dedupe::Upsert,
             ActivityKind::PrAuthored | ActivityKind::PrReviewed => Dedupe::Ignore,
         }
     }

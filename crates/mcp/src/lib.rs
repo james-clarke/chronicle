@@ -6,7 +6,8 @@
 
 mod config;
 pub use config::{
-    ContextCall, ImportEntry, McpConfig, McpConfigError, ServerConfig, parse_mcp_servers_json,
+    ActionCall, ContextCall, ImportEntry, McpConfig, McpConfigError, ServerConfig,
+    parse_mcp_servers_json,
 };
 
 use std::path::Path;
@@ -35,17 +36,19 @@ const MAX_FETCH_CHARS: usize = 6000;
 
 /// Run every allowlisted context call from the TOML config at `config_path`
 /// and format the results for the digest's `## Workspace context` section.
-/// None = nothing to inject: missing/empty config, or every call failed.
-pub fn gather_context(config_path: &Path) -> Option<String> {
+/// Returns how many calls actually reached a server — what leaves the
+/// machine, which is what Settings counts — and the text to inject. None =
+/// nothing to inject: missing/empty config, or every call failed.
+pub fn gather_context(config_path: &Path) -> (usize, Option<String>) {
     let cfg = match McpConfig::load(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!("mcp config {}: {e}", config_path.display());
-            return None;
+            return (0, None);
         }
     };
     if cfg.context_calls.is_empty() {
-        return None;
+        return (0, None);
     }
     let now = jiff::Zoned::now();
     let calls: Vec<ContextCall> = cfg
@@ -60,18 +63,19 @@ pub fn gather_context(config_path: &Path) -> Option<String> {
 }
 
 /// Fetch external context for one task ref (m16): run every `fetch_calls`
-/// entry with `{ref}` in its args replaced by `ext_ref`. None = feature off
-/// (no fetch_calls), bad config, or every call failed.
-pub fn fetch_context(config_path: &Path, ext_ref: &str) -> Option<String> {
+/// entry with `{ref}` in its args replaced by `ext_ref`. Counted like
+/// [`gather_context`]. None = feature off (no fetch_calls), bad config, or
+/// every call failed.
+pub fn fetch_context(config_path: &Path, ext_ref: &str) -> (usize, Option<String>) {
     let cfg = match McpConfig::load(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             tracing::warn!("mcp config {}: {e}", config_path.display());
-            return None;
+            return (0, None);
         }
     };
     if cfg.fetch_calls.is_empty() {
-        return None;
+        return (0, None);
     }
     let now = jiff::Zoned::now();
     let calls: Vec<ContextCall> = cfg
@@ -86,6 +90,98 @@ pub fn fetch_context(config_path: &Path, ext_ref: &str) -> Option<String> {
         })
         .collect();
     run_blocking(&cfg, &calls, MAX_FETCH_CHARS)
+}
+
+/// Run one allowlisted action call (m26): the user clicked "post" in the
+/// task pane. `key` fills `{key}` (the ticket) and `body` fills `{body}`
+/// (the journal entry or checkpoint). Ok = the tool's reply.
+///
+/// `action` must be listed in `action_calls` in the file at `config_path`:
+/// the UI passes back the entry it showed in the dialog and this re-reads
+/// the file of record before anything leaves the machine. Nothing else in
+/// this crate can reach an action call — the read paths take their calls
+/// from `context_calls` / `fetch_calls` only.
+pub fn run_action(
+    config_path: &Path,
+    action: &ActionCall,
+    key: &str,
+    body: &str,
+) -> anyhow::Result<String> {
+    let cfg = McpConfig::load(config_path)
+        .with_context(|| format!("mcp config {}", config_path.display()))?;
+    if !cfg.action_calls.contains(action) {
+        anyhow::bail!(
+            "{}.{} is not an action call in {}",
+            action.server,
+            action.tool,
+            config_path.display()
+        );
+    }
+    let server = cfg
+        .servers
+        .iter()
+        .find(|s| s.name == action.server)
+        .with_context(|| format!("unknown server {}", action.server))?;
+    if !server.enabled {
+        anyhow::bail!("server {} is disabled", server.name);
+    }
+    let call = ContextCall {
+        server: action.server.clone(),
+        tool: action.tool.clone(),
+        args_json: action
+            .args_json
+            .as_ref()
+            .map(|raw| substitute_action(raw, key, body)),
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("mcp runtime")?;
+    rt.block_on(async {
+        let mut client = tokio::time::timeout(CONNECT_TIMEOUT, connect(server))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect timed out"))??;
+        let out = tokio::time::timeout(CALL_TIMEOUT, run_call(&client, &call))
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out"))?;
+        if let Err(e) = client.close().await {
+            tracing::debug!("mcp server {}: close: {e}", server.name);
+        }
+        out
+    })
+}
+
+/// Replace `{key}` and `{body}` in an action template. Both placeholders sit
+/// inside JSON string literals and both carry user text (a whole journal
+/// entry for `{body}`), so each is JSON-escaped first. One pass, so a
+/// substituted value that itself reads `{body}` stays literal text instead
+/// of splicing the entry into the ticket field.
+fn substitute_action(raw: &str, key: &str, body: &str) -> String {
+    let (key, body) = (json_escape(key), json_escape(body));
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        let at = &rest[i..];
+        if let Some(tail) = at.strip_prefix("{key}") {
+            out.push_str(&key);
+            rest = tail;
+        } else if let Some(tail) = at.strip_prefix("{body}") {
+            out.push_str(&body);
+            rest = tail;
+        } else {
+            out.push('{');
+            rest = &at[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The text of a JSON string literal, without its quotes.
+fn json_escape(s: &str) -> String {
+    let quoted = serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_owned());
+    quoted[1..quoted.len() - 1].to_owned()
 }
 
 /// Replace `{now}`, `{today}` (local midnight) and `{tomorrow}` (next
@@ -113,7 +209,11 @@ fn substitute_ref(raw: &str, ext_ref: &str) -> String {
     raw.replace("{ref}", escaped.trim_matches('"'))
 }
 
-fn run_blocking(cfg: &McpConfig, calls: &[ContextCall], max_chars: usize) -> Option<String> {
+fn run_blocking(
+    cfg: &McpConfig,
+    calls: &[ContextCall],
+    max_chars: usize,
+) -> (usize, Option<String>) {
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -121,18 +221,21 @@ fn run_blocking(cfg: &McpConfig, calls: &[ContextCall], max_chars: usize) -> Opt
         Ok(rt) => rt,
         Err(e) => {
             tracing::warn!("mcp runtime: {e}");
-            return None;
+            return (0, None);
         }
     };
-    let out = rt.block_on(gather(cfg, calls));
+    let (ran, out) = rt.block_on(gather(cfg, calls));
     let out = out.trim();
     if out.is_empty() {
-        return None;
+        return (ran, None);
     }
-    Some(truncate_chars(out, max_chars))
+    (ran, Some(truncate_chars(out, max_chars)))
 }
 
-async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
+/// Formatted results, and the number of calls sent to a live server (an
+/// empty or failed reply still left the machine).
+async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> (usize, String) {
+    let mut ran = 0usize;
     let mut out = String::new();
     for server in &cfg.servers {
         let calls: Vec<&ContextCall> = all_calls
@@ -162,6 +265,7 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
             }
         };
         for call in calls {
+            ran += 1;
             match tokio::time::timeout(CALL_TIMEOUT, run_call(&client, call)).await {
                 Ok(Ok(text)) => {
                     out.push_str(&format!("### {}.{}\n{}\n", call.server, call.tool, text));
@@ -178,7 +282,7 @@ async fn gather(cfg: &McpConfig, all_calls: &[ContextCall]) -> String {
             tracing::debug!("mcp server {}: close: {e}", server.name);
         }
     }
-    out
+    (ran, out)
 }
 
 /// What a live server said about itself — the settings panel's "test"
@@ -320,6 +424,98 @@ mod tests {
         let out = super::substitute_ref(r#"{"q":"{ref}"}"#, "a\"b");
         assert_eq!(out, r#"{"q":"a\"b"}"#);
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&out).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::{ActionCall, McpConfig, ServerConfig, run_action, substitute_action};
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("chronicle-act-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const JIRA_ARGS: &str = r#"{"issue_key": "{key}", "comment": "{body}"}"#;
+
+    #[test]
+    fn substitute_action_fills_key_and_body_as_json_strings() {
+        let out = substitute_action(JIRA_ARGS, "ACME-12", "shipped the fold");
+        assert_eq!(
+            out,
+            r#"{"issue_key": "ACME-12", "comment": "shipped the fold"}"#
+        );
+        // A multi-line body with quotes stays inside its string literal.
+        let out = substitute_action(JIRA_ARGS, "ACME-12", "said \"go\"\nthen went");
+        let args: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(args["comment"], "said \"go\"\nthen went");
+        assert_eq!(args["issue_key"], "ACME-12");
+        // A body ending in a quote is not truncated.
+        let out = substitute_action(JIRA_ARGS, "K-1", "ends with \"");
+        let args: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(args["comment"], "ends with \"");
+        // No placeholders, no change.
+        assert_eq!(substitute_action(r#"{"a":"b"}"#, "K", "B"), r#"{"a":"b"}"#);
+        // One pass: a key spelling `{body}` is a ticket named `{body}`, not
+        // the journal entry spliced into issue_key.
+        let out = substitute_action(JIRA_ARGS, "PB-1{body}", "secret entry");
+        let args: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(args["issue_key"], "PB-1{body}");
+        assert_eq!(args["comment"], "secret entry");
+        // A brace that starts no placeholder survives verbatim.
+        assert_eq!(
+            substitute_action(r#"{"a":"{x} {key}"}"#, "K", "B"),
+            r#"{"a":"{x} K"}"#
+        );
+    }
+
+    /// A config whose only calls are actions: the read paths must find
+    /// nothing to run — an action call is reachable from a click and
+    /// nowhere else. The server's command would leave a marker file if it
+    /// were ever spawned.
+    #[test]
+    fn read_paths_never_run_action_calls() {
+        let dir = temp_dir("read-paths");
+        let marker = dir.join("spawned");
+        let action = ActionCall {
+            server: "fake".into(),
+            tool: "jira_add_comment".into(),
+            args_json: Some(JIRA_ARGS.into()),
+            label: "comment on {key}".into(),
+        };
+        let cfg = McpConfig {
+            servers: vec![ServerConfig {
+                name: "fake".into(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), format!("touch {}", marker.display())],
+                enabled: true,
+                env: Default::default(),
+            }],
+            context_calls: Vec::new(),
+            fetch_calls: Vec::new(),
+            action_calls: vec![action.clone()],
+        };
+        let path = dir.join("mcp.toml");
+        cfg.save(&path).unwrap();
+        assert_eq!(super::gather_context(&path), (0, None));
+        assert_eq!(super::fetch_context(&path, "ACME-1"), (0, None));
+        assert!(!marker.exists(), "a read path spawned the action's server");
+
+        // An action the file does not list is refused before any spawn.
+        let unlisted = ActionCall {
+            tool: "jira_delete_issue".into(),
+            ..action
+        };
+        let err = run_action(&path, &unlisted, "ACME-1", "body").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is not an action call"),
+            "{err:#}"
+        );
+        assert!(!marker.exists(), "a refused action spawned the server");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 

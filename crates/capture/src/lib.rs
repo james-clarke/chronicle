@@ -4,10 +4,12 @@
 //! platform-independent.
 
 pub mod ai_sessions;
+pub mod gcal;
 pub mod git;
 pub mod github;
 #[cfg(target_os = "linux")]
 pub mod mic;
+pub mod shell;
 #[cfg(target_os = "linux")]
 pub mod x11;
 

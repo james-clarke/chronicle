@@ -43,6 +43,7 @@ pub fn build_digest(
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
     ticket_re: Option<&regex::Regex>,
+    plan: Option<&str>,
 ) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
         let out = render(
@@ -54,6 +55,7 @@ pub fn build_digest(
             vcs,
             mcp_context,
             ticket_re,
+            plan,
             apps_cap,
             title_chars,
         );
@@ -70,6 +72,7 @@ pub fn build_digest(
         vcs,
         mcp_context,
         ticket_re,
+        plan,
         3,
         24,
     );
@@ -91,6 +94,7 @@ fn render(
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
     ticket_re: Option<&regex::Regex>,
+    plan: Option<&str>,
     apps_cap: usize,
     title_chars: usize,
 ) -> String {
@@ -293,6 +297,16 @@ fn render(
         m = end;
     }
 
+    // What the user said in the morning the day was for (m26). Omitted when
+    // no intent was set, so plan-free digests (and their goldens) are
+    // unchanged.
+    if let Some(plan) = plan.map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "\n## Plan");
+        // Clipped: a long intent must not push `## Open tasks` past the
+        // digest's own truncation.
+        let _ = writeln!(out, "{}", clip(plan, 400));
+    }
+
     // Numbered so interval output can link by index ("ref"). Omitted when
     // empty, so open-task-free digests (and their goldens) are unchanged.
     if !open_tasks.is_empty() {
@@ -478,6 +492,22 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
             }
             if let Some(s) = summary {
                 let _ = write!(line, " ({s})");
+            }
+            line
+        }
+        ActivityKind::Meeting | ActivityKind::Edit | ActivityKind::Shell => {
+            let mut line = format!("- {hm} {}", v.kind.as_str());
+            if !v.repo.is_empty() {
+                let _ = write!(line, " {}", v.repo);
+            }
+            if !v.branch.is_empty() {
+                let _ = write!(line, "@{}", v.branch);
+            }
+            if !dur.is_empty() {
+                let _ = write!(line, " {dur}");
+            }
+            if let Some(s) = summary {
+                let _ = write!(line, " \"{s}\"");
             }
             line
         }

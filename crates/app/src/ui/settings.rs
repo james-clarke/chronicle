@@ -36,6 +36,10 @@ pub(super) struct SettingsPanel {
     /// build it, and the last raw model output.
     digest_view: Option<String>,
     output_view: Option<String>,
+    /// Today's outbound counts (meta `fetches:<date>` / `posts:<date>`) for
+    /// the "what leaves this machine" line; read once, when the panel opens.
+    fetches_today: i64,
+    posts_today: i64,
 }
 
 /// What the Pipeline card shows: the daemon's own view plus what the DB
@@ -115,7 +119,17 @@ impl SettingsPanel {
     ) -> Result<Self, String> {
         let config =
             chronicle_core::config::Config::load(config_path).map_err(|e| e.to_string())?;
-        let connections = super::connections::Connections::load(config.mcp_path(data_dir), conn);
+        let connections =
+            super::connections::Connections::load(config.mcp_path(data_dir), data_dir, conn);
+        let counter = |prefix: &str| -> i64 {
+            conn.and_then(|c| {
+                chronicle_core::storage::get_meta(c, &crate::day_counter_key(prefix))
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+        };
         Ok(Self {
             batch_minutes: config.batch_minutes,
             afk_close_secs: config.afk_close_secs,
@@ -136,6 +150,8 @@ impl SettingsPanel {
             connections,
             base: config,
             status: None,
+            fetches_today: counter("fetches"),
+            posts_today: counter("posts"),
         })
     }
 
@@ -585,6 +601,20 @@ impl TimelineApp {
                                     ui.label("");
                                     ui.end_row();
                                 });
+                            // Everything that ever leaves the machine, in
+                            // one line: the model download, the MCP reads,
+                            // and the writes the user clicked.
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!(
+                                        "what leaves this machine: the model download (once, on demand) \u{b7} MCP context fetches today {} \u{b7} posts today {}",
+                                        panel.fetches_today, panel.posts_today
+                                    ))
+                                    .text_style(theme::caption())
+                                    .weak(),
+                                )
+                                .wrap(),
+                            );
 
                             // UI-only prefs: applied immediately, stored in
                             // db meta (not config.toml), no daemon restart.

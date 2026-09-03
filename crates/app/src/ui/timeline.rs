@@ -1,6 +1,7 @@
 //! Timeline view: widget-style "Today" face — focus-total header, activity
 //! band, task cards, detail pane.
 
+use chronicle_mcp::ActionCall;
 use eframe::egui;
 use jiff::{ToSpan, Zoned};
 
@@ -44,6 +45,8 @@ impl TimelineApp {
                     let ws_edit = &mut self.ws_edit;
                     let merge_pick = &mut self.merge_pick;
                     let spans = &self.spans;
+                    let actions = &self.mcp_actions;
+                    let post = &mut self.post;
                     let mut close_detail = false;
                     let color = theme::task_color(group.task_id, group.project.as_deref());
                     if narrow {
@@ -70,6 +73,8 @@ impl TimelineApp {
                                         spans,
                                         merge_pick,
                                         &candidates,
+                                        actions,
+                                        post,
                                         &mut pending,
                                     );
                                 });
@@ -101,6 +106,8 @@ impl TimelineApp {
                                 spans,
                                 merge_pick,
                                 &candidates,
+                                actions,
+                                post,
                                 &mut pending,
                             );
                             ui.add_space(10.0);
@@ -995,6 +1002,140 @@ fn card_frame(
         });
 }
 
+/// Confirm dialog for the one write Chronicle can make (m26): a journal
+/// entry or checkpoint posted into the task's ticket through an mcp.toml
+/// `[[action_calls]]` entry. Nothing leaves the machine until "post".
+pub(super) struct PostDialog {
+    /// The mcp.toml entry the dialog is showing; `run_action` checks it
+    /// against the file again before it runs.
+    pub(super) action: ActionCall,
+    /// The action's label with `{key}` filled in ("comment on ACME-12").
+    pub(super) title: String,
+    /// `server.tool`, shown verbatim so the dialog names what will run.
+    pub(super) target: String,
+    pub(super) key: String,
+    /// What gets posted; editable until it goes.
+    pub(super) body: String,
+    /// Some = in flight; the posting thread answers once.
+    pub(super) rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// `posted \u{b7} 12:04` or the error, once it landed.
+    pub(super) result: Option<Result<String, String>>,
+}
+
+/// The action offered on this task's entries (the first action call in
+/// mcp.toml) with its button label and the ticket it posts to. Posting
+/// needs a ticket, so unanchored tasks get no button.
+fn post_action<'a>(
+    actions: &'a [ActionCall],
+    group: &TaskGroup,
+) -> Option<(&'a ActionCall, String, String)> {
+    let key = group.external_ref.clone()?;
+    let a = actions.first()?;
+    let label = if a.label.is_empty() {
+        format!("{}.{}", a.server, a.tool)
+    } else {
+        a.label.replace("{key}", &key)
+    };
+    Some((a, label, key))
+}
+
+/// Paper-plane ghost button that opens the confirm dialog for `body`.
+fn post_button(
+    ui: &mut egui::Ui,
+    offer: &(&ActionCall, String, String),
+    body: String,
+    post: &mut Option<PostDialog>,
+) {
+    let (action, label, key) = offer;
+    if theme::ghost_button(ui, theme::glyph(theme::icon::PAPER_PLANE_TILT))
+        .on_hover_text(label.as_str())
+        .clicked()
+    {
+        *post = Some(PostDialog {
+            action: (*action).clone(),
+            title: label.clone(),
+            target: format!("{}.{}", action.server, action.tool),
+            key: key.clone(),
+            body,
+            rx: None,
+            result: None,
+        });
+    }
+}
+
+/// The dialog itself: server, tool and ticket spelled out, the body
+/// editable, and a single "post" that runs the call on a thread. True =
+/// close it.
+fn post_dialog_ui(
+    ui: &mut egui::Ui,
+    dialog: &mut PostDialog,
+    pending: &mut Option<Action>,
+) -> bool {
+    let mut close = false;
+    let sending = dialog.rx.is_some();
+    let width = (ui.ctx().content_rect().width() - 48.0).clamp(200.0, 320.0);
+    let resp = egui::Modal::new(egui::Id::new("post_action")).show(ui.ctx(), |ui| {
+        ui.set_width(width);
+        ui.label(
+            egui::RichText::new(&dialog.title)
+                .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                .color(theme::palette::TEXT),
+        );
+        ui.label(
+            egui::RichText::new(format!("{} \u{b7} {}", dialog.target, dialog.key))
+                .text_style(egui::TextStyle::Small)
+                .color(theme::palette::TEXT_DIM),
+        );
+        ui.add_space(theme::SPACE_XS);
+        ui.add_enabled(
+            !sending && dialog.result.is_none(),
+            egui::TextEdit::multiline(&mut dialog.body)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(theme::SPACE_XS);
+        match (&dialog.result, sending) {
+            (Some(Ok(msg)), _) => {
+                ui.colored_label(theme::palette::GREEN, msg);
+            }
+            (Some(Err(e)), _) => {
+                ui.colored_label(theme::palette::RED, e.as_str());
+            }
+            (None, true) => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.weak("posting\u{2026}");
+                });
+            }
+            (None, false) => {}
+        }
+        ui.horizontal(|ui| {
+            if dialog.result.is_some() {
+                if theme::primary_button(ui, "close").clicked() {
+                    close = true;
+                }
+                return;
+            }
+            let ready = !sending && !dialog.body.trim().is_empty();
+            if theme::primary_button_enabled(ui, ready, "post").clicked() {
+                *pending = Some(Action::Post);
+            }
+            if theme::ghost_button(ui, "cancel").clicked() && !sending {
+                close = true;
+            }
+        });
+    });
+    // Backdrop click / Esc closes, except while the call is in flight.
+    if resp.should_close() && !sending {
+        close = true;
+    }
+    if sending {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    close
+}
+
 /// Detail pane: identity, summary, session strips (with whole-session
 /// move), per-app evidence bars, activity, checkpoint, journal, context.
 /// Returns true to close.
@@ -1008,10 +1149,15 @@ fn detail_ui(
     spans: &[SpanRow],
     merge_pick: &mut Option<i64>,
     candidates: &[(i64, String)],
+    actions: &[ActionCall],
+    post: &mut Option<PostDialog>,
     pending: &mut Option<Action>,
 ) -> bool {
     let mut close = false;
     let content_w = theme::content_width(ui);
+    // Posting is offered only when the task is anchored to a ticket and
+    // mcp.toml lists an action call.
+    let offer = post_action(actions, group);
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
         ui.painter().circle_filled(dot.center(), 4.0, color);
@@ -1050,6 +1196,9 @@ fn detail_ui(
         }
         if group.declared {
             theme::badge(ui, "declared", theme::palette::TEXT_DIM);
+        }
+        if group.stuck {
+            theme::badge(ui, "stuck", theme::palette::AMBER);
         }
     });
     ui.add_space(theme::SPACE_SM);
@@ -1165,7 +1314,16 @@ fn detail_ui(
     }
 
     if let Some(cp) = &group.checkpoint {
-        detail_section(ui, "Checkpoint", None, |_| {});
+        let cp_body = if cp.next_steps.trim().is_empty() {
+            cp.state.clone()
+        } else {
+            format!("{}\n\nNext: {}", cp.state, cp.next_steps)
+        };
+        detail_section(ui, "Checkpoint", None, |ui| {
+            if let Some(offer) = &offer {
+                post_button(ui, offer, cp_body, post);
+            }
+        });
         let editing = matches!(ws_edit,
             Some(WorkspaceEdit::Checkpoint { task_id, .. }) if *task_id == group.task_id);
         if editing {
@@ -1256,23 +1414,38 @@ fn detail_ui(
             }
             ui.horizontal_top(|ui| {
                 time_col(ui, DAYTIME_COL, &j.time);
-                // Click an entry to correct it in place.
+                // The post button sits at the row's right edge; the entry
+                // text wraps in what is left of the line.
+                let label_w =
+                    (ui.available_width() - if offer.is_some() { 26.0 } else { 0.0 }).max(60.0);
                 let resp = ui
-                    .add(
-                        egui::Label::new(
-                            egui::RichText::new(&j.entry)
-                                .text_style(egui::TextStyle::Small)
-                                .color(theme::palette::TEXT),
-                        )
-                        .wrap()
-                        .sense(egui::Sense::click()),
+                    .allocate_ui_with_layout(
+                        egui::vec2(label_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(label_w);
+                            // Click an entry to correct it in place.
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&j.entry)
+                                        .text_style(egui::TextStyle::Small)
+                                        .color(theme::palette::TEXT),
+                                )
+                                .wrap()
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("edit")
+                        },
                     )
-                    .on_hover_text("edit");
+                    .inner;
                 if resp.clicked() {
                     *ws_edit = Some(WorkspaceEdit::Journal {
                         entry_id: j.id,
                         text: j.entry.clone(),
                     });
+                }
+                if let Some(offer) = &offer {
+                    post_button(ui, offer, j.entry.clone(), post);
                 }
             });
         }
@@ -1313,6 +1486,12 @@ fn detail_ui(
                 ui.weak("nothing fetched yet");
             }
         }
+    }
+
+    if let Some(dialog) = post.as_mut()
+        && post_dialog_ui(ui, dialog, pending)
+    {
+        *post = None;
     }
 
     close
@@ -1520,6 +1699,9 @@ fn activity_glyph(kind: chronicle_core::types::ActivityKind) -> &'static str {
         K::AiSession => theme::icon::TERMINAL_WINDOW,
         K::PrAuthored | K::PrReviewed => theme::icon::GIT_PULL_REQUEST,
         K::Call => theme::icon::PHONE_CALL,
+        K::Meeting => theme::icon::CALENDAR,
+        K::Edit => theme::icon::CODE,
+        K::Shell => theme::icon::TERMINAL,
     }
 }
 
@@ -1536,6 +1718,9 @@ fn activity_kind_name(kind: chronicle_core::types::ActivityKind) -> &'static str
         K::PrAuthored => "pull request you opened",
         K::PrReviewed => "pull request you reviewed",
         K::Call => "call",
+        K::Meeting => "calendar event",
+        K::Edit => "editor time",
+        K::Shell => "shell commands",
     }
 }
 

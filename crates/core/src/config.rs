@@ -75,12 +75,24 @@ pub struct Config {
     /// Watch for apps capturing the microphone (PipeWire, Linux) and store
     /// each stretch as a `call`.
     pub mic_capture: bool,
+    /// Poll the primary Google Calendar for `meeting` spans (needs
+    /// `chronicle gcal-login`; off by default).
+    pub google_calendar: bool,
+    /// Fold atuin shell history into `shell` spans per repo (cwd, argv[0]
+    /// and duration only; off by default).
+    pub shell_history: bool,
+    /// Accept WakaTime heartbeats from editor plugins on the local endpoint
+    /// and fold them into `edit` spans. Off = the routes answer 403.
+    pub editor_heartbeats: bool,
     /// Full-match-anywhere regex extracting a ticket key from branch names,
     /// used to anchor derived tasks (`tasks.external_ref`).
     pub ticket_regex: String,
     /// Idle at least this long (lunch-scale) queues a checkpoint per task
     /// with activity since its last one. 0 = feature off.
     pub checkpoint_afk_secs: u32,
+    /// An open task nothing has moved for this many days (no interval, no
+    /// fresh checkpoint) wears a `stuck` chip. 0 = feature off.
+    pub task_stuck_days: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
     /// A larger model for the day-tier consolidation only (m27 chunk 6);
@@ -129,8 +141,12 @@ impl Default for Config {
             ai_session_dirs: vec!["~/.claude/projects".into()],
             github_prs: false,
             mic_capture: true,
+            google_calendar: false,
+            shell_history: false,
+            editor_heartbeats: true,
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
+            task_stuck_days: 3,
             model_path: None,
             model_path_heavy: None,
             mcp_config: None,

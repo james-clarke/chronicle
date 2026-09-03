@@ -791,8 +791,12 @@ dependencies = [
  "chronicle-core",
  "crossbeam-channel",
  "jiff",
+ "rusqlite",
+ "serde",
  "serde_json",
+ "toml",
  "tracing",
+ "ureq",
  "x11rb 0.14.0",
 ]
 

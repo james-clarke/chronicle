@@ -66,6 +66,75 @@ impl TimelineApp {
         }
     }
 
+    /// Morning picker: "Today I'm on" over the open tasks plus a
+    /// free-text line, shown until an intent is stored for today ("skip
+    /// today" stores an empty one so it stops asking).
+    fn intent_card_ui(&mut self, ui: &mut egui::Ui, pending: &mut Option<Action>) {
+        if self.intent.is_some() {
+            return;
+        }
+        let open_tasks = &self.open_tasks;
+        let picks = &mut self.intent_pick;
+        let text = &mut self.intent_text;
+        let mut set = false;
+        let mut skip = false;
+        theme::hover_card(ui, "intent_card", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    theme::glyph(theme::icon::FLAG)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::ACCENT),
+                );
+                ui.label(egui::RichText::new("Today I'm on\u{2026}").strong());
+            });
+            for t in open_tasks {
+                let mut on = picks.contains(&t.task_id);
+                if ui
+                    .checkbox(&mut on, super::clip_chars(&t.label, 46))
+                    .changed()
+                {
+                    if on {
+                        picks.insert(t.task_id);
+                    } else {
+                        picks.remove(&t.task_id);
+                    }
+                }
+            }
+            ui.add_space(theme::SPACE_XS);
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .desired_width(ui.available_width())
+                    .hint_text("and/or in your own words\u{2026}"),
+            );
+            ui.add_space(theme::SPACE_XS);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "set").clicked() {
+                    set = true;
+                }
+                if theme::ghost_button(ui, "skip today").clicked() {
+                    skip = true;
+                }
+            });
+        });
+        ui.add_space(theme::CARD_GAP);
+        if set || skip {
+            let intent = if skip {
+                chronicle_core::intent::Intent::default()
+            } else {
+                chronicle_core::intent::Intent {
+                    // Picker order, not click order.
+                    task_ids: open_tasks
+                        .iter()
+                        .map(|t| t.task_id)
+                        .filter(|id| picks.contains(id))
+                        .collect(),
+                    text: text.trim().to_owned(),
+                }
+            };
+            *pending = Some(Action::SetIntent(intent));
+        }
+    }
+
     /// Standup card: yesterday's draft as one block per task (label line,
     /// prose, the next step lifted out), a spinner while drafting, or a lone
     /// draft button. Returns true when (re)drafting was clicked.
@@ -266,6 +335,7 @@ impl TimelineApp {
                     self.model_card_ui(ui);
                     self.service_card_ui(ui);
                     self.resume_card_ui(ui);
+                    self.intent_card_ui(ui, &mut pending);
                     let open_tasks = &self.open_tasks;
                     let closed_tasks = &self.closed_tasks;
                     let feed = &self.feed;
@@ -523,6 +593,12 @@ fn task_row<'a>(task: &'a OpenRow, color: egui::Color32, bar: bool) -> theme::Li
     }
     if task.declared {
         row = row.chip("declared", theme::palette::TEXT_DIM);
+    }
+    if task.intent {
+        row = row.chip("intent", theme::palette::ACCENT);
+    }
+    if task.stuck {
+        row = row.chip("stuck", theme::palette::AMBER);
     }
     row
 }

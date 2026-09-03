@@ -82,7 +82,57 @@ pub trait FocusProvider: Send { fn run(self, tx: Sender<CaptureEvent>) -> Result
 pub trait AfkProvider:  Send { fn idle_ms(&self) -> Result<u64>; }                       // polled
 ```
 
-Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(ActivityEvent)` into `activity_events`, never `events`: git (`git_repos`), Claude Code transcripts (`ai_session_dirs`, default `~/.claude/projects`, first prompt clipped to 120 chars is all that is stored), GitHub PRs via the user's `gh` (`github_prs = true`, off by default), mic-in-use via `pw-dump` (`mic_capture`, Linux). Each runs on its own thread and is never load-bearing.
+Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(ActivityEvent)` into `activity_events`, never `events`: git (`git_repos`), Claude Code transcripts (`ai_session_dirs`, default `~/.claude/projects`, first prompt clipped to 120 chars is all that is stored), GitHub PRs via the user's `gh` (`github_prs = true`, off by default), mic-in-use via `pw-dump` (`mic_capture`, Linux), atuin shell history (`shell_history = true`, off by default: install atuin and run `atuin import auto` once, then Chronicle reads `~/.local/share/atuin/history.db` read-only every 60 s and keeps only cwd, program name and duration — never the command line). Each runs on its own thread and is never load-bearing.
+
+## Local sources
+
+Opt-in collectors with a setup step of their own. Each runs on its own thread
+and is never load-bearing.
+
+**Google Calendar** (`google_calendar = true`, or the Local sources switch in
+Settings › Connections): the primary calendar only, polled every 5 min over
+yesterday → tomorrow with the read-only `calendar.events.readonly` scope.
+Timed events become `meeting` spans (event id, title, start/end — nothing
+else); all-day events and events declined in the invite are skipped, and a
+cancelled event is tombstoned to zero length so it stops covering time.
+
+1. In Google Cloud, create an OAuth client of type **Desktop app** in the
+   workspace that owns the calendar. Publish it as an **Internal** Workspace
+   app: refresh tokens of an external app in "testing" expire after 7 days.
+2. Export `CHRONICLE_GOOGLE_CLIENT_ID` / `CHRONICLE_GOOGLE_CLIENT_SECRET` and
+   run `chronicle gcal-login`. It opens the consent screen, takes the redirect
+   on `127.0.0.1:<ephemeral port>` and writes `<data dir>/google.toml` at mode
+   0600 (client id/secret, refresh token, account email). The
+   `--client-id …` / `--client-secret …` flags do the same, but a secret in
+   argv is visible in `ps` and lands in shell history.
+3. Turn Google Calendar on under Settings › Connections → Local sources and
+   restart the daemon.
+**Editor heartbeats (WakaTime protocol)** (`editor_heartbeats = true` by default, or the Local sources switch in Settings › Connections; off = the routes answer 403):
+
+The same endpoint speaks WakaTime: `POST /api/v1/users/current/heartbeats.bulk` (and wakapi's single `POST /api/heartbeat`), `Authorization: Basic base64(<api_key>)`, reply `201 {"responses": [[…, 201], …]}`, 401 on a bad key, same `Host` allowlist as the AW routes. Heartbeats fold per `(project, branch)` with a 15-minute gap into `activity_events(kind='edit')`: `summary` = the file, `repo` = the project, `ext_id` = `<project>@<branch>#<span-start-ms>`, so every heartbeat inside the gap refreshes `end_ts`. Any of the ~60 WakaTime plugins works (they queue offline); no account, nothing leaves the machine. Setup:
+
+1. Install the plugin — vim: `Plug 'wakatime/vim-wakatime'`; VS Code/JetBrains/Sublime: the WakaTime extension.
+2. Copy the api key from Settings › Connections › Local sources (it is generated on first daemon start and stored in meta `wakapi_api_key`).
+3. Write `~/.wakatime.cfg`:
+
+```ini
+[settings]
+api_url = http://127.0.0.1:5600/api
+api_key = <the key from Connections>
+```
+
+
+**Shell history (atuin)** (`shell_history = true`, or the Local sources
+switch): `~/.local/share/atuin/history.db` is read every 60 s, read-only, and
+commands fold per repo (cwd matched against `git_repos`, 10-minute gap) into
+`shell` spans whose summary is the top three program names by count. Only
+cwd, program name and duration are kept — never the command line.
+
+1. Install atuin and run `atuin import auto` once.
+2. Turn Shell history on under Settings › Connections → Local sources (or
+   `shell_history = true`).
+3. Restart the daemon; only commands run after that are folded.
+
 
 ## Storage
 

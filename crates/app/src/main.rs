@@ -138,6 +138,16 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Sign in to Google Calendar (loopback OAuth) and store the refresh
+    /// token in `<data dir>/google.toml`.
+    GcalLogin {
+        /// OAuth client id; falls back to $CHRONICLE_GOOGLE_CLIENT_ID.
+        #[arg(long)]
+        client_id: Option<String>,
+        /// OAuth client secret; falls back to $CHRONICLE_GOOGLE_CLIENT_SECRET.
+        #[arg(long)]
+        client_secret: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -209,6 +219,10 @@ fn main() -> anyhow::Result<()> {
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
+        Cmd::GcalLogin {
+            client_id,
+            client_secret,
+        } => gcal_login(&data_dir, client_id, client_secret),
     }
 }
 
@@ -545,6 +559,7 @@ fn bench(
                     &[],
                     &[],
                     &[],
+                    None,
                     None,
                     None,
                 ),
@@ -1026,6 +1041,7 @@ fn live_pass(
         &activity,
         None,
         ticket_re.as_ref(),
+        None,
     );
     if let Some(prev) = storage::label_before(conn, lo)? {
         digest.push_str(&format!("\n## Previously\n{prev}\n"));
@@ -1138,12 +1154,22 @@ fn build_window_digest(
     let corrections = storage::similar_corrections(conn, &spans, 4)?;
     let tz = TimeZone::system();
     let mcp_context = if mcp {
-        chronicle_mcp::gather_context(&config.mcp_path(data_dir))
+        let (mcp_calls, ctx) = chronicle_mcp::gather_context(&config.mcp_path(data_dir));
+        // Counted per call that left the machine, empty reply or not.
+        bump_day_counter_by(conn, "fetches", mcp_calls);
+        ctx
     } else {
         None
     };
     let activity = storage::activity_in_range(conn, lo, hi)?;
     let ticket_re = regex::Regex::new(&config.ticket_regex).ok();
+    // The day's intent (m26): "## Plan" says what the user meant this
+    // window to be, so the model links ambiguous work to the plan.
+    let day = chronicle_core::types::ms_to_ts(lo)
+        .to_zoned(tz.clone())
+        .date()
+        .to_string();
+    let plan = chronicle_core::intent::plan_body(conn, &day)?;
     let digest = chronicle_core::digest::build_digest(
         &spans,
         &tz,
@@ -1153,6 +1179,7 @@ fn build_window_digest(
         &activity,
         mcp_context.as_deref(),
         ticket_re.as_ref(),
+        plan.as_deref(),
     );
     let gaps = afk_gaps_min(&spans, lo);
     Ok(BatchDigest {
@@ -1506,7 +1533,9 @@ fn run_ai_job(
             bail!("task {task_id} has no external_ref")
         };
         let mcp_path = config.mcp_path(data_dir);
-        let Some(content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref) else {
+        let (calls, content) = chronicle_mcp::fetch_context(&mcp_path, &ext_ref);
+        bump_day_counter_by(conn, "fetches", calls);
+        let Some(content) = content else {
             bail!("no fetch_calls configured or every call failed")
         };
         storage::upsert_task_context(conn, task_id, "mcp", Timestamp::now(), &content)?;
@@ -1548,8 +1577,17 @@ fn run_ai_job(
                 bail!("no recent focus activity to suggest from");
             }
             let tz = TimeZone::system();
-            let digest =
-                chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None, None);
+            let digest = chronicle_core::digest::build_digest(
+                &spans,
+                &tz,
+                &[],
+                &[],
+                &[],
+                &[],
+                None,
+                None,
+                None,
+            );
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
         }
@@ -1690,7 +1728,8 @@ fn run_ai_job(
                 };
                 fallback
             } else {
-                describer.standup(&standup_digest_text(&rows, &tz))?
+                let plan = chronicle_core::intent::plan_body(conn, day)?;
+                describer.standup(&standup_digest_text(&rows, &tz, plan.as_deref()))?
             };
             storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
             Ok(text)
@@ -1699,15 +1738,20 @@ fn run_ai_job(
     }
 }
 
-/// Render the standup digest rows for the prompt: per task, the day's
-/// journal tail (last 5 entries keeps multi-task days inside the prompt
-/// budget) plus the fresh checkpoint if one exists.
+/// Render the standup digest rows for the prompt: the day's plan when one
+/// was set (m26), then per task the day's journal tail (last 5 entries keeps
+/// multi-task days inside the prompt budget) plus the fresh checkpoint if
+/// one exists.
 fn standup_digest_text(
     rows: &[chronicle_core::storage::StandupDigestRow],
     tz: &TimeZone,
+    plan: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    if let Some(plan) = plan.map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "## Plan\n{plan}");
+    }
     for row in rows {
         let project = row
             .project
@@ -2054,6 +2098,33 @@ fn clamp_intervals(
     out
 }
 
+/// Per-day counter in `meta` (`fetches:2026-09-03`, `posts:2026-09-03`):
+/// what Settings › Storage reports as having left this machine today.
+/// Best-effort — a meta write must never block the thing it counts.
+pub(crate) fn bump_day_counter(conn: &rusqlite::Connection, prefix: &str) {
+    bump_day_counter_by(conn, prefix, 1);
+}
+
+/// [`bump_day_counter`] for a batch: one mcp gather runs several calls.
+pub(crate) fn bump_day_counter_by(conn: &rusqlite::Connection, prefix: &str, by: usize) {
+    use chronicle_core::storage;
+    if by == 0 {
+        return;
+    }
+    let key = day_counter_key(prefix);
+    let n = storage::get_meta(conn, &key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let _ = storage::set_meta(conn, &key, Some(&(n + by as i64).to_string()));
+}
+
+/// The key [`bump_day_counter`] writes and the settings panel reads.
+pub(crate) fn day_counter_key(prefix: &str) -> String {
+    format!("{prefix}:{}", jiff::Zoned::now().date())
+}
+
 pub(crate) fn socket_path(data_dir: &Path) -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -2379,15 +2450,19 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     spawn_signal_handler(ctrl_tx.clone())?;
     spawn_tray(ctrl_tx.clone())?;
     spawn_ctrl_listener(listener, ctrl_tx)?;
-    spawn_capture(&config, tx.clone())?;
+    spawn_capture(&config, data_dir, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
-    let server_error = match chronicle_server::spawn(&config, tx) {
-        Ok(()) => None,
-        Err(e) => {
-            tracing::error!("AW endpoint failed on 127.0.0.1:{}: {e}", config.port);
-            Some(format!("AW endpoint failed on port {}: {e}", config.port))
-        }
-    };
+    let api_key = wakapi_api_key(&conn)?;
+    // The key exists either way so Settings can show it; the switch decides
+    // whether the routes accept it.
+    let server_error =
+        match chronicle_server::spawn(&config, tx, config.editor_heartbeats.then_some(api_key)) {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::error!("AW endpoint failed on 127.0.0.1:{}: {e}", config.port);
+                Some(format!("AW endpoint failed on port {}: {e}", config.port))
+            }
+        };
     chronicle_core::storage::set_meta(&conn, "server_error", server_error.as_deref())?;
     tracing::info!(?data_dir, "chronicle daemon running");
     let mut ui_child: Option<Child> = None;
@@ -3281,6 +3356,31 @@ fn prune_if_due(conn: &rusqlite::Connection, config: &Config) {
     let _ = storage::set_meta(conn, "last_prune_ts", Some(&now.to_string()));
 }
 
+/// Key the WakaTime heartbeat routes authenticate with, generated once and
+/// shown (with a copy button) in Settings › Connections. 32 url-safe
+/// characters from `/dev/urandom`; the 64-character alphabet divides 256, so
+/// the byte-to-character map is unbiased.
+fn wakapi_api_key(conn: &rusqlite::Connection) -> anyhow::Result<String> {
+    use chronicle_core::storage;
+    use std::io::Read;
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    if let Some(key) = storage::get_meta(conn, "wakapi_api_key")?
+        && !key.is_empty()
+    {
+        return Ok(key);
+    }
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("reading /dev/urandom for the heartbeat api key")?;
+    let key: String = bytes
+        .iter()
+        .map(|b| char::from(ALPHABET[usize::from(*b) % ALPHABET.len()]))
+        .collect();
+    storage::set_meta(conn, "wakapi_api_key", Some(&key))?;
+    Ok(key)
+}
+
 fn spawn_ai_job_worker(job_id: i64) -> std::io::Result<Child> {
     Command::new(own_exe()?)
         .args(["ai-job", "--id", &job_id.to_string()])
@@ -3333,7 +3433,7 @@ fn on_low_battery() -> bool {
 const SESSIONIZE_EVERY: Duration = Duration::from_secs(15);
 
 #[cfg(target_os = "linux")]
-fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+fn spawn_capture(config: &Config, data_dir: &Path, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
     use chronicle_capture::FocusProvider;
     use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
 
@@ -3357,7 +3457,9 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
     spawn_git_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
     spawn_github_capture(config, tx.clone())?;
-    spawn_mic_capture(config, tx)
+    spawn_shell_capture(config, tx.clone())?;
+    spawn_mic_capture(config, tx.clone())?;
+    spawn_gcal_capture(config, data_dir, tx)
 }
 
 /// Mic-in-use watcher via `pw-dump`: optional, never load-bearing.
@@ -3464,8 +3566,197 @@ fn spawn_github_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Re
     Ok(())
 }
 
+/// atuin history poller: opt-in, never load-bearing.
+fn spawn_shell_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::shell::{ShellProvider, default_db_path};
+
+    if !config.shell_history {
+        return Ok(());
+    }
+    let db = default_db_path();
+    if !db.is_file() {
+        tracing::warn!("shell_history = true but {} is missing", db.display());
+        return Ok(());
+    }
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let provider = ShellProvider::new(db, &repos);
+    std::thread::Builder::new()
+        .name("shell".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("shell provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// Google Calendar poller: opt-in and only once `chronicle gcal-login` has
+/// written the token file; never load-bearing.
+fn spawn_gcal_capture(
+    config: &Config,
+    data_dir: &Path,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::gcal::{GcalProvider, Tokens, token_path};
+
+    if !config.google_calendar {
+        return Ok(());
+    }
+    let path = token_path(data_dir);
+    if !path.exists() {
+        tracing::warn!(
+            "google_calendar = true but no {}: run `chronicle gcal-login`",
+            path.display()
+        );
+        return Ok(());
+    }
+    let tokens = match Tokens::load(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("google_calendar: {} unreadable: {e}", path.display());
+            return Ok(());
+        }
+    };
+    let provider = GcalProvider::new(tokens);
+    std::thread::Builder::new()
+        .name("gcal".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("google calendar provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// `chronicle gcal-login`: OAuth desktop flow. Opens the consent screen in
+/// the browser, takes the code off an ephemeral loopback port, exchanges it
+/// and writes `<data dir>/google.toml` (mode 0600).
+fn gcal_login(
+    data_dir: &Path,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::gcal;
+
+    let client_id = flag_or_env(client_id, "CHRONICLE_GOOGLE_CLIENT_ID")
+        .context("no OAuth client id: pass --client-id or set CHRONICLE_GOOGLE_CLIENT_ID")?;
+    let client_secret = flag_or_env(client_secret, "CHRONICLE_GOOGLE_CLIENT_SECRET").context(
+        "no OAuth client secret: pass --client-secret or set CHRONICLE_GOOGLE_CLIENT_SECRET",
+    )?;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let redirect_uri = format!("http://{}", listener.local_addr()?);
+    let state = random_hex(16)?;
+    let endpoints = gcal::Endpoints::default();
+    let url = gcal::auth_url(&endpoints, &client_id, &redirect_uri, &state);
+    let _ = Command::new("xdg-open")
+        .arg(&url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    println!("waiting for Google on {redirect_uri}; if no browser opened, visit:\n{url}");
+
+    let code = wait_for_oauth_code(&listener, &state)?;
+    let grant = gcal::exchange_code(&endpoints, &client_id, &client_secret, &code, &redirect_uri)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let refresh_token = grant.refresh_token.context(
+        "Google returned no refresh token: remove Chronicle under \
+         myaccount.google.com/permissions and sign in again",
+    )?;
+    let email = gcal::account_email(&endpoints, &grant.access_token).unwrap_or_default();
+    std::fs::create_dir_all(data_dir)?;
+    let path = gcal::token_path(data_dir);
+    gcal::Tokens {
+        client_id,
+        client_secret,
+        refresh_token,
+        email: email.clone(),
+    }
+    .save(&path)
+    .map_err(|e| anyhow::anyhow!("writing {}: {e}", path.display()))?;
+    let who = if email.is_empty() {
+        "the primary calendar".to_owned()
+    } else {
+        email
+    };
+    println!(
+        "signed in as {who} \u{b7} token in {} \u{b7} turn Google Calendar on in \
+         Settings \u{203a} Connections and restart the daemon",
+        path.display()
+    );
+    Ok(())
+}
+
+fn flag_or_env(flag: Option<String>, var: &str) -> Option<String> {
+    flag.or_else(|| std::env::var(var).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// `n` bytes from the OS CSPRNG, hex-encoded.
+fn random_hex(n: usize) -> anyhow::Result<String> {
+    use std::io::Read;
+
+    let mut buf = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The browser's redirect carries the code; anything else on the port (a
+/// favicon probe, a stray hit) is answered and ignored.
+fn wait_for_oauth_code(listener: &std::net::TcpListener, state: &str) -> anyhow::Result<String> {
+    use chronicle_capture::gcal::redirect_param;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    for stream in listener.incoming() {
+        let mut stream = stream?;
+        let mut line = String::new();
+        // Bounded: the request line is all we read, and the peer is not
+        // necessarily the browser we opened.
+        BufReader::new(&stream)
+            .take(8 * 1024)
+            .read_line(&mut line)?;
+        let code = redirect_param(&line, "code");
+        let error = redirect_param(&line, "error");
+        let body = match (&code, &error) {
+            (Some(_), _) => "Chronicle is signed in. You can close this tab.",
+            (_, Some(_)) => "Google refused the sign-in; check the terminal.",
+            _ => "Waiting for Google.",
+        };
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        let _ = stream.flush();
+        if let Some(err) = error {
+            bail!("Google returned {err}");
+        }
+        if let Some(code) = code {
+            if redirect_param(&line, "state").as_deref() != Some(state) {
+                bail!("OAuth state mismatch \u{2014} ignoring the redirect");
+            }
+            return Ok(code);
+        }
+    }
+    bail!("the loopback listener closed before the code arrived")
+}
+
 #[cfg(not(target_os = "linux"))]
-fn spawn_capture(_config: &Config, _tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+fn spawn_capture(
+    _config: &Config,
+    _data_dir: &Path,
+    _tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
     bail!("capture on this platform lands in M9/M10")
 }
 
@@ -3596,7 +3887,7 @@ fn mcp_check(data_dir: &Path) -> anyhow::Result<()> {
             Err(e) => println!("{}: FAILED \u{2014} {e:#}", server.name),
         }
     }
-    match chronicle_mcp::gather_context(&path) {
+    match chronicle_mcp::gather_context(&path).1 {
         Some(ctx) => println!("\n## Workspace context\n{ctx}"),
         None => println!(
             "no context gathered (missing/empty config, or every call failed — see warnings above)"
@@ -4184,5 +4475,36 @@ mod tests {
         );
         assert!(s.contains("running but not responding"));
         assert!(s.contains("warning: AW endpoint failed on port 5600: in use"));
+    }
+
+    // The standup prompt's drift rule reads a "## Plan" section; the digest
+    // opens with it when the day had an intent.
+    #[test]
+    fn standup_digest_opens_with_the_days_plan() {
+        use chronicle_core::storage::{JournalEntry, StandupDigestRow};
+        let rows = [StandupDigestRow {
+            task_id: 1,
+            label: "m26 chunk 5".into(),
+            project: Some("chronicle".into()),
+            external_ref: None,
+            entries: vec![JournalEntry {
+                id: 1,
+                batch_id: 1,
+                start_ts: 0,
+                end_ts: 60_000,
+                entry: "wired the picker".into(),
+            }],
+            checkpoint: None,
+        }];
+        let plain = standup_digest_text(&rows, &TimeZone::UTC, None);
+        assert!(!plain.contains("## Plan"), "{plain}");
+        let plan = "- task: m26 chunk 5 [chronicle]\n";
+        let with = standup_digest_text(&rows, &TimeZone::UTC, Some(plan));
+        assert_eq!(with, format!("## Plan\n{plan}{plain}"));
+        // "Skip today" stores an empty intent: the prompt is unchanged.
+        assert_eq!(
+            standup_digest_text(&rows, &TimeZone::UTC, Some("  \n")),
+            plain
+        );
     }
 }

@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use chronicle_core::config::expand_home;
 use chronicle_core::storage;
 use chronicle_core::types::{ActivityEvent, ActivityKind};
-use chronicle_mcp::{ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
+use chronicle_mcp::{ActionCall, ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
 use rusqlite::Connection;
@@ -55,6 +55,8 @@ struct Preset {
     env: &'static [&'static str],
     context_calls: &'static [(&'static str, &'static str)],
     fetch_calls: &'static [(&'static str, &'static str)],
+    /// User-triggered writes (m26): tool, args template, button label.
+    action_calls: &'static [(&'static str, &'static str, &'static str)],
     hint: &'static str,
 }
 
@@ -72,6 +74,11 @@ const PRESETS: &[Preset] = &[
         fetch_calls: &[(
             "jira_get_issue",
             r#"{"issue_key": "{ref}", "comment_limit": 10}"#,
+        )],
+        action_calls: &[(
+            "jira_add_comment",
+            r#"{"issue_key": "{key}", "comment": "{body}"}"#,
+            "comment on {key}",
         )],
         hint: "API token from id.atlassian.com \u{b7} needs uvx on PATH",
     },
@@ -97,6 +104,7 @@ const PRESETS: &[Preset] = &[
             ),
         ],
         fetch_calls: &[],
+        action_calls: &[],
         hint: "binary from github.com/github/github-mcp-server releases on PATH \u{b7} fine-grained PAT with pull request read",
     },
     Preset {
@@ -110,6 +118,7 @@ const PRESETS: &[Preset] = &[
             r#"{"calendarId": "primary", "timeMin": "{today}", "timeMax": "{tomorrow}"}"#,
         )],
         fetch_calls: &[],
+        action_calls: &[],
         hint: "value = path to an OAuth desktop-client JSON; run `npx @cocal/google-calendar-mcp auth` once \u{b7} consent screen must be In production or the token dies in 7 days",
     },
     Preset {
@@ -123,6 +132,7 @@ const PRESETS: &[Preset] = &[
             r#"{"start": "{today}", "end": "{tomorrow}"}"#,
         )],
         fetch_calls: &[],
+        action_calls: &[],
         hint: "iCloud / Fastmail / Nextcloud with an app password \u{b7} list-events may need a calendarUrl (see list-calendars)",
     },
 ];
@@ -133,6 +143,17 @@ fn preset_calls(spec: &[(&str, &str)]) -> Vec<ContextCall> {
             server: String::new(),
             tool: (*tool).to_owned(),
             args_json: Some((*args).to_owned()),
+        })
+        .collect()
+}
+
+fn preset_actions(spec: &[(&str, &str, &str)]) -> Vec<ActionCall> {
+    spec.iter()
+        .map(|(tool, args, label)| ActionCall {
+            server: String::new(),
+            tool: (*tool).to_owned(),
+            args_json: Some((*args).to_owned()),
+            label: (*label).to_owned(),
         })
         .collect()
 }
@@ -172,8 +193,9 @@ struct ServerForm {
     args: String,
     env: Vec<(String, String)>,
     enabled: bool,
-    /// Allowlist entries a preset brings along; `server` is set at submit.
-    preset_calls: Option<(Vec<ContextCall>, Vec<ContextCall>)>,
+    /// Allowlist entries a preset brings along (context, fetch, action);
+    /// `server` is set at submit.
+    preset_calls: Option<(Vec<ContextCall>, Vec<ContextCall>, Vec<ActionCall>)>,
     hint: Option<&'static str>,
     error: Option<String>,
 }
@@ -205,7 +227,11 @@ impl ServerForm {
                 .map(|k| ((*k).to_owned(), String::new()))
                 .collect(),
             enabled: true,
-            preset_calls: Some((preset_calls(p.context_calls), preset_calls(p.fetch_calls))),
+            preset_calls: Some((
+                preset_calls(p.context_calls),
+                preset_calls(p.fetch_calls),
+                preset_actions(p.action_calls),
+            )),
             hint: Some(p.hint),
             error: None,
         }
@@ -333,11 +359,12 @@ fn form_ui(ui: &mut egui::Ui, form: &mut ServerForm) -> FormAct {
         }
         ui.checkbox(&mut form.enabled, "enabled");
         match (&form.preset_calls, &form.original) {
-            (Some((c, f)), _) => {
+            (Some((c, f, a)), _) => {
                 ui.weak(format!(
-                    "adds {} context call(s) and {} fetch call(s) to the allowlist",
+                    "adds {} context call(s), {} fetch call(s) and {} action(s) to the allowlist",
                     c.len(),
-                    f.len()
+                    f.len(),
+                    a.len()
                 ));
             }
             (None, Some(_)) => {
@@ -370,6 +397,15 @@ fn subhead(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui))
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
     });
+}
+
+/// Secret shown as a hint, not a value: last four characters only.
+fn masked(key: &str) -> String {
+    let tail: String = key
+        .chars()
+        .skip(key.chars().count().saturating_sub(4))
+        .collect();
+    format!("{}{tail}", "\u{2022}".repeat(8))
 }
 
 fn caption(ui: &mut egui::Ui, text: String, color: Option<egui::Color32>) -> egui::Response {
@@ -426,6 +462,9 @@ pub(super) struct LocalSources {
     pub ai_session_dirs: Vec<String>,
     pub github_prs: bool,
     pub mic_capture: bool,
+    pub shell_history: bool,
+    pub google_calendar: bool,
+    pub editor_heartbeats: bool,
 }
 
 impl LocalSources {
@@ -434,6 +473,9 @@ impl LocalSources {
             ai_session_dirs: c.ai_session_dirs.clone(),
             github_prs: c.github_prs,
             mic_capture: c.mic_capture,
+            shell_history: c.shell_history,
+            google_calendar: c.google_calendar,
+            editor_heartbeats: c.editor_heartbeats,
         }
     }
 
@@ -441,6 +483,9 @@ impl LocalSources {
         c.ai_session_dirs = self.ai_session_dirs.clone();
         c.github_prs = self.github_prs;
         c.mic_capture = self.mic_capture;
+        c.shell_history = self.shell_history;
+        c.google_calendar = self.google_calendar;
+        c.editor_heartbeats = self.editor_heartbeats;
     }
 }
 
@@ -554,13 +599,18 @@ pub(super) struct Connections {
     repo_last: BTreeMap<String, ActivityEvent>,
     /// Newest event per kind (local collector rows).
     kind_last: Vec<ActivityEvent>,
+    /// Key WakaTime plugins authenticate with (meta `wakapi_api_key`).
+    wakapi_key: Option<String>,
     repo_add: String,
     repo_error: Option<String>,
     repo_arm_remove: Option<usize>,
+    /// `google.toml` as found at load: `None` = not signed in, the string is
+    /// the account (empty when the login could not read it).
+    google_account: Option<String>,
 }
 
 impl Connections {
-    pub(super) fn load(mcp_path: PathBuf, conn: Option<&Connection>) -> Self {
+    pub(super) fn load(mcp_path: PathBuf, data_dir: &Path, conn: Option<&Connection>) -> Self {
         let (mcp, mcp_error) = match McpConfig::load(&mcp_path) {
             Ok(cfg) => (cfg, None),
             Err(e) => (McpConfig::default(), Some(e.to_string())),
@@ -586,6 +636,7 @@ impl Connections {
         let kind_last = conn
             .and_then(|c| storage::latest_activity_per_kind(c).ok())
             .unwrap_or_default();
+        let wakapi_key = conn.and_then(|c| storage::get_meta(c, "wakapi_api_key").ok().flatten());
         Self {
             mcp_path,
             mcp,
@@ -598,9 +649,15 @@ impl Connections {
             last_fetch,
             repo_last,
             kind_last,
+            wakapi_key,
             repo_add: String::new(),
             repo_error: None,
             repo_arm_remove: None,
+            google_account: chronicle_capture::gcal::Tokens::load(
+                &chronicle_capture::gcal::token_path(data_dir),
+            )
+            .ok()
+            .map(|t| t.email),
         }
     }
 
@@ -613,6 +670,7 @@ impl Connections {
     ) {
         self.poll_probes(conn);
         self.servers_ui(ui, conn);
+        self.actions_ui(ui);
         ui.add_space(theme::SPACE_SM);
         self.repos_ui(ui, git_repos);
         ui.add_space(theme::SPACE_SM);
@@ -999,6 +1057,11 @@ impl Connections {
                             c.server = name.clone();
                         }
                     }
+                    for a in next.action_calls.iter_mut() {
+                        if &a.server == old {
+                            a.server = name.clone();
+                        }
+                    }
                     self.probes.remove(old);
                 }
                 next.servers[idx] = server;
@@ -1008,13 +1071,18 @@ impl Connections {
                     return Err(format!("a server named {name} already exists"));
                 }
                 next.servers.push(server);
-                if let Some((ctx_calls, fetch_calls)) = &form.preset_calls {
+                if let Some((ctx_calls, fetch_calls, action_calls)) = &form.preset_calls {
                     let with_server = |c: &ContextCall| ContextCall {
                         server: name.clone(),
                         ..c.clone()
                     };
                     next.context_calls.extend(ctx_calls.iter().map(with_server));
                     next.fetch_calls.extend(fetch_calls.iter().map(with_server));
+                    next.action_calls
+                        .extend(action_calls.iter().map(|a| ActionCall {
+                            server: name.clone(),
+                            ..a.clone()
+                        }));
                 }
             }
         }
@@ -1030,6 +1098,7 @@ impl Connections {
         next.servers.retain(|s| s.name != name);
         next.context_calls.retain(|c| c.server != name);
         next.fetch_calls.retain(|c| c.server != name);
+        next.action_calls.retain(|a| a.server != name);
         next.save(&self.mcp_path).map_err(|e| e.to_string())?;
         self.mcp = next;
         self.probes.remove(name);
@@ -1037,6 +1106,33 @@ impl Connections {
             let _ = storage::set_meta(conn, &probe_key(name), None);
         }
         Ok(())
+    }
+
+    /// Every allowlisted write in mcp.toml, listed apart from the read
+    /// calls: these are the only things Chronicle can put back into a
+    /// tracker, and only a click in the task pane runs one.
+    fn actions_ui(&mut self, ui: &mut egui::Ui) {
+        if self.mcp.action_calls.is_empty() {
+            return;
+        }
+        ui.add_space(theme::SPACE_SM);
+        subhead(ui, "Actions", |_| {});
+        let width = ui.available_width();
+        for a in &self.mcp.action_calls {
+            let title = format!("{}.{}", a.server, a.tool);
+            theme::ListRow::new(&title)
+                .emphasis()
+                .dot(palette::TEXT_DIM)
+                .chip("manual".to_owned(), palette::TEXT_DIM)
+                .show(ui, width, |_| {});
+            if !a.label.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    caption(ui, a.label.clone(), None);
+                });
+            }
+        }
+        caption(ui, "posts only when you click".to_owned(), None);
     }
 
     fn repos_ui(&mut self, ui: &mut egui::Ui, git_repos: &mut Vec<String>) {
@@ -1128,7 +1224,13 @@ impl Connections {
         } else {
             "Claude Code transcripts under ~/.claude/projects".to_owned()
         };
-        let mut rows: [SourceRow; 3] = [
+        let atuin_db = chronicle_capture::shell::default_db_path();
+        let gcal_detail = match self.google_account.as_deref() {
+            Some("") => "primary calendar every 5 min".to_owned(),
+            Some(email) => format!("primary calendar every 5 min \u{b7} {email}"),
+            None => "primary calendar every 5 min \u{b7} read-only, events scope".to_owned(),
+        };
+        let mut rows: [SourceRow; 6] = [
             (
                 "Claude Code sessions",
                 &mut sessions_on,
@@ -1149,6 +1251,30 @@ impl Connections {
                 (!on_path("pw-dump")).then(|| "pw-dump not on PATH".to_owned()),
                 &[ActivityKind::Call],
                 "pw-dump every 20 s \u{b7} each stretch becomes a call".to_owned(),
+            ),
+            (
+                "Shell history (atuin)",
+                &mut src.shell_history,
+                (!atuin_db.is_file()).then(|| "no atuin history.db".to_owned()),
+                &[ActivityKind::Shell],
+                "atuin history.db every 60 s \u{b7} cwd, program name and duration only".to_owned(),
+            ),
+            (
+                "Editor heartbeats (WakaTime plugins)",
+                &mut src.editor_heartbeats,
+                None,
+                &[ActivityKind::Edit],
+                "vim-wakatime and friends post to this machine \u{b7} folded into edit spans per project"
+                    .to_owned(),
+            ),
+            (
+                "Google Calendar",
+                &mut src.google_calendar,
+                self.google_account
+                    .is_none()
+                    .then(|| "not signed in: run `chronicle gcal-login`".to_owned()),
+                &[ActivityKind::Meeting],
+                gcal_detail,
             ),
         ];
         for (name, on, blocker, kinds, detail) in rows.iter_mut() {
@@ -1185,6 +1311,18 @@ impl Connections {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
                 caption(ui, detail.clone(), None);
+            });
+        }
+        if let Some(key) = self.wakapi_key.clone() {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                caption(ui, format!("api key {}", masked(&key)), None);
+                if theme::ghost_button(ui, theme::glyph(theme::icon::COPY))
+                    .on_hover_text("copy the api key for ~/.wakatime.cfg")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(key.clone());
+                }
             });
         }
         if sessions_on != !src.ai_session_dirs.is_empty() {

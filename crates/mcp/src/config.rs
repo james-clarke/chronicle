@@ -39,6 +39,11 @@ pub struct McpConfig {
     /// external_ref at fetch time. Empty = feature off.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fetch_calls: Vec<ContextCall>,
+    /// Writes the user triggers by hand (m26): posting a journal entry into
+    /// the task's ticket. Never read by `gather_context` / `fetch_context`,
+    /// never scheduled — only a click in the task pane reaches one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub action_calls: Vec<ActionCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +71,21 @@ pub struct ContextCall {
     pub args_json: Option<String>,
 }
 
+/// One allowlisted write (m26). `args_json`'s string values may carry
+/// `{key}` (the task's external ref) and `{body}` (the text being posted);
+/// both are filled in per click. `label` is the button in the task pane
+/// (`{key}` substituted there too).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionCall {
+    pub server: String,
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_json: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -89,17 +109,27 @@ impl McpConfig {
     /// Every call must name a listed server (enabled or not) and carry a
     /// JSON object for its arguments.
     pub fn validate(&self) -> Result<(), McpConfigError> {
-        for call in self.context_calls.iter().chain(&self.fetch_calls) {
-            if !self.servers.iter().any(|s| s.name == call.server) {
-                return Err(McpConfigError::UnknownServer(call.server.clone()));
+        let calls = self
+            .context_calls
+            .iter()
+            .chain(&self.fetch_calls)
+            .map(|c| (&c.server, &c.tool, &c.args_json))
+            .chain(
+                self.action_calls
+                    .iter()
+                    .map(|a| (&a.server, &a.tool, &a.args_json)),
+            );
+        for (server, tool, args_json) in calls {
+            if !self.servers.iter().any(|s| &s.name == server) {
+                return Err(McpConfigError::UnknownServer(server.clone()));
             }
-            if let Some(raw) = &call.args_json
+            if let Some(raw) = args_json
                 && let Err(err) =
                     serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw)
             {
                 return Err(McpConfigError::BadArgs {
-                    server: call.server.clone(),
-                    tool: call.tool.clone(),
+                    server: server.clone(),
+                    tool: tool.clone(),
                     err,
                 });
             }
@@ -278,6 +308,12 @@ mod tests {
                 tool: "get".into(),
                 args_json: None,
             }],
+            action_calls: vec![ActionCall {
+                server: "jira".into(),
+                tool: "jira_add_comment".into(),
+                args_json: Some(r#"{"issue_key": "{key}", "comment": "{body}"}"#.into()),
+                label: "comment on {key}".into(),
+            }],
         }
     }
 
@@ -296,7 +332,36 @@ mod tests {
         assert_eq!(back, cfg);
         // Defaults stay out of the written file; the disabled flag goes in.
         assert_eq!(text.matches("enabled").count(), 1, "{text}");
-        assert_eq!(text.matches("args_json").count(), 1, "{text}");
+        // One context call and one action call carry args; the fetch call
+        // has none.
+        assert_eq!(text.matches("args_json").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn action_calls_are_validated_like_the_read_calls() {
+        let mut cfg = McpConfig::default();
+        cfg.action_calls.push(ActionCall {
+            server: "nope".into(),
+            tool: "jira_add_comment".into(),
+            args_json: None,
+            label: String::new(),
+        });
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            McpConfigError::UnknownServer(ref s) if s == "nope"
+        ));
+        cfg.servers.push(ServerConfig {
+            name: "nope".into(),
+            command: "c".into(),
+            args: Vec::new(),
+            enabled: true,
+            env: BTreeMap::new(),
+        });
+        cfg.action_calls[0].args_json = Some("[1]".into());
+        assert!(matches!(
+            cfg.validate().unwrap_err(),
+            McpConfigError::BadArgs { .. }
+        ));
     }
 
     #[test]

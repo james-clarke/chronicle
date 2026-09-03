@@ -14,7 +14,7 @@ mod theme;
 mod timeline;
 mod triage;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,12 +27,14 @@ use jiff::tz::TimeZone;
 use jiff::{ToSpan, Zoned};
 use rusqlite::Connection;
 
+use chronicle_core::intent::Intent;
 use chronicle_core::proposals::Proposal;
 use chronicle_core::storage::FeedBlock;
 
 use chat::ChatPanel;
 use onboarding::ModelDownload;
 use settings::SettingsPanel;
+use timeline::PostDialog;
 
 const RELOAD_EVERY: Duration = Duration::from_secs(5);
 /// Idle wake-up cadence; the only repaint source besides user input.
@@ -209,6 +211,14 @@ fn spawn_stdin_listener(ctx: egui::Context, visible: Arc<AtomicBool>) {
     });
 }
 
+/// mcp.toml as the daemon resolves it: the config override when set, else
+/// the data dir's copy.
+fn mcp_path(config_path: &Path, data_dir: &Path) -> PathBuf {
+    chronicle_core::config::Config::load(config_path)
+        .map(|c| c.mcp_path(data_dir))
+        .unwrap_or_else(|_| data_dir.join("mcp.toml"))
+}
+
 struct SpanRow {
     start: Zoned,
     end: Zoned,
@@ -267,6 +277,8 @@ struct TaskGroup {
     /// Short, undeclared, unanchored scrap of a task (Wordle-scale); folds
     /// into the timeline's collapsed background strip.
     background: bool,
+    /// Nothing has moved it for `task_stuck_days` (`storage::stuck_tasks`).
+    stuck: bool,
 }
 
 /// One journal entry of the selected task.
@@ -333,6 +345,10 @@ struct OpenRow {
     anchor: Option<String>,
     /// First line of the newest checkpoint's next steps.
     next_step: Option<String>,
+    /// Named in today's intent: pins first, wears the "intent" chip.
+    intent: bool,
+    /// Nothing has moved it for `task_stuck_days` (`storage::stuck_tasks`).
+    stuck: bool,
 }
 
 /// `s` cut to `max` chars with an ellipsis (chip text stays chip-sized).
@@ -357,6 +373,8 @@ impl OpenRow {
             last_touched: None,
             anchor: None,
             next_step: None,
+            intent: false,
+            stuck: false,
         }
     }
 }
@@ -431,6 +449,12 @@ enum Action {
         end_ts: i64,
         label: String,
     },
+    /// Store today's intent from the morning picker (an empty one is
+    /// "skip today": the picker stops asking).
+    SetIntent(Intent),
+    /// Run the open post dialog's action call on a thread (m26). Only ever
+    /// reached from the dialog's "post" button.
+    Post,
 }
 
 /// In-flight inline edit of a workspace artifact in the detail pane.
@@ -613,6 +637,21 @@ struct TimelineApp {
     /// X11 compositor present at boot: transparent window, rounded card,
     /// shadow. False = square opaque fallback (bare WM / Wayland).
     composited: bool,
+    /// Today's intent (meta `intent:<date>`); None = the morning picker is
+    /// due. An empty one ("skip today") still counts as set.
+    intent: Option<Intent>,
+    /// Morning picker: task ids ticked so far.
+    intent_pick: HashSet<i64>,
+    /// Morning picker: the free-text line.
+    intent_text: String,
+    /// Open tasks nothing has moved for `task_stuck_days`.
+    stuck: HashSet<i64>,
+    /// Action calls from mcp.toml (m26): the only writes the UI can make.
+    /// Reloaded with the day so a preset added in Settings shows up.
+    mcp_actions: Vec<chronicle_mcp::ActionCall>,
+    /// Open post-confirm dialog (detail pane); Some = the user is looking
+    /// at what would be sent.
+    post: Option<PostDialog>,
 }
 
 /// Home standup card data.
@@ -730,6 +769,12 @@ impl TimelineApp {
             standup_read_day: None,
             standup_show_all: false,
             composited,
+            intent: None,
+            intent_pick: HashSet::new(),
+            intent_text: String::new(),
+            stuck: HashSet::new(),
+            mcp_actions: Vec::new(),
+            post: None,
         }
     }
 
@@ -766,12 +811,40 @@ impl TimelineApp {
         candidates
     }
 
+    /// The posting thread's verdict (m26): the dialog's result line, and a
+    /// successful post counted in meta `posts:<date>`.
+    fn poll_post(&mut self) {
+        let Some(dialog) = self.post.as_mut() else {
+            return;
+        };
+        let Some(rx) = dialog.rx.as_ref() else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            // The thread panicked or dropped the sender: end `sending` with
+            // an error line rather than leaving the modal spinning forever.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the post thread died".to_owned())
+            }
+        };
+        dialog.rx = None;
+        let ok = result.is_ok();
+        dialog.result =
+            Some(result.map(|()| format!("posted \u{b7} {}", Zoned::now().strftime("%H:%M"))));
+        if ok && let Some(conn) = self.conn.as_ref() {
+            crate::bump_day_counter(conn, "posts");
+        }
+    }
+
     fn reload_if_stale(&mut self) {
         if self.loaded_at.is_some_and(|t| t.elapsed() < RELOAD_EVERY) {
             return;
         }
         self.loaded_at = Some(Instant::now());
         match self.load_spans().and_then(|spans| {
+            self.load_intent()?;
             let groups = self.load_groups()?;
             let unplaced = self.load_unplaced()?;
             let open = self.load_open(&groups)?;
@@ -820,6 +893,10 @@ impl TimelineApp {
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
         }
+        self.mcp_actions =
+            chronicle_mcp::McpConfig::load(&mcp_path(&self.config_path, &self.data_dir))
+                .map(|c| c.action_calls)
+                .unwrap_or_default();
         self.poll_ai_jobs();
         if self.view == View::Reports {
             match self.load_report() {
@@ -841,17 +918,24 @@ impl TimelineApp {
                 .flatten()
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(0);
-            self.resume = chronicle_core::storage::latest_checkpoint_since(conn, last_open)
-                .ok()
-                .flatten()
-                .map(|(task_id, label, external_ref, cp)| ResumeRow {
-                    task_id,
-                    ts: cp.ts,
-                    label,
-                    external_ref,
-                    state: cp.state,
-                    next_steps: cp.next_steps,
-                });
+            // Several checkpoints can qualify; today's intent picks which.
+            let prefer: Vec<i64> = self
+                .intent
+                .as_ref()
+                .map(|i| i.task_ids.clone())
+                .unwrap_or_default();
+            self.resume =
+                chronicle_core::storage::latest_checkpoint_since(conn, last_open, &prefer)
+                    .ok()
+                    .flatten()
+                    .map(|(task_id, label, external_ref, cp)| ResumeRow {
+                        task_id,
+                        ts: cp.ts,
+                        label,
+                        external_ref,
+                        state: cp.state,
+                        next_steps: cp.next_steps,
+                    });
             let now_ms = jiff::Timestamp::now().as_millisecond().to_string();
             let _ = chronicle_core::storage::set_meta(conn, "ui_last_open_ts", Some(&now_ms));
         }
@@ -1081,6 +1165,7 @@ impl TimelineApp {
                         journal: Vec::new(),
                         checkpoint: None,
                         background: false,
+                        stuck: self.stuck.contains(&t.id),
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -1214,6 +1299,23 @@ impl TimelineApp {
         )
     }
 
+    /// Today's intent (the morning picker's answer) and the open tasks
+    /// nothing has moved for `task_stuck_days`. Both decorate the Working-on
+    /// rows and the detail pane, so they load before either.
+    fn load_intent(&mut self) -> anyhow::Result<()> {
+        let stuck_days = chronicle_core::config::Config::load(&self.config_path)
+            .unwrap_or_default()
+            .task_stuck_days;
+        let now = jiff::Timestamp::now();
+        let today = now.to_zoned(self.tz.clone()).date().to_string();
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        self.intent = chronicle_core::intent::get(conn, &today)?;
+        self.stuck = chronicle_core::storage::stuck_tasks(conn, now, stuck_days)?
+            .into_iter()
+            .collect();
+        Ok(())
+    }
+
     fn load_open(&mut self, groups: &[TaskGroup]) -> anyhow::Result<Vec<OpenRow>> {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let open = chronicle_core::storage::open_tasks(conn, 8)?;
@@ -1239,6 +1341,7 @@ impl TimelineApp {
             }
         }
         let groups_today = self.day == today;
+        let intent_ids: &[i64] = self.intent.as_ref().map_or(&[], |i| &i.task_ids);
         let mut rows: Vec<OpenRow> = open
             .into_iter()
             .map(|t| {
@@ -1263,6 +1366,8 @@ impl TimelineApp {
                 {
                     row.anchor = Some(key);
                 }
+                row.intent = intent_ids.contains(&row.task_id);
+                row.stuck = self.stuck.contains(&row.task_id);
                 row.next_step = chronicle_core::storage::get_checkpoint(conn, row.task_id)
                     .ok()
                     .flatten()
@@ -1277,6 +1382,8 @@ impl TimelineApp {
             })
             .collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.today_ms));
+        // Today's intent pins first; time order holds inside each group.
+        rows.sort_by_key(|r| !r.intent);
         Ok(rows)
     }
 
@@ -1530,6 +1637,29 @@ impl TimelineApp {
                 }
                 result.map(|_| ())
             }
+            Action::Post => {
+                let path = mcp_path(&self.config_path, &self.data_dir);
+                let Some(dialog) = self.post.as_mut() else {
+                    return;
+                };
+                let action = dialog.action.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (key, body) = (dialog.key.clone(), dialog.body.clone());
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("mcp-action".into())
+                        .spawn(move || {
+                            let result = chronicle_mcp::run_action(&path, &action, &key, &body)
+                                .map(|_| ())
+                                .map_err(|e| format!("{e:#}"));
+                            let _ = tx.send(result);
+                        });
+                match spawned {
+                    Ok(_) => dialog.rx = Some(rx),
+                    Err(e) => dialog.result = Some(Err(e.to_string())),
+                }
+                return;
+            }
             Action::SaveWorkspaceEdit(w) => {
                 self.ws_edit = None;
                 match w {
@@ -1596,6 +1726,19 @@ impl TimelineApp {
                     }
                     Err(e) => Err(e),
                 }
+            }
+            Action::SetIntent(intent) => {
+                let day = jiff::Timestamp::now()
+                    .to_zoned(self.tz.clone())
+                    .date()
+                    .to_string();
+                let result = chronicle_core::intent::set(conn, &day, &intent);
+                if result.is_ok() {
+                    self.intent = Some(intent);
+                    self.intent_pick.clear();
+                    self.intent_text.clear();
+                }
+                result
             }
             Action::GenerateStandup => {
                 let Ok(day) = jiff::Timestamp::now()
@@ -1789,6 +1932,7 @@ impl eframe::App for TimelineApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
+        self.poll_post();
 
         // m19 window chrome: one rounded card with border + shadow, painted
         // here because panels can't round their own corners. Content lives in

@@ -209,9 +209,19 @@ fn digest_keys_seen_section() {
         span(12, 13, "chrome", "ACME-11374 - Jira"),
     ];
     let re = regex::Regex::new(&Config::default().ticket_regex).unwrap();
-    let with = build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, Some(&re));
+    let with = build_digest(
+        &spans,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        Some(&re),
+        None,
+    );
     assert!(with.contains("## Keys seen\nACME-11382 9m00s (chrome), ACME-11374 1m00s (chrome)\ncwd mailer 3m00s\n"), "{with}");
-    let without = build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let without = build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None, None);
     assert!(
         without.contains("## Keys seen\ncwd mailer 3m00s\n"),
         "{without}"
@@ -270,6 +280,7 @@ fn day1_digest_golden() {
         &[],
         None,
         None,
+        None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     check_golden("day1.digest.golden", &digest);
@@ -307,6 +318,7 @@ fn day2_web_per_site_spans() {
         &[],
         None,
         None,
+        None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     assert!(digest.contains("## Sites by time"), "digest: {digest}");
@@ -324,7 +336,7 @@ fn eval_digest(fixture: &str) -> String {
     let stream_end = events.last().expect("fixture has events").ts;
     let spans = sessionize(&events, stream_end, &config);
     check_golden(&format!("{fixture}.spans.golden"), &render_spans(&spans));
-    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None)
+    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None, None)
 }
 
 #[test]
@@ -452,7 +464,17 @@ fn correction_changes_next_digest() {
     );
     assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
 
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let plain = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        None,
+    );
     let with = build_digest(
         current,
         &TimeZone::UTC,
@@ -460,6 +482,7 @@ fn correction_changes_next_digest() {
         &corrections,
         &[],
         &[],
+        None,
         None,
         None,
     );
@@ -759,9 +782,29 @@ fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let plain = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        None,
+    );
     let ctx = "### jira.search\nCHR-42 fix AFK split";
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some(ctx), None);
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        Some(ctx),
+        None,
+        None,
+    );
     assert_eq!(with, format!("{plain}\n## Workspace context\n{ctx}\n"));
     // Blank context must not add the section (goldens stay MCP-free).
     assert_eq!(
@@ -773,7 +816,57 @@ fn digest_workspace_context_section() {
             &[],
             &[],
             Some("  \n"),
+            None,
             None
+        ),
+        plain
+    );
+}
+
+// The evening half of m26's intent: the day's plan reaches the prompt as its
+// own section (no standup fixture mechanism exists — bench scores derivation
+// JSON — so this is the fixture for the standup prompt's drift rule).
+#[test]
+fn digest_plan_section() {
+    let (spans, config) = day1();
+    let batches = assign_batches(&spans, &config);
+    let current = &spans[batches[0].spans.clone()];
+    let plain = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        None,
+    );
+    let plan = "- task: m26 chunk 5 [chronicle]\n- note: and the soak";
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        Some(plan),
+    );
+    assert_eq!(with, format!("{plain}\n## Plan\n{plan}\n"));
+    // A skipped day stores an empty intent: no section, goldens unchanged.
+    assert_eq!(
+        build_digest(
+            current,
+            &TimeZone::UTC,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            None,
+            Some(" \n")
         ),
         plain
     );
@@ -834,7 +927,17 @@ fn digest_git_activity_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let plain = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        None,
+    );
     let t0 = ts_to_ms(current.first().unwrap().start);
     let vcs = [
         ActivityEvent {
@@ -856,7 +959,17 @@ fn digest_git_activity_section() {
             summary: Some("feat: plan model".into()),
         },
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &vcs, None, None);
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &vcs,
+        None,
+        None,
+        None,
+    );
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("checkout app \u{2192} ABC-123-sending-plans"),
@@ -872,7 +985,17 @@ fn digest_git_activity_section() {
         ..vcs[0].clone()
     }];
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &[], &outside, None, None),
+        build_digest(
+            current,
+            &TimeZone::UTC,
+            &[],
+            &[],
+            &[],
+            &outside,
+            None,
+            None,
+            None
+        ),
         plain
     );
 }
@@ -931,6 +1054,7 @@ fn digest_activity_section_mixed_kinds() {
         &activity,
         None,
         None,
+        None,
     );
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
@@ -965,7 +1089,8 @@ fn activity_events_upsert_and_ignore_paths() {
         summary: summary.map(Into::into),
     };
 
-    // Span kinds: one row per ext_id, end_ts follows, empty summary fills in.
+    // Span kinds: one row per ext_id, end_ts follows, the newest non-empty
+    // summary wins (an empty one keeps the last).
     let s = ActivityKind::AiSession;
     storage::insert_activity_event(&conn, &ev(s, 1_000, Some(1_000), "sess", None)).unwrap();
     storage::insert_activity_event(&conn, &ev(s, 1_000, Some(9_000), "sess", Some("hi"))).unwrap();
@@ -974,7 +1099,10 @@ fn activity_events_upsert_and_ignore_paths() {
     let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].end_ts, Some(ms_to_ts(20_000)));
-    assert_eq!(rows[0].summary.as_deref(), Some("hi"));
+    assert_eq!(rows[0].summary.as_deref(), Some("later"));
+    storage::insert_activity_event(&conn, &ev(s, 1_000, Some(20_000), "sess", None)).unwrap();
+    let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
+    assert_eq!(rows[0].summary.as_deref(), Some("later"));
 
     // PR kinds: one row per (kind, ext_id, ts); a bumped ts is a new marker.
     let p = ActivityKind::PrAuthored;
@@ -1779,6 +1907,7 @@ fn eject_splits_interval_and_blocks_suggestion() {
         &[],
         None,
         None,
+        None,
     );
     check_golden("m24.hints.digest.golden", &digest);
     // A hint naming a task outside the open list is dropped, not mislinked.
@@ -1789,6 +1918,7 @@ fn eject_splits_interval_and_blocks_suggestion() {
         &few_shot,
         &hints,
         &[],
+        None,
         None,
         None,
     );
