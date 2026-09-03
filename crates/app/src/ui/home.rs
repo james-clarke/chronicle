@@ -747,7 +747,15 @@ fn feed_row(
         .num(fmt_dur(block.ms));
     match &block.claim {
         Some(c) => {
-            row = row.dot(theme::task_color(c.task_id, c.project.as_deref()));
+            // A shaky model placement wears the timeline's confidence tint
+            // instead of hiding it in the hover text.
+            let dot = if c.source != "user" && c.confidence < 0.7 {
+                theme::confidence_color(theme::confidence_band(c.confidence))
+                    .unwrap_or_else(|| theme::task_color(c.task_id, c.project.as_deref()))
+            } else {
+                theme::task_color(c.task_id, c.project.as_deref())
+            };
+            row = row.dot(dot);
             if c.source == "prepass" {
                 row = row.chip("to confirm", theme::palette::AMBER);
             } else if c.source == "live" {

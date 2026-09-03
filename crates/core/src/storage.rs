@@ -2484,6 +2484,40 @@ pub fn stamp_consolidated(conn: &Connection, day: &str, id: i64) -> Result<(), S
     set_meta(conn, &format!("consolidated:{day}"), Some(&id.to_string()))
 }
 
+/// The newest live-tier row: its end and the task label (the inspector's
+/// "last live pass").
+pub fn last_live_interval(conn: &Connection) -> Result<Option<(i64, String)>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT i.end_ts, t.label FROM intervals i JOIN tasks t ON t.id = i.task_id
+             WHERE i.source='live' ORDER BY i.end_ts DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Pre-pass placements in `[lo, hi)` with their task labels:
+/// `(start_ts, end_ts, label, reason)` in time order.
+pub fn tail_placements(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(i64, i64, String, String)>, StorageError> {
+    Ok(conn
+        .prepare(
+            "SELECT i.start_ts, i.end_ts, t.label, COALESCE(i.reason, '')
+             FROM intervals i JOIN tasks t ON t.id = i.task_id
+             WHERE i.source='prepass' AND i.start_ts >= ?1 AND i.start_ts < ?2
+             ORDER BY i.start_ts",
+        )?
+        .query_map([lo, hi], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
 /// The open task anchored to `key` (`tasks.external_ref`), if any.
 pub fn open_task_by_ref(conn: &Connection, key: &str) -> Result<Option<OpenTask>, StorageError> {
     use rusqlite::OptionalExtension;

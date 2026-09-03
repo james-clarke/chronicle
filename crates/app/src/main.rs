@@ -1080,12 +1080,54 @@ fn build_batch_digest(
     config: &Config,
     data_dir: &Path,
     batch: &chronicle_core::storage::BatchRow,
+    open: Vec<chronicle_core::types::OpenTask>,
+    mcp: bool,
+) -> anyhow::Result<BatchDigest> {
+    let spans = chronicle_core::storage::batch_spans(conn, batch.id)?;
+    build_window_digest(
+        conn,
+        config,
+        data_dir,
+        batch.start_ts,
+        batch.end_ts,
+        spans,
+        open,
+        mcp,
+    )
+}
+
+/// The tail digest as the worker would build it if the tail closed now —
+/// the inspector's "show digest" (m27 chunk 7). No MCP fetch (it would
+/// block the UI); "(no tail spans)" when nothing is unbatched.
+pub(crate) fn tail_digest(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+) -> anyhow::Result<String> {
+    use chronicle_core::storage;
+    let now = Timestamp::now().as_millisecond();
+    let lo = storage::latest_batch_end(conn)?.unwrap_or(now - 12 * 3_600_000);
+    let spans = storage::spans_in_range(conn, lo, now)?;
+    if spans.is_empty() {
+        return Ok("(no tail spans)".to_owned());
+    }
+    let open = storage::open_tasks(conn, OPEN_CAP)?;
+    Ok(build_window_digest(conn, config, data_dir, lo, now, spans, open, false)?.digest)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_window_digest(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    lo: i64,
+    hi: i64,
+    spans: Vec<chronicle_core::sessionizer::SpanDraft>,
     mut open: Vec<chronicle_core::types::OpenTask>,
     mcp: bool,
 ) -> anyhow::Result<BatchDigest> {
     use chronicle_core::storage;
-    let spans = storage::batch_spans(conn, batch.id)?;
-    let hints = storage::prepass_hints(conn, batch.start_ts, batch.end_ts)?;
+    let hints = storage::prepass_hints(conn, lo, hi)?;
     for h in &hints {
         if !open.iter().any(|t| t.id == h.task_id)
             && let Some(t) = storage::open_task_by_id(conn, h.task_id)?
@@ -1100,7 +1142,7 @@ fn build_batch_digest(
     } else {
         None
     };
-    let activity = storage::activity_in_range(conn, batch.start_ts, batch.end_ts)?;
+    let activity = storage::activity_in_range(conn, lo, hi)?;
     let ticket_re = regex::Regex::new(&config.ticket_regex).ok();
     let digest = chronicle_core::digest::build_digest(
         &spans,
@@ -1112,7 +1154,7 @@ fn build_batch_digest(
         mcp_context.as_deref(),
         ticket_re.as_ref(),
     );
-    let gaps = afk_gaps_min(&spans, batch.start_ts);
+    let gaps = afk_gaps_min(&spans, lo);
     Ok(BatchDigest {
         digest,
         open,
@@ -2601,21 +2643,21 @@ struct Scheduler {
 static NEVER_REPLY: std::sync::LazyLock<crossbeam_channel::Receiver<deriveproto::Reply>> =
     std::sync::LazyLock::new(crossbeam_channel::never);
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DaemonStatus {
-    uptime_secs: u64,
-    derive_active: bool,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DaemonStatus {
+    pub(crate) uptime_secs: u64,
+    pub(crate) derive_active: bool,
     /// What the inference slot is running ("derive batch 71", "ai job 12")
     /// and for how long; absent when idle or from a pre-m27 daemon.
     #[serde(default)]
-    worker: Option<String>,
+    pub(crate) worker: Option<String>,
     #[serde(default)]
-    worker_secs: Option<u64>,
+    pub(crate) worker_secs: Option<u64>,
     /// The resident derive worker is up with the model loaded.
     #[serde(default)]
-    model_resident: bool,
-    idle_secs: Option<u64>,
-    ui_open: bool,
+    pub(crate) model_resident: bool,
+    pub(crate) idle_secs: Option<u64>,
+    pub(crate) ui_open: bool,
 }
 
 fn status_json(
@@ -3563,18 +3605,24 @@ fn mcp_check(data_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-enum Liveness {
+pub(crate) enum Liveness {
     Stopped,
     Unresponsive,
     Running(DaemonStatus),
 }
 
-fn query_daemon(sock: &Path) -> Liveness {
+pub(crate) fn query_daemon(sock: &Path) -> Liveness {
+    query_daemon_within(sock, Duration::from_secs(1))
+}
+
+/// `query_daemon` with a caller-chosen reply timeout (the UI thread polls
+/// with a short one so an unresponsive daemon cannot stall a frame).
+pub(crate) fn query_daemon_within(sock: &Path, timeout: Duration) -> Liveness {
     use std::io::{BufRead, Write};
     let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) else {
         return Liveness::Stopped;
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let _ = stream.set_read_timeout(Some(timeout));
     if stream.write_all(b"status\n").is_err() {
         return Liveness::Unresponsive;
     }

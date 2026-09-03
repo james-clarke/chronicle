@@ -512,6 +512,9 @@ struct TimelineApp {
     /// Today's consolidation stamp when the shown day is today: None = not
     /// run, Some(0) = ran with no change, Some(id) = undoable.
     tidy: Option<Option<i64>>,
+    /// Settings › Derivation's Pipeline card (m27 chunk 7), refreshed with
+    /// the reload while the panel is open.
+    pipeline: Option<settings::PipelineInfo>,
     /// Open proposed tasks of the shown day (m24), newest first.
     proposals: Vec<Proposal>,
     /// When each feed block was first seen (drives the arrival fade).
@@ -677,6 +680,7 @@ impl TimelineApp {
             feed: Vec::new(),
             progress: None,
             tidy: None,
+            pipeline: None,
             unassigned_ms: 0,
             proposals: Vec::new(),
             feed_seen: HashMap::new(),
@@ -798,6 +802,11 @@ impl TimelineApp {
             .conn
             .as_ref()
             .and_then(|c| chronicle_core::storage::derive_progress(c).ok().flatten());
+        if let Some(panel) = &self.settings {
+            self.pipeline = self.conn.as_ref().map(|c| {
+                settings::PipelineInfo::load(c, &self.data_dir, &self.sock_path, panel.config())
+            });
+        }
         let today = jiff::Zoned::now().with_time_zone(self.tz.clone()).date();
         self.tidy = if self.day == today {
             self.conn.as_ref().map(|c| {

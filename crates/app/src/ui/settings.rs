@@ -32,9 +32,82 @@ pub(super) struct SettingsPanel {
     /// on save and the restart hint fires only when the file changes.
     base: chronicle_core::config::Config,
     status: Option<Result<String, String>>,
+    /// Inspector views (m27 chunk 7): the tail digest as the worker would
+    /// build it, and the last raw model output.
+    digest_view: Option<String>,
+    output_view: Option<String>,
+}
+
+/// What the Pipeline card shows: the daemon's own view plus what the DB
+/// holds about the last runs. Loaded on the reload cadence while Settings
+/// is open (the socket query has a 1 s timeout).
+#[derive(Debug, Clone)]
+pub(super) struct PipelineInfo {
+    pub daemon: Option<crate::DaemonStatus>,
+    pub model: String,
+    pub last_derive: Option<chronicle_core::storage::DeriveMetrics>,
+    pub pending: i64,
+    pub last_live: Option<(i64, String)>,
+    /// `(start_ts, end_ts, label, reason)` in the tail.
+    pub placements: Vec<(i64, i64, String, String)>,
+    pub last_batch: Option<i64>,
+}
+
+impl PipelineInfo {
+    pub(super) fn load(
+        conn: &rusqlite::Connection,
+        data_dir: &Path,
+        sock: &Path,
+        config: &chronicle_core::config::Config,
+    ) -> Self {
+        use chronicle_core::storage;
+        // Short timeout: this runs on the UI thread every reload.
+        let daemon = match crate::query_daemon_within(sock, std::time::Duration::from_millis(200)) {
+            crate::Liveness::Running(s) => Some(s),
+            _ => None,
+        };
+        let model = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+            .map(|p| {
+                let file = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                match chronicle_derive::model::PRESETS
+                    .iter()
+                    .find(|m| m.file == file)
+                {
+                    Some(m) => format!("{file} ({})", m.name),
+                    None => file,
+                }
+            })
+            .unwrap_or_else(|| "not downloaded".to_owned());
+        let now = jiff::Timestamp::now().as_millisecond();
+        let tail_lo = storage::latest_batch_end(conn)
+            .ok()
+            .flatten()
+            .unwrap_or(now - 12 * 3_600_000);
+        Self {
+            daemon,
+            model,
+            last_derive: storage::last_derive(conn).ok().flatten(),
+            pending: storage::pending_batch_count(conn).unwrap_or(0),
+            last_live: storage::last_live_interval(conn).ok().flatten(),
+            placements: storage::tail_placements(conn, tail_lo, now).unwrap_or_default(),
+            last_batch: storage::get_meta(conn, "derive_last_batch")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok()),
+        }
+    }
 }
 
 impl SettingsPanel {
+    /// The config as loaded or last saved (for the Pipeline card).
+    pub(super) fn config(&self) -> &chronicle_core::config::Config {
+        &self.base
+    }
+
     fn load(
         config_path: &Path,
         data_dir: &Path,
@@ -57,6 +130,8 @@ impl SettingsPanel {
             distraction_patterns: config.distraction_patterns.join("\n"),
             checkpoint_afk_secs: config.checkpoint_afk_secs,
             git_repos: config.git_repos.clone(),
+            digest_view: None,
+            output_view: None,
             sources: super::connections::LocalSources::from_config(&config),
             connections,
             base: config,
@@ -115,6 +190,143 @@ const SECTIONS: &[&str] = &[
     "Window & appearance",
 ];
 const SECTION_INDEX_W: f32 = 132.0;
+
+/// Settings › Derivation › Pipeline (m27 chunk 7): what the worker is doing
+/// and what it last saw, without opening a log. Two debugging views on
+/// demand: the tail digest as the worker would build it, and the last raw
+/// model output.
+fn pipeline_card(
+    ui: &mut egui::Ui,
+    info: Option<&PipelineInfo>,
+    tz: &jiff::tz::TimeZone,
+    panel: &mut SettingsPanel,
+    conn: Option<&rusqlite::Connection>,
+    data_dir: &Path,
+) {
+    let hm = |ms: i64| {
+        chronicle_core::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .strftime("%H:%M")
+            .to_string()
+    };
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Pipeline")
+            .strong()
+            .color(theme::palette::TEXT),
+    );
+    ui.weak("what the derivation worker is doing and what it last saw");
+    let Some(info) = info else {
+        ui.weak("loading\u{2026}");
+        return;
+    };
+    egui::Grid::new("settings_pipeline")
+        .num_columns(2)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            ui.weak("model");
+            ui.label(&info.model);
+            ui.end_row();
+            ui.weak("worker");
+            let worker = match &info.daemon {
+                None => "daemon not running".to_owned(),
+                Some(d) => match (&d.worker, d.worker_secs) {
+                    (Some(w), Some(s)) => format!("{w} ({s}s)"),
+                    (Some(w), None) => w.clone(),
+                    (None, _) if d.model_resident => "idle, model resident".to_owned(),
+                    (None, _) => "idle".to_owned(),
+                },
+            };
+            ui.label(worker);
+            ui.end_row();
+            ui.weak("pending batches");
+            ui.label(theme::num(info.pending.to_string()));
+            ui.end_row();
+            ui.weak("last derive");
+            match &info.last_derive {
+                Some(d) => ui.label(format!(
+                    "batch {} at {}, {:.1}s, {} prompt + {} gen tokens",
+                    d.batch_id,
+                    hm(d.derived_ts),
+                    d.derive_ms as f64 / 1000.0,
+                    d.prompt_tokens,
+                    d.gen_tokens
+                )),
+                None => ui.weak("none yet"),
+            };
+            ui.end_row();
+            ui.weak("last live pass");
+            match &info.last_live {
+                Some((end, label)) => ui.label(format!("{} \u{2192} {label}", hm(*end))),
+                None => ui.weak("none yet"),
+            };
+            ui.end_row();
+        });
+    if !info.placements.is_empty() {
+        ui.weak("pre-pass placements in the tail");
+        for (lo, hi, label, reason) in &info.placements {
+            ui.label(format!(
+                "{}\u{2013}{} \u{2192} {label} ({reason})",
+                hm(*lo),
+                hm(*hi)
+            ));
+        }
+    }
+    ui.horizontal(|ui| {
+        if theme::ghost_button(ui, "show digest")
+            .on_hover_text("the tail digest as the worker would build it now (no MCP fetch)")
+            .clicked()
+        {
+            panel.digest_view = match panel.digest_view.take() {
+                Some(_) => None,
+                None => Some(match conn {
+                    Some(c) => crate::tail_digest(c, &panel.base, data_dir)
+                        .unwrap_or_else(|e| format!("digest failed: {e:#}")),
+                    None => "(no database)".to_owned(),
+                }),
+            };
+        }
+        if theme::ghost_button(ui, "last output")
+            .on_hover_text("the model's last raw batch answer, before linking")
+            .clicked()
+        {
+            panel.output_view = match panel.output_view.take() {
+                Some(_) => None,
+                None => Some(
+                    conn.and_then(|c| {
+                        chronicle_core::storage::get_meta(c, "derive_last_output")
+                            .ok()
+                            .flatten()
+                    })
+                    .map(|raw| match info.last_batch {
+                        Some(b) => format!("batch {b}\n{raw}"),
+                        None => raw,
+                    })
+                    .unwrap_or_else(|| "(no derive since the worker was instrumented)".to_owned()),
+                ),
+            };
+        }
+        ui.weak("debugging views");
+    });
+    for (id, text) in [
+        ("digest", &mut panel.digest_view),
+        ("output", &mut panel.output_view),
+    ] {
+        if let Some(text) = text {
+            egui::ScrollArea::vertical()
+                .id_salt(id)
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(text)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
+                    );
+                });
+        }
+    }
+}
 
 /// Section heading; scrolls itself to the top when it is the `jump` target.
 fn section(ui: &mut egui::Ui, title: &str, first: bool, jump: Option<&str>) {
@@ -184,6 +396,8 @@ impl TimelineApp {
         let autohide_now = self.autohide;
         let mut autohide_toggle: Option<bool> = None;
         let conn = self.conn.as_ref();
+        let pipeline = self.pipeline.clone();
+        let tz = self.tz.clone();
         let Some(panel) = &mut self.settings else {
             return;
         };
@@ -330,6 +544,7 @@ impl TimelineApp {
                                     ui.weak("minutes (0 = off)");
                                     ui.end_row();
                                 });
+                            pipeline_card(ui, pipeline.as_ref(), &tz, panel, conn, &data_dir);
 
                             section(ui, "Standup & journal", false, jump);
                             egui::Grid::new("settings_journal")
