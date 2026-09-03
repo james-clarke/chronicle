@@ -34,6 +34,7 @@ use chronicle_core::storage::FeedBlock;
 use chat::ChatPanel;
 use onboarding::ModelDownload;
 use settings::SettingsPanel;
+use timeline::PostDialog;
 
 const RELOAD_EVERY: Duration = Duration::from_secs(5);
 /// Idle wake-up cadence; the only repaint source besides user input.
@@ -208,6 +209,14 @@ fn spawn_stdin_listener(ctx: egui::Context, visible: Arc<AtomicBool>) {
             }
         }
     });
+}
+
+/// mcp.toml as the daemon resolves it: the config override when set, else
+/// the data dir's copy.
+fn mcp_path(config_path: &Path, data_dir: &Path) -> PathBuf {
+    chronicle_core::config::Config::load(config_path)
+        .map(|c| c.mcp_path(data_dir))
+        .unwrap_or_else(|_| data_dir.join("mcp.toml"))
 }
 
 struct SpanRow {
@@ -439,6 +448,9 @@ enum Action {
     /// Store today's intent from the morning picker (an empty one is
     /// "skip today": the picker stops asking).
     SetIntent(Intent),
+    /// Run the open post dialog's action call on a thread (m26). Only ever
+    /// reached from the dialog's "post" button.
+    Post,
 }
 
 /// In-flight inline edit of a workspace artifact in the detail pane.
@@ -622,6 +634,12 @@ struct TimelineApp {
     intent_text: String,
     /// Open tasks nothing has moved for `task_stuck_days`.
     stuck: HashSet<i64>,
+    /// Action calls from mcp.toml (m26): the only writes the UI can make.
+    /// Reloaded with the day so a preset added in Settings shows up.
+    mcp_actions: Vec<chronicle_mcp::ActionCall>,
+    /// Open post-confirm dialog (detail pane); Some = the user is looking
+    /// at what would be sent.
+    post: Option<PostDialog>,
 }
 
 /// Home standup card data.
@@ -740,6 +758,8 @@ impl TimelineApp {
             intent_pick: HashSet::new(),
             intent_text: String::new(),
             stuck: HashSet::new(),
+            mcp_actions: Vec::new(),
+            post: None,
         }
     }
 
@@ -774,6 +794,27 @@ impl TimelineApp {
             }
         }
         candidates
+    }
+
+    /// The posting thread's verdict (m26): the dialog's result line, and a
+    /// successful post counted in meta `posts:<date>`.
+    fn poll_post(&mut self) {
+        let Some(dialog) = self.post.as_mut() else {
+            return;
+        };
+        let Some(rx) = dialog.rx.as_ref() else {
+            return;
+        };
+        let Ok(result) = rx.try_recv() else {
+            return;
+        };
+        dialog.rx = None;
+        let ok = result.is_ok();
+        dialog.result =
+            Some(result.map(|()| format!("posted \u{b7} {}", Zoned::now().strftime("%H:%M"))));
+        if ok && let Some(conn) = self.conn.as_ref() {
+            crate::bump_day_counter(conn, "posts");
+        }
     }
 
     fn reload_if_stale(&mut self) {
@@ -812,6 +853,10 @@ impl TimelineApp {
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
         }
+        self.mcp_actions =
+            chronicle_mcp::McpConfig::load(&mcp_path(&self.config_path, &self.data_dir))
+                .map(|c| c.action_calls)
+                .unwrap_or_default();
         self.poll_ai_jobs();
         if self.view == View::Reports {
             match self.load_report() {
@@ -1547,6 +1592,29 @@ impl TimelineApp {
                 }
                 result.map(|_| ())
             }
+            Action::Post => {
+                let path = mcp_path(&self.config_path, &self.data_dir);
+                let Some(dialog) = self.post.as_mut() else {
+                    return;
+                };
+                let action = dialog.action.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (key, body) = (dialog.key.clone(), dialog.body.clone());
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("mcp-action".into())
+                        .spawn(move || {
+                            let result = chronicle_mcp::run_action(&path, &action, &key, &body)
+                                .map(|_| ())
+                                .map_err(|e| format!("{e:#}"));
+                            let _ = tx.send(result);
+                        });
+                match spawned {
+                    Ok(_) => dialog.rx = Some(rx),
+                    Err(e) => dialog.result = Some(Err(e.to_string())),
+                }
+                return;
+            }
             Action::SaveWorkspaceEdit(w) => {
                 self.ws_edit = None;
                 match w {
@@ -1819,6 +1887,7 @@ impl eframe::App for TimelineApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.reload_if_stale();
+        self.poll_post();
 
         // m19 window chrome: one rounded card with border + shadow, painted
         // here because panels can't round their own corners. Content lives in

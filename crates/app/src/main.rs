@@ -874,7 +874,11 @@ fn build_batch_digest(
     let corrections = storage::similar_corrections(conn, &spans, 4)?;
     let tz = TimeZone::system();
     let mcp_context = if mcp {
-        chronicle_mcp::gather_context(&config.mcp_path(data_dir))
+        let ctx = chronicle_mcp::gather_context(&config.mcp_path(data_dir));
+        if ctx.is_some() {
+            bump_day_counter(conn, "fetches");
+        }
+        ctx
     } else {
         None
     };
@@ -1204,6 +1208,7 @@ fn run_ai_job(
             bail!("no fetch_calls configured or every call failed")
         };
         storage::upsert_task_context(conn, task_id, "mcp", Timestamp::now(), &content)?;
+        bump_day_counter(conn, "fetches");
         return Ok(content);
     }
     let model_path = model_path.context("no model available; run `chronicle model pull`")?;
@@ -1752,6 +1757,25 @@ fn clamp_intervals(
         true
     });
     out
+}
+
+/// Per-day counter in `meta` (`fetches:2026-09-03`, `posts:2026-09-03`):
+/// what Settings › Storage reports as having left this machine today.
+/// Best-effort — a meta write must never block the thing it counts.
+pub(crate) fn bump_day_counter(conn: &rusqlite::Connection, prefix: &str) {
+    use chronicle_core::storage;
+    let key = day_counter_key(prefix);
+    let n = storage::get_meta(conn, &key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let _ = storage::set_meta(conn, &key, Some(&(n + 1).to_string()));
+}
+
+/// The key [`bump_day_counter`] writes and the settings panel reads.
+pub(crate) fn day_counter_key(prefix: &str) -> String {
+    format!("{prefix}:{}", jiff::Zoned::now().date())
 }
 
 pub(crate) fn socket_path(data_dir: &Path) -> PathBuf {

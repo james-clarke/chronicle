@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use chronicle_core::config::expand_home;
 use chronicle_core::storage;
 use chronicle_core::types::{ActivityEvent, ActivityKind};
-use chronicle_mcp::{ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
+use chronicle_mcp::{ActionCall, ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
 use rusqlite::Connection;
@@ -55,6 +55,8 @@ struct Preset {
     env: &'static [&'static str],
     context_calls: &'static [(&'static str, &'static str)],
     fetch_calls: &'static [(&'static str, &'static str)],
+    /// User-triggered writes (m26): tool, args template, button label.
+    action_calls: &'static [(&'static str, &'static str, &'static str)],
     hint: &'static str,
 }
 
@@ -72,6 +74,11 @@ const PRESETS: &[Preset] = &[
         fetch_calls: &[(
             "jira_get_issue",
             r#"{"issue_key": "{ref}", "comment_limit": 10}"#,
+        )],
+        action_calls: &[(
+            "jira_add_comment",
+            r#"{"issue_key": "{key}", "comment": "{body}"}"#,
+            "comment on {key}",
         )],
         hint: "API token from id.atlassian.com \u{b7} needs uvx on PATH",
     },
@@ -97,6 +104,7 @@ const PRESETS: &[Preset] = &[
             ),
         ],
         fetch_calls: &[],
+        action_calls: &[],
         hint: "binary from github.com/github/github-mcp-server releases on PATH \u{b7} fine-grained PAT with pull request read",
     },
     Preset {
@@ -110,6 +118,7 @@ const PRESETS: &[Preset] = &[
             r#"{"calendarId": "primary", "timeMin": "{today}", "timeMax": "{tomorrow}"}"#,
         )],
         fetch_calls: &[],
+        action_calls: &[],
         hint: "value = path to an OAuth desktop-client JSON; run `npx @cocal/google-calendar-mcp auth` once \u{b7} consent screen must be In production or the token dies in 7 days",
     },
     Preset {
@@ -123,6 +132,7 @@ const PRESETS: &[Preset] = &[
             r#"{"start": "{today}", "end": "{tomorrow}"}"#,
         )],
         fetch_calls: &[],
+        action_calls: &[],
         hint: "iCloud / Fastmail / Nextcloud with an app password \u{b7} list-events may need a calendarUrl (see list-calendars)",
     },
 ];
@@ -133,6 +143,17 @@ fn preset_calls(spec: &[(&str, &str)]) -> Vec<ContextCall> {
             server: String::new(),
             tool: (*tool).to_owned(),
             args_json: Some((*args).to_owned()),
+        })
+        .collect()
+}
+
+fn preset_actions(spec: &[(&str, &str, &str)]) -> Vec<ActionCall> {
+    spec.iter()
+        .map(|(tool, args, label)| ActionCall {
+            server: String::new(),
+            tool: (*tool).to_owned(),
+            args_json: Some((*args).to_owned()),
+            label: (*label).to_owned(),
         })
         .collect()
 }
@@ -172,8 +193,9 @@ struct ServerForm {
     args: String,
     env: Vec<(String, String)>,
     enabled: bool,
-    /// Allowlist entries a preset brings along; `server` is set at submit.
-    preset_calls: Option<(Vec<ContextCall>, Vec<ContextCall>)>,
+    /// Allowlist entries a preset brings along (context, fetch, action);
+    /// `server` is set at submit.
+    preset_calls: Option<(Vec<ContextCall>, Vec<ContextCall>, Vec<ActionCall>)>,
     hint: Option<&'static str>,
     error: Option<String>,
 }
@@ -205,7 +227,11 @@ impl ServerForm {
                 .map(|k| ((*k).to_owned(), String::new()))
                 .collect(),
             enabled: true,
-            preset_calls: Some((preset_calls(p.context_calls), preset_calls(p.fetch_calls))),
+            preset_calls: Some((
+                preset_calls(p.context_calls),
+                preset_calls(p.fetch_calls),
+                preset_actions(p.action_calls),
+            )),
             hint: Some(p.hint),
             error: None,
         }
@@ -333,11 +359,12 @@ fn form_ui(ui: &mut egui::Ui, form: &mut ServerForm) -> FormAct {
         }
         ui.checkbox(&mut form.enabled, "enabled");
         match (&form.preset_calls, &form.original) {
-            (Some((c, f)), _) => {
+            (Some((c, f, a)), _) => {
                 ui.weak(format!(
-                    "adds {} context call(s) and {} fetch call(s) to the allowlist",
+                    "adds {} context call(s), {} fetch call(s) and {} action(s) to the allowlist",
                     c.len(),
-                    f.len()
+                    f.len(),
+                    a.len()
                 ));
             }
             (None, Some(_)) => {
@@ -640,6 +667,7 @@ impl Connections {
     ) {
         self.poll_probes(conn);
         self.servers_ui(ui, conn);
+        self.actions_ui(ui);
         ui.add_space(theme::SPACE_SM);
         self.repos_ui(ui, git_repos);
         ui.add_space(theme::SPACE_SM);
@@ -1026,6 +1054,11 @@ impl Connections {
                             c.server = name.clone();
                         }
                     }
+                    for a in next.action_calls.iter_mut() {
+                        if &a.server == old {
+                            a.server = name.clone();
+                        }
+                    }
                     self.probes.remove(old);
                 }
                 next.servers[idx] = server;
@@ -1035,13 +1068,18 @@ impl Connections {
                     return Err(format!("a server named {name} already exists"));
                 }
                 next.servers.push(server);
-                if let Some((ctx_calls, fetch_calls)) = &form.preset_calls {
+                if let Some((ctx_calls, fetch_calls, action_calls)) = &form.preset_calls {
                     let with_server = |c: &ContextCall| ContextCall {
                         server: name.clone(),
                         ..c.clone()
                     };
                     next.context_calls.extend(ctx_calls.iter().map(with_server));
                     next.fetch_calls.extend(fetch_calls.iter().map(with_server));
+                    next.action_calls
+                        .extend(action_calls.iter().map(|a| ActionCall {
+                            server: name.clone(),
+                            ..a.clone()
+                        }));
                 }
             }
         }
@@ -1057,6 +1095,7 @@ impl Connections {
         next.servers.retain(|s| s.name != name);
         next.context_calls.retain(|c| c.server != name);
         next.fetch_calls.retain(|c| c.server != name);
+        next.action_calls.retain(|a| a.server != name);
         next.save(&self.mcp_path).map_err(|e| e.to_string())?;
         self.mcp = next;
         self.probes.remove(name);
@@ -1064,6 +1103,33 @@ impl Connections {
             let _ = storage::set_meta(conn, &probe_key(name), None);
         }
         Ok(())
+    }
+
+    /// Every allowlisted write in mcp.toml, listed apart from the read
+    /// calls: these are the only things Chronicle can put back into a
+    /// tracker, and only a click in the task pane runs one.
+    fn actions_ui(&mut self, ui: &mut egui::Ui) {
+        if self.mcp.action_calls.is_empty() {
+            return;
+        }
+        ui.add_space(theme::SPACE_SM);
+        subhead(ui, "Actions", |_| {});
+        let width = ui.available_width();
+        for a in &self.mcp.action_calls {
+            let title = format!("{}.{}", a.server, a.tool);
+            theme::ListRow::new(&title)
+                .emphasis()
+                .dot(palette::TEXT_DIM)
+                .chip("manual".to_owned(), palette::TEXT_DIM)
+                .show(ui, width, |_| {});
+            if !a.label.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    caption(ui, a.label.clone(), None);
+                });
+            }
+        }
+        caption(ui, "posts only when you click".to_owned(), None);
     }
 
     fn repos_ui(&mut self, ui: &mut egui::Ui, git_repos: &mut Vec<String>) {
