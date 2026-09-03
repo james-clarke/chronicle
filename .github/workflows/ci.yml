@@ -3,9 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
-    paths-ignore: [site/**, render.yaml]
+    paths-ignore: [site/**, docs/**, "**.md", render.yaml]
   pull_request:
-    paths-ignore: [site/**, render.yaml]
+    paths-ignore: [site/**, docs/**, "**.md", render.yaml]
 
 jobs:
   check:

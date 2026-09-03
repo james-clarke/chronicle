@@ -1,6 +1,6 @@
 # M27 — Derivation: accurate, fast, visible
 
-Status: **chunk 1 shipped** (2026-09-03, a899606), chunks 2–7 planned. Research session: four sub-agents (daemon scheduling + logs, live DB statistics, feed/timeline surfaces, eval history) plus live benches of both model presets on batches 66–68. Every "today" claim below is verified in code or data with a `file:line`; every number comes from the live DB, the daemon log, or a bench run on this machine (Ryzen 5 5625U, 6 cores, 14 GB, Vega iGPU, no discrete GPU).
+Status: **chunks 1–7 shipped** (2026-09-03; a899606, 81f1853, ed3f387, b7d87ab, 799af4d, 4043e14, bbb249d — see Shipped). Open: the post-chunk-5 replay run and a quiet-box soak day for the chunk 3 numbers. Research session: four sub-agents (daemon scheduling + logs, live DB statistics, feed/timeline surfaces, eval history) plus live benches of both model presets on batches 66–68. Every "today" claim below is verified in code or data with a `file:line`; every number comes from the live DB, the daemon log, or a bench run on this machine (Ryzen 5 5625U, 6 cores, 14 GB, Vega iGPU, no discrete GPU).
 
 Numbering: m26 (daily driver) is in flight in another session. The teams doc reserved m27 for "publish outward" and framed derivation quality as the gate for it (`teams-direction.md:289`); this milestone takes m27 and publishing slides to m28. None of the chunks below touch m26's files (Home layout, calendar, Wakapi, atuin, intent, Jira write-back). m26 chunks 3–4 will add cwd/file evidence that chunk 5 here should consume once both land.
 
@@ -242,7 +242,7 @@ Deviations from the plan text:
 - Replay probes come from what the corrections table holds. `merge`, `rename`, and `eject` rows carry no `interval_id`, so a merge/rename probe is the target task's current intervals per batch that ended before the correction (one probe per batch, range clipped to the batch window), and an eject probe borrows the range of the `assign` the user made within 120 s after it. The open-task list at a batch's end is rebuilt from `tasks.created_ts`/`closed_ts` with labels rewound through later renames, so a corrected label cannot leak into the prompt. Replay never gathers MCP context.
 - `placed` passes on a label-token match when the target task did not exist at the batch's end (declared later), reported as "by label".
 
-Numbers: over the last 7 days, 180 probes from 45 corrections over 50 done batches (1 correction skipped). The 4B baseline run is recorded below once it finishes (about 2 minutes per batch on this box under load).
+Numbers: over the last 7 days, 180 probes from 45 corrections over 50 done batches (1 correction skipped). 4B baseline (pre-chunk-5 rules, prompt v4, run 2026-09-03 under load): `total: 76/180` — `placed 75/178`, `not_ejected 1/2`; the dominant failure is the declared-task magnet (c78 merge probes landing on the neighbouring declared task).
 
 ### Chunk 3 — resident derive worker (2026-09-03, ed3f387)
 
@@ -264,7 +264,7 @@ What landed: `core::evidence` (ticket keys in titles/URLs with screen time per k
 
 Deviations: hint strength is rendered from the stored reason (`branch`/`title` strong, else weak) rather than stored, so existing rows and the UI's "placed by a rule · repo chronicle" text are unchanged.
 
-Numbers: fixtures unchanged under v5 — day3_sms 8/10, day4_heroku 5/6, same two failures as v3/v4. The replay before/after comparison is recorded once the 4B baseline finishes and the post-chunk-5 run follows it.
+Numbers: fixtures unchanged under v5 — day3_sms 8/10, day4_heroku 5/6, same two failures as v3/v4. Replay: 4B baseline before chunk 5 = 76/180 (chunk 2 section); the post-chunk-5 run (prompt v5, title-key + gated repo rules) is in flight in m28 and its number goes here.
 
 ### Chunk 6 — day-tier consolidation (2026-09-03)
 
