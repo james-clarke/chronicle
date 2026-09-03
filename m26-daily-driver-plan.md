@@ -1,6 +1,7 @@
 # M26 — Daily driver: right for James first
 
-Status: **planned, approved in outline (2026-09-03), no code.** Written so
+Status: **chunk 1 shipped 2026-09-03** (3e3e8ca, 496fe5b, e906918,
+4f37f34; installed daemon). Chunks 2–7 planned, approved in outline. Written so
 a fresh context can plan and build from this file alone. Repo conventions:
 one chunk per commit, tests + clippy per chunk, Conventional Commits
 single line, stop the systemd unit before `cargo install --locked`
