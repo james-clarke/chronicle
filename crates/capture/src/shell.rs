@@ -167,9 +167,9 @@ impl Span {
             .join(" \u{b7} ")
     }
 
-    /// Open spans re-emit with no summary: storage only ever fills an empty
-    /// one, so the counts must land in the row that closes the span.
-    fn event(&self, summary: Option<String>) -> ActivityEvent {
+    /// Every emit carries the counts so far; storage's upsert keeps the
+    /// newest non-empty summary under the same `ext_id`.
+    fn event(&self) -> ActivityEvent {
         ActivityEvent {
             ts: ms_to_ts(self.start_ms),
             end_ts: Some(ms_to_ts(self.last_ms)),
@@ -177,7 +177,7 @@ impl Span {
             branch: String::new(),
             kind: ActivityKind::Shell,
             ext_id: Some(format!("{}#{}", self.cwd, self.start_ms)),
-            summary,
+            summary: Some(self.summary()),
         }
     }
 }
@@ -210,8 +210,8 @@ impl Fold {
     }
 
     /// Folds `cmds` (timestamp order) into the open spans and returns the
-    /// events to store: closed spans with their summary, then the still-open
-    /// spans that grew, with a refreshed `end_ts`.
+    /// events to store: closed spans, then the still-open spans that grew,
+    /// with a refreshed `end_ts`.
     fn step(&mut self, cmds: &[Cmd], now_ms: i64) -> Vec<ActivityEvent> {
         let mut out = Vec::new();
         let mut touched: BTreeSet<String> = BTreeSet::new();
@@ -227,7 +227,7 @@ impl Fold {
                 *s.counts.entry(c.program.clone()).or_default() += 1;
             } else {
                 if let Some(prev) = self.open.remove(&repo) {
-                    out.push(prev.event(Some(prev.summary())));
+                    out.push(prev.event());
                 }
                 self.open.insert(
                     repo.clone(),
@@ -251,11 +251,11 @@ impl Fold {
         for k in stale {
             let s = self.open.remove(&k).expect("just listed");
             touched.remove(&k);
-            out.push(s.event(Some(s.summary())));
+            out.push(s.event());
         }
         for k in touched {
             if let Some(s) = self.open.get(&k) {
-                out.push(s.event(None));
+                out.push(s.event());
             }
         }
         out
@@ -344,10 +344,13 @@ mod tests {
             cmd(t + 300_000, 500, "ls", "/home/x/tmp"),
         ];
         let open = fold.step(&burst, t + 300_000);
-        assert_eq!(open.len(), 2, "one open span per repo, no summary yet");
+        assert_eq!(open.len(), 2, "one open span per repo");
         let chronicle = open.iter().find(|e| e.repo == "chronicle").unwrap();
         assert_eq!(chronicle.kind, ActivityKind::Shell);
-        assert_eq!(chronicle.summary, None);
+        assert_eq!(
+            chronicle.summary.as_deref(),
+            Some("cargo \u{d7}2 \u{b7} git \u{d7}1 \u{b7} rtk \u{d7}1")
+        );
         assert_eq!(
             chronicle.ext_id.as_deref(),
             Some(format!("/home/x/dev/chronicle#{t}").as_str())
@@ -359,8 +362,7 @@ mod tests {
             "outside any configured repo"
         );
 
-        // Eleven idle minutes close both spans; the summary lands on the
-        // closing event, under the same ext_id.
+        // Eleven idle minutes close both spans under the same ext_id.
         let closed = fold.step(&[], t + 300_000 + 11 * 60_000);
         assert_eq!(closed.len(), 2);
         let chronicle_close = closed.iter().find(|e| e.repo == "chronicle").unwrap();
@@ -386,7 +388,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].summary.as_deref(), Some("cargo \u{d7}1"));
         assert_eq!(events[0].ext_id, first[0].ext_id);
-        assert_eq!(events[1].summary, None);
+        assert_eq!(events[1].summary.as_deref(), Some("git \u{d7}1"));
         assert_eq!(
             events[1].ext_id.as_deref(),
             Some(format!("/home/x/dev/chronicle#{late}").as_str())
@@ -409,9 +411,13 @@ mod tests {
         let (cmds, _) = read_since(&conn, 0).unwrap();
         let mut fold = Fold::new(&[PathBuf::from("/home/x/dev/chronicle")]);
         let events = fold.step(&cmds, T0 / 1_000_000 + 20 * 60_000);
-        let closed: Vec<_> = events.iter().filter(|e| e.summary.is_some()).collect();
-        assert_eq!(closed.len(), 1);
-        assert_eq!(closed[0].summary.as_deref(), Some("cargo \u{d7}2"));
-        assert_eq!(closed[0].repo, "chronicle");
+        assert_eq!(
+            events.len(),
+            2,
+            "the closed cargo span, then the open git span"
+        );
+        assert_eq!(events[0].summary.as_deref(), Some("cargo \u{d7}2"));
+        assert_eq!(events[0].repo, "chronicle");
+        assert_eq!(events[1].summary.as_deref(), Some("git \u{d7}1"));
     }
 }

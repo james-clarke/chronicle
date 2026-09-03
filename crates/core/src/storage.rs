@@ -111,10 +111,16 @@ pub fn insert_activity_event(conn: &Connection, e: &ActivityEvent) -> Result<(),
         Dedupe::Upsert => {
             if let Some(ext) = &e.ext_id {
                 let n = conn.execute(
-                    "UPDATE activity_events SET end_ts=?3,
-                            summary=COALESCE(NULLIF(summary, ''), ?4)
+                    "UPDATE activity_events SET ts=?3, end_ts=?4,
+                            summary=COALESCE(NULLIF(?5, ''), summary)
                      WHERE kind=?1 AND ext_id=?2",
-                    params![e.kind.as_str(), ext, e.end_ts.map(ts_to_ms), e.summary],
+                    params![
+                        e.kind.as_str(),
+                        ext,
+                        ts_to_ms(e.ts),
+                        e.end_ts.map(ts_to_ms),
+                        e.summary
+                    ],
                 )?;
                 if n > 0 {
                     return Ok(());

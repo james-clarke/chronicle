@@ -829,7 +829,8 @@ fn activity_events_upsert_and_ignore_paths() {
         summary: summary.map(Into::into),
     };
 
-    // Span kinds: one row per ext_id, end_ts follows, empty summary fills in.
+    // Span kinds: one row per ext_id, end_ts follows, the newest non-empty
+    // summary wins (an empty one keeps the last).
     let s = ActivityKind::AiSession;
     storage::insert_activity_event(&conn, &ev(s, 1_000, Some(1_000), "sess", None)).unwrap();
     storage::insert_activity_event(&conn, &ev(s, 1_000, Some(9_000), "sess", Some("hi"))).unwrap();
@@ -838,7 +839,10 @@ fn activity_events_upsert_and_ignore_paths() {
     let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].end_ts, Some(ms_to_ts(20_000)));
-    assert_eq!(rows[0].summary.as_deref(), Some("hi"));
+    assert_eq!(rows[0].summary.as_deref(), Some("later"));
+    storage::insert_activity_event(&conn, &ev(s, 1_000, Some(20_000), "sess", None)).unwrap();
+    let rows = storage::activity_in_range(&conn, 0, 100_000).unwrap();
+    assert_eq!(rows[0].summary.as_deref(), Some("later"));
 
     // PR kinds: one row per (kind, ext_id, ts); a bumped ts is a new marker.
     let p = ActivityKind::PrAuthored;

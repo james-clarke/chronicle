@@ -62,7 +62,7 @@ pub enum Dedupe {
     LatestCheckout,
     /// Every observation is a row.
     None,
-    /// One row per `(kind, ext_id)`; a repeat refreshes `end_ts` (and fills
+    /// One row per `(kind, ext_id)`; a repeat rewrites `ts`/`end_ts` (and
     /// an empty summary).
     Upsert,
     /// One row per `(kind, ext_id, ts)`; repeats are ignored.

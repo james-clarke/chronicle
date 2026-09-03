@@ -106,6 +106,32 @@ cancelled event is tombstoned to zero length so it stops covering time.
    token, account email).
 3. Turn Google Calendar on under Settings › Connections → Local sources and
    restart the daemon.
+**Editor heartbeats (WakaTime protocol)** (no config key: the endpoint is always on):
+
+The same endpoint speaks WakaTime: `POST /api/v1/users/current/heartbeats.bulk` (and wakapi's single `POST /api/heartbeat`), `Authorization: Basic base64(<api_key>)`, reply `201 {"responses": [[…, 201], …]}`, 401 on a bad key, same `Host` allowlist as the AW routes. Heartbeats fold per `(project, branch)` with a 15-minute gap into `activity_events(kind='edit')`: `summary` = the file, `repo` = the project, `ext_id` = `<project>@<branch>#<span-start-ms>`, so every heartbeat inside the gap refreshes `end_ts`. Any of the ~60 WakaTime plugins works (they queue offline); no account, nothing leaves the machine. Setup:
+
+1. Install the plugin — vim: `Plug 'wakatime/vim-wakatime'`; VS Code/JetBrains/Sublime: the WakaTime extension.
+2. Copy the api key from Settings › Connections › Local sources (it is generated on first daemon start and stored in meta `wakapi_api_key`).
+3. Write `~/.wakatime.cfg`:
+
+```ini
+[settings]
+api_url = http://127.0.0.1:5600/api
+api_key = <the key from Connections>
+```
+
+
+**Shell history (atuin)** (`shell_history = true`, or the Local sources
+switch): `~/.local/share/atuin/history.db` is read every 60 s, read-only, and
+commands fold per repo (cwd matched against `git_repos`, 10-minute gap) into
+`shell` spans whose summary is the top three program names by count. Only
+cwd, program name and duration are kept — never the command line.
+
+1. Install atuin and run `atuin import auto` once.
+2. Turn Shell history on under Settings › Connections → Local sources (or
+   `shell_history = true`).
+3. Restart the daemon; only commands run after that are folded.
+
 
 ## Storage
 
@@ -140,22 +166,6 @@ SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks` (identity: label, pro
 - CORS: hardcode stock Firefox/Chrome extension origins + configurable regex for sideloads.
 - Strict `Host` check (`127.0.0.1:5600` / `localhost:5600`), reject everything else.
 - Map heartbeats → `events(kind='url', url, title, app='browser:<name>')`.
-
-## Local sources
-
-### Editor heartbeats (WakaTime protocol, m26)
-
-The same endpoint speaks WakaTime: `POST /api/v1/users/current/heartbeats.bulk` (and wakapi's single `POST /api/heartbeat`), `Authorization: Basic base64(<api_key>)`, reply `201 {"responses": [[…, 201], …]}`, 401 on a bad key, same `Host` allowlist as the AW routes. Heartbeats fold per `(project, branch)` with a 15-minute gap into `activity_events(kind='edit')`: `summary` = the file, `repo` = the project, `ext_id` = `<project>@<branch>#<span-start-ms>`, so every heartbeat inside the gap refreshes `end_ts`. Any of the ~60 WakaTime plugins works (they queue offline); no account, nothing leaves the machine. Setup:
-
-1. Install the plugin — vim: `Plug 'wakatime/vim-wakatime'`; VS Code/JetBrains/Sublime: the WakaTime extension.
-2. Copy the api key from Settings › Connections › Local sources (it is generated on first daemon start and stored in meta `wakapi_api_key`).
-3. Write `~/.wakatime.cfg`:
-
-```ini
-[settings]
-api_url = http://127.0.0.1:5600/api
-api_key = <the key from Connections>
-```
 
 ## MCP context
 
