@@ -2,7 +2,9 @@
 //! REST surface for stock `aw-watcher-web` to report browser tabs. Heartbeats
 //! merge in memory per AW semantics; each page *change* becomes one
 //! `CaptureEvent::Url` sent into the daemon's event channel (same filter +
-//! storage path as capture events).
+//! storage path as capture events). Since m26 the same endpoint speaks the
+//! WakaTime protocol (`/api/v1/users/current/heartbeats.bulk`), folding
+//! editor heartbeats into `edit` activity events.
 //!
 //! Hardening: binds 127.0.0.1 only, strict `Host` allowlist (DNS-rebinding
 //! defense — ActivityWatch shipped CVE-2022-31149 for exactly this), CORS
@@ -11,13 +13,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::{Router, extract::DefaultBodyLimit};
 use chronicle_core::config::Config;
+use chronicle_core::heartbeats::{Folder, Heartbeat};
 use chronicle_core::types::{CaptureEvent, UrlEvent};
 use crossbeam_channel::Sender;
 use jiff::Timestamp;
@@ -34,6 +38,10 @@ struct AppState {
     cors: Vec<regex::Regex>,
     buckets: Mutex<HashMap<String, Bucket>>,
     tx: Sender<CaptureEvent>,
+    /// Key WakaTime plugins authenticate with (meta `wakapi_api_key`).
+    api_key: String,
+    /// Open edit span per (project, branch) across heartbeats.
+    edits: Mutex<Folder>,
 }
 
 struct Bucket {
@@ -47,7 +55,11 @@ struct LastEvent {
     end_ms: i64,
 }
 
-fn app_state(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<Arc<AppState>> {
+fn app_state(
+    config: &Config,
+    tx: Sender<CaptureEvent>,
+    api_key: String,
+) -> anyhow::Result<Arc<AppState>> {
     let mut cors = vec![regex::Regex::new(MOZ_EXT_RE).expect("static regex")];
     for pat in &config.cors_allow {
         cors.push(
@@ -66,13 +78,15 @@ fn app_state(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<Arc<Ap
         cors,
         buckets: Mutex::new(HashMap::new()),
         tx,
+        api_key,
+        edits: Mutex::new(Folder::default()),
     }))
 }
 
 /// Bind and serve on a background thread. A bind failure (port taken)
 /// surfaces here so the daemon can log it and warn in the UI.
-pub fn spawn(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
-    let state = app_state(config, tx)?;
+pub fn spawn(config: &Config, tx: Sender<CaptureEvent>, api_key: String) -> anyhow::Result<()> {
+    let state = app_state(config, tx, api_key)?;
     let port = config.port;
     let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
     listener.set_nonblocking(true)?;
@@ -116,6 +130,14 @@ fn router(state: Arc<AppState>) -> Router {
             "/api/0/buckets/{id}/heartbeat",
             axum::routing::post(heartbeat),
         )
+        // WakaTime protocol (m26): the bulk route every editor plugin posts
+        // to, plus wakapi's single-heartbeat route (both take one object or
+        // an array).
+        .route(
+            "/api/v1/users/current/heartbeats.bulk",
+            axum::routing::post(wakatime_heartbeats),
+        )
+        .route("/api/heartbeat", axum::routing::post(wakatime_heartbeats))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
@@ -323,6 +345,89 @@ async fn heartbeat(
     Json(event_json(bucket.last.as_ref().expect("set above"))).into_response()
 }
 
+/// WakaTime protocol (m26): editor plugins post heartbeats here (bulk or
+/// single) with `Authorization: Basic base64(api_key)`. Each one folds into
+/// its `(project, branch)` span and is re-emitted with the same `ext_id`, so
+/// the stored `edit` row's `end_ts` grows while the file stays open.
+async fn wakatime_heartbeats(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !authorized(&headers, &st.api_key) {
+        return (StatusCode::UNAUTHORIZED, "bad api key").into_response();
+    }
+    let Some(heartbeats) = parse_heartbeats(&body) else {
+        return (StatusCode::BAD_REQUEST, "bad heartbeat body").into_response();
+    };
+    let now_ms = Timestamp::now().as_millisecond();
+    let mut responses = Vec::with_capacity(heartbeats.len());
+    let mut folder = st.edits.lock().expect("heartbeat fold lock");
+    for hb in &heartbeats {
+        if let Some(event) = folder.fold(hb, now_ms)
+            && st.tx.send(CaptureEvent::Activity(event)).is_err()
+        {
+            tracing::error!("daemon event channel closed; dropping edit event");
+        }
+        responses.push(json!([{"data": {"entity": hb.entity, "time": hb.time}}, 201]));
+    }
+    drop(folder);
+    (StatusCode::CREATED, Json(json!({ "responses": responses }))).into_response()
+}
+
+/// Both routes take one heartbeat or an array of them (wakapi's contract).
+fn parse_heartbeats(body: &[u8]) -> Option<Vec<Heartbeat>> {
+    serde_json::from_slice::<Vec<Heartbeat>>(body)
+        .or_else(|_| serde_json::from_slice::<Heartbeat>(body).map(|h| vec![h]))
+        .ok()
+}
+
+/// WakaTime's own scheme: `base64(api_key)` with no password. Some clients
+/// encode the separator anyway, so `api_key:` passes too.
+fn authorized(headers: &HeaderMap, key: &str) -> bool {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(encoded) = value
+        .strip_prefix("Basic ")
+        .or_else(|| value.strip_prefix("basic "))
+    else {
+        return false;
+    };
+    let Some(decoded) = base64_decode(encoded.trim()) else {
+        return false;
+    };
+    let decoded = decoded.strip_suffix(':').unwrap_or(&decoded);
+    !key.is_empty() && decoded == key
+}
+
+/// Enough base64 to read one Basic credential (standard or url-safe
+/// alphabet); not worth a dependency.
+fn base64_decode(s: &str) -> Option<String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    let mut out = Vec::new();
+    for c in s.bytes().filter(|c| *c != b'=') {
+        let c = match c {
+            b'-' => b'+',
+            b'_' => b'/',
+            c => c,
+        };
+        let v = ALPHABET.iter().position(|a| *a == c)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 fn event_json(last: &LastEvent) -> Value {
     json!({
         "timestamp": chronicle_core::types::ms_to_ts(last.start_ms).to_string(),
@@ -348,9 +453,12 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    /// `base64("test-api-key")` = `dGVzdC1hcGkta2V5`.
+    const TEST_KEY: &str = "test-api-key";
+
     fn test_router() -> (Router, Receiver<CaptureEvent>) {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let state = app_state(&Config::default(), tx).unwrap();
+        let state = app_state(&Config::default(), tx, TEST_KEY.to_owned()).unwrap();
         (router(state), rx)
     }
 
@@ -465,6 +573,108 @@ mod tests {
             panic!("expected url event")
         };
         assert_eq!(ev.url, "https://github.com/a/b");
+    }
+
+    fn waka_req(uri: &str, auth: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::HOST, "127.0.0.1:5600")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, auth)
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn waka_hb(time: f64, entity: &str) -> Value {
+        json!({"entity": entity, "type": "file", "time": time, "project": "contoso",
+               "branch": "main", "language": "Python", "is_write": true})
+    }
+
+    fn activity_ext_id(ev: CaptureEvent) -> (String, i64) {
+        let CaptureEvent::Activity(ev) = ev else {
+            panic!("expected activity event, got {ev:?}")
+        };
+        assert_eq!(ev.kind, chronicle_core::types::ActivityKind::Edit);
+        assert_eq!(ev.repo, "contoso");
+        (
+            ev.ext_id.expect("edit spans carry an ext_id"),
+            ev.end_ts
+                .expect("edit spans carry an end_ts")
+                .as_millisecond(),
+        )
+    }
+
+    #[tokio::test]
+    async fn heartbeats_bulk_folds_into_one_span_until_the_gap() {
+        let (app, rx) = test_router();
+        let bulk = json!([
+            waka_hb(1000.0, "/dev/contoso/a.py"),
+            waka_hb(1060.0, "/dev/contoso/b.py")
+        ]);
+        let res = app
+            .clone()
+            .oneshot(waka_req(
+                "/api/v1/users/current/heartbeats.bulk",
+                "Basic dGVzdC1hcGkta2V5",
+                bulk,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert_eq!(
+            body_json(res).await["responses"].as_array().unwrap().len(),
+            2
+        );
+        let (first, first_end) = activity_ext_id(rx.try_recv().expect("first heartbeat stores"));
+        let (second, second_end) = activity_ext_id(rx.try_recv().expect("second heartbeat stores"));
+        assert_eq!(
+            first, "contoso@main#1000000",
+            "span start is the first heartbeat"
+        );
+        assert_eq!(second, first, "same span refreshes end_ts via Upsert");
+        assert_eq!((first_end, second_end), (1_000_000, 1_060_000));
+
+        // Single-heartbeat route, past the gap, key with the empty password
+        // separator some clients encode: a new span.
+        let res = app
+            .oneshot(waka_req(
+                "/api/heartbeat",
+                "Basic dGVzdC1hcGkta2V5Og==",
+                waka_hb(
+                    1060.0 + chronicle_core::heartbeats::GAP_SECS as f64 + 1.0,
+                    "/dev/contoso/a.py",
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let (third, _) = activity_ext_id(rx.try_recv().expect("new span stores"));
+        assert_ne!(third, first);
+    }
+
+    #[tokio::test]
+    async fn heartbeats_reject_a_bad_api_key() {
+        let (app, rx) = test_router();
+        let uri = "/api/v1/users/current/heartbeats.bulk";
+        let body = json!([waka_hb(1000.0, "/dev/contoso/a.py")]);
+        // base64("wrong-key")
+        let res = app
+            .clone()
+            .oneshot(waka_req(uri, "Basic d3Jvbmcta2V5", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let res = app
+            .clone()
+            .oneshot(waka_req(uri, "", body.clone()))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            rx.try_recv().is_err(),
+            "a rejected heartbeat stores nothing"
+        );
     }
 
     #[tokio::test]

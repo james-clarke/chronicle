@@ -2035,7 +2035,8 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     spawn_ctrl_listener(listener, ctrl_tx)?;
     spawn_capture(&config, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
-    let server_error = match chronicle_server::spawn(&config, tx) {
+    let api_key = wakapi_api_key(&conn)?;
+    let server_error = match chronicle_server::spawn(&config, tx, api_key) {
         Ok(()) => None,
         Err(e) => {
             tracing::error!("AW endpoint failed on 127.0.0.1:{}: {e}", config.port);
@@ -2656,6 +2657,31 @@ fn prune_if_due(conn: &rusqlite::Connection, config: &Config) {
         }
     }
     let _ = storage::set_meta(conn, "last_prune_ts", Some(&now.to_string()));
+}
+
+/// Key the WakaTime heartbeat routes authenticate with, generated once and
+/// shown (with a copy button) in Settings › Connections. 32 url-safe
+/// characters from `/dev/urandom`; the 64-character alphabet divides 256, so
+/// the byte-to-character map is unbiased.
+fn wakapi_api_key(conn: &rusqlite::Connection) -> anyhow::Result<String> {
+    use chronicle_core::storage;
+    use std::io::Read;
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    if let Some(key) = storage::get_meta(conn, "wakapi_api_key")?
+        && !key.is_empty()
+    {
+        return Ok(key);
+    }
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("reading /dev/urandom for the heartbeat api key")?;
+    let key: String = bytes
+        .iter()
+        .map(|b| char::from(ALPHABET[usize::from(*b) % ALPHABET.len()]))
+        .collect();
+    storage::set_meta(conn, "wakapi_api_key", Some(&key))?;
+    Ok(key)
 }
 
 fn spawn_ai_job_worker(job_id: i64) -> std::io::Result<Child> {

@@ -372,6 +372,15 @@ fn subhead(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui))
     });
 }
 
+/// Secret shown as a hint, not a value: last four characters only.
+fn masked(key: &str) -> String {
+    let tail: String = key
+        .chars()
+        .skip(key.chars().count().saturating_sub(4))
+        .collect();
+    format!("{}{tail}", "\u{2022}".repeat(8))
+}
+
 fn caption(ui: &mut egui::Ui, text: String, color: Option<egui::Color32>) -> egui::Response {
     let mut rich = egui::RichText::new(text).text_style(theme::caption());
     rich = match color {
@@ -557,6 +566,8 @@ pub(super) struct Connections {
     repo_last: BTreeMap<String, ActivityEvent>,
     /// Newest event per kind (local collector rows).
     kind_last: Vec<ActivityEvent>,
+    /// Key WakaTime plugins authenticate with (meta `wakapi_api_key`).
+    wakapi_key: Option<String>,
     repo_add: String,
     repo_error: Option<String>,
     repo_arm_remove: Option<usize>,
@@ -589,6 +600,7 @@ impl Connections {
         let kind_last = conn
             .and_then(|c| storage::latest_activity_per_kind(c).ok())
             .unwrap_or_default();
+        let wakapi_key = conn.and_then(|c| storage::get_meta(c, "wakapi_api_key").ok().flatten());
         Self {
             mcp_path,
             mcp,
@@ -601,6 +613,7 @@ impl Connections {
             last_fetch,
             repo_last,
             kind_last,
+            wakapi_key,
             repo_add: String::new(),
             repo_error: None,
             repo_arm_remove: None,
@@ -1132,7 +1145,10 @@ impl Connections {
             "Claude Code transcripts under ~/.claude/projects".to_owned()
         };
         let atuin_db = chronicle_capture::shell::default_db_path();
-        let mut rows: [SourceRow; 4] = [
+        // The heartbeat routes run with the daemon's endpoint: no config key
+        // to switch, so the row's switch is a local always-on flag.
+        let mut heartbeats_on = true;
+        let mut rows: [SourceRow; 5] = [
             (
                 "Claude Code sessions",
                 &mut sessions_on,
@@ -1160,6 +1176,14 @@ impl Connections {
                 (!atuin_db.is_file()).then(|| "no atuin history.db".to_owned()),
                 &[ActivityKind::Shell],
                 "atuin history.db every 60 s \u{b7} cwd, program name and duration only".to_owned(),
+            ),
+            (
+                "Editor heartbeats (WakaTime plugins)",
+                &mut heartbeats_on,
+                None,
+                &[ActivityKind::Edit],
+                "vim-wakatime and friends post to this machine \u{b7} folded into edit spans per project"
+                    .to_owned(),
             ),
         ];
         for (name, on, blocker, kinds, detail) in rows.iter_mut() {
@@ -1196,6 +1220,18 @@ impl Connections {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
                 caption(ui, detail.clone(), None);
+            });
+        }
+        if let Some(key) = self.wakapi_key.clone() {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                caption(ui, format!("api key {}", masked(&key)), None);
+                if theme::ghost_button(ui, theme::glyph(theme::icon::COPY))
+                    .on_hover_text("copy the api key for ~/.wakatime.cfg")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(key.clone());
+                }
             });
         }
         if sessions_on != !src.ai_session_dirs.is_empty() {
