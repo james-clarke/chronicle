@@ -963,10 +963,10 @@ fn is_rule(cell: &str) -> bool {
     !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ':')
 }
 
-/// One line of an answer (or one table cell, at infinite `width`). Without
-/// links it is a single label; with them the line is laid out as
-/// alternating text and link widgets, the inline `**`/`*`/`` ` `` state
-/// carrying across the pieces.
+/// One line of an answer (or one table cell, at infinite `width`), always
+/// as a single galley: the inline `**`/`*`/`` ` `` marks and any link are
+/// formats inside it, and a click is resolved by the character the pointer
+/// is over.
 #[allow(clippy::too_many_arguments)]
 fn line_body(
     ui: &mut egui::Ui,
@@ -980,10 +980,10 @@ fn line_body(
 ) {
     let mut state = Marks::new(heading);
     let spans = link_spans(body, links);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = width;
     if spans.is_empty() {
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = width;
-        inline(&mut job, body, base, color, &mut state);
+        inline(&mut job, body, base, color, &mut state, None);
         let label = egui::Label::new(job);
         ui.add(if width.is_finite() {
             label.wrap()
@@ -992,40 +992,43 @@ fn line_body(
         });
         return;
     }
-    // `horizontal_wrapped` centres its items on the row: a text piece that
-    // wraps to two lines is twice as tall as the single-line link beside
-    // it, and the link floats to the middle of it. Same wrapping, top
-    // alignment, so every piece shares the first line's baseline.
-    let layout = egui::Layout::left_to_right(egui::Align::TOP).with_main_wrap(true);
-    ui.with_layout(layout, |ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let mut at = 0;
-        for (start, end, link) in spans {
-            fragment(ui, &body[at..start], base, color, &mut state);
-            if ui.link(&body[start..end]).clicked() {
-                *nav = Some(link);
-            }
-            at = end;
-        }
-        fragment(ui, &body[at..], base, color, &mut state);
-    });
-}
-
-/// A run of text between two links, formatted from the running mark state.
-fn fragment(
-    ui: &mut egui::Ui,
-    text: &str,
-    base: &egui::FontId,
-    color: egui::Color32,
-    state: &mut Marks,
-) {
-    if text.is_empty() {
-        return;
+    // One galley for the whole line, links being a format inside it: laid
+    // out as widgets they were their own boxes, and any wrapping one threw
+    // the rest of the line off its baseline.
+    let accent = ui.visuals().hyperlink_color;
+    let mut targets: Vec<(usize, usize, ChatLink)> = Vec::new();
+    let mut at = 0;
+    for (start, end, link) in spans {
+        inline(&mut job, &body[at..start], base, color, &mut state, None);
+        let from = job.text.chars().count();
+        inline(
+            &mut job,
+            &body[start..end],
+            base,
+            color,
+            &mut state,
+            Some(accent),
+        );
+        targets.push((from, job.text.chars().count(), link));
+        at = end;
     }
-    let mut job = egui::text::LayoutJob::default();
-    inline(&mut job, text, base, color, state);
-    if !job.sections.is_empty() {
-        ui.add(egui::Label::new(job).wrap());
+    inline(&mut job, &body[at..], base, color, &mut state, None);
+
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let response = ui.add(egui::Label::new(galley.clone()).sense(egui::Sense::click()));
+    let Some(pointer) = response.hover_pos() else {
+        return;
+    };
+    let index = galley.cursor_from_pos(pointer - response.rect.min).index.0;
+    let Some((_, _, link)) = targets.into_iter().find(|(from, to, _)| {
+        // The trailing end is the caret *after* the last character.
+        (*from..*to).contains(&index)
+    }) else {
+        return;
+    };
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        *nav = Some(link);
     }
 }
 
@@ -1072,6 +1075,7 @@ fn inline(
     base: &egui::FontId,
     color: egui::Color32,
     state: &mut Marks,
+    link: Option<egui::Color32>,
 ) {
     let medium = egui::FontId::new(base.size, egui::FontFamily::Name(theme::MEDIUM.into()));
     let mono = egui::FontId::new(base.size * 0.92, egui::FontFamily::Monospace);
@@ -1093,10 +1097,13 @@ fn inline(
             } else {
                 base.clone()
             },
-            color,
+            color: link.unwrap_or(color),
             italics: italic,
             ..Default::default()
         };
+        if let Some(accent) = link {
+            fmt.underline = egui::Stroke::new(1.0, accent);
+        }
         if code {
             fmt.background = color.gamma_multiply(0.12);
         }
