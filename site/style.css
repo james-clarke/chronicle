@@ -77,12 +77,13 @@ section { padding: 80px 0; }
 section + section { border-top: 1px solid var(--line); }
 
 /* hero */
-.hero {
-  display: grid;
-  grid-template-columns: 1.15fr 1fr;
-  gap: 48px;
-  align-items: center;
-  padding-top: 40px;
+.hero { padding-top: 40px; }
+.hero-text { max-width: 44em; margin-bottom: 40px; }
+.status {
+  margin: 18px 0 0;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--muted);
 }
 .lede { font-size: 1.15rem; color: var(--soft); max-width: 34em; margin-bottom: 1.6em; }
 
@@ -128,6 +129,8 @@ section + section { border-top: 1px solid var(--line); }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--line);
 }
 figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-align: center; }
+.hero .shot img { max-width: 100%; border-radius: 12px; }
+.sources .shot img { max-width: 460px; }
 
 /* the day: fanned deck */
 .day h2 { text-align: center; margin-bottom: 40px; }
@@ -179,18 +182,11 @@ figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-alig
 .feature-text p:not(:first-of-type) { font-size: 0.95rem; }
 
 /* task + week */
-.work {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 48px;
-  align-items: center;
-}
-.work-text p { max-width: 30em; color: var(--soft); }
+.work-text { max-width: 44em; margin-bottom: 36px; }
+.work-text p { color: var(--soft); }
 .work-text h2 + p { color: var(--text); }
-.work-shots { display: flex; gap: 28px; align-items: flex-start; }
-.work-shots .shot { flex-direction: column; align-items: center; }
-.work-shots .shot img { max-width: 290px; }
-.work-shots figcaption {
+.work .wide-shot:last-child { margin-bottom: 0; }
+.wide-shot figcaption {
   font-family: var(--mono);
   font-size: 0.8rem;
   letter-spacing: 0.04em;
@@ -198,6 +194,9 @@ figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-alig
 }
 
 .section-lede { max-width: 40em; color: var(--soft); margin: 0 0 24px; }
+.day .section-lede { margin-bottom: 32px; }
+.wide-shot { margin: 0 0 40px; }
+.wide-shot img { max-width: 100%; border-radius: 12px; }
 
 /* what it sees: stages */
 .brain .section-lede { margin-bottom: 36px; }
@@ -259,7 +258,7 @@ figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-alig
   justify-content: center;
 }
 .stage:nth-child(3)::before, .stage:nth-child(4)::before { border-color: var(--green); }
-.stage:nth-child(5)::before, .stage:nth-child(6)::before { border-color: var(--amber); }
+.stage:nth-child(5)::before, .stage:nth-child(6)::before, .stage:nth-child(7)::before { border-color: var(--amber); }
 .stage-text h3 { padding-top: 3px; }
 .stage-text p { color: var(--soft); max-width: 36em; margin-bottom: 0.7em; }
 .stage-text p:last-child { margin-bottom: 0; }
@@ -287,10 +286,16 @@ figcaption { margin-top: 12px; color: var(--muted); font-size: 0.9rem; text-alig
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--line);
 }
 .stage-shot figcaption { max-width: 24em; font-size: 0.85rem; }
+.stage-shot.wide img { max-width: 100%; }
+.stage-shot.wide figcaption { max-width: none; }
 
 @media (max-width: 760px) {
-  .hero, .feature, .stage, .work { grid-template-columns: 1fr; gap: 28px; }
-  .work-shots { flex-direction: column; align-items: center; }
+  .feature, .stage { grid-template-columns: 1fr; gap: 28px; }
+  .hero-text { margin-bottom: 28px; }
+  .hero .shot, .wide-shot { display: block; margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .wide-shot { margin-bottom: 32px; }
+  .hero .shot img, .wide-shot img { width: 760px; max-width: none; }
+  .wide-shot figcaption { text-align: left; }
   .stage-heads { display: none; }
   .shot img { max-width: 300px; }
   section { padding: 40px 0; }

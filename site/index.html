@@ -19,7 +19,7 @@
 <section class="hero">
   <div class="hero-text">
     <h1>Your day, written down. Nowhere but your machine.</h1>
-    <p class="lede">Chronicle runs quietly in the background. It groups the documents, tabs, calls and messages you were in into the tasks you were actually doing, then writes your standup, timeline and reports from that.</p>
+    <p class="lede">Chronicle runs quietly in the background. It groups the documents, tabs, calls and messages you were in into the tasks you were actually doing, keeps a short list of what you are on today with the time each has had, and writes your standup, timeline and reports from that.</p>
     <ul class="nos" aria-label="What Chronicle does not have">
       <li>No account</li>
       <li>No server</li>
@@ -28,31 +28,37 @@
       <li>No screenshots</li>
       <li>No keylogging</li>
     </ul>
+    <p class="status">Linux today. macOS and Windows next. Ask for a build.</p>
   </div>
   <figure class="shot hero-shot">
-    <img src="img/home.webp" width="678" height="1062" alt="Chronicle home: a standup draft for Tuesday written from the previous day's activity, naming ticket ACME-11342 and the render pipeline work, above the two tasks currently being worked on">
+    <img src="img/home-wide.webp" width="1478" height="1080" alt="Chronicle home, dragged out wide: on the left the four tasks being worked on, the first with 4h30m today, when it was last touched and its next step, above a collapsed standup card; on the right the feed of the day's blocks, each with the rule or model that placed it">
   </figure>
 </section>
 
 <section class="feature feed">
   <figure class="shot">
-    <img src="img/feed.webp" width="678" height="1062" alt="Chronicle home feed: a proposed task card with accept and not-a-task buttons, then the day's blocks newest first, each with a state chip (provisional, fresh, unmatched), the task it sits under, its focus time and a one-line reason such as 'repo chronicle' or 'model, 91%'" loading="lazy">
+    <img src="img/feed.webp" width="678" height="1062" alt="Chronicle home feed: the day's blocks newest first, each with its task, its focus time and one line saying why it is there, such as 'placed by a rule · branch ACME-11382' or 'placed by the model'; blocks a rule placed carry a 'to confirm' chip, blocks nothing placed say 'unsorted'" loading="lazy">
   </figure>
   <div class="feature-text">
     <h2>Sorted as it happens.</h2>
-    <p>Every stretch of focus lands in the feed the moment it ends: the task it sits under, and why. Rules place it first, the model confirms later. Stretches that match nothing become a proposed task. Keep, move or eject any block. Eject is remembered as a hard no.</p>
+    <p>Every stretch of focus lands in the feed the moment it ends: the task it sits under, and why. A rule places it first, from the branch in a terminal title, a ticket key in a tab, the folder a file lives in, or a correction you made before. Those wait to be confirmed. The model looks at the open stretch every five minutes and again when the batch closes, and its answer replaces the rule's. What it cannot place says so. Keep, move or eject any block. Eject is remembered as a hard no.</p>
   </div>
 </section>
 
 <section class="day">
   <h2>The day, as it happened.</h2>
+  <p class="section-lede">One Thursday: 6h01m focused, 1h22m away, 15m of switching. The window is a small card in the corner of the screen; drag it out and the lanes run the full width, with a card per task underneath. A block the model was unsure about carries an amber dot, so a shaky hour is visible before you read it.</p>
+  <figure class="wide-shot">
+    <img src="img/timeline-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide window, lanes view: one lane per task across the day from 07:00 to 15:00, then a card per task with its time range, project, apps and a one-line summary" loading="lazy">
+  </figure>
+  <p class="section-lede">Narrow, the same day fits three ways.</p>
   <div class="deck">
     <figure class="card c1">
-      <img src="img/timeline-band.webp" width="678" height="1062" alt="Chronicle timeline, band view: one strip across the day showing focused, away and switching periods, above the day's tasks with their time ranges and apps" loading="lazy">
+      <img src="img/timeline-band.webp" width="678" height="1062" alt="Chronicle timeline, band view: one strip across the day showing focused, away and switching periods, above the day's tasks with their time ranges, apps and a one-line summary each" loading="lazy">
       <figcaption>Band</figcaption>
     </figure>
     <figure class="card c2">
-      <img src="img/timeline-lanes.webp" width="678" height="1062" alt="Chronicle timeline, lanes view: one horizontal lane per task showing when each was active through the day" loading="lazy">
+      <img src="img/timeline-lanes.webp" width="678" height="1062" alt="Chronicle timeline, lanes view: one horizontal lane per task showing when each was active through the day, with a background lane for scraps" loading="lazy">
       <figcaption>Lanes</figcaption>
     </figure>
     <figure class="card c3">
@@ -65,19 +71,17 @@
 <section class="work">
   <div class="work-text">
     <h2>Each task, broken down. Each week, added up.</h2>
-    <p>Open any task for a closer look at what you did and how you did it: timestamps, the apps you were in, every session that went into it and a short summary. There whenever you need it.</p>
+    <p>Open any task for a closer look at what you did and how you did it: timestamps, the apps you were in, every session that went into it and a short summary. Underneath, the commits, sessions and calls that touched it, a checkpoint with the next step, and a journal you can post to the ticket in one click.</p>
     <p>The week rolls the same detail up. Deep work, longest stretch, how often you switched, how it compares with last week, and every task grouped by project with its share of the hours. No spreadsheet, no filling anything in.</p>
   </div>
-  <div class="work-shots">
-    <figure class="shot">
-      <img src="img/task.webp" width="678" height="1062" alt="Chronicle task card: description, every session that fed the task with its activity strip, and where the time went by app" loading="lazy">
-      <figcaption>One task</figcaption>
-    </figure>
-    <figure class="shot">
-      <img src="img/reports.webp" width="678" height="1062" alt="Chronicle weekly report: per-day stacked bars, focus statistics, app share, and tasks grouped by project" loading="lazy">
-      <figcaption>The week</figcaption>
-    </figure>
-  </div>
+  <figure class="wide-shot">
+    <img src="img/task-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide window, with one task open beside it: the task's summary, 1h11m across 4 sessions with a strip per session, where the time went by app, and the 13 activity events that touched it" loading="lazy">
+    <figcaption>One task, opened beside the day.</figcaption>
+  </figure>
+  <figure class="wide-shot">
+    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide window: per-day stacked bars, a project mix bar (chronicle 41%, mailer 23%, contoso 14%), six focus tiles such as 15h41m of deep work, 86 switches and +9h05m against the prior week, app share, and tasks grouped by project" loading="lazy">
+    <figcaption>The week.</figcaption>
+  </figure>
 </section>
 
 <section class="feature">
@@ -88,13 +92,24 @@
     <h2>Ask your own history.</h2>
     <p>Questions you cannot answer from memory. What was I doing Tuesday afternoon before the call? How much of this month went to the launch? What did I finish last week? Ask in plain words and get an answer with times attached, taken from what your computer actually saw.</p>
     <p>The model that answers runs inside the app, on your CPU. It is 2.4 GB on disk, downloaded once on first run, and stays loaded between questions so the second answer is quicker than the first. It knows nothing about you except what is in the database.</p>
-    <p>When you ask, Chronicle works out the time range you mean and pulls the tasks and activity from that window. If there is no time in the question it searches your tasks and sessions for the best matches instead. That text goes into the prompt, and the model writes an answer from it and nothing else. The question, the context and the answer stay inside one process.</p>
+    <p>When you ask, Chronicle works out the time range you mean and pulls the tasks and activity from that window. If there is no time in the question it searches your tasks and sessions for the best matches instead. That text goes into the prompt, and the model writes an answer from it and nothing else. The question, the context and the answer never leave the machine.</p>
+  </div>
+</section>
+
+<section class="feature sources">
+  <figure class="shot">
+    <img src="img/sources.webp" width="678" height="578" alt="Chronicle settings, local sources: six switches, each with a one-line note on what it reads. Claude Code sessions from ~/.claude/projects; GitHub pull requests through gh every 5 minutes; calls, from whether a microphone is in use; shell history from atuin, folder, program name and duration only; editor heartbeats from WakaTime plugins posting to this machine; Google Calendar, primary calendar, read-only" loading="lazy">
+  </figure>
+  <div class="feature-text">
+    <h2>What else it can see, if you let it.</h2>
+    <p>The window title is the whole record until you add a source, and every source is a switch that says what it reads. On this machine: commits and checkouts from the repos you list, your AI coding sessions from their transcripts on disk, whether a microphone is open, your shell history through atuin (the folder, the program and how long it ran, never the command line), and heartbeats from the WakaTime plugin in your editor, posted to this machine and nowhere else.</p>
+    <p>From places you sign in to: pull requests through the GitHub CLI, your primary Google Calendar, read-only, and a ticket tracker such as Jira over MCP, so a ticket's summary can go into the digest and a journal entry can go back as a comment when you click. Nothing talks to a server unless you turned it on, and the tracker is asked only when a task needs it.</p>
   </div>
 </section>
 
 <section class="brain">
   <h2>What it sees</h2>
-  <p class="section-lede">A morning, from the first window to the standup line. Six steps, and the same morning's data at each one.</p>
+  <p class="section-lede">A morning, from the first window to the standup line. Seven steps, and the same morning's data at each one.</p>
 
   <div class="stage-heads" aria-hidden="true">
     <span>What happens</span>
@@ -107,64 +122,79 @@
       <div class="stage-text">
         <h3>Sees</h3>
         <p>A small background process notices which window is in front and when you step away. It keeps the name of the app and the title of the window: the document, the sheet, the tab, the call. That is the whole record. No keystrokes, no screenshots, no clipboard.</p>
-        <p>Where it can, it also picks up the things that say what the work was: a call starting, a project folder you are working in, a ticket number in a tab.</p>
+        <p>Where it can, it also picks up the things that say what the work was: a call starting, a meeting on the calendar, the branch or folder in a terminal title, a ticket number in a tab, a commit landing in a repo you listed.</p>
       </div>
-      <pre class="stage-data"><code>09:02:14  focus  Chrome   Q3 launch brief – Google Docs
-09:31:40  focus  Slack    #launch-planning
-09:40:05  focus  Zoom     Launch sync
-09:40:11  call   microphone on
-10:12:22  focus  Chrome   LAUNCH-241 Landing page copy – Jira
-10:40:10  focus  Figma    Landing page v2</code></pre>
+      <pre class="stage-data"><code>09:02:14  focus    Chrome   Q3 launch brief – Google Docs
+09:31:40  focus    Slack    #launch-planning
+09:40:05  focus    Zoom     Launch sync
+09:40:00  meeting  Launch sync · calendar · 09:40–10:15
+09:40:11  call     microphone on
+10:12:22  focus    Chrome   LAUNCH-241 Landing page copy – Jira
+10:40:10  focus    Figma    Landing page v2</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Groups</h3>
-        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Half an hour away closes the batch.</p>
+        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Ten minutes of work and then five minutes away closes the batch; half an hour away closes it whatever happened.</p>
       </div>
       <pre class="stage-data"><code>span   09:02–09:31  Chrome   Q3 launch brief – Google Docs
 span   09:31–09:40  Slack    #launch-planning
 span   09:40–10:12  Zoom     Launch sync · on a call
 span   10:12–10:40  Chrome   LAUNCH-241 Landing page copy – Jira
 span   10:40–11:15  Figma    Landing page v2
-batch  09:02–11:15  5 spans · 32m on a call · 4 switches</code></pre>
+batch  09:02–11:15  5 spans · 32m on a call · 4 switches
+       closed at 11:20 · away 5m</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Recognises</h3>
-        <p>Before any model runs, a few plain rules take a first pass every minute. A window that looks like one you have filed before gets the same answer. A file in a project folder points at the last task from that folder. A ticket number in a tab points at that ticket. These are written down as provisional, so the feed and the timeline fill in while you are still working, each block with the rule that placed it.</p>
+        <p>Before any model runs, a few plain rules take a first pass every minute, in a fixed order. A branch name that carries a ticket key. A ticket key in a tab or its address. The project folder a file is in, if that task was touched in the last two hours. A window that looks like one you filed before. A match is written down as provisional, with the rule that placed it, so the feed and the timeline fill in while you are still working.</p>
+        <p>Every five minutes the model also looks at the stretch still open and places it at a discount, until the batch closes and the full pass replaces both.</p>
       </div>
       <pre class="stage-data"><code>rules  09:02–09:31  → Q3 launch brief
-       reason: matches a correction you made on Tuesday
+       reason: past correction
                "Chrome · Q3 launch brief" → Q3 launch brief
-       confidence 0.50  provisional
+       confidence 0.50  to confirm
 
-       09:31–11:15  no rule matched · waiting for the model</code></pre>
+       10:12–10:40  → LAUNCH-241 landing page copy
+       reason: title LAUNCH-241
+       confidence 0.50  to confirm
+
+       09:31–10:12  no rule matched · waiting for the model</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Thinks</h3>
-        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, calls and other activity, and a minute-by-minute line of what was in front. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with tasks, each with a time range. The answer has to fit a fixed shape, so it cannot wander. Those replace the provisional rows.</p>
+        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, calls and other activity, the ticket keys that were on screen, a minute-by-minute line of what was in front, and the tasks already open, numbered. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with blocks, each linked to an open task by its number or given a new name, with a start and end in minutes. The answer has to fit a fixed shape, at most eight blocks, so it cannot wander. Neighbouring blocks for one task are merged before they are stored, and they replace the provisional rows.</p>
+        <p>On a laptop CPU a batch takes about two minutes. The part of the prompt that does not change between batches stays in the model's cache, so reading the next one takes about half as long.</p>
       </div>
       <pre class="stage-data"><code>digest  apps     Chrome 57m · Figma 35m · Zoom 32m · Slack 9m
-        call     09:40–10:12
-        context  LAUNCH-241 Landing page copy (Jira)
+        call     09:40–10:12 · meeting Launch sync
+        keys     LAUNCH-241 · 28 min on screen
+        open     1 Q3 launch brief
+                 2 LAUNCH-241 landing page copy
+        context  LAUNCH-241 (Jira): rewrite the hero and
+                 the pricing row for the Q3 launch
 
-model   { "task": "landing page copy and launch brief",
-          "project": "Q3 launch", "ticket": "LAUNCH-241",
-          "start": "09:02", "end": "11:15" }
-        { "task": "launch sync", "project": "Q3 launch",
-          "start": "09:40", "end": "10:12" }
+model   {"ref": 1, "label": null, "project": null,
+         "start": 0, "end": 29, "confidence": 0.9}
+        {"ref": null, "label": "launch sync",
+         "project": "Q3 launch",
+         "start": 29, "end": 70, "confidence": 0.85}
+        {"ref": 2, "label": null, "project": null,
+         "start": 70, "end": 133, "confidence": 0.9}
 
-stored  2 tasks · confidence 0.90</code></pre>
+stored  3 blocks · replaces 2 provisional rows</code></pre>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Learns</h3>
         <p>It will be wrong sometimes. When you rename, move or throw out a block, the correction is stored with the context it was made in: the app and the window title. The next pass reads those first. Throwing a block out of a task is remembered as a hard no, so the same guess is not made again. Loose time gets folded into runs you can file in one go, with the task pre-filled from what you did last time.</p>
+        <p>Once a day, at the first quiet moment after two in the afternoon or at six, slivers under three minutes with no project or ticket of their own that sit between two blocks of the same task fold into it. One tidy a day, and one undo.</p>
       </div>
       <figure class="stage-shot">
         <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
@@ -182,6 +212,17 @@ stored  2 tasks · confidence 0.90</code></pre>
 timeline  09:02 ──────────────── 11:15  Q3 launch
 report    Q3 launch · LAUNCH-241 · 2.2 h
 chat      "what did I do before the launch sync?" → same rows</code></pre>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Shows its work</h3>
+        <p>Settings keeps the pipeline in view: which model file is loaded, whether the worker is running or idle, how many batches are waiting, the last batch with its time and token counts, and the last live pass. Two buttons show the exact digest the model read and the exact answer it gave. If a block is in the wrong place, you can see why.</p>
+      </div>
+      <figure class="stage-shot wide">
+        <img src="img/pipeline.webp" width="678" height="540" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, background under 10 minutes; then the pipeline card with the model file, worker idle, 2 pending batches, the last derive as batch 73 at 14:00 in 139.9 seconds with its prompt token count, and buttons to show the digest and the last output" loading="lazy">
+        <figcaption>Settings › Derivation: the worker, the last batch, the digest and the answer.</figcaption>
+      </figure>
     </li>
 
   </ol>
