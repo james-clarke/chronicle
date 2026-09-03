@@ -426,6 +426,7 @@ pub(super) struct LocalSources {
     pub ai_session_dirs: Vec<String>,
     pub github_prs: bool,
     pub mic_capture: bool,
+    pub shell_history: bool,
 }
 
 impl LocalSources {
@@ -434,6 +435,7 @@ impl LocalSources {
             ai_session_dirs: c.ai_session_dirs.clone(),
             github_prs: c.github_prs,
             mic_capture: c.mic_capture,
+            shell_history: c.shell_history,
         }
     }
 
@@ -441,6 +443,7 @@ impl LocalSources {
         c.ai_session_dirs = self.ai_session_dirs.clone();
         c.github_prs = self.github_prs;
         c.mic_capture = self.mic_capture;
+        c.shell_history = self.shell_history;
     }
 }
 
@@ -1128,7 +1131,8 @@ impl Connections {
         } else {
             "Claude Code transcripts under ~/.claude/projects".to_owned()
         };
-        let mut rows: [SourceRow; 3] = [
+        let atuin_db = chronicle_capture::shell::default_db_path();
+        let mut rows: [SourceRow; 4] = [
             (
                 "Claude Code sessions",
                 &mut sessions_on,
@@ -1149,6 +1153,13 @@ impl Connections {
                 (!on_path("pw-dump")).then(|| "pw-dump not on PATH".to_owned()),
                 &[ActivityKind::Call],
                 "pw-dump every 20 s \u{b7} each stretch becomes a call".to_owned(),
+            ),
+            (
+                "Shell history (atuin)",
+                &mut src.shell_history,
+                (!atuin_db.is_file()).then(|| "no atuin history.db".to_owned()),
+                &[ActivityKind::Shell],
+                "atuin history.db every 60 s \u{b7} cwd, program name and duration only".to_owned(),
             ),
         ];
         for (name, on, blocker, kinds, detail) in rows.iter_mut() {

@@ -82,7 +82,7 @@ pub trait FocusProvider: Send { fn run(self, tx: Sender<CaptureEvent>) -> Result
 pub trait AfkProvider:  Send { fn idle_ms(&self) -> Result<u64>; }                       // polled
 ```
 
-Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(ActivityEvent)` into `activity_events`, never `events`: git (`git_repos`), Claude Code transcripts (`ai_session_dirs`, default `~/.claude/projects`, first prompt clipped to 120 chars is all that is stored), GitHub PRs via the user's `gh` (`github_prs = true`, off by default), mic-in-use via `pw-dump` (`mic_capture`, Linux). Each runs on its own thread and is never load-bearing.
+Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(ActivityEvent)` into `activity_events`, never `events`: git (`git_repos`), Claude Code transcripts (`ai_session_dirs`, default `~/.claude/projects`, first prompt clipped to 120 chars is all that is stored), GitHub PRs via the user's `gh` (`github_prs = true`, off by default), mic-in-use via `pw-dump` (`mic_capture`, Linux), atuin shell history (`shell_history = true`, off by default: install atuin and run `atuin import auto` once, then Chronicle reads `~/.local/share/atuin/history.db` read-only every 60 s and keeps only cwd, program name and duration — never the command line). Each runs on its own thread and is never load-bearing.
 
 ## Storage
 

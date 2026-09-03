@@ -2734,6 +2734,7 @@ fn spawn_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()
     spawn_git_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
     spawn_github_capture(config, tx.clone())?;
+    spawn_shell_capture(config, tx.clone())?;
     spawn_mic_capture(config, tx)
 }
 
@@ -2836,6 +2837,35 @@ fn spawn_github_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Re
         .spawn(move || {
             if let Err(e) = provider.run(tx) {
                 tracing::error!("github provider exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// atuin history poller: opt-in, never load-bearing.
+fn spawn_shell_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::FocusProvider;
+    use chronicle_capture::shell::{ShellProvider, default_db_path};
+
+    if !config.shell_history {
+        return Ok(());
+    }
+    let db = default_db_path();
+    if !db.is_file() {
+        tracing::warn!("shell_history = true but {} is missing", db.display());
+        return Ok(());
+    }
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let provider = ShellProvider::new(db, &repos);
+    std::thread::Builder::new()
+        .name("shell".into())
+        .spawn(move || {
+            if let Err(e) = provider.run(tx) {
+                tracing::error!("shell provider exited: {e}");
             }
         })?;
     Ok(())
