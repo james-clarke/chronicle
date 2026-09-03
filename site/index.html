@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chronicle — your day, written down</title>
-  <meta name="description" content="Chronicle runs in the background and groups the documents, tabs, calls and messages you were in into the tasks you were actually doing. Standup draft, timeline, reports and chat, all from one file on your own disk. No account, no server, no telemetry.">
+  <meta name="description" content="Chronicle runs in the background and turns the windows you were in into the tasks you were actually doing. Standup, timeline, reports and chat from one file on your own disk. No account, no server, no telemetry.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,217 +18,137 @@
 
 <section class="hero">
   <div class="hero-text">
-    <h1>Your day, written down. Nowhere but your machine.</h1>
-    <p class="lede">Chronicle runs quietly in the background. It groups the documents, tabs, calls and messages you were in into the tasks you were actually doing, keeps a short list of what you are on today with the time each has had, and writes your standup, timeline and reports from that.</p>
+    <h1>Your day,<br>written down.</h1>
+    <p class="lede">A small window in the corner of your screen that knows what you worked on, for how long, and why. Nothing leaves your machine.</p>
     <ul class="nos" aria-label="What Chronicle does not have">
-      <li>No account</li>
-      <li>No server</li>
-      <li>No telemetry</li>
-      <li>No cloud model</li>
-      <li>No screenshots</li>
-      <li>No keylogging</li>
+      <li>no account</li>
+      <li>no server</li>
+      <li>no telemetry</li>
+      <li>no cloud model</li>
+      <li>no screenshots</li>
+      <li>no keylogging</li>
     </ul>
-    <p class="status">Linux today. macOS and Windows next. Ask for a build.</p>
   </div>
-  <figure class="shot hero-shot">
-    <img src="img/home-wide.webp" width="1478" height="1080" alt="Chronicle home, dragged out wide: on the left the four tasks being worked on, the first with 4h30m today, when it was last touched and its next step, above a collapsed standup card; on the right the feed of the day's blocks, each with the rule or model that placed it">
-  </figure>
-</section>
-
-<section class="feature feed">
-  <figure class="shot">
-    <img src="img/feed.webp" width="678" height="1062" alt="Chronicle home feed: the day's blocks newest first, each with its task, its focus time and one line saying why it is there, such as 'placed by a rule · branch ACME-11382' or 'placed by the model'; blocks a rule placed carry a 'to confirm' chip, blocks nothing placed say 'unsorted'" loading="lazy">
-  </figure>
-  <div class="feature-text">
-    <h2>Sorted as it happens.</h2>
-    <p>Every stretch of focus lands in the feed the moment it ends: the task it sits under, and why. A rule places it first, from the branch in a terminal title, a ticket key in a tab, the folder a file lives in, or a correction you made before. Those wait to be confirmed. The model looks at the open stretch every five minutes and again when the batch closes, and its answer replaces the rule's. What it cannot place says so. Keep, move or eject any block. Eject is remembered as a hard no.</p>
+  <div class="hero-art">
+    <img class="back" src="img/home-wide.webp" width="1478" height="1080" alt="Chronicle home, dragged wide: the tasks being worked on with time today and next step on the left, the feed of the day's blocks on the right">
+    <img class="front" src="img/feed.webp" width="678" height="1062" alt="Chronicle as a small window: the feed of today's blocks, each with the rule or model that placed it">
   </div>
 </section>
 
-<section class="day">
-  <h2>The day, as it happened.</h2>
-  <p class="section-lede">One Thursday: 6h01m focused, 1h22m away, 15m of switching. The window is a small card in the corner of the screen; drag it out and the lanes run the full width, with a card per task underneath. A block the model was unsure about carries an amber dot, so a shaky hour is visible before you read it.</p>
-  <figure class="wide-shot">
-    <img src="img/timeline-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide window, lanes view: one lane per task across the day from 07:00 to 15:00, then a card per task with its time range, project, apps and a one-line summary" loading="lazy">
-  </figure>
-  <p class="section-lede">Narrow, the same day fits three ways.</p>
-  <div class="deck">
-    <figure class="card c1">
-      <img src="img/timeline-band.webp" width="678" height="1062" alt="Chronicle timeline, band view: one strip across the day showing focused, away and switching periods, above the day's tasks with their time ranges, apps and a one-line summary each" loading="lazy">
-      <figcaption>Band</figcaption>
-    </figure>
-    <figure class="card c2">
-      <img src="img/timeline-lanes.webp" width="678" height="1062" alt="Chronicle timeline, lanes view: one horizontal lane per task showing when each was active through the day, with a background lane for scraps" loading="lazy">
-      <figcaption>Lanes</figcaption>
-    </figure>
-    <figure class="card c3">
-      <img src="img/timeline-hours.webp" width="678" height="1062" alt="Chronicle timeline, hours view: a stacked bar per hour showing which tasks filled it" loading="lazy">
-      <figcaption>Hours</figcaption>
-    </figure>
+<section class="band-section">
+  <div class="band" aria-hidden="true">
+    <div class="track">
+      <i style="left:6%;width:2%;background:var(--blue)"></i>
+      <i style="left:8.5%;width:10%;background:var(--amber)"></i>
+      <i style="left:19%;width:8%;background:var(--blue)"></i>
+      <i style="left:27%;width:5%;background:var(--amber)"></i>
+      <i style="left:32.5%;width:1.5%;background:var(--green)"></i>
+      <i style="left:35%;width:12%;background:var(--amber)"></i>
+      <i style="left:52%;width:2%;background:var(--amber)"></i>
+      <i style="left:56%;width:4%;background:var(--amber)"></i>
+      <i style="left:62%;width:3%;background:var(--blue)"></i>
+      <i style="left:68%;width:6%;background:var(--amber)"></i>
+      <i style="left:75%;width:9%;background:var(--amber)"></i>
+      <i style="left:86%;width:12%;background:var(--amber)"></i>
+    </div>
+    <div class="ticks"><span>07:00</span><span>09:00</span><span>11:00</span><span>13:00</span><span>15:00</span></div>
   </div>
+  <p class="band-caption"><b>6h01m</b> focused · 1h22m away · 15m switching · 9 switches. One Thursday, sorted while it was still happening.</p>
 </section>
 
-<section class="work">
-  <div class="work-text">
-    <h2>Each task, broken down. Each week, added up.</h2>
-    <p>Open any task for a closer look at what you did and how you did it: timestamps, the apps you were in, every session that went into it and a short summary. Underneath, the commits, sessions and calls that touched it, a checkpoint with the next step, and a journal you can post to the ticket in one click.</p>
-    <p>The week rolls the same detail up. Deep work, longest stretch, how often you switched, how it compares with last week, and every task grouped by project with its share of the hours. No spreadsheet, no filling anything in.</p>
+<section class="showcase">
+  <div class="showcase-head">
+    <h2>The day, as it happened.</h2>
+    <p>Every stretch of focus lands in the feed the moment it ends, with the task it belongs to and the reason. Drag the window out and the day runs in lanes, with any task open beside it.</p>
   </div>
   <figure class="wide-shot">
-    <img src="img/task-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide window, with one task open beside it: the task's summary, 1h11m across 4 sessions with a strip per session, where the time went by app, and the 13 activity events that touched it" loading="lazy">
-    <figcaption>One task, opened beside the day.</figcaption>
+    <img src="img/task-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across the day, a card per task underneath, and one task open on the right with its sessions, where the time went and the activity that touched it" loading="lazy">
+    <figcaption><span>timeline · lanes</span><span>one task open</span></figcaption>
   </figure>
+</section>
+
+<section class="showcase">
+  <div class="showcase-head">
+    <h2>The week, added up.</h2>
+    <p>Deep work, longest block, switches, the hour that fragments, and how it compares with last week. Every task grouped by project with its share of the hours. Nothing to fill in.</p>
+  </div>
   <figure class="wide-shot">
-    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide window: per-day stacked bars, a project mix bar (chronicle 41%, mailer 23%, contoso 14%), six focus tiles such as 15h41m of deep work, 86 switches and +9h05m against the prior week, app share, and tasks grouped by project" loading="lazy">
-    <figcaption>The week.</figcaption>
+    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars, a project mix bar, six focus tiles including 15h41m of deep work and 86 switches, app share, and tasks grouped by project" loading="lazy">
+    <figcaption><span>reports · this week</span><span>31 aug – 6 sep</span></figcaption>
   </figure>
 </section>
 
 <section class="feature">
   <figure class="shot">
-    <img src="img/chat.webp" width="678" height="1062" alt="Chronicle chat: the question 'what did I work on this morning?' answered by the local model with a list of tasks and time ranges" loading="lazy">
+    <img src="img/chat.webp" width="678" height="1062" alt="Chronicle chat: 'what did I work on this morning?' answered by the local model with tasks and time ranges" loading="lazy">
   </figure>
   <div class="feature-text">
     <h2>Ask your own history.</h2>
-    <p>Questions you cannot answer from memory. What was I doing Tuesday afternoon before the call? How much of this month went to the launch? What did I finish last week? Ask in plain words and get an answer with times attached, taken from what your computer actually saw.</p>
-    <p>The model that answers runs inside the app, on your CPU. It is 2.4 GB on disk, downloaded once on first run, and stays loaded between questions so the second answer is quicker than the first. It knows nothing about you except what is in the database.</p>
-    <p>When you ask, Chronicle works out the time range you mean and pulls the tasks and activity from that window. If there is no time in the question it searches your tasks and sessions for the best matches instead. That text goes into the prompt, and the model writes an answer from it and nothing else. The question, the context and the answer never leave the machine.</p>
+    <p>What was I doing Tuesday before the call? How much of this month went to the launch? Ask in plain words, get an answer with times attached.</p>
+    <p class="fine">The model runs inside the app, on your CPU: 2.4 GB on disk, downloaded once. It reads the rows for the time you asked about and nothing else.</p>
   </div>
 </section>
 
 <section class="feature sources">
-  <figure class="shot">
-    <img src="img/sources.webp" width="678" height="578" alt="Chronicle settings, local sources: six switches, each with a one-line note on what it reads. Claude Code sessions from ~/.claude/projects; GitHub pull requests through gh every 5 minutes; calls, from whether a microphone is in use; shell history from atuin, folder, program name and duration only; editor heartbeats from WakaTime plugins posting to this machine; Google Calendar, primary calendar, read-only" loading="lazy">
-  </figure>
   <div class="feature-text">
-    <h2>What else it can see, if you let it.</h2>
-    <p>The window title is the whole record until you add a source, and every source is a switch that says what it reads. On this machine: commits and checkouts from the repos you list, your AI coding sessions from their transcripts on disk, whether a microphone is open, your shell history through atuin (the folder, the program and how long it ran, never the command line), and heartbeats from the WakaTime plugin in your editor, posted to this machine and nowhere else.</p>
-    <p>From places you sign in to: pull requests through the GitHub CLI, your primary Google Calendar, read-only, and a ticket tracker such as Jira over MCP, so a ticket's summary can go into the digest and a journal entry can go back as a comment when you click. Nothing talks to a server unless you turned it on, and the tracker is asked only when a task needs it.</p>
+    <h2>Sees more, if you let it.</h2>
+    <p>The window title is the whole record until you flip a switch. Each source says what it reads, and nothing talks to a server unless you turned it on.</p>
+    <ul class="tags" aria-label="Sources">
+      <li><i class="on"></i>git repos</li>
+      <li><i class="on"></i>AI coding sessions</li>
+      <li><i class="on"></i>pull requests</li>
+      <li><i class="on"></i>calls</li>
+      <li><i class="on"></i>editor heartbeats</li>
+      <li><i></i>shell history</li>
+      <li><i></i>Google Calendar</li>
+      <li><i></i>Jira over MCP</li>
+    </ul>
   </div>
+  <figure class="shot">
+    <img src="img/sources.webp" width="678" height="578" alt="Chronicle settings, local sources: six switches, each with a note on what it reads" loading="lazy">
+  </figure>
 </section>
 
-<section class="brain">
-  <h2>What it sees</h2>
-  <p class="section-lede">A morning, from the first window to the standup line. Seven steps, and the same morning's data at each one.</p>
-
-  <div class="stage-heads" aria-hidden="true">
-    <span>What happens</span>
-    <span>What it looks like inside</span>
-  </div>
-
-  <ol class="stages">
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Sees</h3>
-        <p>A small background process notices which window is in front and when you step away. It keeps the name of the app and the title of the window: the document, the sheet, the tab, the call. That is the whole record. No keystrokes, no screenshots, no clipboard.</p>
-        <p>Where it can, it also picks up the things that say what the work was: a call starting, a meeting on the calendar, the branch or folder in a terminal title, a ticket number in a tab, a commit landing in a repo you listed.</p>
-      </div>
-      <pre class="stage-data"><code>09:02:14  focus    Chrome   Q3 launch brief – Google Docs
-09:31:40  focus    Slack    #launch-planning
-09:40:05  focus    Zoom     Launch sync
-09:40:00  meeting  Launch sync · calendar · 09:40–10:15
-09:40:11  call     microphone on
-10:12:22  focus    Chrome   LAUNCH-241 Landing page copy – Jira
-10:40:10  focus    Figma    Landing page v2</code></pre>
+<section class="how">
+  <h2>How it works</h2>
+  <ol class="steps">
+    <li>
+      <h3><span>01</span>Sees</h3>
+      <p>Which window is in front, and when you step away. The app and the title. No keystrokes, no screenshots, no clipboard.</p>
+      <pre><code>09:02 Chrome launch brief
+09:40 Zoom   sync · mic on
+10:12 Chrome LAUNCH-241</code></pre>
     </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Groups</h3>
-        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Ten minutes of work and then five minutes away closes the batch; half an hour away closes it whatever happened.</p>
-      </div>
-      <pre class="stage-data"><code>span   09:02–09:31  Chrome   Q3 launch brief – Google Docs
-span   09:31–09:40  Slack    #launch-planning
-span   09:40–10:12  Zoom     Launch sync · on a call
-span   10:12–10:40  Chrome   LAUNCH-241 Landing page copy – Jira
-span   10:40–11:15  Figma    Landing page v2
-batch  09:02–11:15  5 spans · 32m on a call · 4 switches
-       closed at 11:20 · away 5m</code></pre>
+    <li>
+      <h3><span>02</span>Recognises</h3>
+      <p>Every minute, plain rules take a first pass: a ticket key in a tab, a branch in a terminal, a window you filed before. Provisional, and marked so.</p>
+      <pre><code>10:12–10:40 → LAUNCH-241
+reason: title has the key
+0.50 · to confirm</code></pre>
     </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Recognises</h3>
-        <p>Before any model runs, a few plain rules take a first pass every minute, in a fixed order. A branch name that carries a ticket key. A ticket key in a tab or its address. The project folder a file is in, if that task was touched in the last two hours. A window that looks like one you filed before. A match is written down as provisional, with the rule that placed it, so the feed and the timeline fill in while you are still working.</p>
-        <p>Every five minutes the model also looks at the stretch still open and places it at a discount, until the batch closes and the full pass replaces both.</p>
-      </div>
-      <pre class="stage-data"><code>rules  09:02–09:31  → Q3 launch brief
-       reason: past correction
-               "Chrome · Q3 launch brief" → Q3 launch brief
-       confidence 0.50  to confirm
-
-       10:12–10:40  → LAUNCH-241 landing page copy
-       reason: title LAUNCH-241
-       confidence 0.50  to confirm
-
-       09:31–10:12  no rule matched · waiting for the model</code></pre>
+    <li>
+      <h3><span>03</span>Thinks</h3>
+      <p>When a batch closes, a model inside the app reads a short digest and answers in a fixed shape: blocks, each tied to a task, with a start and end.</p>
+      <pre><code>{"ref": 2, "start": 70,
+ "end": 133,
+ "confidence": 0.9}</code></pre>
     </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Thinks</h3>
-        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, calls and other activity, the ticket keys that were on screen, a minute-by-minute line of what was in front, and the tasks already open, numbered. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with blocks, each linked to an open task by its number or given a new name, with a start and end in minutes. The answer has to fit a fixed shape, at most eight blocks, so it cannot wander. Neighbouring blocks for one task are merged before they are stored, and they replace the provisional rows.</p>
-        <p>On a laptop CPU a batch takes about two minutes. The part of the prompt that does not change between batches stays in the model's cache, so reading the next one takes about half as long.</p>
-      </div>
-      <pre class="stage-data"><code>digest  apps     Chrome 57m · Figma 35m · Zoom 32m · Slack 9m
-        call     09:40–10:12 · meeting Launch sync
-        keys     LAUNCH-241 · 28 min on screen
-        open     1 Q3 launch brief
-                 2 LAUNCH-241 landing page copy
-        context  LAUNCH-241 (Jira): rewrite the hero and
-                 the pricing row for the Q3 launch
-
-model   {"ref": 1, "label": null, "project": null,
-         "start": 0, "end": 29, "confidence": 0.9}
-        {"ref": null, "label": "launch sync",
-         "project": "Q3 launch",
-         "start": 29, "end": 70, "confidence": 0.85}
-        {"ref": 2, "label": null, "project": null,
-         "start": 70, "end": 133, "confidence": 0.9}
-
-stored  3 blocks · replaces 2 provisional rows</code></pre>
+    <li>
+      <h3><span>04</span>Learns</h3>
+      <p>Rename, move or eject a block and the correction is kept with its context. Eject is a hard no. Once a day it tidies the slivers, with one undo.</p>
+      <pre><code>"Chrome · Q3 launch brief"
+  → Q3 launch brief
+eject: not that task, ever</code></pre>
     </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Learns</h3>
-        <p>It will be wrong sometimes. When you rename, move or throw out a block, the correction is stored with the context it was made in: the app and the window title. The next pass reads those first. Throwing a block out of a task is remembered as a hard no, so the same guess is not made again. Loose time gets folded into runs you can file in one go, with the task pre-filled from what you did last time.</p>
-        <p>Once a day, at the first quiet moment after two in the afternoon or at six, slivers under three minutes with no project or ticket of their own that sit between two blocks of the same task fold into it. One tidy a day, and one undo.</p>
-      </div>
-      <figure class="stage-shot">
-        <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
-        <figcaption>Organize: unassigned time, one run at a time, task pre-filled.</figcaption>
-      </figure>
-    </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Writes</h3>
-        <p>The standup draft, the timeline, the task cards, the reports and the chat all read the same table. Nothing is worked out twice and nothing is stored anywhere else.</p>
-      </div>
-      <pre class="stage-data"><code>standup   Yesterday: landing page copy and the launch brief
-          (LAUNCH-241, 2h13m) · launch sync (32m)
-timeline  09:02 ──────────────── 11:15  Q3 launch
-report    Q3 launch · LAUNCH-241 · 2.2 h
-chat      "what did I do before the launch sync?" → same rows</code></pre>
-    </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Shows its work</h3>
-        <p>Settings keeps the pipeline in view: which model file is loaded, whether the worker is running or idle, how many batches are waiting, the last batch with its time and token counts, and the last live pass. Two buttons show the exact digest the model read and the exact answer it gave. If a block is in the wrong place, you can see why.</p>
-      </div>
-      <figure class="stage-shot wide">
-        <img src="img/pipeline.webp" width="678" height="540" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, background under 10 minutes; then the pipeline card with the model file, worker idle, 2 pending batches, the last derive as batch 73 at 14:00 in 139.9 seconds with its prompt token count, and buttons to show the digest and the last output" loading="lazy">
-        <figcaption>Settings › Derivation: the worker, the last batch, the digest and the answer.</figcaption>
-      </figure>
-    </li>
-
   </ol>
 </section>
 
 </main>
+
+<footer class="foot">
+  <p>Linux today. macOS and Windows next. <a href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Ask for a build.</a></p>
+  <p class="fine">One SQLite file in your home folder. No scripts on this page either.</p>
+</footer>
 
 </body>
 </html>
