@@ -125,6 +125,7 @@ fn checkout_event(name: &str, s: &RepoState) -> ActivityEvent {
         ext_id: None,
         end_ts: None,
         summary: None,
+        detail: None,
     }
 }
 
@@ -146,6 +147,7 @@ fn diff_state(
             ext_id: new.head.clone(),
             end_ts: None,
             summary: None,
+            detail: None,
         }),
         Some(_) => None,
         None => Some(checkout_event(name, new)),

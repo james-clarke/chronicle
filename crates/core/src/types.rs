@@ -37,6 +37,10 @@ pub struct ActivityEvent {
     pub ext_id: Option<String>,
     /// Commit subject, first prompt, PR title, calling app.
     pub summary: Option<String>,
+    /// Per-kind JSON the anchors read (m30): `{"path","language"}` for
+    /// edits, `{"prompts":[..],"paths":[..]}` for AI sessions,
+    /// `{"attendees":[..]}` for meetings. `None` for kinds without one.
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

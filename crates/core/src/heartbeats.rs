@@ -101,6 +101,9 @@ impl Folder {
             kind: ActivityKind::Edit,
             ext_id: Some(format!("{}@{}#{}", hb.project, hb.branch, span.start_ms)),
             summary: Some(basename(&hb.entity).to_owned()),
+            detail: Some(
+                serde_json::json!({"path": hb.entity, "language": hb.language}).to_string(),
+            ),
         })
     }
 }

@@ -488,3 +488,57 @@ pub(crate) fn backfill_coalesce(data_dir: &Path, since: &str, dry_run: bool) -> 
     );
     Ok(())
 }
+
+/// `chronicle backfill-anchors`: recompute anchors for every focus span
+/// since `since` (a local day) or all of them.
+pub(crate) fn backfill_anchors(data_dir: &Path, since: Option<&str>) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let lo = match since {
+        Some(day) => {
+            let day: civil::Date = day.parse().with_context(|| format!("bad date {day:?}"))?;
+            day.to_zoned(TimeZone::system())?
+                .timestamp()
+                .as_millisecond()
+        }
+        None => 0,
+    };
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let n = storage::anchor_spans(&mut conn, lo, i64::MAX, &re)?;
+    println!("anchored {n} spans");
+    Ok(())
+}
+
+/// `chronicle anchors`: coverage of focus time by anchor strength and the
+/// values that cover the most time.
+pub(crate) fn anchor_report(data_dir: &Path, days: u32, top: usize) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let hi = Timestamp::now().as_millisecond();
+    let lo = hi - i64::from(days) * 86_400_000;
+    let cov = storage::anchor_coverage(&conn, lo, hi, top)?;
+    let pct = |ms: i64| {
+        if cov.focus_ms == 0 {
+            0.0
+        } else {
+            100.0 * ms as f64 / cov.focus_ms as f64
+        }
+    };
+    let none = cov.focus_ms - cov.strong_ms - cov.medium_ms - cov.weak_ms;
+    println!(
+        "focus {:>7.1} min over {days} days",
+        cov.focus_ms as f64 / 60_000.0
+    );
+    println!(
+        "strong {:>6.1}%  medium {:>6.1}%  weak {:>6.1}%  none {:>6.1}%",
+        pct(cov.strong_ms),
+        pct(cov.medium_ms),
+        pct(cov.weak_ms),
+        pct(none)
+    );
+    for (kind, value, ms) in &cov.top {
+        println!("{:>7.1} min  {kind:<8} {value}", *ms as f64 / 60_000.0);
+    }
+    Ok(())
+}

@@ -5,6 +5,7 @@ pub mod consolidate;
 pub mod digest;
 pub mod eval;
 pub mod evidence;
+pub mod extract;
 pub mod heartbeats;
 pub mod insights;
 pub mod intent;

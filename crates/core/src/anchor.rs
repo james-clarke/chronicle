@@ -143,6 +143,7 @@ mod tests {
             ext_id: None,
             end_ts: None,
             summary: None,
+            detail: None,
         }
     }
 
@@ -155,6 +156,7 @@ mod tests {
             ext_id: Some("deadbeef".into()),
             end_ts: None,
             summary: Some("x".into()),
+            detail: None,
         }
     }
 
@@ -167,6 +169,7 @@ mod tests {
             ext_id: Some("url".into()),
             end_ts: None,
             summary: Some(title.into()),
+            detail: None,
         }
     }
 

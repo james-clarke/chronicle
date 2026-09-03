@@ -28,6 +28,9 @@ const BOOT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 const HEAD_LINES: usize = 200;
 const TAIL_BYTES: u64 = 64 * 1024;
 const PROMPT_CHARS: usize = 120;
+/// Prompts and touched paths kept per segment for the span anchors.
+const MAX_PROMPTS: usize = 12;
+const MAX_PATHS: usize = 40;
 /// A pause between transcript lines longer than this ends the span.
 const SESSION_GAP: Duration = Duration::from_secs(30 * 60);
 
@@ -61,8 +64,22 @@ struct Segment {
     /// Branch on the segment's first line.
     branch: String,
     prompt: Option<String>,
+    /// Every typed prompt (clipped), oldest first, up to `MAX_PROMPTS`.
+    prompts: Vec<String>,
+    /// Files the tool read or edited, relative to the cwd, first-seen
+    /// order, up to `MAX_PATHS`.
+    paths: Vec<String>,
     /// `end` as of the last emitted event.
     sent: Option<Timestamp>,
+}
+
+impl Segment {
+    fn detail(&self) -> Option<String> {
+        if self.prompts.is_empty() && self.paths.is_empty() {
+            return None;
+        }
+        Some(serde_json::json!({ "prompts": self.prompts, "paths": self.paths }).to_string())
+    }
 }
 
 impl FileState {
@@ -84,6 +101,8 @@ struct Line {
     branch: String,
     session_id: String,
     prompt: Option<String>,
+    /// File paths in this line's tool calls, relative to `cwd`.
+    paths: Vec<String>,
 }
 
 impl AiSessionProvider {
@@ -150,6 +169,7 @@ impl AiSessionProvider {
                     kind: ActivityKind::AiSession,
                     ext_id,
                     summary: seg.prompt.clone(),
+                    detail: seg.detail(),
                 });
             }
         }
@@ -248,10 +268,7 @@ fn read_lines_from(path: &Path, from: u64) -> (Vec<String>, u64) {
 fn absorb(state: &mut FileState, line: &Line) {
     if state.ident.is_none() {
         state.ident = Some(Ident {
-            repo: Path::new(&line.cwd)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            repo: repo_name(&line.cwd),
             session_id: line.session_id.clone(),
         });
     }
@@ -268,15 +285,56 @@ fn absorb(state: &mut FileState, line: &Line) {
             if seg.prompt.is_none() {
                 seg.prompt = line.prompt.clone();
             }
+            seg.absorb_detail(line);
         }
-        _ => state.segments.push(Segment {
-            ts: line.ts,
-            end: line.ts,
-            branch: line.branch.clone(),
-            prompt: line.prompt.clone(),
-            sent: None,
-        }),
+        _ => {
+            let mut seg = Segment {
+                ts: line.ts,
+                end: line.ts,
+                branch: line.branch.clone(),
+                prompt: line.prompt.clone(),
+                prompts: Vec::new(),
+                paths: Vec::new(),
+                sent: None,
+            };
+            seg.absorb_detail(line);
+            state.segments.push(seg);
+        }
     }
+}
+
+impl Segment {
+    fn absorb_detail(&mut self, line: &Line) {
+        if let Some(p) = &line.prompt
+            && self.prompts.len() < MAX_PROMPTS
+            && self.prompts.last() != Some(p)
+        {
+            self.prompts.push(p.clone());
+        }
+        for p in &line.paths {
+            if self.paths.len() >= MAX_PATHS {
+                break;
+            }
+            if !self.paths.contains(p) {
+                self.paths.push(p.clone());
+            }
+        }
+    }
+}
+
+/// The cwd's basename as the session's place; a session started in the
+/// home directory (or the filesystem root) has none.
+fn repo_name(cwd: &str) -> String {
+    let path = Path::new(cwd);
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if home.as_deref() == Some(path) {
+        return String::new();
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// `user`/`assistant` lines with a timestamp; sidechain (subagent) lines and
@@ -301,13 +359,44 @@ fn parse_line(raw: &str) -> Option<Line> {
     let prompt = (kind == "user")
         .then(|| prompt_text(v.get("message")?.get("content")?))
         .flatten();
+    let paths = (kind == "assistant")
+        .then(|| {
+            v.get("message")
+                .and_then(|m| m.get("content"))
+                .map(|c| tool_paths(c, &cwd))
+        })
+        .flatten()
+        .unwrap_or_default();
     Some(Line {
         ts,
         cwd,
         branch,
         session_id,
         prompt,
+        paths,
     })
+}
+
+/// File paths named by the line's `tool_use` blocks (`file_path`, `path`,
+/// `notebook_path`), made relative to `cwd` when under it. Tool names are
+/// not checked: any tool that takes a path touched that file.
+fn tool_paths(content: &serde_json::Value, cwd: &str) -> Vec<String> {
+    const KEYS: [&str; 3] = ["file_path", "path", "notebook_path"];
+    let Some(blocks) = content.as_array() else {
+        return Vec::new();
+    };
+    let prefix = format!("{}/", cwd.trim_end_matches('/'));
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+        .filter_map(|b| b.get("input"))
+        .flat_map(|input| {
+            KEYS.iter()
+                .filter_map(move |k| input.get(*k).and_then(|p| p.as_str()))
+        })
+        .filter(|p| !p.is_empty())
+        .map(|p| p.strip_prefix(&prefix).unwrap_or(p).to_owned())
+        .collect()
 }
 
 /// A typed prompt: a string or the first text block. Tool results, tagged
@@ -344,7 +433,7 @@ mod tests {
     const USER: &str = r#"{"type":"user","cwd":"/home/u/dev/app","gitBranch":"ABC-1-x","sessionId":"s1","timestamp":"2026-09-02T19:00:00.000Z","isSidechain":false,"message":{"role":"user","content":"fix the flaky test"}}"#;
     const MODE: &str = r#"{"type":"mode","sessionId":"s1"}"#;
     const SIDE: &str = r#"{"type":"user","cwd":"/home/u/dev/app","gitBranch":"ABC-1-x","sessionId":"s1","timestamp":"2026-09-02T19:30:00.000Z","isSidechain":true,"message":{"role":"user","content":"sub"}}"#;
-    const ASSISTANT: &str = r#"{"type":"assistant","cwd":"/home/u/dev/app","gitBranch":"ABC-1-x","sessionId":"s1","timestamp":"2026-09-02T19:05:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+    const ASSISTANT: &str = r#"{"type":"assistant","cwd":"/home/u/dev/app","gitBranch":"ABC-1-x","sessionId":"s1","timestamp":"2026-09-02T19:05:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","name":"Edit","input":{"file_path":"/home/u/dev/app/src/lib.rs","old_string":"a"}}]}}"#;
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -398,6 +487,10 @@ mod tests {
         assert_eq!((e.repo.as_str(), e.branch.as_str()), ("app", "ABC-1-x"));
         assert_eq!(e.ext_id.as_deref(), Some("s1"));
         assert_eq!(e.summary.as_deref(), Some("fix the flaky test"));
+        assert_eq!(
+            e.detail.as_deref(),
+            Some(r#"{"paths":["src/lib.rs"],"prompts":["fix the flaky test"]}"#)
+        );
         assert!(p.scan(now).is_empty(), "nothing moved");
 
         // Growth: only the new bytes are read; a partial line waits.

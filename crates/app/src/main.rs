@@ -90,6 +90,23 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Internal: recompute span anchors (m30) for spans since a local day.
+    #[command(hide = true)]
+    BackfillAnchors {
+        /// Spans starting on or after this local day; default: everything.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: Option<String>,
+    },
+    /// How much focus time carries an anchor (work item, document, place…),
+    /// and which anchors cover the most time.
+    Anchors {
+        /// Window in days ending now.
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Values to list.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
     /// Generate descriptions for closed tasks that lack one, newest first.
     BackfillDescriptions {
         /// Max tasks to describe this run; rerun to continue.
@@ -245,6 +262,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
+        Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
+        Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),
         Cmd::GcalLogin {
             client_id,
             client_secret,

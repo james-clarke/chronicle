@@ -1009,6 +1009,7 @@ fn digest_git_activity_section() {
             ext_id: None,
             end_ts: None,
             summary: None,
+            detail: None,
         },
         ActivityEvent {
             ts: ms_to_ts(t0 + 120_000),
@@ -1018,6 +1019,7 @@ fn digest_git_activity_section() {
             ext_id: Some("abc123".into()),
             end_ts: None,
             summary: Some("feat: plan model".into()),
+            detail: None,
         },
     ];
     let with = build_digest(
@@ -1078,6 +1080,7 @@ fn digest_activity_section_mixed_kinds() {
             kind,
             ext_id: Some(format!("{off}")),
             summary: Some(summary.into()),
+            detail: None,
         };
     let activity = [
         ev(
@@ -1148,6 +1151,7 @@ fn activity_events_upsert_and_ignore_paths() {
         kind,
         ext_id: Some(ext.into()),
         summary: summary.map(Into::into),
+        detail: None,
     };
 
     // Span kinds: one row per ext_id, end_ts follows, the newest non-empty
@@ -1324,6 +1328,7 @@ fn vcs_events_store_dedupe_and_anchor_guard() {
         ext_id: None,
         end_ts: None,
         summary: None,
+        detail: None,
     };
     storage::insert_activity_event(&conn, &checkout(1_000, "main")).unwrap();
     // Re-announced state on daemon restart must not stack a duplicate.
@@ -1337,6 +1342,7 @@ fn vcs_events_store_dedupe_and_anchor_guard() {
         ext_id: Some("abc".into()),
         end_ts: None,
         summary: Some("feat: x".into()),
+        detail: None,
     };
     storage::insert_activity_event(&conn, &commit).unwrap();
     let all = storage::vcs_in_range(&conn, 0, 10_000).unwrap();
@@ -1617,6 +1623,7 @@ fn prepass_places_runs_and_derive_keeps_user_rows() {
         kind,
         ext_id: ext.map(str::to_owned),
         summary: None,
+        detail: None,
     };
     storage::insert_activity_event(
         &conn,
@@ -2107,6 +2114,7 @@ fn feed_lists_blocks_newest_first_and_keep_survives_derive() {
             kind: chronicle_core::types::ActivityKind::Checkout,
             ext_id: None,
             summary: None,
+            detail: None,
         },
     )
     .unwrap();
@@ -2284,6 +2292,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
                 kind: chronicle_core::types::ActivityKind::AiSession,
                 ext_id: None,
                 summary: None,
+                detail: None,
             },
         )
         .unwrap();

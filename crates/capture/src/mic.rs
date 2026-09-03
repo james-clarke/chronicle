@@ -93,6 +93,7 @@ fn call_event(start: Timestamp, end: Option<Timestamp>, app: &str) -> ActivityEv
         kind: ActivityKind::Call,
         ext_id: Some(format!("call:{}", start.as_millisecond())),
         summary: (!app.is_empty()).then(|| app.to_owned()),
+        detail: None,
     }
 }
 

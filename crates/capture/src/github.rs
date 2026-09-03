@@ -115,6 +115,7 @@ fn parse_prs(json: &str, kind: ActivityKind) -> Vec<ActivityEvent> {
                 kind,
                 ext_id: Some(url),
                 summary: Some(summary),
+                detail: None,
             })
         })
         .collect()
