@@ -24,5 +24,6 @@
     }
   ],
   "forbid_label_tokens": ["M7", "northwind"],
-  "max_tasks": 4
+  "max_tasks": 4,
+  "max_intervals": 4
 }

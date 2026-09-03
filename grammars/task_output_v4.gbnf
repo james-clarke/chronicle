@@ -1,0 +1,23 @@
+# Constrains derivation output to the interval JSON schema (derive v4).
+# Containment layer for untrusted title/MCP text: the model can only emit this
+# shape. start/end replace v3's start_offset_min/end_offset_min (about 8
+# output tokens per interval; IntervalDraft accepts both). The other keys
+# keep their words on purpose: a one-letter "r" reads as an ordinal to the
+# 4B model (interval 2 → ref 2). ref = index into the digest's numbered
+# "## Open tasks" list (deterministic linking); ref null proposes a new task
+# via label. "ref null => label required" is enforced in code, not here. Cap 8 intervals: a window is 10–30 minutes and
+# consecutive lines serving one goal are one interval (merge.rs coalesces the
+# rest).
+# Bounded repetition (x{0,N}) only — chained x? x? is pathologically slow.
+
+root ::= "{" ws "\"intervals\"" ws ":" ws "[" ws (interval (ws "," ws interval){0,7})? ws "]" ws "}"
+
+# One line on purpose: llama.cpp's GBNF parser ends a rule at newline
+# (continuations are only legal inside parentheses).
+interval ::= "{" ws "\"ref\"" ws ":" ws (int | "null") ws "," ws "\"label\"" ws ":" ws (string | "null") ws "," ws "\"project\"" ws ":" ws (string | "null") ws "," ws "\"start\"" ws ":" ws int ws "," ws "\"end\"" ws ":" ws int ws "," ws "\"confidence\"" ws ":" ws confidence ws "}"
+
+string ::= "\"" char{0,120} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+int ::= [0-9]{1,4}
+confidence ::= ("0" | "1") ("." [0-9]{1,3})?
+ws ::= [ \n\t]{0,4}

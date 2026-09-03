@@ -49,6 +49,17 @@ enum Cmd {
         #[arg(long)]
         id: i64,
     },
+    /// Internal: one-off m27 coalesce of stored derived intervals (adjacent
+    /// same-task pieces join unless an AFK ≥ 5 min or a user row lies between).
+    #[command(hide = true)]
+    BackfillCoalesce {
+        /// Batches starting on or after this local day.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: String,
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate descriptions for closed tasks that lack one, newest first.
     BackfillDescriptions {
         /// Max tasks to describe this run; rerun to continue.
@@ -168,6 +179,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::ChatWorker { conversation, task } => chat_worker(&data_dir, conversation, task),
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
+        Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
     }
 }
 
@@ -406,7 +418,15 @@ fn bench(
     use chronicle_core::{digest, sessionizer, storage};
 
     let config = Config::load(&data_dir.join("config.toml"))?;
-    let mut cases: Vec<(String, String, Vec<OpenTask>, Option<Expectations>)> = Vec::new();
+    // (name, digest, open tasks, expectations, AFK gaps ≥ 5 min in window minutes)
+    type Case = (
+        String,
+        String,
+        Vec<OpenTask>,
+        Option<Expectations>,
+        Vec<(i64, i64)>,
+    );
+    let mut cases: Vec<Case> = Vec::new();
 
     if fixtures.is_dir() {
         let mut paths: Vec<_> = std::fs::read_dir(fixtures)?
@@ -443,11 +463,14 @@ fn bench(
                 .as_ref()
                 .map(|e| e.open_task_list())
                 .unwrap_or_default();
+            let origin = spans.first().map_or(0, |s| s.start.as_millisecond());
+            let gaps = afk_gaps_min(&spans, origin);
             cases.push((
                 format!("fixture:{name}"),
                 digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], &[], &[], None),
                 open,
                 expect,
+                gaps,
             ));
         }
     }
@@ -463,11 +486,13 @@ fn bench(
             }
             let open = storage::open_tasks(&conn, 8)?;
             let corrections = storage::similar_corrections(&conn, &spans, 4)?;
+            let gaps = afk_gaps_min(&spans, spans[0].start.as_millisecond());
             cases.push((
                 format!("batch:{id}"),
                 digest::build_digest(&spans, &tz, &open, &corrections, &[], &[], None),
                 open,
                 None,
+                gaps,
             ));
         }
     }
@@ -501,7 +526,7 @@ fn bench(
         bail!("no matching models downloaded; run `chronicle model pull`");
     }
 
-    for (case, digest_text, open, expect) in &cases {
+    for (case, digest_text, open, expect, gaps) in &cases {
         println!(
             "\n=== {case} (digest ~{} tokens)",
             digest::approx_tokens(digest_text)
@@ -512,6 +537,7 @@ fn bench(
                 Ok(raw) => {
                     let drafts = chronicle_core::merge::sanitize_intervals(raw, open.len());
                     let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, open);
+                    let linked = chronicle_core::merge::coalesce(linked, gaps, COALESCE_GAP_MIN);
                     let resolved = chronicle_core::eval::resolve(&slots, &linked, open);
                     println!(
                         "--- {name}: {} intervals over {} tasks in {:.1}s (linked)",
@@ -590,6 +616,11 @@ fn derive_worker(data_dir: &Path, batch_id: i64) -> anyhow::Result<()> {
         let raw = chronicle_derive::infer_intervals(&model_path, &digest)?;
         let drafts = chronicle_core::merge::sanitize_intervals(raw, open.len());
         let (slots, linked) = chronicle_core::merge::link_intervals(&drafts, &open);
+        let linked = chronicle_core::merge::coalesce(
+            linked,
+            &afk_gaps_min(&spans, batch.start_ts),
+            COALESCE_GAP_MIN,
+        );
         let intervals = clamp_intervals(linked, &spans, batch.start_ts, batch.end_ts);
         let n = intervals.len();
         let stored = storage::store_derivation(&mut conn, batch_id, &slots, &intervals)?;
@@ -1076,6 +1107,95 @@ fn backfill_descriptions(data_dir: &Path, limit: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An AFK span this long is a hard boundary: it splits time intervals and
+/// blocks coalescing across it (M5 time honesty).
+const AFK_SPLIT_MS: i64 = 5 * 60_000;
+/// Unlabelled space two same-task pieces may join across.
+const COALESCE_GAP_MIN: i64 = 2;
+
+/// AFK gaps ≥ 5 min as `(start, end)` in whole minutes from `origin_ms`,
+/// widened outward so a gap never looks shorter than it is.
+fn afk_gaps_min(
+    spans: &[chronicle_core::sessionizer::SpanDraft],
+    origin_ms: i64,
+) -> Vec<(i64, i64)> {
+    use chronicle_core::sessionizer::SpanKind;
+    spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Afk && s.duration_ms() >= AFK_SPLIT_MS)
+        .map(|s| {
+            let lo = (s.start.as_millisecond() - origin_ms).div_euclid(60_000);
+            let hi = (s.end.as_millisecond() - origin_ms + 59_999).div_euclid(60_000);
+            (lo, hi)
+        })
+        .collect()
+}
+
+/// One-off after the m27 chunk 1 deploy: apply `merge::coalesce` to stored
+/// derived rows, batch by batch, in ms. AFK gaps come from the batch's spans;
+/// the user's own rows block a join the same way. Take a `.bak` of the DB
+/// first; the daemon may run alongside (each batch is one transaction and a
+/// re-derivation replaces the batch's rows anyway).
+fn backfill_coalesce(data_dir: &Path, since: &str, dry_run: bool) -> anyhow::Result<()> {
+    use chronicle_core::merge::{LinkedInterval, coalesce};
+    use chronicle_core::storage::{self, StoredInterval};
+    let tz = TimeZone::system();
+    let day: civil::Date = since
+        .parse()
+        .with_context(|| format!("bad date {since:?}"))?;
+    let since_ms = day.to_zoned(tz)?.timestamp().as_millisecond();
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let batches = storage::derived_rows_by_batch(&conn, since_ms)?;
+    let (mut before, mut after, mut changed) = (0usize, 0usize, 0usize);
+    for (batch_id, lo, hi, rows) in batches {
+        let spans = storage::batch_spans(&conn, batch_id)?;
+        let mut blocks: Vec<(i64, i64)> = spans
+            .iter()
+            .filter(|s| {
+                s.kind == chronicle_core::sessionizer::SpanKind::Afk
+                    && s.duration_ms() >= AFK_SPLIT_MS
+            })
+            .map(|s| (s.start.as_millisecond(), s.end.as_millisecond()))
+            .collect();
+        blocks.extend(storage::user_ranges_in(&conn, lo, hi)?);
+        let linked = rows
+            .iter()
+            .map(|r| LinkedInterval {
+                slot: r.task_id as usize,
+                start_offset_min: r.start_ts,
+                end_offset_min: r.end_ts,
+                confidence: r.confidence,
+            })
+            .collect();
+        let out = coalesce(linked, &blocks, COALESCE_GAP_MIN * 60_000);
+        before += rows.len();
+        after += out.len();
+        if out.len() == rows.len() {
+            continue;
+        }
+        changed += 1;
+        println!("batch {batch_id}: {} → {} rows", rows.len(), out.len());
+        if dry_run {
+            continue;
+        }
+        let rows: Vec<StoredInterval> = out
+            .into_iter()
+            .map(|iv| StoredInterval {
+                task_id: iv.slot as i64,
+                start_ts: iv.start_offset_min,
+                end_ts: iv.end_offset_min,
+                confidence: iv.confidence,
+            })
+            .collect();
+        storage::replace_derived_rows(&mut conn, batch_id, &rows)?;
+    }
+    println!(
+        "{}{changed} batches changed, {before} → {after} derived rows",
+        if dry_run { "dry run: " } else { "" }
+    );
+    Ok(())
+}
+
 /// Offsets are minutes from batch start, untrusted model output: clamp into
 /// the batch window, drop empty/inverted intervals, and split any interval
 /// the model stretched across a long AFK gap (small models ignore the prompt
@@ -1089,7 +1209,6 @@ fn clamp_intervals(
 ) -> Vec<chronicle_core::types::NewInterval> {
     use chronicle_core::sessionizer::SpanKind;
     use chronicle_core::types::{NewInterval, ms_to_ts};
-    const AFK_SPLIT_MS: i64 = 5 * 60_000;
     const MIN_PIECE_MS: i64 = 60_000;
     let gaps: Vec<(i64, i64)> = spans
         .iter()

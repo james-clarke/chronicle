@@ -65,8 +65,8 @@ chronicle/
 │   ├── derive/     # digest→prompt, llama runner, GBNF, corrections
 │   ├── mcp/        # rmcp client wrapper
 │   └── app/        # binary: clap, shell integration, egui UI
-├── grammars/       # task_output_v3.gbnf (older versions kept for history)
-├── prompts/        # derive_v3.txt, chat_v1.txt
+├── grammars/       # task_output_v4.gbnf (older versions kept for history)
+├── prompts/        # derive_v4.txt, chat_v1.txt
 ├── packaging/      # systemd user unit
 └── fixtures/       # recorded JSONL event streams + goldens + *.expect.json evals
 ```
@@ -101,7 +101,7 @@ SQLite, WAL. Tables: `events`, `spans`, `batches`, `tasks` (identity: label, pro
 ## Derivation
 
 - Ephemeral worker: mmap model → infer → write tasks → mark batch done → exit. Hard timeout 5 min → mark failed, retry once at next idle.
-- GBNF-constrained JSON (v3): `{ "intervals": [ { ref|null, label|null, project|null, start_offset_min, end_offset_min, confidence } ] }` — `ref` = index into the digest's open-task list (deterministic linking); `ref null` proposes a new task via `label`. Post-inference: sanitize (bad refs → null, label-less proposals dropped) → link (near-identical proposals snap to open tasks or collapse together) → clamp (offsets into batch window, AFK ≥ 5 min splits time but keeps identity). Use bounded repetition `x{0,N}` in the grammar, never chained `x? x?` (pathologically slow).
+- GBNF-constrained JSON (v4): `{ "intervals": [ { ref|null, label|null, project|null, start, end, confidence } ] }`, at most 8 — `ref` = index into the digest's open-task list (deterministic linking); `ref null` proposes a new task via `label`. Post-inference: sanitize (bad refs → null, label-less proposals dropped) → link (near-identical proposals snap to open tasks or collapse together) → coalesce (overlaps trimmed, adjacent same-task pieces joined unless an AFK ≥ 5 min lies between) → clamp (offsets into batch window, AFK ≥ 5 min splits time but keeps identity). Use bounded repetition `x{0,N}` in the grammar, never chained `x? x?` (pathologically slow).
 - Threads = physical cores − 1, cap 8. Features: `metal` / `vulkan` / CPU fallback, wire the feature gating at M4 so ports are just `#[cfg]`.
 - Model manager: download to data dir, SHA-256 verify, resume; first-run progress UI. Never bundled in installer.
 - **M4 gate:** benchmark Qwen3-1.7B vs Qwen3-4B-Instruct-2507 on fixture evals before pinning the default. (Settled: 4B default, 1.7B low-RAM fallback.)

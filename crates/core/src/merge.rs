@@ -2,8 +2,9 @@
 //! (model-independent dedup). Refs link intervals to open tasks by list
 //! index; null-ref proposals near-matching an open task attach to it instead
 //! of minting a drifted duplicate; the rest collapse among themselves when
-//! near-identical with the same project. Time intervals are never coalesced —
-//! AFK splits stay time-honest (M5 decision).
+//! near-identical with the same project. `coalesce` then repairs overlaps
+//! and joins adjacent same-slot pieces; it never bridges an AFK gap of 5 min
+//! or more, so AFK splits stay time-honest (M5 decision).
 
 use crate::types::{IntervalDraft, OpenTask, TaskSlot};
 
@@ -126,9 +127,127 @@ pub fn link_intervals(
     (slots, intervals)
 }
 
+/// Overlap repair, then adjacency merge, in whatever unit the caller's
+/// offsets and `afk_gaps` use (digest minutes in the worker, ms in the
+/// backfill). Sorted by start; an interval starting inside the previous one
+/// is trimmed to its end, one ending inside it is dropped. Then an interval
+/// joins the previous one when both share a slot, the unlabelled gap between
+/// them is under `max_gap`, and no AFK gap touches that space. Both models
+/// emit one interval per Timeline line, so without this a 30-minute stretch
+/// of one goal lands as eight one-minute rows. Confidence is the
+/// duration-weighted mean of the pieces.
+pub fn coalesce(
+    mut linked: Vec<LinkedInterval>,
+    afk_gaps: &[(i64, i64)],
+    max_gap: i64,
+) -> Vec<LinkedInterval> {
+    linked.retain(|iv| iv.end_offset_min > iv.start_offset_min);
+    linked.sort_by(|a, b| {
+        a.start_offset_min
+            .cmp(&b.start_offset_min)
+            .then(b.confidence.total_cmp(&a.confidence))
+    });
+    let mut out: Vec<LinkedInterval> = Vec::with_capacity(linked.len());
+    for mut iv in linked {
+        if let Some(prev) = out.last_mut() {
+            if iv.start_offset_min < prev.end_offset_min {
+                if iv.end_offset_min <= prev.end_offset_min {
+                    continue;
+                }
+                iv.start_offset_min = prev.end_offset_min;
+            }
+            let gap = iv.start_offset_min - prev.end_offset_min;
+            let afk_between = afk_gaps
+                .iter()
+                .any(|&(s, e)| s < iv.start_offset_min && e > prev.end_offset_min);
+            if iv.slot == prev.slot && gap < max_gap && !afk_between {
+                let a = prev.end_offset_min - prev.start_offset_min;
+                let b = iv.end_offset_min - iv.start_offset_min;
+                prev.confidence =
+                    (prev.confidence * a as f64 + iv.confidence * b as f64) / (a + b) as f64;
+                prev.end_offset_min = iv.end_offset_min;
+                continue;
+            }
+        }
+        out.push(iv);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn linked(slot: usize, start: i64, end: i64, confidence: f64) -> LinkedInterval {
+        LinkedInterval {
+            slot,
+            start_offset_min: start,
+            end_offset_min: end,
+            confidence,
+        }
+    }
+
+    #[test]
+    fn coalesce_joins_adjacent_same_slot_pieces() {
+        // Batch 67 with 4B: eight consecutive one-minute intervals, one label.
+        let pieces: Vec<_> = (0..8).map(|m| linked(0, m, m + 1, 0.9)).collect();
+        let out = coalesce(pieces, &[], 2);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].start_offset_min, out[0].end_offset_min), (0, 8));
+        assert!((out[0].confidence - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn coalesce_keeps_slot_changes_and_weights_confidence() {
+        let out = coalesce(
+            vec![
+                linked(0, 0, 6, 1.0),
+                linked(0, 7, 9, 0.4), // 1-minute unlabelled gap: joins
+                linked(1, 9, 12, 0.8),
+                linked(0, 12, 15, 0.6), // slot 1 lies between: stays apart
+            ],
+            &[],
+            2,
+        );
+        assert_eq!(out.len(), 3);
+        assert_eq!((out[0].start_offset_min, out[0].end_offset_min), (0, 9));
+        assert!((out[0].confidence - (6.0 * 1.0 + 2.0 * 0.4) / 8.0).abs() < 1e-9);
+        assert_eq!(out[1].slot, 1);
+        assert_eq!(out[2].slot, 0);
+    }
+
+    #[test]
+    fn coalesce_never_bridges_afk() {
+        let out = coalesce(
+            vec![linked(0, 0, 10, 0.9), linked(0, 11, 20, 0.9)],
+            &[(10, 11)],
+            2,
+        );
+        assert_eq!(out.len(), 2);
+        // Wide unlabelled gap without AFK also stays apart.
+        let out = coalesce(vec![linked(0, 0, 10, 0.9), linked(0, 13, 20, 0.9)], &[], 2);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn coalesce_repairs_overlaps() {
+        // Batch 68 with 4B: 0–28 and 13–15 as separate intervals.
+        let out = coalesce(
+            vec![
+                linked(0, 0, 28, 0.9),
+                linked(1, 13, 15, 0.7), // nested: dropped
+                linked(1, 25, 30, 0.8), // overlapping: trimmed to 28–30
+                linked(2, 5, 0, 0.5),   // inverted: dropped
+            ],
+            &[],
+            2,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            (out[1].slot, out[1].start_offset_min, out[1].end_offset_min),
+            (1, 28, 30)
+        );
+    }
 
     fn draft(
         task_ref: Option<i64>,

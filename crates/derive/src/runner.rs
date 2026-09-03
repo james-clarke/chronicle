@@ -13,12 +13,13 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
-const GRAMMAR: &str = include_str!("../../../grammars/task_output_v3.gbnf");
-const PROMPT: &str = include_str!("../../../prompts/derive_v3.txt");
+const GRAMMAR: &str = include_str!("../../../grammars/task_output_v4.gbnf");
+const PROMPT: &str = include_str!("../../../prompts/derive_v4.txt");
 
 const N_CTX: u32 = 4096;
 const N_BATCH: u32 = 512;
-const MAX_GEN: usize = 900;
+// 8 intervals × ~35 tokens under the v4 keys, with room for long labels; the 300 tokens freed from v3's 900 went to digest::MAX_TOKENS.
+const MAX_GEN: usize = 600;
 
 pub use chronicle_core::types::{DeriveOutput, IntervalDraft};
 

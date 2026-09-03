@@ -187,14 +187,17 @@ pub struct DeriveOutput {
 /// One model-proposed interval. `task_ref` is a 1-based index into the
 /// digest's numbered "## Open tasks" list (deterministic linking, no string
 /// matching); None proposes a new task via `label`. Offsets are minutes from
-/// the start of the digest window.
+/// the start of the digest window. The v4 grammar emits `start`/`end`; the
+/// v3 names stay accepted for fixtures and stored outputs.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct IntervalDraft {
     #[serde(rename = "ref")]
     pub task_ref: Option<i64>,
     pub label: Option<String>,
     pub project: Option<String>,
+    #[serde(alias = "start")]
     pub start_offset_min: i64,
+    #[serde(alias = "end")]
     pub end_offset_min: i64,
     pub confidence: f64,
 }

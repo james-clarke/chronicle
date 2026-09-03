@@ -1856,6 +1856,87 @@ pub struct Placement {
     pub reason: String,
 }
 
+/// A stored interval row without its ids, as the m27 backfill rewrites them.
+#[derive(Debug, Clone)]
+pub struct StoredInterval {
+    pub task_id: i64,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub confidence: f64,
+}
+
+/// `derived` rows of every batch starting at or after `since_ms`, oldest
+/// first: `(batch_id, batch start, batch end, rows by start)`.
+#[allow(clippy::type_complexity)]
+pub fn derived_rows_by_batch(
+    conn: &Connection,
+    since_ms: i64,
+) -> Result<Vec<(i64, i64, i64, Vec<StoredInterval>)>, StorageError> {
+    let mut out = Vec::new();
+    let mut batches = conn.prepare(
+        "SELECT id, start_ts, end_ts FROM batches WHERE start_ts >= ?1 ORDER BY start_ts",
+    )?;
+    let mut rows = conn.prepare(
+        "SELECT task_id, start_ts, end_ts, confidence FROM intervals
+          WHERE batch_id=?1 AND source='derived' ORDER BY start_ts",
+    )?;
+    for b in batches.query_map([since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+        let (id, lo, hi): (i64, i64, i64) = b?;
+        let ivs: Vec<StoredInterval> = rows
+            .query_map([id], |r| {
+                Ok(StoredInterval {
+                    task_id: r.get(0)?,
+                    start_ts: r.get(1)?,
+                    end_ts: r.get(2)?,
+                    confidence: r.get(3)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        if !ivs.is_empty() {
+            out.push((id, lo, hi, ivs));
+        }
+    }
+    Ok(out)
+}
+
+/// `(start, end)` of the user's own interval rows overlapping `[lo, hi)`.
+pub fn user_ranges_in(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(i64, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT start_ts, end_ts FROM intervals
+          WHERE source='user' AND start_ts < ?2 AND end_ts > ?1 ORDER BY start_ts",
+    )?;
+    let out = stmt
+        .query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(out)
+}
+
+/// Replace a batch's `derived` rows in one transaction (m27 backfill).
+pub fn replace_derived_rows(
+    conn: &mut Connection,
+    batch_id: i64,
+    rows: &[StoredInterval],
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM intervals WHERE batch_id=?1 AND source='derived'",
+        [batch_id],
+    )?;
+    for r in rows {
+        tx.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![r.task_id, batch_id, r.start_ts, r.end_ts, r.confidence],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Drop the pre-pass's provisional intervals starting inside `[lo, hi)`
 /// (the pre-pass re-reads the window every tick).
 pub fn clear_prepass(conn: &Connection, lo: i64, hi: i64) -> Result<usize, StorageError> {

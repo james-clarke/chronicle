@@ -9,13 +9,13 @@ use crate::sessionizer::{SpanDraft, SpanKind};
 use crate::storage::Placement;
 use crate::types::{ActivityEvent, ActivityKind, Correction, OpenTask};
 
-/// Digest budget in `approx_tokens`. The derive runner has 4096 − 900 gen −
-/// 64 = 3132 tokens for the whole prompt; the instruction text plus chat
-/// template takes 1078 (Qwen3 tokenizer, measured 2026-09-02), leaving
-/// ~2050 for the digest. 1900 keeps a margin for template drift, so the
-/// render ladder shortens titles and app lists instead of the runner
-/// cutting the tail, where the open tasks, hints and corrections live.
-pub const MAX_TOKENS: usize = 1900;
+/// Digest budget in `approx_tokens`. The derive runner has 4096 − 600 gen −
+/// 64 = 3432 tokens for the whole prompt; the v4 instruction text plus chat
+/// template takes ~1100 (Qwen3 tokenizer), leaving ~2300 for the digest.
+/// 2200 keeps a margin for template drift, so the render ladder shortens
+/// titles and app lists instead of the runner cutting the tail, where the
+/// open tasks, hints and corrections live.
+pub const MAX_TOKENS: usize = 2200;
 
 /// Rough heuristic; the real tokenizer lives in the derive worker. Digest
 /// text runs 2.5–3.0 chars per token (timestamps, dashes, paths, JSON

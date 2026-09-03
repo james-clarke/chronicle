@@ -23,6 +23,9 @@ pub struct Expectations {
     /// Cap on distinct task identities (over-fragmentation guard).
     #[serde(default)]
     pub max_tasks: Option<usize>,
+    /// Cap on intervals after coalescing (one-row-per-Timeline-line guard).
+    #[serde(default)]
+    pub max_intervals: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +277,13 @@ pub fn score(tasks: &[TaskDraft], exp: &Expectations) -> Report {
             "fragmentation".into(),
             idents.len() <= max,
             format!("{} identities, cap {max}", idents.len()),
+        );
+    }
+    if let Some(max) = exp.max_intervals {
+        check(
+            "intervals".into(),
+            tasks.len() <= max,
+            format!("{} intervals, cap {max}", tasks.len()),
         );
     }
 
