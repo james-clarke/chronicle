@@ -1133,7 +1133,9 @@ fn afk_gaps_min(
 
 /// One-off after the m27 chunk 1 deploy: apply `merge::coalesce` to stored
 /// derived rows, batch by batch, in ms. AFK gaps come from the batch's spans;
-/// the user's own rows block a join the same way. Take a `.bak` of the DB
+/// the user's own rows and rows a correction points at block a join the
+/// same way (and the latter stay put: `corrections.interval_id` is a
+/// foreign key). Take a `.bak` of the DB
 /// first; the daemon may run alongside (each batch is one transaction and a
 /// re-derivation replaces the batch's rows anyway).
 fn backfill_coalesce(data_dir: &Path, since: &str, dry_run: bool) -> anyhow::Result<()> {
@@ -1158,6 +1160,8 @@ fn backfill_coalesce(data_dir: &Path, since: &str, dry_run: bool) -> anyhow::Res
             .map(|s| (s.start.as_millisecond(), s.end.as_millisecond()))
             .collect();
         blocks.extend(storage::user_ranges_in(&conn, lo, hi)?);
+        let (pinned, rows): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.pinned);
+        blocks.extend(pinned.iter().map(|r| (r.start_ts, r.end_ts)));
         let linked = rows
             .iter()
             .map(|r| LinkedInterval {
@@ -1185,6 +1189,7 @@ fn backfill_coalesce(data_dir: &Path, since: &str, dry_run: bool) -> anyhow::Res
                 start_ts: iv.start_offset_min,
                 end_ts: iv.end_offset_min,
                 confidence: iv.confidence,
+                pinned: false,
             })
             .collect();
         storage::replace_derived_rows(&mut conn, batch_id, &rows)?;

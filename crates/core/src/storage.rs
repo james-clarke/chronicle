@@ -1856,14 +1856,19 @@ pub struct Placement {
     pub reason: String,
 }
 
-/// A stored interval row without its ids, as the m27 backfill rewrites them.
+/// A stored interval row as the m27 backfill rewrites them. `pinned` rows are
+/// referenced by a correction (`corrections.interval_id`) and stay as they
+/// are; the rewrite treats their range as a boundary.
 #[derive(Debug, Clone)]
 pub struct StoredInterval {
     pub task_id: i64,
     pub start_ts: i64,
     pub end_ts: i64,
     pub confidence: f64,
+    pub pinned: bool,
 }
+
+const PINNED: &str = "id IN (SELECT interval_id FROM corrections WHERE interval_id IS NOT NULL)";
 
 /// `derived` rows of every batch starting at or after `since_ms`, oldest
 /// first: `(batch_id, batch start, batch end, rows by start)`.
@@ -1876,10 +1881,10 @@ pub fn derived_rows_by_batch(
     let mut batches = conn.prepare(
         "SELECT id, start_ts, end_ts FROM batches WHERE start_ts >= ?1 ORDER BY start_ts",
     )?;
-    let mut rows = conn.prepare(
-        "SELECT task_id, start_ts, end_ts, confidence FROM intervals
-          WHERE batch_id=?1 AND source='derived' ORDER BY start_ts",
-    )?;
+    let mut rows = conn.prepare(&format!(
+        "SELECT task_id, start_ts, end_ts, confidence, {PINNED} FROM intervals
+          WHERE batch_id=?1 AND source='derived' ORDER BY start_ts"
+    ))?;
     for b in batches.query_map([since_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
         let (id, lo, hi): (i64, i64, i64) = b?;
         let ivs: Vec<StoredInterval> = rows
@@ -1889,6 +1894,7 @@ pub fn derived_rows_by_batch(
                     start_ts: r.get(1)?,
                     end_ts: r.get(2)?,
                     confidence: r.get(3)?,
+                    pinned: r.get(4)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -1915,7 +1921,8 @@ pub fn user_ranges_in(
     Ok(out)
 }
 
-/// Replace a batch's `derived` rows in one transaction (m27 backfill).
+/// Replace a batch's unpinned `derived` rows in one transaction (m27
+/// backfill); `rows` must carry no pinned entry.
 pub fn replace_derived_rows(
     conn: &mut Connection,
     batch_id: i64,
@@ -1923,7 +1930,7 @@ pub fn replace_derived_rows(
 ) -> Result<(), StorageError> {
     let tx = conn.transaction()?;
     tx.execute(
-        "DELETE FROM intervals WHERE batch_id=?1 AND source='derived'",
+        &format!("DELETE FROM intervals WHERE batch_id=?1 AND source='derived' AND NOT {PINNED}"),
         [batch_id],
     )?;
     for r in rows {
