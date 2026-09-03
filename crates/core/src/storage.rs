@@ -2279,6 +2279,14 @@ pub fn repos_active_in(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<String
 }
 
 /// End of the task's latest interval (its last activity), if any.
+pub fn task_created_ts(conn: &Connection, task_id: i64) -> Result<i64, StorageError> {
+    Ok(
+        conn.query_row("SELECT created_ts FROM tasks WHERE id=?1", [task_id], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
 pub fn task_last_end(conn: &Connection, task_id: i64) -> Result<Option<i64>, StorageError> {
     Ok(conn.query_row(
         "SELECT MAX(end_ts) FROM intervals WHERE task_id=?1",
@@ -2538,6 +2546,13 @@ pub fn similar_corrections(
         .take(k)
         .cloned()
         .collect();
+    // A rename onto a declared task's label outranks free-text renames of
+    // equal match: the user named that task on purpose.
+    let declared: Vec<String> = conn
+        .prepare("SELECT LOWER(label) FROM tasks WHERE status='open' AND source='user'")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    out.sort_by_key(|c| !declared.contains(&c.new_label.to_lowercase()));
     out.extend(ranked.into_iter().filter(|c| c.kind == "eject").take(k));
     Ok(out)
 }

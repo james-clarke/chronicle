@@ -23,7 +23,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 
 const BATCH_GRAMMAR: &str = include_str!("../../../grammars/task_output_v4.gbnf");
-const BATCH_PROMPT: &str = include_str!("../../../prompts/derive_v4.txt");
+const BATCH_PROMPT: &str = include_str!("../../../prompts/derive_v5.txt");
 const LIVE_GRAMMAR: &str = include_str!("../../../grammars/live_output_v1.gbnf");
 const LIVE_PROMPT: &str = include_str!("../../../prompts/live_v1.txt");
 

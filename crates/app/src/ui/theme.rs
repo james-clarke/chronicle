@@ -403,12 +403,7 @@ pub(super) fn series_color_for_key(key: &str) -> Color32 {
 /// to a reader here, so the leading run of such glyphs is dropped. Stored
 /// titles (and the digest) keep it.
 pub(super) fn display_title(title: &str) -> &str {
-    const STATUS_GLYPHS: &[char] = &[
-        '\u{2733}', '\u{273b}', '\u{273d}', '\u{2736}', '\u{2722}', '\u{2749}', '\u{25d0}',
-        '\u{25d1}', '\u{25d2}', '\u{25d3}', '\u{2610}', '\u{23fa}', '\u{00b7}', '\u{2731}',
-        '\u{2732}',
-    ];
-    title.trim_start_matches(|c: char| c.is_whitespace() || STATUS_GLYPHS.contains(&c))
+    chronicle_core::evidence::strip_glyphs(title)
 }
 
 /// Cut `text` to whole sentences fitting `max_chars` (at least one). Returns

@@ -13,6 +13,9 @@ active 25m04s · afk 0s · 83 switches
 - northwind-memberships.acmeapi.example/control_panel: 21s
 - chromewebstore.google.com/detail: 9s
 
+## Keys seen
+cwd contoso 3m21s, mailer 1m52s
+
 ## Timeline (minute offsets from window start)
 - 0–1m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
 - 1–2m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome + Google-chrome: Contoso Control Panel - Google Chrome

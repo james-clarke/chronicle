@@ -87,6 +87,138 @@ fn day1_batches() {
     assert!(batch.spans.end < spans.len() - 1);
 }
 
+// m27 chunk 5 pre-pass rules: a ticket key on screen places by
+// `title <KEY>`; a cwd path in a title counts as the repo but a task whose
+// last interval is over 2 h old fails the recency gate; a distraction run
+// is skipped outright.
+#[test]
+fn prepass_title_key_recency_gate_and_distractions() {
+    use chronicle_core::prepass;
+    use chronicle_core::storage;
+    use chronicle_core::types::ms_to_ts;
+
+    let db = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("m27_prepass_rules.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db{suffix}")));
+    }
+    let mut conn = storage::open(&db).unwrap();
+    let config = Config {
+        distraction_patterns: vec!["(?i)youtube".into()],
+        ..Config::default()
+    };
+    let h = 3_600_000i64;
+    let now = 20 * h;
+    let task = |conn: &rusqlite::Connection,
+                label: &str,
+                project: Option<&str>,
+                source: &str,
+                ext: Option<&str>| {
+        conn.execute(
+            "INSERT INTO tasks (label, project, status, source, created_ts, external_ref) VALUES (?1, ?2, 'open', ?3, 0, ?4)",
+            rusqlite::params![label, project, source, ext],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    };
+    let ticket = task(
+        &conn,
+        "SMS rules",
+        Some("mailer"),
+        "derived",
+        Some("ACME-9"),
+    );
+    let stale = task(
+        &conn,
+        "Old chronicle work",
+        Some("chronicle"),
+        "derived",
+        None,
+    );
+    let fresh = task(&conn, "Fresh contoso work", Some("contoso"), "derived", None);
+    // The ticket task and the stale repo task last saw work 3 h before their
+    // runs; the fresh repo task 1 h before.
+    for (t, end) in [(ticket, 12 * h), (stale, 12 * h), (fresh, 17 * h)] {
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence) VALUES (?1, NULL, ?2, ?3, 0.9)",
+            rusqlite::params![t, end - 600_000, end],
+        )
+        .unwrap();
+    }
+    // A: key on screen for 3 of 4 minutes; B: cwd names the stale repo task;
+    // C: cwd names the fresh repo task; D: a distraction.
+    let spans = [
+        (
+            15 * h,
+            15 * h + 180_000,
+            "chrome",
+            "[ACME-9] SMS rules - Jira",
+        ),
+        (15 * h + 180_000, 15 * h + 240_000, "chrome", "Inbox"),
+        (
+            16 * h,
+            16 * h + 240_000,
+            "Terminator",
+            "sam@box:~/dev/chronicle",
+        ),
+        (
+            18 * h,
+            18 * h + 240_000,
+            "Terminator",
+            "sam@box:~/dev/contoso",
+        ),
+        (19 * h, 19 * h + 240_000, "firefox", "Cats - YouTube"),
+    ];
+    for (s, e, app, title) in spans {
+        conn.execute(
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, ?3, ?4, 'focus', NULL)",
+            rusqlite::params![s, e, app, title],
+        )
+        .unwrap();
+    }
+    let placed = prepass::run(&mut conn, &config, ms_to_ts(now)).unwrap();
+    let got: Vec<(i64, i64, &str)> = placed
+        .iter()
+        .map(|p| (p.task_id, p.start_ts, p.reason.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (ticket, 15 * h, "title ACME-9"),
+            (fresh, 18 * h, "repo contoso"),
+        ],
+        "{placed:?}"
+    );
+}
+
+// m27 chunk 5: ticket keys on screen and cwd paths in titles render under
+// "## Keys seen" when a ticket regex is given; without one only cwd shows.
+#[test]
+fn digest_keys_seen_section() {
+    let ms = |m: i64| chronicle_core::types::ms_to_ts(m * 60_000);
+    let span = |lo: i64, hi: i64, app: &str, title: &str| SpanDraft {
+        start: ms(lo),
+        end: ms(hi),
+        app: app.into(),
+        title: title.into(),
+        kind: SpanKind::Focus,
+        url: None,
+    };
+    let spans = vec![
+        span(0, 9, "chrome", "[ACME-11382] SMS rules - Jira"),
+        span(9, 12, "Terminator", "sam@box:~/dev/mailer"),
+        span(12, 13, "chrome", "ACME-11374 - Jira"),
+    ];
+    let re = regex::Regex::new(&Config::default().ticket_regex).unwrap();
+    let with = build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, Some(&re));
+    assert!(with.contains("## Keys seen\nACME-11382 9m00s (chrome), ACME-11374 1m00s (chrome)\ncwd mailer 3m00s\n"), "{with}");
+    let without = build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    assert!(
+        without.contains("## Keys seen\ncwd mailer 3m00s\n"),
+        "{without}"
+    );
+    assert!(!without.contains("ACME-11382 9m"), "{without}");
+}
+
 // m27: an AFK gap ≥ 5 min closes a batch that already holds
 // `batch_min_minutes`; a shorter gap or a younger batch does not.
 #[test]
@@ -137,6 +269,7 @@ fn day1_digest_golden() {
         &[],
         &[],
         None,
+        None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     check_golden("day1.digest.golden", &digest);
@@ -173,6 +306,7 @@ fn day2_web_per_site_spans() {
         &[],
         &[],
         None,
+        None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     assert!(digest.contains("## Sites by time"), "digest: {digest}");
@@ -190,7 +324,7 @@ fn eval_digest(fixture: &str) -> String {
     let stream_end = events.last().expect("fixture has events").ts;
     let spans = sessionize(&events, stream_end, &config);
     check_golden(&format!("{fixture}.spans.golden"), &render_spans(&spans));
-    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None)
+    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None)
 }
 
 #[test]
@@ -318,8 +452,17 @@ fn correction_changes_next_digest() {
     );
     assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
 
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
-    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &corrections,
+        &[],
+        &[],
+        None,
+        None,
+    );
     assert_ne!(plain, with, "correction must change the digest");
     check_golden("day1.corrections.digest.golden", &with);
 }
@@ -616,13 +759,22 @@ fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
     let ctx = "### jira.search\nCHR-42 fix AFK split";
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some(ctx));
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some(ctx), None);
     assert_eq!(with, format!("{plain}\n## Workspace context\n{ctx}\n"));
     // Blank context must not add the section (goldens stay MCP-free).
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some("  \n")),
+        build_digest(
+            current,
+            &TimeZone::UTC,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some("  \n"),
+            None
+        ),
         plain
     );
 }
@@ -682,7 +834,7 @@ fn digest_git_activity_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
     let t0 = ts_to_ms(current.first().unwrap().start);
     let vcs = [
         ActivityEvent {
@@ -704,7 +856,7 @@ fn digest_git_activity_section() {
             summary: Some("feat: plan model".into()),
         },
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &vcs, None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &vcs, None, None);
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("checkout app \u{2192} ABC-123-sending-plans"),
@@ -720,7 +872,7 @@ fn digest_git_activity_section() {
         ..vcs[0].clone()
     }];
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &[], &outside, None),
+        build_digest(current, &TimeZone::UTC, &[], &[], &[], &outside, None, None),
         plain
     );
 }
@@ -770,7 +922,16 @@ fn digest_activity_section_mixed_kinds() {
         ),
         ev(ActivityKind::Call, 240_000, None, "", "", "Firefox"),
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &activity, None);
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &activity,
+        None,
+        None,
+    );
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("claude app@ABC-123-x 23m00s \"fix the flaky test\""),
@@ -1617,10 +1778,20 @@ fn eject_splits_interval_and_blocks_suggestion() {
         &hints,
         &[],
         None,
+        None,
     );
     check_golden("m24.hints.digest.golden", &digest);
     // A hint naming a task outside the open list is dropped, not mislinked.
-    let orphan = build_digest(&all, &TimeZone::UTC, &[], &few_shot, &hints, &[], None);
+    let orphan = build_digest(
+        &all,
+        &TimeZone::UTC,
+        &[],
+        &few_shot,
+        &hints,
+        &[],
+        None,
+        None,
+    );
     assert!(!orphan.contains("Pre-pass hints"), "{orphan}");
     assert!(orphan.contains("## Ejected"), "{orphan}");
     // A different task with the same evidence is still suggested.
@@ -1927,7 +2098,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
         .unwrap();
     }
 
-    let heads = proposals::refresh(&mut conn, ms_to_ts(7_000_000)).unwrap();
+    let heads = proposals::refresh(&mut conn, ms_to_ts(7_000_000), &[]).unwrap();
     assert_eq!(heads, vec![600_000, 2_400_000, 5_000_000]);
     let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
     type Row<'a> = (i64, i64, usize, Option<&'a str>, bool, &'a str);
@@ -1976,7 +2147,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
         )
     );
     // Same tick again: no new jobs, rows rewritten in place.
-    proposals::refresh(&mut conn, ms_to_ts(7_100_000)).unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_100_000), &[]).unwrap();
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM ai_jobs", [], |r| r.get(0))
         .unwrap();
@@ -1987,7 +2158,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
         [],
     )
     .unwrap();
-    proposals::refresh(&mut conn, ms_to_ts(7_200_000)).unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_200_000), &[]).unwrap();
     let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
     let roadmap = open.iter().find(|p| p.start_ts == 600_000).unwrap();
     assert_eq!(
@@ -2001,7 +2172,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
     // Dismiss YouTube: it stays out on later ticks.
     let yt = open.iter().find(|p| p.start_ts == 2_400_000).unwrap().id;
     proposals::dismiss(&conn, yt).unwrap();
-    proposals::refresh(&mut conn, ms_to_ts(7_300_000)).unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_300_000), &[]).unwrap();
     let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
     assert_eq!(open.len(), 2);
     assert!(open.iter().all(|p| p.start_ts != 2_400_000));
@@ -2031,7 +2202,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
             Some("Reading the roadmap.")
         )
     );
-    proposals::refresh(&mut conn, ms_to_ts(7_500_000)).unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_500_000), &[]).unwrap();
     let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].start_ts, 5_000_000);
@@ -2042,7 +2213,7 @@ fn proposals_cluster_name_accept_and_dismiss() {
         [],
     )
     .unwrap();
-    proposals::refresh(&mut conn, ms_to_ts(7_600_000)).unwrap();
+    proposals::refresh(&mut conn, ms_to_ts(7_600_000), &[]).unwrap();
     let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
     assert!(open.is_empty(), "{open:?}");
 }

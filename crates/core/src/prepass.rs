@@ -31,6 +31,12 @@ const MAX_WINDOW_MS: i64 = 12 * 3_600_000;
 const MAX_LINES: usize = 4;
 /// Open tasks considered (declared first, then most recently active).
 const OPEN_CAP: usize = 64;
+/// Title-key rule: the dominant key needs this much screen time in the run.
+const KEY_MIN_MS: i64 = 2 * 60_000;
+/// Repo rule: a candidate task must have an interval ending within this of
+/// the run's start (or be declared today) — the recency gate that stops one
+/// stale declared task from magnetizing every stretch in its repo.
+const REPO_RECENT_MS: i64 = 2 * 3_600_000;
 
 /// One pre-pass over `[end of the newest derived batch, now)`: last tick's
 /// provisional rows are dropped, the window's unassigned runs re-read, and
@@ -52,8 +58,22 @@ pub fn run(
     let ticket_re = Regex::new(&config.ticket_regex).ok();
     let prior = storage::branch_state_before(&tx, lo)?;
     let vcs = storage::vcs_in_range(&tx, lo, hi)?;
+    let distractions = crate::evidence::compile_patterns(&config.distraction_patterns);
+    let today_start = now
+        .to_zoned(jiff::tz::TimeZone::system())
+        .start_of_day()
+        .map(|z| z.timestamp().as_millisecond())
+        .unwrap_or(hi);
     let mut placed = Vec::new();
     for run in runs.iter().filter(|r| r.ms >= MIN_RUN_MS) {
+        // A distraction stretch (video, social) never seeds a placement.
+        if run
+            .lines
+            .first()
+            .is_some_and(|l| crate::evidence::is_distraction(&l.0, &l.1, &distractions))
+        {
+            continue;
+        }
         let hints = storage::correction_hints(&tx, &run_text(run))?;
         let ejected: Vec<&Correction> = hints.iter().filter(|c| c.kind == "eject").collect();
         let allowed = |t: &OpenTask| {
@@ -71,8 +91,35 @@ pub fn run(
                 hit = Some((t.id, format!("branch {key}")));
             }
         }
+        // Titles feed the next two rules; a branch hit never needs them.
+        let spans = if hit.is_none() {
+            storage::spans_in_range(&tx, run.start_ts, run.end_ts)?
+        } else {
+            Vec::new()
+        };
+        // A ticket key on screen (Jira page title, PR URL) for most of the
+        // run names the task as firmly as a branch does.
+        if hit.is_none()
+            && let Some(re) = &ticket_re
+        {
+            let keys = crate::evidence::keys_in_spans(&spans, re, run.start_ts, run.end_ts);
+            let total: i64 = keys.iter().map(|k| k.ms).sum();
+            if let Some(top) = keys.first()
+                && top.ms >= KEY_MIN_MS
+                && top.ms * 2 >= total
+                && let Some(t) = storage::open_task_by_ref(&tx, &top.key)?
+                && allowed(&t)
+            {
+                hit = Some((t.id, format!("title {}", top.key)));
+            }
+        }
         if hit.is_none() {
-            let repos = storage::repos_active_in(&tx, run.start_ts, run.end_ts)?;
+            let mut repos = storage::repos_active_in(&tx, run.start_ts, run.end_ts)?;
+            for (repo, _) in crate::evidence::cwd_repos(&spans, run.start_ts, run.end_ts) {
+                if !repos.iter().any(|r| r.eq_ignore_ascii_case(&repo)) {
+                    repos.push(repo);
+                }
+            }
             let mut best: Option<(i64, i64, &str)> = None;
             for repo in &repos {
                 for t in open.iter().filter(|t| {
@@ -82,6 +129,11 @@ pub fn run(
                         && allowed(t)
                 }) {
                     let last = storage::task_last_end(&tx, t.id)?.unwrap_or(0);
+                    let recent = last >= run.start_ts - REPO_RECENT_MS
+                        || (t.declared && storage::task_created_ts(&tx, t.id)? >= today_start);
+                    if !recent {
+                        continue;
+                    }
                     if best.is_none_or(|b| last > b.1) {
                         best = Some((t.id, last, repo));
                     }

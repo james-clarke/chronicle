@@ -194,10 +194,22 @@ pub fn cluster_runs(
 /// in place, a head that got claimed drops the row), queue a naming job for
 /// each new proposal, and copy finished names in. Accepted and dismissed
 /// rows are left alone. Returns the open proposals' starts.
-pub fn refresh(conn: &mut Connection, now: Timestamp) -> Result<Vec<i64>, StorageError> {
+pub fn refresh(
+    conn: &mut Connection,
+    now: Timestamp,
+    distractions: &[regex::Regex],
+) -> Result<Vec<i64>, StorageError> {
     let hi = ts_to_ms(now);
     let lo = hi - WINDOW_MS;
-    let runs = storage::unassigned_runs(conn, lo, hi, RUN_GAP_MS)?;
+    // A distraction stretch (video, social) never seeds a proposal.
+    let runs: Vec<_> = storage::unassigned_runs(conn, lo, hi, RUN_GAP_MS)?
+        .into_iter()
+        .filter(|r| {
+            !r.lines
+                .first()
+                .is_some_and(|l| crate::evidence::is_distraction(&l.0, &l.1, distractions))
+        })
+        .collect();
     let titles = day_titles(conn, lo, hi)?;
     let mut repos = Vec::with_capacity(runs.len());
     for r in &runs {

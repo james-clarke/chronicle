@@ -33,6 +33,7 @@ pub const fn max_chars(tokens: usize) -> usize {
 /// `hints` are the pre-pass's provisional placements over the window; each
 /// must name a task in `open_tasks` (the worker appends missing ones) or it
 /// is left out of the digest.
+#[allow(clippy::too_many_arguments)]
 pub fn build_digest(
     spans: &[SpanDraft],
     tz: &TimeZone,
@@ -41,6 +42,7 @@ pub fn build_digest(
     hints: &[Placement],
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
+    ticket_re: Option<&regex::Regex>,
 ) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
         let out = render(
@@ -51,6 +53,7 @@ pub fn build_digest(
             hints,
             vcs,
             mcp_context,
+            ticket_re,
             apps_cap,
             title_chars,
         );
@@ -66,6 +69,7 @@ pub fn build_digest(
         hints,
         vcs,
         mcp_context,
+        ticket_re,
         3,
         24,
     );
@@ -86,6 +90,7 @@ fn render(
     hints: &[Placement],
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
+    ticket_re: Option<&regex::Regex>,
     apps_cap: usize,
     title_chars: usize,
 ) -> String {
@@ -179,6 +184,34 @@ fn render(
         let skip = in_window.len().saturating_sub(10);
         for v in &in_window[skip..] {
             let _ = writeln!(out, "{}", activity_line(v, tz, title_chars));
+        }
+    }
+
+    // Ticket keys on screen and the working directories titles name (m27
+    // chunk 5): deterministic identity evidence the model would otherwise
+    // have to spot in the timeline. Omitted when empty so evidence-less
+    // digests (and their goldens) are unchanged.
+    let keys = ticket_re
+        .map(|re| crate::evidence::keys_in_spans(spans, re, win_lo, win_hi))
+        .unwrap_or_default();
+    let cwds = crate::evidence::cwd_repos(spans, win_lo, win_hi);
+    if !keys.is_empty() || !cwds.is_empty() {
+        let _ = writeln!(out, "\n## Keys seen");
+        if !keys.is_empty() {
+            let line: Vec<String> = keys
+                .iter()
+                .take(6)
+                .map(|k| format!("{} {} ({})", k.key, fmt_dur(k.ms), k.app))
+                .collect();
+            let _ = writeln!(out, "{}", line.join(", "));
+        }
+        if !cwds.is_empty() {
+            let line: Vec<String> = cwds
+                .iter()
+                .take(4)
+                .map(|(repo, ms)| format!("{repo} {}", fmt_dur(*ms)))
+                .collect();
+            let _ = writeln!(out, "cwd {}", line.join(", "));
         }
     }
 
@@ -287,7 +320,13 @@ fn render(
             let idx = open_tasks.iter().position(|t| t.id == h.task_id)? + 1;
             let lo = ((h.start_ts - win_start).max(0) / 60_000) as usize;
             let hi = (((h.end_ts - win_start) + 59_999) / 60_000).clamp(0, mins as i64) as usize;
-            (hi > lo).then(|| format!("- {lo}\u{2013}{hi}m \u{2192} {idx} ({})", h.reason))
+            (hi > lo).then(|| {
+                format!(
+                    "- {lo}\u{2013}{hi}m \u{2192} {idx} ({}: {})",
+                    hint_strength(&h.reason),
+                    h.reason
+                )
+            })
         })
         .collect();
     if !hint_lines.is_empty() {
@@ -309,7 +348,22 @@ fn render(
     if !renames.is_empty() {
         let _ = writeln!(out, "\n## Past corrections (user renamed similar work)");
         for c in renames {
-            let _ = write!(out, "- \"{}\" \u{2192} \"{}\"", c.old_label, c.new_label);
+            // An assign has no old label: the work it was made over is the
+            // left-hand side, like an eject, never "(unassigned)".
+            let old = if c.kind == "assign" || c.old_label == "(unassigned)" {
+                // Pre-m23 assigns carry no context: nothing to quote, skip.
+                let Some(work) = c.ctx.lines().find(|l| !l.trim().is_empty()) else {
+                    continue;
+                };
+                clip(crate::evidence::strip_glyphs(work.trim()), title_chars)
+            } else {
+                crate::evidence::strip_glyphs(&c.old_label).to_owned()
+            };
+            let _ = write!(
+                out,
+                "- \"{old}\" \u{2192} \"{}\"",
+                crate::evidence::strip_glyphs(&c.new_label)
+            );
             if c.old_project != c.new_project {
                 let _ = write!(
                     out,
@@ -328,8 +382,8 @@ fn render(
             let _ = write!(
                 out,
                 "- \"{}\" \u{2717} \"{}\"",
-                clip(work.trim(), title_chars),
-                c.old_label
+                clip(crate::evidence::strip_glyphs(work.trim()), title_chars),
+                crate::evidence::strip_glyphs(&c.old_label)
             );
             if let Some(p) = &c.old_project {
                 let _ = write!(out, " [{p}]");
@@ -360,6 +414,17 @@ pub(crate) fn site_key(url: &str) -> String {
 }
 
 /// One digest/journal line for an activity event: `- HH:MM <kind> …`.
+/// How firmly a pre-pass rule's placement should be read: a branch or a
+/// window title naming the task's ticket is strong; a shared repo or a
+/// similar past correction is weak.
+pub fn hint_strength(reason: &str) -> &'static str {
+    if reason.starts_with("branch ") || reason.starts_with("title ") {
+        "strong"
+    } else {
+        "weak"
+    }
+}
+
 pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> String {
     let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
     let dur = v

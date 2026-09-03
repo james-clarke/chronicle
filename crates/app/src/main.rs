@@ -533,7 +533,16 @@ fn bench(
             let gaps = afk_gaps_min(&spans, origin);
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], &[], &[], None),
+                digest::build_digest(
+                    &spans,
+                    &jiff::tz::TimeZone::UTC,
+                    &open,
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    None,
+                ),
                 open,
                 expect,
                 gaps,
@@ -553,7 +562,7 @@ fn bench(
                 println!("batch {id}: no such batch, skipping");
                 continue;
             };
-            let open = storage::open_tasks(&conn, 8)?;
+            let open = storage::open_tasks(&conn, OPEN_CAP)?;
             let bd = build_batch_digest(&conn, &config, data_dir, &batch, open, !no_mcp)?;
             cases.push((format!("batch:{id}"), bd.digest, bd.open, None, bd.gaps));
         }
@@ -910,6 +919,7 @@ fn ref_label(from_ref: &str, open: &[chronicle_core::types::OpenTask]) -> Option
 /// 0.8). Returns the task it landed on, None when the window holds no spans.
 fn live_pass(
     conn: &mut rusqlite::Connection,
+    config: &Config,
     session: &mut chronicle_derive::DeriveSession<'_>,
     lo: i64,
     hi: i64,
@@ -932,8 +942,17 @@ fn live_pass(
     }
     let activity = storage::activity_in_range(conn, lo, hi)?;
     let tz = TimeZone::system();
-    let mut digest =
-        chronicle_core::digest::build_digest(&spans, &tz, &open, &[], &hints, &activity, None);
+    let ticket_re = regex::Regex::new(&config.ticket_regex).ok();
+    let mut digest = chronicle_core::digest::build_digest(
+        &spans,
+        &tz,
+        &open,
+        &[],
+        &hints,
+        &activity,
+        None,
+        ticket_re.as_ref(),
+    );
     if let Some(prev) = storage::label_before(conn, lo)? {
         digest.push_str(&format!("\n## Previously\n{prev}\n"));
     }
@@ -960,7 +979,10 @@ fn live_pass(
     Ok(Some(task_id))
 }
 
-/// Open tasks offered to the live prompt (the batch tier offers 8).
+/// Open tasks offered to the batch prompt; 8 → 16 in m27 chunk 5, paid for
+/// by chunk 1's shorter output.
+const OPEN_CAP: usize = 16;
+/// Open tasks offered to the live prompt.
 const LIVE_OPEN_CAP: usize = 16;
 /// A live label is a guess over a short window; the batch tier confirms it.
 const LIVE_CONFIDENCE_SCALE: f64 = 0.8;
@@ -1005,6 +1027,7 @@ fn build_batch_digest(
         None
     };
     let activity = storage::activity_in_range(conn, batch.start_ts, batch.end_ts)?;
+    let ticket_re = regex::Regex::new(&config.ticket_regex).ok();
     let digest = chronicle_core::digest::build_digest(
         &spans,
         &tz,
@@ -1013,6 +1036,7 @@ fn build_batch_digest(
         &hints,
         &activity,
         mcp_context.as_deref(),
+        ticket_re.as_ref(),
     );
     let gaps = afk_gaps_min(&spans, batch.start_ts);
     Ok(BatchDigest {
@@ -1147,11 +1171,18 @@ fn derive_resident(data_dir: &Path) -> anyhow::Result<()> {
                 }
             }
             Request::Live { lo, hi } => {
-                let result = live_pass(&mut conn, &mut live_session, lo, hi, &mut |label| {
-                    send(&Reply::Progress {
-                        label: label.into(),
-                    })
-                });
+                let result = live_pass(
+                    &mut conn,
+                    &config,
+                    &mut live_session,
+                    lo,
+                    hi,
+                    &mut |label| {
+                        send(&Reply::Progress {
+                            label: label.into(),
+                        })
+                    },
+                );
                 match result {
                     Ok(placed) => send(&Reply::Done {
                         batch_id: None,
@@ -1187,7 +1218,7 @@ fn derive_batch(
     };
     let result = (|| -> anyhow::Result<usize> {
         let t0 = Instant::now();
-        let open = storage::open_tasks(conn, 8)?;
+        let open = storage::open_tasks(conn, OPEN_CAP)?;
         let BatchDigest {
             digest,
             open,
@@ -1385,7 +1416,7 @@ fn run_ai_job(
             }
             let tz = TimeZone::system();
             let digest =
-                chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None);
+                chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None, None);
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
         }
@@ -2225,6 +2256,7 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
     }
     let mut scheduler = Scheduler::new();
     let _ = chronicle_core::storage::set_derive_progress(&conn, None);
+    let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
     let mut idle_since: Option<i64> = None;
     // Fires once per idle stretch: remembers which idle_since epoch already
     // queued checkpoints, cleared when the user comes back.
@@ -2290,7 +2322,9 @@ fn run(data_dir: &Path) -> anyhow::Result<()> {
                         Ok(_) => {}
                         Err(e) => tracing::error!("pre-pass failed: {e}"),
                     }
-                    if let Err(e) = chronicle_core::proposals::refresh(&mut conn, now) {
+                    if let Err(e) =
+                        chronicle_core::proposals::refresh(&mut conn, now, &distractions)
+                    {
                         tracing::error!("proposals refresh failed: {e}");
                     }
                     scheduler.maybe_live(&conn, &config, data_dir, idle_since);
