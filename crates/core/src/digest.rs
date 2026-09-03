@@ -33,6 +33,7 @@ pub const fn max_chars(tokens: usize) -> usize {
 /// `hints` are the pre-pass's provisional placements over the window; each
 /// must name a task in `open_tasks` (the worker appends missing ones) or it
 /// is left out of the digest.
+#[allow(clippy::too_many_arguments)]
 pub fn build_digest(
     spans: &[SpanDraft],
     tz: &TimeZone,
@@ -41,6 +42,7 @@ pub fn build_digest(
     hints: &[Placement],
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
+    plan: Option<&str>,
 ) -> String {
     for (apps_cap, title_chars) in [(8, 120), (6, 80), (4, 48), (3, 24)] {
         let out = render(
@@ -51,6 +53,7 @@ pub fn build_digest(
             hints,
             vcs,
             mcp_context,
+            plan,
             apps_cap,
             title_chars,
         );
@@ -66,6 +69,7 @@ pub fn build_digest(
         hints,
         vcs,
         mcp_context,
+        plan,
         3,
         24,
     );
@@ -86,6 +90,7 @@ fn render(
     hints: &[Placement],
     vcs: &[ActivityEvent],
     mcp_context: Option<&str>,
+    plan: Option<&str>,
     apps_cap: usize,
     title_chars: usize,
 ) -> String {
@@ -258,6 +263,14 @@ fn render(
             }
         }
         m = end;
+    }
+
+    // What the user said in the morning the day was for (m26). Omitted when
+    // no intent was set, so plan-free digests (and their goldens) are
+    // unchanged.
+    if let Some(plan) = plan.map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "\n## Plan");
+        let _ = writeln!(out, "{plan}");
     }
 
     // Numbered so interval output can link by index ("ref"). Omitted when

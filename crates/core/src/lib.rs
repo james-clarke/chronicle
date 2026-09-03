@@ -5,6 +5,7 @@ pub mod digest;
 pub mod eval;
 pub mod heartbeats;
 pub mod insights;
+pub mod intent;
 pub mod merge;
 pub mod prepass;
 pub mod proposals;

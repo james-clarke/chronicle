@@ -14,7 +14,7 @@ mod theme;
 mod timeline;
 mod triage;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,7 @@ use jiff::tz::TimeZone;
 use jiff::{ToSpan, Zoned};
 use rusqlite::Connection;
 
+use chronicle_core::intent::Intent;
 use chronicle_core::proposals::Proposal;
 use chronicle_core::storage::FeedBlock;
 
@@ -267,6 +268,8 @@ struct TaskGroup {
     /// Short, undeclared, unanchored scrap of a task (Wordle-scale); folds
     /// into the timeline's collapsed background strip.
     background: bool,
+    /// Nothing has moved it for `task_stuck_days` (`storage::stuck_tasks`).
+    stuck: bool,
 }
 
 /// One journal entry of the selected task.
@@ -333,6 +336,10 @@ struct OpenRow {
     anchor: Option<String>,
     /// First line of the newest checkpoint's next steps.
     next_step: Option<String>,
+    /// Named in today's intent: pins first, wears the "intent" chip.
+    intent: bool,
+    /// Nothing has moved it for `task_stuck_days` (`storage::stuck_tasks`).
+    stuck: bool,
 }
 
 /// `s` cut to `max` chars with an ellipsis (chip text stays chip-sized).
@@ -357,6 +364,8 @@ impl OpenRow {
             last_touched: None,
             anchor: None,
             next_step: None,
+            intent: false,
+            stuck: false,
         }
     }
 }
@@ -427,6 +436,9 @@ enum Action {
         end_ts: i64,
         label: String,
     },
+    /// Store today's intent from the morning picker (an empty one is
+    /// "skip today": the picker stops asking).
+    SetIntent(Intent),
 }
 
 /// In-flight inline edit of a workspace artifact in the detail pane.
@@ -601,6 +613,15 @@ struct TimelineApp {
     /// X11 compositor present at boot: transparent window, rounded card,
     /// shadow. False = square opaque fallback (bare WM / Wayland).
     composited: bool,
+    /// Today's intent (meta `intent:<date>`); None = the morning picker is
+    /// due. An empty one ("skip today") still counts as set.
+    intent: Option<Intent>,
+    /// Morning picker: task ids ticked so far.
+    intent_pick: HashSet<i64>,
+    /// Morning picker: the free-text line.
+    intent_text: String,
+    /// Open tasks nothing has moved for `task_stuck_days`.
+    stuck: HashSet<i64>,
 }
 
 /// Home standup card data.
@@ -715,6 +736,10 @@ impl TimelineApp {
             standup_read_day: None,
             standup_show_all: false,
             composited,
+            intent: None,
+            intent_pick: HashSet::new(),
+            intent_text: String::new(),
+            stuck: HashSet::new(),
         }
     }
 
@@ -757,6 +782,7 @@ impl TimelineApp {
         }
         self.loaded_at = Some(Instant::now());
         match self.load_spans().and_then(|spans| {
+            self.load_intent()?;
             let groups = self.load_groups()?;
             let unplaced = self.load_unplaced()?;
             let open = self.load_open(&groups)?;
@@ -807,17 +833,24 @@ impl TimelineApp {
                 .flatten()
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or(0);
-            self.resume = chronicle_core::storage::latest_checkpoint_since(conn, last_open)
-                .ok()
-                .flatten()
-                .map(|(task_id, label, external_ref, cp)| ResumeRow {
-                    task_id,
-                    ts: cp.ts,
-                    label,
-                    external_ref,
-                    state: cp.state,
-                    next_steps: cp.next_steps,
-                });
+            // Several checkpoints can qualify; today's intent picks which.
+            let prefer: Vec<i64> = self
+                .intent
+                .as_ref()
+                .map(|i| i.task_ids.clone())
+                .unwrap_or_default();
+            self.resume =
+                chronicle_core::storage::latest_checkpoint_since(conn, last_open, &prefer)
+                    .ok()
+                    .flatten()
+                    .map(|(task_id, label, external_ref, cp)| ResumeRow {
+                        task_id,
+                        ts: cp.ts,
+                        label,
+                        external_ref,
+                        state: cp.state,
+                        next_steps: cp.next_steps,
+                    });
             let now_ms = jiff::Timestamp::now().as_millisecond().to_string();
             let _ = chronicle_core::storage::set_meta(conn, "ui_last_open_ts", Some(&now_ms));
         }
@@ -1047,6 +1080,7 @@ impl TimelineApp {
                         journal: Vec::new(),
                         checkpoint: None,
                         background: false,
+                        stuck: self.stuck.contains(&t.id),
                     });
                     groups.last_mut().expect("just pushed")
                 }
@@ -1180,6 +1214,23 @@ impl TimelineApp {
         )
     }
 
+    /// Today's intent (the morning picker's answer) and the open tasks
+    /// nothing has moved for `task_stuck_days`. Both decorate the Working-on
+    /// rows and the detail pane, so they load before either.
+    fn load_intent(&mut self) -> anyhow::Result<()> {
+        let stuck_days = chronicle_core::config::Config::load(&self.config_path)
+            .unwrap_or_default()
+            .task_stuck_days;
+        let now = jiff::Timestamp::now();
+        let today = now.to_zoned(self.tz.clone()).date().to_string();
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        self.intent = chronicle_core::intent::get(conn, &today)?;
+        self.stuck = chronicle_core::storage::stuck_tasks(conn, now, stuck_days)?
+            .into_iter()
+            .collect();
+        Ok(())
+    }
+
     fn load_open(&mut self, groups: &[TaskGroup]) -> anyhow::Result<Vec<OpenRow>> {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let open = chronicle_core::storage::open_tasks(conn, 8)?;
@@ -1205,6 +1256,7 @@ impl TimelineApp {
             }
         }
         let groups_today = self.day == today;
+        let intent_ids: &[i64] = self.intent.as_ref().map_or(&[], |i| &i.task_ids);
         let mut rows: Vec<OpenRow> = open
             .into_iter()
             .map(|t| {
@@ -1229,6 +1281,8 @@ impl TimelineApp {
                 {
                     row.anchor = Some(key);
                 }
+                row.intent = intent_ids.contains(&row.task_id);
+                row.stuck = self.stuck.contains(&row.task_id);
                 row.next_step = chronicle_core::storage::get_checkpoint(conn, row.task_id)
                     .ok()
                     .flatten()
@@ -1243,6 +1297,8 @@ impl TimelineApp {
             })
             .collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.today_ms));
+        // Today's intent pins first; time order holds inside each group.
+        rows.sort_by_key(|r| !r.intent);
         Ok(rows)
     }
 
@@ -1557,6 +1613,19 @@ impl TimelineApp {
                     }
                     Err(e) => Err(e),
                 }
+            }
+            Action::SetIntent(intent) => {
+                let day = jiff::Timestamp::now()
+                    .to_zoned(self.tz.clone())
+                    .date()
+                    .to_string();
+                let result = chronicle_core::intent::set(conn, &day, &intent);
+                if result.is_ok() {
+                    self.intent = Some(intent);
+                    self.intent_pick.clear();
+                    self.intent_text.clear();
+                }
+                result
             }
             Action::GenerateStandup => {
                 let Ok(day) = jiff::Timestamp::now()

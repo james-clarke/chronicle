@@ -1370,16 +1370,24 @@ pub fn tasks_needing_checkpoint(
 pub type ResumeCheckpoint = (i64, String, Option<String>, Checkpoint);
 
 /// Newest checkpoint written after `since_ms`, with its task's identity —
-/// the Home resume card.
+/// the Home resume card. A task in `prefer` (the day's intent) wins when
+/// several checkpoints qualify.
 pub fn latest_checkpoint_since(
     conn: &Connection,
     since_ms: i64,
+    prefer: &[i64],
 ) -> Result<Option<ResumeCheckpoint>, StorageError> {
-    let mut stmt = conn.prepare(
+    // 0 is never a task id, so an empty `prefer` is a list that matches
+    // nothing and the order falls back to newest-first.
+    let mut ids = vec!["0".to_owned()];
+    ids.extend(prefer.iter().map(i64::to_string));
+    let mut stmt = conn.prepare(&format!(
         "SELECT c.task_id, t.label, t.external_ref, c.ts, c.state, c.next_steps
          FROM checkpoints c JOIN tasks t ON t.id = c.task_id
-         WHERE c.ts > ?1 ORDER BY c.ts DESC LIMIT 1",
-    )?;
+         WHERE c.ts > ?1
+         ORDER BY c.task_id IN ({}) DESC, c.ts DESC LIMIT 1",
+        ids.join(",")
+    ))?;
     let mut rows = stmt.query([since_ms])?;
     Ok(rows
         .next()?
@@ -2784,6 +2792,32 @@ pub fn delete_empty_conversations(conn: &Connection) -> Result<usize, StorageErr
     )?)
 }
 
+/// Open tasks nothing has moved for `days`: no interval, and no checkpoint
+/// written since the cutoff either — the one checkpoint row per task holds
+/// the newest "what's next", so an untouched one means the next steps have
+/// not changed since the work stopped. A task that never ran counts from
+/// its creation. `days = 0` turns the chip off.
+pub fn stuck_tasks(
+    conn: &Connection,
+    now: jiff::Timestamp,
+    days: u32,
+) -> Result<Vec<i64>, StorageError> {
+    if days == 0 {
+        return Ok(Vec::new());
+    }
+    let cutoff = ts_to_ms(now) - i64::from(days) * 86_400_000;
+    let mut stmt = conn.prepare(
+        "SELECT t.id FROM tasks t
+         WHERE t.status='open'
+           AND COALESCE((SELECT MAX(i.end_ts) FROM intervals i WHERE i.task_id = t.id),
+                        t.created_ts) <= ?1
+           AND COALESCE((SELECT c.ts FROM checkpoints c WHERE c.task_id = t.id), 0) <= ?1
+         ORDER BY t.id",
+    )?;
+    let rows = stmt.query_map([cutoff], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -3476,5 +3510,41 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    // Stuck: open, no interval for `days`, and no checkpoint written since
+    // the cutoff (a fresh checkpoint means the next steps moved on).
+    #[test]
+    fn stuck_tasks_needs_idle_intervals_and_a_stale_checkpoint() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let now = 10 * 86_400_000i64;
+        let day = 86_400_000i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done');
+             INSERT INTO tasks (id, label, status, source, created_ts)
+                 VALUES (1, 'idle', 'open', 'user', 0),
+                        (2, 'worked on today', 'open', 'user', 0),
+                        (3, 'replanned', 'open', 'user', 0),
+                        (4, 'closed', 'closed', 'user', 0),
+                        (5, 'declared just now', 'open', 'user', {now});
+             INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+                 VALUES (1, 1, {five_days_ago}, {five_days_ago}, 0.9),
+                        (2, 1, {now}, {now}, 0.9),
+                        (3, 1, {five_days_ago}, {five_days_ago}, 0.9),
+                        (4, 1, {five_days_ago}, {five_days_ago}, 0.9);
+             INSERT INTO checkpoints (task_id, ts, state, next_steps)
+                 VALUES (1, {five_days_ago}, 'stalled', 'ask James'),
+                        (3, {now}, 'replanned', 'new next step');",
+            now = now,
+            five_days_ago = now - 5 * day,
+        ))
+        .unwrap();
+        let ts = crate::types::ms_to_ts(now);
+        assert_eq!(super::stuck_tasks(&conn, ts, 3).unwrap(), vec![1]);
+        // Wider window: the idle task is inside it again, so nothing is stuck.
+        assert!(super::stuck_tasks(&conn, ts, 7).unwrap().is_empty());
+        // 0 = off.
+        assert!(super::stuck_tasks(&conn, ts, 0).unwrap().is_empty());
     }
 }

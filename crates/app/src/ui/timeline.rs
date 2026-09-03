@@ -1051,6 +1051,9 @@ fn detail_ui(
         if group.declared {
             theme::badge(ui, "declared", theme::palette::TEXT_DIM);
         }
+        if group.stuck {
+            theme::badge(ui, "stuck", theme::palette::AMBER);
+        }
     });
     ui.add_space(theme::SPACE_SM);
     theme::ai_summary_line(ui, group.ai_summary.as_deref(), true);

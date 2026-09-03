@@ -81,6 +81,9 @@ pub struct Config {
     /// Idle at least this long (lunch-scale) queues a checkpoint per task
     /// with activity since its last one. 0 = feature off.
     pub checkpoint_afk_secs: u32,
+    /// An open task nothing has moved for this many days (no interval, no
+    /// fresh checkpoint) wears a `stuck` chip. 0 = feature off.
+    pub task_stuck_days: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -127,6 +130,7 @@ impl Default for Config {
             shell_history: false,
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
+            task_stuck_days: 3,
             model_path: None,
             mcp_config: None,
         }

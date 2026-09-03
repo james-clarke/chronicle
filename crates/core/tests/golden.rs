@@ -96,6 +96,7 @@ fn day1_digest_golden() {
         &[],
         &[],
         None,
+        None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     check_golden("day1.digest.golden", &digest);
@@ -132,6 +133,7 @@ fn day2_web_per_site_spans() {
         &[],
         &[],
         None,
+        None,
     );
     assert!(approx_tokens(&digest) <= MAX_TOKENS);
     assert!(digest.contains("## Sites by time"), "digest: {digest}");
@@ -149,7 +151,7 @@ fn eval_digest(fixture: &str) -> String {
     let stream_end = events.last().expect("fixture has events").ts;
     let spans = sessionize(&events, stream_end, &config);
     check_golden(&format!("{fixture}.spans.golden"), &render_spans(&spans));
-    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None)
+    build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None)
 }
 
 #[test]
@@ -277,8 +279,17 @@ fn correction_changes_next_digest() {
     );
     assert_eq!(corrections[0].new_label, "hacking on chronicle capture");
 
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
-    let with = build_digest(current, &TimeZone::UTC, &[], &corrections, &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &corrections,
+        &[],
+        &[],
+        None,
+        None,
+    );
     assert_ne!(plain, with, "correction must change the digest");
     check_golden("day1.corrections.digest.golden", &with);
 }
@@ -575,13 +586,59 @@ fn digest_workspace_context_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
     let ctx = "### jira.search\nCHR-42 fix AFK split";
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some(ctx));
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some(ctx), None);
     assert_eq!(with, format!("{plain}\n## Workspace context\n{ctx}\n"));
     // Blank context must not add the section (goldens stay MCP-free).
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], Some("  \n")),
+        build_digest(
+            current,
+            &TimeZone::UTC,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some("  \n"),
+            None
+        ),
+        plain
+    );
+}
+
+// The evening half of m26's intent: the day's plan reaches the prompt as its
+// own section (no standup fixture mechanism exists — bench scores derivation
+// JSON — so this is the fixture for the standup prompt's drift rule).
+#[test]
+fn digest_plan_section() {
+    let (spans, config) = day1();
+    let batches = assign_batches(&spans, &config);
+    let current = &spans[batches[0].spans.clone()];
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
+    let plan = "- task: m26 chunk 5 [chronicle]\n- note: and the soak";
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        Some(plan),
+    );
+    assert_eq!(with, format!("{plain}\n## Plan\n{plan}\n"));
+    // A skipped day stores an empty intent: no section, goldens unchanged.
+    assert_eq!(
+        build_digest(
+            current,
+            &TimeZone::UTC,
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            Some(" \n")
+        ),
         plain
     );
 }
@@ -641,7 +698,7 @@ fn digest_git_activity_section() {
     let (spans, config) = day1();
     let batches = assign_batches(&spans, &config);
     let current = &spans[batches[0].spans.clone()];
-    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None);
+    let plain = build_digest(current, &TimeZone::UTC, &[], &[], &[], &[], None, None);
     let t0 = ts_to_ms(current.first().unwrap().start);
     let vcs = [
         ActivityEvent {
@@ -663,7 +720,7 @@ fn digest_git_activity_section() {
             summary: Some("feat: plan model".into()),
         },
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &vcs, None);
+    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &vcs, None, None);
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("checkout app \u{2192} ABC-123-sending-plans"),
@@ -679,7 +736,7 @@ fn digest_git_activity_section() {
         ..vcs[0].clone()
     }];
     assert_eq!(
-        build_digest(current, &TimeZone::UTC, &[], &[], &[], &outside, None),
+        build_digest(current, &TimeZone::UTC, &[], &[], &[], &outside, None, None),
         plain
     );
 }
@@ -729,7 +786,16 @@ fn digest_activity_section_mixed_kinds() {
         ),
         ev(ActivityKind::Call, 240_000, None, "", "", "Firefox"),
     ];
-    let with = build_digest(current, &TimeZone::UTC, &[], &[], &[], &activity, None);
+    let with = build_digest(
+        current,
+        &TimeZone::UTC,
+        &[],
+        &[],
+        &[],
+        &activity,
+        None,
+        None,
+    );
     assert!(with.contains("## Activity"), "digest: {with}");
     assert!(
         with.contains("claude app@ABC-123-x 23m00s \"fix the flaky test\""),
@@ -1576,10 +1642,20 @@ fn eject_splits_interval_and_blocks_suggestion() {
         &hints,
         &[],
         None,
+        None,
     );
     check_golden("m24.hints.digest.golden", &digest);
     // A hint naming a task outside the open list is dropped, not mislinked.
-    let orphan = build_digest(&all, &TimeZone::UTC, &[], &few_shot, &hints, &[], None);
+    let orphan = build_digest(
+        &all,
+        &TimeZone::UTC,
+        &[],
+        &few_shot,
+        &hints,
+        &[],
+        None,
+        None,
+    );
     assert!(!orphan.contains("Pre-pass hints"), "{orphan}");
     assert!(orphan.contains("## Ejected"), "{orphan}");
     // A different task with the same evidence is still suggested.

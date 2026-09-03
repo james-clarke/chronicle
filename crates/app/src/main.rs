@@ -539,7 +539,16 @@ fn bench(
             let gaps = afk_gaps_min(&spans, origin);
             cases.push((
                 format!("fixture:{name}"),
-                digest::build_digest(&spans, &jiff::tz::TimeZone::UTC, &open, &[], &[], &[], None),
+                digest::build_digest(
+                    &spans,
+                    &jiff::tz::TimeZone::UTC,
+                    &open,
+                    &[],
+                    &[],
+                    &[],
+                    None,
+                    None,
+                ),
                 open,
                 expect,
                 gaps,
@@ -870,6 +879,13 @@ fn build_batch_digest(
         None
     };
     let activity = storage::activity_in_range(conn, batch.start_ts, batch.end_ts)?;
+    // The day's intent (m26): "## Plan" says what the user meant this
+    // window to be, so the model links ambiguous work to the plan.
+    let day = chronicle_core::types::ms_to_ts(batch.start_ts)
+        .to_zoned(tz.clone())
+        .date()
+        .to_string();
+    let plan = chronicle_core::intent::plan_body(conn, &day)?;
     let digest = chronicle_core::digest::build_digest(
         &spans,
         &tz,
@@ -878,6 +894,7 @@ fn build_batch_digest(
         &hints,
         &activity,
         mcp_context.as_deref(),
+        plan.as_deref(),
     );
     let gaps = afk_gaps_min(&spans, batch.start_ts);
     Ok(BatchDigest {
@@ -1226,7 +1243,7 @@ fn run_ai_job(
             }
             let tz = TimeZone::system();
             let digest =
-                chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None);
+                chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None, None);
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
         }
@@ -1367,7 +1384,8 @@ fn run_ai_job(
                 };
                 fallback
             } else {
-                describer.standup(&standup_digest_text(&rows, &tz))?
+                let plan = chronicle_core::intent::plan_body(conn, day)?;
+                describer.standup(&standup_digest_text(&rows, &tz, plan.as_deref()))?
             };
             storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
             Ok(text)
@@ -1376,15 +1394,20 @@ fn run_ai_job(
     }
 }
 
-/// Render the standup digest rows for the prompt: per task, the day's
-/// journal tail (last 5 entries keeps multi-task days inside the prompt
-/// budget) plus the fresh checkpoint if one exists.
+/// Render the standup digest rows for the prompt: the day's plan when one
+/// was set (m26), then per task the day's journal tail (last 5 entries keeps
+/// multi-task days inside the prompt budget) plus the fresh checkpoint if
+/// one exists.
 fn standup_digest_text(
     rows: &[chronicle_core::storage::StandupDigestRow],
     tz: &TimeZone,
+    plan: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    if let Some(plan) = plan.map(str::trim).filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "## Plan\n{plan}");
+    }
     for row in rows {
         let project = row
             .project
@@ -3735,5 +3758,36 @@ mod tests {
         );
         assert!(s.contains("running but not responding"));
         assert!(s.contains("warning: AW endpoint failed on port 5600: in use"));
+    }
+
+    // The standup prompt's drift rule reads a "## Plan" section; the digest
+    // opens with it when the day had an intent.
+    #[test]
+    fn standup_digest_opens_with_the_days_plan() {
+        use chronicle_core::storage::{JournalEntry, StandupDigestRow};
+        let rows = [StandupDigestRow {
+            task_id: 1,
+            label: "m26 chunk 5".into(),
+            project: Some("chronicle".into()),
+            external_ref: None,
+            entries: vec![JournalEntry {
+                id: 1,
+                batch_id: 1,
+                start_ts: 0,
+                end_ts: 60_000,
+                entry: "wired the picker".into(),
+            }],
+            checkpoint: None,
+        }];
+        let plain = standup_digest_text(&rows, &TimeZone::UTC, None);
+        assert!(!plain.contains("## Plan"), "{plain}");
+        let plan = "- task: m26 chunk 5 [chronicle]\n";
+        let with = standup_digest_text(&rows, &TimeZone::UTC, Some(plan));
+        assert_eq!(with, format!("## Plan\n{plan}{plain}"));
+        // "Skip today" stores an empty intent: the prompt is unchanged.
+        assert_eq!(
+            standup_digest_text(&rows, &TimeZone::UTC, Some("  \n")),
+            plain
+        );
     }
 }
