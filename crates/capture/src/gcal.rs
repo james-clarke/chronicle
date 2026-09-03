@@ -116,11 +116,6 @@ impl GcalProvider {
         }
     }
 
-    pub fn with_endpoints(mut self, endpoints: Endpoints) -> Self {
-        self.endpoints = endpoints;
-        self
-    }
-
     fn access_token(&mut self) -> Result<String, BoxError> {
         let now = Timestamp::now();
         if let Some((token, expires)) = &self.access
@@ -157,26 +152,20 @@ impl GcalProvider {
 
 impl FocusProvider for GcalProvider {
     fn run(mut self, tx: Sender<CaptureEvent>) -> Result<(), BoxError> {
-        loop {
-            match self.poll() {
-                Ok(events) => {
-                    self.last_err = None;
-                    for event in events {
-                        if tx.send(CaptureEvent::Activity(event)).is_err() {
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(e) => {
-                    let err = e.to_string();
-                    if self.last_err.as_deref() != Some(err.as_str()) {
-                        tracing::warn!("google calendar poll: {err}");
-                        self.last_err = Some(err);
-                    }
-                }
+        crate::poll_loop(&tx, POLL, move || match self.poll() {
+            Ok(events) => {
+                self.last_err = None;
+                events
             }
-            std::thread::sleep(POLL);
-        }
+            Err(e) => {
+                let err = e.to_string();
+                if self.last_err.as_deref() != Some(err.as_str()) {
+                    tracing::warn!("google calendar poll: {err}");
+                    self.last_err = Some(err);
+                }
+                Vec::new()
+            }
+        })
     }
 }
 

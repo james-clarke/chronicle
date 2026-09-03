@@ -44,6 +44,21 @@ struct AppState {
     api_key: Option<String>,
     /// Open edit span per (project, branch) across heartbeats.
     edits: Mutex<Folder>,
+    /// Read once at startup: `/proc/sys/kernel/hostname` doesn't change
+    /// while the daemon runs, so `info()` shouldn't block the
+    /// current-thread runtime on it per request.
+    hostname: String,
+}
+
+impl AppState {
+    /// A panic inside a route must not wedge the endpoint for the rest of
+    /// the daemon's life: the buckets map is plain in-memory state, so a
+    /// poisoned lock is safe to recover rather than propagate.
+    fn buckets(&self) -> std::sync::MutexGuard<'_, HashMap<String, Bucket>> {
+        self.buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 struct Bucket {
@@ -82,6 +97,9 @@ fn app_state(
         tx,
         api_key,
         edits: Mutex::new(Folder::default()),
+        hostname: std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_else(|_| "localhost".into()),
     }))
 }
 
@@ -201,12 +219,9 @@ fn cors_headers(mut res: Response, origin: &Option<String>) -> Response {
     res
 }
 
-async fn info() -> Json<Value> {
-    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_else(|_| "localhost".into());
+async fn info(State(st): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
-        "hostname": hostname,
+        "hostname": st.hostname,
         "version": concat!("chronicle ", env!("CARGO_PKG_VERSION")),
         "testing": false,
         "device_id": "chronicle",
@@ -214,7 +229,7 @@ async fn info() -> Json<Value> {
 }
 
 async fn list_buckets(State(st): State<Arc<AppState>>) -> Json<Value> {
-    let buckets = st.buckets.lock().expect("bucket lock");
+    let buckets = st.buckets();
     Json(Value::Object(
         buckets
             .iter()
@@ -224,7 +239,7 @@ async fn list_buckets(State(st): State<Arc<AppState>>) -> Json<Value> {
 }
 
 async fn get_bucket(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let buckets = st.buckets.lock().expect("bucket lock");
+    let buckets = st.buckets();
     match buckets.get(&id) {
         Some(b) => Json(b.meta.clone()).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -237,7 +252,7 @@ async fn create_bucket(
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Response {
-    let mut buckets = st.buckets.lock().expect("bucket lock");
+    let mut buckets = st.buckets();
     if buckets.contains_key(&id) {
         return StatusCode::NOT_MODIFIED.into_response();
     }
@@ -266,7 +281,7 @@ fn bucket_meta(id: &str, body: &Value) -> Value {
 }
 
 async fn get_events(State(st): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    let buckets = st.buckets.lock().expect("bucket lock");
+    let buckets = st.buckets();
     match buckets.get(&id) {
         Some(b) => Json(
             b.last
@@ -304,7 +319,7 @@ async fn heartbeat(
     };
     let start_ms = ts.as_millisecond();
     let end_ms = start_ms + (body.duration * 1000.0) as i64;
-    let mut buckets = st.buckets.lock().expect("bucket lock");
+    let mut buckets = st.buckets();
     // Buckets are in-memory: after a daemon restart extensions keep
     // heartbeating without re-creating, so materialize on the fly.
     let bucket = buckets.entry(id.clone()).or_insert_with(|| Bucket {

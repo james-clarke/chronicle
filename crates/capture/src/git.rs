@@ -24,6 +24,9 @@ struct Repo {
     work_dir: PathBuf,
     git_dir: PathBuf,
     state: Option<RepoState>,
+    /// Set once a `read_state` failure has been warned about, so a streak
+    /// of failures (repo mid-rewrite, momentary permission blip) logs once.
+    read_failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +52,7 @@ impl GitProvider {
                     work_dir: p.clone(),
                     git_dir,
                     state: None,
+                    read_failed: false,
                 })
             })
             .collect();
@@ -77,9 +81,20 @@ impl FocusProvider for GitProvider {
         loop {
             std::thread::sleep(POLL);
             for repo in &mut self.repos {
-                let new = read_state(&repo.git_dir);
-                let Some(event) = diff_state(repo.state.as_ref(), new.as_ref(), &repo.name) else {
-                    repo.state = new;
+                // A failed read is transient (mid-rewrite HEAD, momentary
+                // permission blip): keep the last-good state rather than
+                // dropping to None, which would read back as a spurious
+                // checkout on the next good poll.
+                let Some(new) = read_state(&repo.git_dir) else {
+                    if !repo.read_failed {
+                        tracing::warn!("git poll: could not read state for {}", repo.name);
+                        repo.read_failed = true;
+                    }
+                    continue;
+                };
+                repo.read_failed = false;
+                let Some(event) = diff_state(repo.state.as_ref(), Some(&new), &repo.name) else {
+                    repo.state = Some(new);
                     continue;
                 };
                 let event = match event.kind {
@@ -92,7 +107,7 @@ impl FocusProvider for GitProvider {
                     },
                     _ => event,
                 };
-                repo.state = new;
+                repo.state = Some(new);
                 if tx.send(CaptureEvent::Activity(event)).is_err() {
                     return Ok(());
                 }

@@ -159,14 +159,7 @@ impl AiSessionProvider {
 
 impl FocusProvider for AiSessionProvider {
     fn run(mut self, tx: Sender<CaptureEvent>) -> Result<(), BoxError> {
-        loop {
-            for event in self.scan(SystemTime::now()) {
-                if tx.send(CaptureEvent::Activity(event)).is_err() {
-                    return Ok(());
-                }
-            }
-            std::thread::sleep(POLL);
-        }
+        crate::poll_loop(&tx, POLL, move || self.scan(SystemTime::now()))
     }
 }
 

@@ -13,7 +13,9 @@ pub mod shell;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
-use chronicle_core::types::CaptureEvent;
+use std::time::Duration;
+
+use chronicle_core::types::{ActivityEvent, CaptureEvent};
 use crossbeam_channel::Sender;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -26,4 +28,25 @@ pub trait FocusProvider: Send {
 /// Polled (≤ 1/30 s).
 pub trait AfkProvider: Send {
     fn idle_ms(&self) -> Result<u64, BoxError>;
+}
+
+/// Shared shape for the poll-then-sleep providers (git and shell poll
+/// per-item state and sleep first, so they don't fit this): poll
+/// immediately, emit every event, sleep, repeat. `poll` is responsible for
+/// its own error handling (warn-once-per-streak, return no events on
+/// failure) — this loop only stops, without error, once the receiver hangs
+/// up.
+pub(crate) fn poll_loop(
+    tx: &Sender<CaptureEvent>,
+    interval: Duration,
+    mut poll: impl FnMut() -> Vec<ActivityEvent>,
+) -> Result<(), BoxError> {
+    loop {
+        for event in poll() {
+            if tx.send(CaptureEvent::Activity(event)).is_err() {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(interval);
+    }
 }

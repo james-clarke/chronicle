@@ -19,6 +19,8 @@ pub struct MicProvider {
     pw_dump: PathBuf,
     /// Call in progress: start and the app that opened it.
     current: Option<(Timestamp, String)>,
+    /// Last error warned about; repeats stay quiet.
+    last_err: Option<String>,
 }
 
 impl MicProvider {
@@ -26,6 +28,40 @@ impl MicProvider {
         Self {
             pw_dump,
             current: None,
+            last_err: None,
+        }
+    }
+
+    /// A failed `pw-dump` is transient (PipeWire hiccup, brief permission
+    /// blip): warn once per failure streak and report no events, leaving an
+    /// open call span untouched rather than closing it on bad data.
+    fn poll(&mut self) -> Vec<ActivityEvent> {
+        let out = match Command::new(&self.pw_dump).output() {
+            Ok(o) if o.status.success() => o,
+            Ok(o) => {
+                self.warn_once(
+                    String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .next()
+                        .unwrap_or("pw-dump failed")
+                        .to_owned(),
+                );
+                return Vec::new();
+            }
+            Err(e) => {
+                self.warn_once(e.to_string());
+                return Vec::new();
+            }
+        };
+        self.last_err = None;
+        let apps = active_inputs(&String::from_utf8_lossy(&out.stdout));
+        self.step(&apps, Timestamp::now()).into_iter().collect()
+    }
+
+    fn warn_once(&mut self, err: String) {
+        if self.last_err.as_deref() != Some(err.as_str()) {
+            tracing::warn!("pw-dump poll: {err}");
+            self.last_err = Some(err);
         }
     }
 
@@ -62,26 +98,7 @@ fn call_event(start: Timestamp, end: Option<Timestamp>, app: &str) -> ActivityEv
 
 impl FocusProvider for MicProvider {
     fn run(mut self, tx: Sender<CaptureEvent>) -> Result<(), BoxError> {
-        loop {
-            let out = Command::new(&self.pw_dump).output()?;
-            if !out.status.success() {
-                return Err(format!(
-                    "pw-dump failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                )
-                .into());
-            }
-            let apps = active_inputs(&String::from_utf8_lossy(&out.stdout));
-            if let Some(event) = self.step(&apps, Timestamp::now())
-                && tx.send(CaptureEvent::Activity(event)).is_err()
-            {
-                return Ok(());
-            }
-            std::thread::sleep(POLL);
-        }
+        crate::poll_loop(&tx, POLL, move || self.poll())
     }
 }
 

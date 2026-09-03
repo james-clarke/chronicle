@@ -79,14 +79,7 @@ impl GitHubProvider {
 
 impl FocusProvider for GitHubProvider {
     fn run(mut self, tx: Sender<CaptureEvent>) -> Result<(), BoxError> {
-        loop {
-            for event in self.poll() {
-                if tx.send(CaptureEvent::Activity(event)).is_err() {
-                    return Ok(());
-                }
-            }
-            std::thread::sleep(POLL);
-        }
+        crate::poll_loop(&tx, POLL, move || self.poll())
     }
 }
 
