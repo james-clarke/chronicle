@@ -773,7 +773,10 @@ impl<'a> ListRow<'a> {
         // real height — a taller child inside a 24pt row would overlap the
         // row above it.
         let title_galley = (self.lines > 1).then(|| {
-            let mut reserved = 48.0 + self.num.as_ref().map_or(0.0, |_| NUM_COL + 6.0);
+            // 72 covers the trailing controls (a `…` menu plus a dot or a
+            // ghost button); the real leftover width re-lays the galley
+            // below when it turns out narrower.
+            let mut reserved = 72.0 + self.num.as_ref().map_or(0.0, |_| NUM_COL + 6.0);
             if self.dot.is_some() {
                 reserved += 14.0;
             }
@@ -822,7 +825,25 @@ impl<'a> ListRow<'a> {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         match title_galley {
                             Some((galley, title_w)) => {
-                                ui.set_max_width(title_w.min(ui.available_width()));
+                                let actual_w = ui.available_width();
+                                ui.set_max_width(title_w.min(actual_w));
+                                // Estimate too generous: re-lay at the real
+                                // width so the title truncates instead of
+                                // running under the trailing controls.
+                                let galley = if actual_w + 0.5 < title_w {
+                                    let mut job = egui::text::LayoutJob::simple(
+                                        self.title.to_owned(),
+                                        font.clone(),
+                                        palette::TEXT,
+                                        actual_w.max(20.0),
+                                    );
+                                    job.wrap.max_rows = galley.rows.len().max(1);
+                                    job.wrap.break_anywhere = false;
+                                    job.wrap.overflow_character = Some('\u{2026}');
+                                    ui.fonts_mut(|f| f.layout_job(job))
+                                } else {
+                                    galley
+                                };
                                 let elided = galley.elided;
                                 let resp = ui.add(egui::Label::new(galley).selectable(false));
                                 if elided {

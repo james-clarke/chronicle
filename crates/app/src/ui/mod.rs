@@ -1664,13 +1664,16 @@ impl eframe::App for TimelineApp {
             );
         }
         ui.painter().rect_filled(card, radius, theme::palette::BG);
-        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(card));
-        self.window_ui(&mut content);
         // Resize grip in the card's bottom-right corner: the decoration-less
         // window has no frame to grab, so a drag here hands the WM a
         // south-east resize (the same route the top bar uses to move).
+        // Registered BEFORE the view so any control that reaches into the
+        // corner (chat's send, the detail pane's close task) wins the hit
+        // test; the grip only owns the bare corner. Painted after.
         let grip = egui::Rect::from_min_max(card.max - egui::Vec2::splat(18.0), card.max);
         let grip_resp = ui.interact(grip, ui.id().with("resize_grip"), egui::Sense::drag());
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(card));
+        self.window_ui(&mut content);
         if grip_resp.drag_started() {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::BeginResize(
