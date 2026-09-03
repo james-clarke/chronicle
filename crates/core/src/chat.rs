@@ -1,6 +1,8 @@
 //! Question → grounding context for the chat worker, local DB only.
 //! A recognized time reference selects an SQL range; anything else falls back
-//! to FTS over task labels + span titles, then to today.
+//! to FTS over task labels + span titles, then to today. A question asking
+//! for a quantity also carries a SQL totals table for its range, so the
+//! model quotes figures instead of adding rows up.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -11,37 +13,122 @@ use rusqlite::Connection;
 
 use crate::sessionizer::SpanKind;
 use crate::storage::{self, StorageError};
-use crate::types::{Task, ms_to_ts};
-use crate::{digest, timeref};
+use crate::types::{ActivityKind, Task, ms_to_ts, ts_to_ms};
+use crate::{digest, report, timeref};
 
 /// Hard cap ≈ digest::MAX_TOKENS under the digest's chars-per-token heuristic.
 const MAX_CHARS: usize = digest::max_chars(digest::MAX_TOKENS);
 const FTS_K: usize = 12;
+/// Rows of the per-task totals table a quantity question gets.
+const TABLE_ROWS: usize = 40;
+
+/// What an answer was built from, for the panel's "Read 14 blocks ·
+/// Thu 3 Sep 08:00–14:56" footer and the row list it expands to.
+#[derive(Debug, Clone, Default)]
+pub struct ChatContextInfo {
+    /// Number of activity rows handed to the model: `rows.len()`.
+    pub blocks: usize,
+    /// Range the context covers, epoch ms. `None` when the question carried
+    /// no time reference and search stood in for one.
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    /// Those rows, in prompt order, as display text.
+    pub rows: Vec<String>,
+}
 
 pub fn build_context(
     conn: &Connection,
     question: &str,
     now: &Zoned,
-) -> Result<String, StorageError> {
+) -> Result<(String, ChatContextInfo), StorageError> {
     let tz = now.time_zone();
-    let mut out = match timeref::parse(question, now) {
-        Some((lo, hi)) => range_context(conn, lo, hi, tz)?,
+    let (mut out, mut info) = match resolve_range(conn, question, now)? {
+        Some((lo, hi)) => range_context(conn, question, lo, hi, tz)?,
         None => {
-            let fts = fts_context(conn, question, tz)?;
+            let (fts, fts_info) = fts_context(conn, question, tz)?;
             if fts.is_empty() {
                 // Nothing matched: today's activity beats an empty prompt.
                 let (lo, hi) = today_range(now);
-                format!(
-                    "(no data matched the question; showing today)\n{}",
-                    range_context(conn, lo, hi, tz)?
+                let (ctx, info) = range_context(conn, question, lo, hi, tz)?;
+                (
+                    format!("(no data matched the question; showing today)\n{ctx}"),
+                    info,
                 )
             } else {
-                fts
+                (fts, fts_info)
             }
         }
     };
     digest::truncate_chars(&mut out, MAX_CHARS);
-    Ok(out)
+    info.blocks = info.rows.len();
+    Ok((out, info))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallSide {
+    Before,
+    After,
+}
+
+/// "before the call", "after the 09:40 call": the nearest side word ahead of
+/// the noun wins.
+fn call_side(question: &str) -> Option<CallSide> {
+    let lower = question.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let at = words.iter().position(|w| *w == "call" || *w == "calls")?;
+    words[..at].iter().rev().find_map(|w| match *w {
+        "before" => Some(CallSide::Before),
+        "after" => Some(CallSide::After),
+        _ => None,
+    })
+}
+
+/// The range a question asks about: a call-relative phrase first (it needs
+/// the DB), otherwise the deterministic phrase set in [`timeref`]. The call
+/// is the day's first mic-in-use block; with none recorded the day's own
+/// range stands.
+fn resolve_range(
+    conn: &Connection,
+    question: &str,
+    now: &Zoned,
+) -> Result<Option<(i64, i64)>, StorageError> {
+    let parsed = timeref::parse(question, now);
+    if let Some(side) = call_side(question) {
+        let (day_lo, day_hi) = parsed.unwrap_or_else(|| today_range(now));
+        let call = storage::activity_in_range(conn, day_lo, day_hi)?
+            .into_iter()
+            .find(|e| e.kind == ActivityKind::Call);
+        if let Some(call) = call {
+            let start = ts_to_ms(call.ts);
+            let end = call.end_ts.map_or(start, ts_to_ms);
+            return Ok(Some(match side {
+                CallSide::Before => (day_lo, start.clamp(day_lo, day_hi)),
+                CallSide::After => (end.clamp(day_lo, day_hi), day_hi),
+            }));
+        }
+    }
+    Ok(parsed)
+}
+
+/// Questions whose answer is a number. Those get the totals table and are
+/// told to read it off rather than add rows up.
+fn is_quantity_question(question: &str) -> bool {
+    let q = question.to_lowercase();
+    [
+        "how long",
+        "how much",
+        "how many hour",
+        "how many min",
+        "total",
+        "per project",
+        "spent on",
+        "time on",
+    ]
+    .iter()
+    .any(|p| q.contains(p))
 }
 
 /// Task-scoped grounding (m16): the task IS the retrieval — external context,
@@ -110,10 +197,11 @@ fn today_range(now: &Zoned) -> (i64, i64) {
 
 fn range_context(
     conn: &Connection,
+    question: &str,
     lo: i64,
     hi: i64,
     tz: &TimeZone,
-) -> Result<String, StorageError> {
+) -> Result<(String, ChatContextInfo), StorageError> {
     let tasks = storage::tasks_in_range(conn, lo, hi)?;
     let spans = storage::spans_in_range(conn, lo, hi)?;
 
@@ -130,7 +218,7 @@ fn range_context(
 
     // Ahead of ## Tasks so totals survive the MAX_CHARS truncation, and
     // over the full vec, not the take(60) display cap below.
-    let totals = crate::report::project_totals(&tasks, lo, hi);
+    let totals = report::project_totals(&tasks, lo, hi);
     if !totals.is_empty() {
         let _ = writeln!(out, "\n## Totals by project");
         for p in &totals {
@@ -138,13 +226,27 @@ fn range_context(
         }
     }
 
+    if is_quantity_question(question) {
+        let per_task = report::task_totals(&tasks, lo, hi);
+        if !per_task.is_empty() {
+            let _ = write!(
+                out,
+                "\n## Time per task (computed from the database; quote these figures verbatim)\n{}",
+                report::totals_table(&per_task, TABLE_ROWS)
+            );
+        }
+    }
+
+    let mut rows = Vec::new();
     let _ = writeln!(out, "\n## Tasks (derived, may lag recent activity)");
     if tasks.is_empty() {
         let _ = writeln!(out, "(none derived for this range)");
     }
     let multi_day = start.date() != end.date();
     for t in tasks.iter().take(60) {
-        let _ = writeln!(out, "- {}", task_line(t, tz, multi_day));
+        let line = task_line(t, tz, multi_day);
+        let _ = writeln!(out, "- {line}");
+        rows.push(line);
     }
 
     // Aggregates from raw spans back the tasks up (and stand in for them
@@ -181,18 +283,33 @@ fn range_context(
 
     let _ = writeln!(out, "\n## Windows by time");
     for ((app, title), ms) in top(title_ms, 15) {
-        let _ = writeln!(out, "- {}: {app}: {}", fmt_dur(ms), digest::clip(title, 80));
+        let line = format!("{}: {app}: {}", fmt_dur(ms), digest::clip(title, 80));
+        let _ = writeln!(out, "- {line}");
+        rows.push(line);
     }
-    Ok(out)
+    Ok((
+        out,
+        ChatContextInfo {
+            blocks: rows.len(),
+            start_ms: Some(lo),
+            end_ms: Some(hi),
+            rows,
+        },
+    ))
 }
 
-fn fts_context(conn: &Connection, question: &str, tz: &TimeZone) -> Result<String, StorageError> {
+fn fts_context(
+    conn: &Connection,
+    question: &str,
+    tz: &TimeZone,
+) -> Result<(String, ChatContextInfo), StorageError> {
     let query = storage::fts_query_from_text(question);
     let tasks = storage::search_tasks(conn, &query, FTS_K)?;
     let spans = storage::search_spans(conn, &query, FTS_K)?;
     if tasks.is_empty() && spans.is_empty() {
-        return Ok(String::new());
+        return Ok((String::new(), ChatContextInfo::default()));
     }
+    let mut rows = Vec::new();
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -202,7 +319,9 @@ fn fts_context(conn: &Connection, question: &str, tz: &TimeZone) -> Result<Strin
     if !tasks.is_empty() {
         let _ = writeln!(out, "\n## Matching tasks");
         for t in &tasks {
-            let _ = writeln!(out, "- {}", task_line(t, tz, true));
+            let line = task_line(t, tz, true);
+            let _ = writeln!(out, "- {line}");
+            rows.push(line);
         }
     }
     if !spans.is_empty() {
@@ -210,18 +329,26 @@ fn fts_context(conn: &Connection, question: &str, tz: &TimeZone) -> Result<Strin
         for s in &spans {
             let start = s.start.to_zoned(tz.clone());
             let end = s.end.to_zoned(tz.clone());
-            let _ = writeln!(
-                out,
-                "- {} {}\u{2013}{} {}: {}",
+            let line = format!(
+                "{} {}\u{2013}{} {}: {}",
                 start.strftime("%Y-%m-%d"),
                 start.strftime("%H:%M"),
                 end.strftime("%H:%M"),
                 s.app,
                 digest::clip(&s.title, 80),
             );
+            let _ = writeln!(out, "- {line}");
+            rows.push(line);
         }
     }
-    Ok(out)
+    Ok((
+        out,
+        ChatContextInfo {
+            blocks: rows.len(),
+            rows,
+            ..ChatContextInfo::default()
+        },
+    ))
 }
 
 fn task_line(t: &Task, tz: &TimeZone, with_date: bool) -> String {
@@ -269,7 +396,24 @@ fn fmt_dur(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use jiff::civil;
     use jiff::tz::TimeZone;
+
+    /// Wed 2026-08-26 14:30 UTC.
+    fn now() -> jiff::Zoned {
+        civil::date(2026, 8, 26)
+            .at(14, 30, 0, 0)
+            .to_zoned(TimeZone::UTC)
+            .unwrap()
+    }
+
+    fn at(date: civil::Date, hour: i8) -> i64 {
+        date.at(hour, 0, 0, 0)
+            .to_zoned(TimeZone::UTC)
+            .unwrap()
+            .timestamp()
+            .as_millisecond()
+    }
 
     fn db() -> rusqlite::Connection {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -322,5 +466,113 @@ mod tests {
         let out = super::build_task_context(&conn, 6, &TimeZone::UTC).unwrap();
         assert!(out.contains("## Screen evidence"), "{out}");
         assert!(out.contains("code editing foo.rs"), "{out}");
+    }
+
+    #[test]
+    fn phrases_resolve_to_fixed_ranges() {
+        let conn = db();
+        let (mon, tue, wed) = (
+            civil::date(2026, 8, 24),
+            civil::date(2026, 8, 25),
+            civil::date(2026, 8, 26),
+        );
+        let thu = civil::date(2026, 8, 27);
+        for (question, want) in [
+            (
+                "what did I work on this morning?",
+                (at(wed, 0), at(wed, 12)),
+            ),
+            (
+                "what happened yesterday afternoon",
+                (at(tue, 12), at(tue, 18)),
+            ),
+            ("how long on chronicle this week?", (at(mon, 0), at(thu, 0))),
+            (
+                "what shipped last week",
+                (at(civil::date(2026, 8, 17), 0), at(mon, 0)),
+            ),
+            // Most recent past Tuesday, today included for today's weekday.
+            ("what did I do on tuesday", (at(tue, 0), at(wed, 0))),
+            ("what did I do on wednesday", (at(wed, 0), at(thu, 0))),
+        ] {
+            assert_eq!(
+                super::resolve_range(&conn, question, &now()).unwrap(),
+                Some(want),
+                "{question}"
+            );
+        }
+    }
+
+    // The call = the day's first mic-in-use block; a day without one keeps
+    // the range the rest of the phrase parsed to.
+    #[test]
+    fn call_relative_ranges_split_the_day() {
+        let conn = db();
+        let (tue, wed) = (civil::date(2026, 8, 25), civil::date(2026, 8, 26));
+        conn.execute(
+            "INSERT INTO activity_events (ts, end_ts, repo, branch, kind, ext_id)
+                 VALUES (?1, ?2, '', '', 'call', 'call:1'), (?3, ?4, '', '', 'call', 'call:2')",
+            [at(wed, 9), at(wed, 10), at(wed, 13), at(wed, 14)],
+        )
+        .unwrap();
+
+        let now_ms = now().timestamp().as_millisecond();
+        for (question, want) in [
+            (
+                "what was I doing before the call?",
+                (at(wed, 0), at(wed, 9)),
+            ),
+            (
+                "what was I doing before the 09:40 call?",
+                (at(wed, 0), at(wed, 9)),
+            ),
+            ("and after the call?", (at(wed, 10), now_ms)),
+            (
+                "what did I do after the call this morning",
+                (at(wed, 10), at(wed, 12)),
+            ),
+            ("before the call yesterday", (at(tue, 0), at(wed, 0))),
+        ] {
+            assert_eq!(
+                super::resolve_range(&conn, question, &now()).unwrap(),
+                Some(want),
+                "{question}"
+            );
+        }
+    }
+
+    // A quantity question carries the SQL totals table; the answer's figure
+    // is in the prompt verbatim, so the model never adds rows up.
+    #[test]
+    fn quantity_question_gets_the_totals_table() {
+        let conn = db();
+        let wed = civil::date(2026, 8, 26);
+        conn.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
+                 VALUES (5, 1, ?1, ?2, 0.9)",
+            [at(wed, 9), at(wed, 9) + 90 * 60_000],
+        )
+        .unwrap();
+
+        let (ctx, info) =
+            super::build_context(&conn, "how long did I spend on plans this morning?", &now())
+                .unwrap();
+        assert!(ctx.contains("## Time per task"), "{ctx}");
+        assert!(ctx.contains("| sending plans | plans | 1h30m |"), "{ctx}");
+        assert!(ctx.contains("| all tasks | | 1h30m |"), "{ctx}");
+        assert_eq!(
+            (info.start_ms, info.end_ms),
+            (Some(at(wed, 0)), Some(at(wed, 12)))
+        );
+        assert_eq!(info.blocks, info.rows.len());
+        assert!(
+            info.rows.iter().any(|r| r.contains("sending plans")),
+            "{:?}",
+            info.rows
+        );
+
+        let (ctx, _) =
+            super::build_context(&conn, "what did I work on this morning?", &now()).unwrap();
+        assert!(!ctx.contains("## Time per task"), "{ctx}");
     }
 }

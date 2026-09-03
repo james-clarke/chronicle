@@ -913,7 +913,7 @@ fn chat_context_includes_project_totals() {
     )
     .unwrap();
 
-    let ctx = chat::build_context(&conn, "how long on chronicle this week?", &now).unwrap();
+    let (ctx, _) = chat::build_context(&conn, "how long on chronicle this week?", &now).unwrap();
     assert!(
         ctx.contains("## Totals by project") && ctx.contains("- chronicle: 1h30m"),
         "missing totals section:\n{ctx}"

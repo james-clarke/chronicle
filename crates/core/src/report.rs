@@ -51,6 +51,60 @@ pub fn project_totals(tasks: &[Task], lo: i64, hi: i64) -> Vec<ProjectTotal> {
 }
 
 #[derive(Debug, Clone)]
+pub struct TaskTotal {
+    pub task_id: i64,
+    pub label: String,
+    pub project: String,
+    pub total_ms: i64,
+}
+
+/// Per-task totals over an exact `[lo, hi)`, biggest first. Separate from
+/// [`build`], whose day columns force whole-civil-day bounds: a question
+/// about this morning must not count the afternoon.
+pub fn task_totals(tasks: &[Task], lo: i64, hi: i64) -> Vec<TaskTotal> {
+    let mut rows: Vec<TaskTotal> = Vec::new();
+    for t in tasks {
+        let ms = clamped_ms(t, lo, hi);
+        if ms == 0 {
+            continue;
+        }
+        match rows.iter_mut().find(|r| r.task_id == t.id) {
+            Some(r) => r.total_ms += ms,
+            None => rows.push(TaskTotal {
+                task_id: t.id,
+                label: t.label.clone(),
+                project: t.project.as_deref().unwrap_or(UNTAGGED).to_string(),
+                total_ms: ms,
+            }),
+        }
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.total_ms));
+    rows
+}
+
+/// `task · project · total` markdown plus the range total — the figures a
+/// chat answer quotes instead of adding rows up itself. The total covers
+/// every row, including any past `max_rows`.
+pub fn totals_table(rows: &[TaskTotal], max_rows: usize) -> String {
+    let mut out = String::from("| task | project | total |\n|---|---|---|\n");
+    for r in rows.iter().take(max_rows) {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} |",
+            r.label,
+            r.project,
+            fmt_dur(r.total_ms)
+        );
+    }
+    let _ = writeln!(
+        out,
+        "| all tasks | | {} |",
+        fmt_dur(rows.iter().map(|r| r.total_ms).sum())
+    );
+    out
+}
+
+#[derive(Debug, Clone)]
 pub struct TaskRow {
     pub task_id: i64,
     pub label: String,
