@@ -441,23 +441,39 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
+                let segmenter = config.derive_mode == "segmenter";
                 if config.prepass_secs > 0
                     && last_prepass.elapsed() >= Duration::from_secs(u64::from(config.prepass_secs))
                 {
                     last_prepass = Instant::now();
-                    match chronicle_core::prepass::run(&mut conn, &config, now) {
-                        Ok(placed) if !placed.is_empty() => {
-                            tracing::debug!(n = placed.len(), "pre-pass placed runs");
+                    if segmenter {
+                        match chronicle_core::segmenter::run(&mut conn, &config, now, &distractions) {
+                            Ok(placed) if !placed.is_empty() => {
+                                tracing::debug!(n = placed.len(), "segmenter placed segments");
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("segmenter failed: {e}"),
                         }
-                        Ok(_) => {}
-                        Err(e) => tracing::error!("pre-pass failed: {e}"),
+                    } else {
+                        match chronicle_core::prepass::run(&mut conn, &config, now) {
+                            Ok(placed) if !placed.is_empty() => {
+                                tracing::debug!(n = placed.len(), "pre-pass placed runs");
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::error!("pre-pass failed: {e}"),
+                        }
                     }
                     if let Err(e) =
                         chronicle_core::proposals::refresh(&mut conn, now, &distractions)
                     {
                         tracing::error!("proposals refresh failed: {e}");
                     }
-                    scheduler.maybe_live(&conn, &config, data_dir, idle_since);
+                    if !segmenter {
+                        scheduler.maybe_live(&conn, &config, data_dir, idle_since);
+                    }
+                }
+                if segmenter {
+                    reconcile_due(&mut conn, &config, &distractions);
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
@@ -1299,6 +1315,39 @@ pub(crate) fn spawn_ai_job_worker(job_id: i64) -> std::io::Result<Child> {
 
 /// Derive when AFK ≥ `derive_idle_secs`, or the 1-min load is low enough
 /// that inference won't be noticed.
+/// The segmenter's batch tier (m30 chunk 3): every batch the model would
+/// have derived is re-scored with the day's profiles instead, in-process,
+/// no idle gate — it is a few milliseconds of SQL and arithmetic. A few
+/// per tick so a backlog after a long pause drains without stalling the
+/// loop; a failure leaves the batch eligible, so it logs and stops.
+const RECONCILE_PER_TICK: usize = 3;
+fn reconcile_due(conn: &mut rusqlite::Connection, config: &Config, distractions: &[regex::Regex]) {
+    use chronicle_core::storage;
+    for _ in 0..RECONCILE_PER_TICK {
+        let batch_id = match storage::next_eligible_batch(conn) {
+            Ok(Some(id)) => id,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::error!("eligible-batch query failed: {e}");
+                return;
+            }
+        };
+        match chronicle_core::segmenter::reconcile(
+            conn,
+            config,
+            batch_id,
+            Timestamp::now(),
+            distractions,
+        ) {
+            Ok(n) => tracing::info!(batch_id, segments = n, "batch reconciled"),
+            Err(e) => {
+                tracing::error!(batch_id, "reconcile failed: {e}");
+                return;
+            }
+        }
+    }
+}
+
 pub(crate) fn derive_gates_open(config: &Config, idle_since: Option<i64>) -> bool {
     let idle_long_enough = idle_since.is_some_and(|since| {
         Timestamp::now().as_millisecond() - since >= i64::from(config.derive_idle_secs) * 1000

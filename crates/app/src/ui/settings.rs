@@ -15,6 +15,8 @@ pub(super) struct SettingsPanel {
     batch_minutes: u32,
     afk_close_secs: u32,
     derive_idle_secs: u32,
+    /// `derive_mode == "segmenter"` (m30 chunk 3).
+    segmenter: bool,
     retention_days: u32,
     task_autoclose_days: u32,
     background_minutes: u32,
@@ -139,6 +141,7 @@ impl SettingsPanel {
             batch_minutes: config.batch_minutes,
             afk_close_secs: config.afk_close_secs,
             derive_idle_secs: config.derive_idle_secs,
+            segmenter: config.derive_mode == "segmenter",
             retention_days: config.retention_days,
             task_autoclose_days: config.task_autoclose_days,
             background_minutes: config.background_minutes,
@@ -167,6 +170,7 @@ impl SettingsPanel {
         config.batch_minutes = self.batch_minutes;
         config.afk_close_secs = self.afk_close_secs;
         config.derive_idle_secs = self.derive_idle_secs;
+        config.derive_mode = if self.segmenter { "segmenter" } else { "model" }.to_owned();
         config.retention_days = self.retention_days;
         config.task_autoclose_days = self.task_autoclose_days;
         config.background_minutes = self.background_minutes;
@@ -555,6 +559,10 @@ impl TimelineApp {
                                             .range(60..=3600),
                                     );
                                     ui.weak("secs");
+                                    ui.end_row();
+                                    ui.label("placement");
+                                    ui.checkbox(&mut panel.segmenter, "segmenter");
+                                    ui.weak("evidence scoring, no live model (m30)");
                                     ui.end_row();
                                     ui.label("background under");
                                     ui.add(

@@ -138,6 +138,46 @@ pub(crate) fn run_ai_job(
             let s = describer.suggest_task(&digest)?;
             Ok(serde_json::to_string(&s)?)
         }
+        "name_task" => {
+            // The segmenter created a task for a new cluster under a
+            // placeholder label (m30 chunk 3); name it from the stretch's
+            // own spans. A label the user changed meanwhile stays.
+            let task_id = payload["task_id"]
+                .as_i64()
+                .context("payload lacks task_id")?;
+            let lo = payload["lo"].as_i64().context("payload lacks lo")?;
+            let hi = payload["hi"].as_i64().context("payload lacks hi")?;
+            let placeholder = payload["placeholder"].as_str().unwrap_or("").to_owned();
+            let spans = storage::spans_in_range(conn, lo, hi)?;
+            if spans
+                .iter()
+                .all(|s| s.kind != chronicle_core::sessionizer::SpanKind::Focus)
+            {
+                bail!("no focus activity to name task {task_id} from");
+            }
+            let tz = TimeZone::system();
+            let digest = chronicle_core::digest::build_digest(
+                &spans,
+                &tz,
+                &[],
+                &[],
+                &[],
+                &[],
+                None,
+                None,
+                None,
+            );
+            let s = describer.suggest_task(&digest)?;
+            let n = conn.execute(
+                "UPDATE tasks SET label=?1, project=COALESCE(project, ?2)
+                 WHERE id=?3 AND source='derived' AND label=?4",
+                rusqlite::params![s.label, s.project, task_id, placeholder],
+            )?;
+            if n == 0 {
+                bail!("task {task_id} was renamed or removed before naming");
+            }
+            Ok(serde_json::to_string(&s)?)
+        }
         "journal" => {
             let task_id = payload["task_id"]
                 .as_i64()

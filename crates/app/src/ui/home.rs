@@ -829,6 +829,28 @@ fn feed_row(
                     },
                     "source: user".to_owned(),
                 ),
+                "segment" => {
+                    let why = c.reason.clone().unwrap_or_else(|| "evidence".to_owned());
+                    if c.confident == Some(false) {
+                        (
+                            Some(("to confirm", theme::palette::AMBER)),
+                            why,
+                            format!(
+                                "segmenter: a close call \u{b7} score {:.0}%; click the state to keep it",
+                                c.confidence * 100.0
+                            ),
+                        )
+                    } else {
+                        (
+                            Some(("placed", theme::palette::TEXT_DIM)),
+                            format!("matched \u{b7} {why}"),
+                            format!(
+                                "segmenter: matched the task's evidence \u{b7} score {:.0}%",
+                                c.confidence * 100.0
+                            ),
+                        )
+                    }
+                }
                 "live" => (
                     Some(("live", theme::palette::AMBER)),
                     "placed by the model".to_owned(),
@@ -912,8 +934,12 @@ fn feed_row(
     // for a decision the user can take now are also buttons.
     if let Some((tip, action)) = state.and_then(|(word, _)| match word {
         "to confirm" => Some((
-            "A rule placed this from the branch name. The model re-reads this batch in about 35 minutes. Click to keep it as it is.",
+            "A rule or the segmenter placed this on its best guess. A later pass can move it. Click to keep it as it is.",
             true,
+        )),
+        "placed" => Some((
+            "The segmenter matched this stretch to the task's evidence. A batch re-score can still move it unless you keep it.",
+            false,
         )),
         "live" => Some((
             "The model placed this as the work happened; the batch re-reads the stretch in about 35 minutes and can move it.",
@@ -942,7 +968,9 @@ fn feed_row(
     let shown = row.show(ui, width, |ui| {
         ui.menu_button("\u{2026}", |ui| match &block.claim {
             Some(c) => {
-                if (c.source == "prepass" || c.source == "live") && ui.button("keep").clicked() {
+                if matches!(c.source.as_str(), "prepass" | "live" | "segment")
+                    && ui.button("keep").clicked()
+                {
                     *pending = Some(Action::KeepBlock(c.interval_id));
                     ui.close();
                 }
@@ -989,7 +1017,7 @@ fn feed_row(
     if let Some(state) = shown.state {
         match &block.claim {
             // Only `to confirm` (a pre-pass placement) is the one-click keep.
-            Some(c) if c.source == "prepass" && state.clicked() => {
+            Some(c) if matches!(c.source.as_str(), "prepass" | "segment") && state.clicked() => {
                 *pending = Some(Action::KeepBlock(c.interval_id));
             }
             None => {

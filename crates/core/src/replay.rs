@@ -233,7 +233,12 @@ pub fn build_probes(rows: &Rows<'_>, set: ProbeSet) -> (Vec<Probe>, Vec<String>)
                 // `Source` a merge spans only what the folded task owned.
                 let source = if set == ProbeSet::Source && c.kind == "merge" {
                     match merge_source(c, rows) {
-                        Some(id) if rows.intervals.iter().any(|iv| iv.origin_task_id == Some(id)) => {
+                        Some(id)
+                            if rows
+                                .intervals
+                                .iter()
+                                .any(|iv| iv.origin_task_id == Some(id)) =>
+                        {
                             Some(id)
                         }
                         Some(_) => {
@@ -364,7 +369,10 @@ fn merge_source(c: &CorrectionRow, rows: &Rows<'_>) -> Option<i64> {
     rows.tasks
         .iter()
         .filter(|t| t.closed && t.label == c.old_label)
-        .filter(|t| t.closed_ts.is_some_and(|ts| (ts - c.ts).abs() <= MERGE_CLOSE_SLACK_MS))
+        .filter(|t| {
+            t.closed_ts
+                .is_some_and(|ts| (ts - c.ts).abs() <= MERGE_CLOSE_SLACK_MS)
+        })
         .min_by_key(|t| (t.closed_ts.unwrap_or(0) - c.ts).abs())
         .map(|t| t.id)
 }
@@ -645,7 +653,11 @@ mod tests {
         ];
         let mut own = iv(8, 20, 1, 14 * M, 16 * M);
         own.origin_task_id = Some(10);
-        let intervals = vec![iv(5, 20, 1, 2 * M, 12 * M), own, iv(6, 20, 2, 31 * M, 40 * M)];
+        let intervals = vec![
+            iv(5, 20, 1, 2 * M, 12 * M),
+            own,
+            iv(6, 20, 2, 31 * M, 40 * M),
+        ];
         let corrections = vec![
             corr(1, 45 * M, "reassign", 20, "x", "real work", Some(5)),
             corr(2, 50 * M, "merge", 20, "old work", "real work", None),
@@ -667,7 +679,11 @@ mod tests {
         let (source, _) = build_probes(&rows, ProbeSet::Source);
         let merge_src: Vec<_> = source.iter().filter(|p| p.kind == "merge").collect();
         assert_eq!(merge_src.len(), 1);
-        assert_eq!(merge_src[0].range, (14 * M, 16 * M), "the folded task's own rows");
+        assert_eq!(
+            merge_src[0].range,
+            (14 * M, 16 * M),
+            "the folded task's own rows"
+        );
         assert_eq!(merge_src[0].task_id, 20);
         // Without origin rows the merge is skipped with a reason, not scored.
         let legacy: Vec<IntervalRow> = intervals

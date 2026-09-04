@@ -43,6 +43,18 @@ pub struct Config {
     /// Open derived tasks with no interval this many days are auto-closed
     /// daily (0 = never; declared tasks only close by hand).
     pub task_autoclose_days: u32,
+    /// How the live tail is placed (m30 chunk 3): `model` = the m27 path
+    /// (deterministic pre-pass, then the resident model every `live_secs`,
+    /// then a model batch derive); `segmenter` = deterministic segmentation
+    /// over span anchors scored against task evidence, with the batch tier
+    /// reduced to a re-score and the model only naming new tasks.
+    pub derive_mode: String,
+    /// Segmenter: minutes a run of unrelated spans must last before it
+    /// becomes a segment of its own (shorter excursions fold in).
+    pub segment_switch_min: u32,
+    /// Segmenter: minutes a stretch the scorer calls new must last before
+    /// a task is created for it.
+    pub segment_new_task_min: u32,
     /// AW-compatible HTTP server port.
     pub port: u16,
     /// Extra CORS origin regexes for sideloaded browser extensions
@@ -116,6 +128,9 @@ impl Default for Config {
             title_similarity: 0.8,
             retention_days: 180,
             task_autoclose_days: 3,
+            derive_mode: "model".into(),
+            segment_switch_min: 3,
+            segment_new_task_min: 10,
             port: 5600,
             cors_allow: Vec::new(),
             browser_apps: [

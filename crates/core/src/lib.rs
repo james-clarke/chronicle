@@ -15,6 +15,7 @@ pub mod profile;
 pub mod proposals;
 pub mod replay;
 pub mod report;
+pub mod segmenter;
 pub mod sessionizer;
 pub mod storage;
 pub mod timeref;

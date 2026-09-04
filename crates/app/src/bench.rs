@@ -32,6 +32,7 @@ pub(crate) fn bench(
     model_filter: Option<&str>,
     no_mcp: bool,
     scorer: bool,
+    segment: bool,
 ) -> anyhow::Result<()> {
     use chronicle_core::eval::Expectations;
     use chronicle_core::types::Event;
@@ -137,6 +138,9 @@ pub(crate) fn bench(
         }
         return Ok(());
     }
+    if scorer && segment {
+        return segment_fixture_eval(&cases, &config);
+    }
     if scorer {
         return scorer_fixture_eval(&cases, &config);
     }
@@ -202,6 +206,192 @@ pub(crate) fn bench(
 /// group already taught must resolve back to that same task.
 // (group index, minute range, ms range)
 type FlatRange = (usize, (i64, i64), (i64, i64));
+
+/// A fixture's focus spans with anchors extracted from their titles and
+/// URLs (fixtures carry no collector events), sorted by start.
+fn fixture_anchored_spans(
+    spans: &[chronicle_core::sessionizer::SpanDraft],
+    re: &regex::Regex,
+) -> Vec<chronicle_core::profile::AnchoredSpan> {
+    use chronicle_core::sessionizer::SpanKind;
+    let mut out: Vec<chronicle_core::profile::AnchoredSpan> = spans
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.kind == SpanKind::Focus)
+        .map(|(i, s)| chronicle_core::profile::AnchoredSpan {
+            id: i as i64,
+            start_ts: s.start.as_millisecond(),
+            end_ts: s.end.as_millisecond(),
+            app: s.app.clone(),
+            title: s.title.clone(),
+            anchors: chronicle_core::extract::extract(&s.app, &s.title, s.url.as_deref(), re),
+        })
+        .collect();
+    out.sort_by_key(|s| s.start_ts);
+    out
+}
+
+/// `chronicle bench --scorer --segment` (m30 chunk 3): the live path, cold,
+/// over each persona fixture — cut with the segmenter, score each segment
+/// against profiles that grow from the segments already placed (as the
+/// daemon's evidence refresh does), create a task for each new cluster.
+/// A group passes when every one of its ranges resolves to one task and
+/// no other group resolves to that task. Prints coverage and segment
+/// length next to the group score.
+fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
+    use chronicle_core::profile::{self, Params};
+    use chronicle_core::replay::TaskRow;
+    use chronicle_core::segmenter::{self, SegParams, Target};
+    use std::collections::HashMap;
+
+    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+    let params = Params::default();
+    let sp = SegParams::from_config(config);
+    let (mut groups_ok, mut groups_n) = (0usize, 0usize);
+
+    for (case, _digest, open, expect, _gaps, spans) in cases {
+        let Some(exp) = expect else { continue };
+        if exp.groups.is_empty() {
+            continue;
+        }
+        let aspans = fixture_anchored_spans(spans, &re);
+        let Some(origin) = aspans.first().map(|s| s.start_ts) else {
+            continue;
+        };
+        let end = aspans.last().map_or(origin, |s| s.end_ts);
+        println!("\n=== {case} [segmenter] ({} groups)", exp.groups.len());
+
+        // Cold: the declared tasks' label keys are all the profiles hold.
+        let tasks: Vec<TaskRow> = open
+            .iter()
+            .map(|t| TaskRow {
+                id: t.id,
+                label: t.label.clone(),
+                project: t.project.clone(),
+                declared: t.declared,
+                closed: false,
+                created_ts: origin - 1,
+                closed_ts: None,
+            })
+            .collect();
+        let labels: HashMap<i64, String> = tasks.iter().map(|t| (t.id, t.label.clone())).collect();
+        let profiles = profile::build_profiles(&tasks, &[], &aspans, &[], &re, origin, &params);
+        let segs = segmenter::segment(&aspans, &distractions, &sp);
+        let placements = segmenter::decide(
+            &aspans,
+            origin,
+            end,
+            &profiles,
+            &labels,
+            &distractions,
+            &params,
+            &sp,
+        );
+        // Clusters become synthetic tasks numbered after the declared ones.
+        let base = tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        let mut placed: Vec<(i64, i64, i64)> = Vec::new();
+        let mut created: HashMap<usize, String> = HashMap::new();
+        let hm = |ms: i64| {
+            format!(
+                "{:02}:{:02}",
+                (ms - origin) / 3_600_000,
+                (ms - origin) / 60_000 % 60
+            )
+        };
+        for p in &placements {
+            let (task_id, name) = match &p.target {
+                Target::Existing(id) => (*id, labels.get(id).cloned().unwrap_or_default()),
+                Target::New { label, cluster, .. } => {
+                    created.insert(*cluster, label.clone());
+                    (base + *cluster as i64, format!("new: {label}"))
+                }
+            };
+            placed.push((p.lo, p.hi, task_id));
+            println!(
+                "  {}\u{2013}{} -> {name} [{task_id}] {} ({})",
+                hm(p.lo),
+                hm(p.hi),
+                if p.confident { "confident" } else { "unsure" },
+                p.reason
+            );
+        }
+
+        let owner = |range: (i64, i64)| -> Option<i64> {
+            let mut by_task: HashMap<i64, i64> = HashMap::new();
+            for (lo, hi, t) in &placed {
+                let ov = hi.min(&range.1) - lo.max(&range.0);
+                if ov > 0 {
+                    *by_task.entry(*t).or_insert(0) += ov;
+                }
+            }
+            by_task
+                .into_iter()
+                .max_by_key(|(_, ms)| *ms)
+                .map(|(t, _)| t)
+        };
+        let mut resolved: Vec<Option<i64>> = Vec::new();
+        let mut details: Vec<String> = Vec::new();
+        for g in &exp.groups {
+            let owners: Vec<Option<i64>> = g
+                .ranges
+                .iter()
+                .map(|&(a, b)| owner((origin + a * 60_000, origin + b * 60_000)))
+                .collect();
+            let first = owners.first().copied().flatten();
+            let one = first.is_some() && owners.iter().all(|o| *o == first);
+            resolved.push(if one { first } else { None });
+            details.push(
+                owners
+                    .iter()
+                    .map(|o| o.map_or("-".to_owned(), |t| t.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        let mut ok = 0;
+        for (gi, g) in exp.groups.iter().enumerate() {
+            let shared = resolved[gi].is_some()
+                && resolved
+                    .iter()
+                    .enumerate()
+                    .any(|(j, r)| j != gi && *r == resolved[gi]);
+            let pass = resolved[gi].is_some() && !shared;
+            if pass {
+                ok += 1;
+            }
+            println!(
+                "  [{}] {} -> {}{}",
+                if pass { "PASS" } else { "FAIL" },
+                g.name,
+                details[gi],
+                if shared {
+                    " (shared with another group)"
+                } else {
+                    ""
+                }
+            );
+        }
+        let focus_ms: i64 = aspans.iter().map(|s| s.end_ts - s.start_ts).sum();
+        let placed_ms: i64 = placed.iter().map(|(lo, hi, _)| hi - lo).sum();
+        let mut lengths: Vec<f64> = segs.iter().map(|s| s.minutes).collect();
+        lengths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = lengths.get(lengths.len() / 2).copied().unwrap_or(0.0);
+        println!(
+            "  {case} segmenter: {ok}/{} groups; {} segments -> {} rows, coverage {:.0}%, median segment {:.0} min, {} tasks created",
+            exp.groups.len(),
+            segs.len(),
+            placements.len(),
+            placed_ms as f64 / focus_ms.max(1) as f64 * 100.0,
+            median,
+            created.len()
+        );
+        groups_ok += ok;
+        groups_n += exp.groups.len();
+    }
+    println!("\nsegmenter fixtures: {groups_ok}/{groups_n} groups");
+    Ok(())
+}
 
 fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
     use chronicle_core::extract;
@@ -426,6 +616,7 @@ pub(crate) fn replay_eval(
     since_days: u64,
     model_filter: Option<&str>,
     scorer: bool,
+    segment: bool,
     probe_set: chronicle_core::replay::ProbeSet,
     out: Option<&Path>,
 ) -> anyhow::Result<()> {
@@ -497,9 +688,40 @@ pub(crate) fn replay_eval(
                 batch.start_ts,
                 &params,
             );
+            // `--segment`: the batch cut the segmenter's way, each piece
+            // scored on its own; a probe takes the minute-weighted majority
+            // of the pieces under its range.
+            let cuts = segment.then(|| {
+                let bspans: Vec<profile::AnchoredSpan> = spans
+                    .iter()
+                    .filter(|s| s.end_ts > batch.start_ts && s.start_ts < batch.end_ts)
+                    .cloned()
+                    .collect();
+                let sp = chronicle_core::segmenter::SegParams::from_config(&config);
+                let segs = chronicle_core::segmenter::segment(&bspans, &distractions, &sp);
+                (bspans, segs)
+            });
             for p in probes.iter().filter(|p| p.batch_id == bid) {
                 let seg = Segment::from_spans_skipping(&spans, p.range.0, p.range.1, &distractions);
-                let v = profile::score(&seg, &profiles, &params);
+                let mut v = profile::score(&seg, &profiles, &params);
+                if let Some((bspans, segs)) = &cuts {
+                    let mut tally: HashMap<Option<i64>, f64> = HashMap::new();
+                    for sg in segs.iter().filter(|s| s.hi > p.range.0 && s.lo < p.range.1) {
+                        let (lo, hi) = (sg.lo.max(p.range.0), sg.hi.min(p.range.1));
+                        let piece = Segment::from_spans_skipping(bspans, lo, hi, &distractions);
+                        if piece.keys.is_empty() {
+                            continue;
+                        }
+                        let pv = profile::score(&piece, &profiles, &params);
+                        *tally.entry(pv.best).or_insert(0.0) += piece.minutes;
+                    }
+                    if let Some((best, _)) = tally
+                        .iter()
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    {
+                        v.best = *best;
+                    }
+                }
                 let label = match v.best {
                     Some(id) => rows
                         .tasks

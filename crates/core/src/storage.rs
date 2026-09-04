@@ -44,6 +44,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/016_span_anchors.sql")),
         M::up(include_str!("../migrations/017_task_evidence.sql")),
         M::up(include_str!("../migrations/018_interval_origin.sql")),
+        M::up(include_str!("../migrations/019_segment_rows.sql")),
     ])
 });
 
@@ -2600,6 +2601,239 @@ pub fn insert_live_interval(
     Ok(task_id)
 }
 
+/// `[start, end)` of a batch, if it exists.
+pub fn batch_range(conn: &Connection, batch_id: i64) -> Result<Option<(i64, i64)>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT start_ts, end_ts FROM batches WHERE id=?1",
+            [batch_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// The segmenter's batch tier (m30 chunk 3) finished the batch: done, with
+/// the same timing columns the model derive fills, so `chronicle status`
+/// and the derive metrics read the same either way.
+pub fn finish_batch_reconciled(
+    conn: &Connection,
+    batch_id: i64,
+    now: jiff::Timestamp,
+    derive_ms: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE batches SET status='done', attempts=attempts+1, derived_ts=?2, derive_ms=?3,
+                prompt_tokens=0, gen_tokens=0
+         WHERE id=?1",
+        params![batch_id, ts_to_ms(now), derive_ms],
+    )?;
+    Ok(())
+}
+
+/// Rewrite the window's segmenter rows (m30 chunk 3): every non-user row
+/// the live tiers placed there (`segment`, `prepass`, `live`) goes, and
+/// one `segment` row per placement comes in, clipped around what the user
+/// placed by hand. `New` targets become derived tasks. Returns the task ids
+/// that gained rows and, for each task created, `(id, lo, hi, placeholder
+/// label)` for the naming job.
+#[allow(clippy::type_complexity)]
+pub fn store_segments(
+    conn: &mut Connection,
+    lo: i64,
+    hi: i64,
+    batch_id: Option<i64>,
+    placements: &[crate::segmenter::Placement],
+) -> Result<(Vec<i64>, Vec<(i64, i64, i64, String)>), StorageError> {
+    use crate::segmenter::Target;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM intervals WHERE source IN ('segment','prepass','live')
+           AND start_ts >= ?1 AND start_ts < ?2",
+        [lo, hi],
+    )?;
+    let user_rows: Vec<(i64, i64)> = tx
+        .prepare("SELECT start_ts, end_ts FROM intervals WHERE source='user' AND start_ts < ?2 AND end_ts > ?1 ORDER BY start_ts")?
+        .query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut touched: Vec<i64> = Vec::new();
+    let mut created: Vec<(i64, i64, i64, String)> = Vec::new();
+    let mut by_cluster: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+    for p in placements {
+        let task_id = match &p.target {
+            Target::Existing(id) => *id,
+            Target::New {
+                label,
+                project,
+                cluster,
+            } => match by_cluster.get(cluster) {
+                Some(id) => {
+                    // The cluster's task already exists: the naming job
+                    // sees the whole cluster's range.
+                    if let Some(c) = created.iter_mut().find(|c| c.0 == *id) {
+                        c.1 = c.1.min(p.lo);
+                        c.2 = c.2.max(p.hi);
+                    }
+                    *id
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO tasks (label, project, status, source, created_ts)
+                         VALUES (?1, ?2, 'open', 'derived', ?3)",
+                        params![label, project, p.lo],
+                    )?;
+                    let id = tx.last_insert_rowid();
+                    by_cluster.insert(*cluster, id);
+                    created.push((id, p.lo, p.hi, label.clone()));
+                    id
+                }
+            },
+        };
+        let mut wrote = false;
+        for (s, e) in subtract_ranges(p.lo, p.hi, &user_rows) {
+            tx.execute(
+                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source,
+                                        reason, origin_task_id, confident)
+                 VALUES (?1, COALESCE(?2, (SELECT id FROM batches WHERE start_ts <= ?3 AND end_ts > ?3)),
+                         ?3, ?4, ?5, 'segment', ?6, ?1, ?7)",
+                params![task_id, batch_id, s, e, p.confidence, p.reason, p.confident as i64],
+            )?;
+            wrote = true;
+        }
+        if wrote && !touched.contains(&task_id) {
+            touched.push(task_id);
+        }
+    }
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    // A task created for a range the user rows swallowed whole is gone again.
+    created.retain(|(id, ..)| touched.contains(id));
+    Ok((touched, created))
+}
+
+/// Every open task's profile from the `task_evidence` cache, plus labels
+/// for the segmenter's "between A and B" reason line.
+#[allow(clippy::type_complexity)]
+pub fn live_profiles(
+    conn: &Connection,
+) -> Result<
+    (
+        Vec<profile::Profile>,
+        std::collections::HashMap<i64, String>,
+    ),
+    StorageError,
+> {
+    let mut stmt = conn.prepare(
+        "SELECT e.task_id, e.kind, e.value, e.source, e.minutes, e.first_ts, e.last_ts
+         FROM task_evidence e JOIN tasks t ON t.id = e.task_id
+         WHERE t.status = 'open'",
+    )?;
+    let mut rows = Vec::new();
+    for row in stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, f64>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
+        ))
+    })? {
+        let (task_id, kind, value, source, minutes, first_ts, last_ts) = row?;
+        let (Some(key), Some(source)) = (
+            profile::Key::parse(&kind, &value),
+            profile::Source::parse(&source),
+        ) else {
+            continue;
+        };
+        rows.push(profile::EvidenceRow {
+            task_id,
+            key,
+            minutes,
+            first_ts,
+            last_ts,
+            source,
+        });
+    }
+    let last: Vec<crate::replay::IntervalRow> = conn
+        .prepare("SELECT task_id, MAX(end_ts) FROM intervals GROUP BY task_id")?
+        .query_map([], |r| {
+            let (task_id, end_ts): (i64, i64) = (r.get(0)?, r.get(1)?);
+            Ok(crate::replay::IntervalRow {
+                id: 0,
+                task_id,
+                batch_id: None,
+                start_ts: end_ts,
+                end_ts,
+                origin_task_id: None,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let labels = conn
+        .prepare("SELECT id, label FROM tasks WHERE status='open'")?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok((profile::Profile::from_rows(&rows, &last), labels))
+}
+
+/// Rebuild the `task_evidence` rows of `task_ids` only, from the full
+/// history as of `now_ts` (m30 chunk 3: the live accrual after a segment
+/// write or a correction). Returns the rows written.
+pub fn refresh_task_evidence(
+    conn: &mut Connection,
+    ticket_re: &Regex,
+    params: &profile::Params,
+    now_ts: i64,
+    task_ids: &[i64],
+) -> Result<usize, StorageError> {
+    if task_ids.is_empty() {
+        return Ok(0);
+    }
+    let ReplayRows {
+        corrections,
+        intervals,
+        tasks,
+        ..
+    } = replay_rows(conn, 0)?;
+    let spans = anchored_spans(conn, 0, i64::MAX)?;
+    let rows: Vec<profile::EvidenceRow> = profile::build_evidence(
+        &tasks,
+        &intervals,
+        &spans,
+        &corrections,
+        ticket_re,
+        now_ts,
+        params,
+    )
+    .into_iter()
+    .filter(|r| task_ids.contains(&r.task_id))
+    .collect();
+    let tx = conn.transaction()?;
+    for id in task_ids {
+        tx.execute("DELETE FROM task_evidence WHERE task_id = ?1", [id])?;
+    }
+    {
+        let mut ins = tx.prepare(
+            "INSERT INTO task_evidence (task_id, kind, value, source, minutes, first_ts, last_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for r in &rows {
+            ins.execute(params![
+                r.task_id,
+                r.key.kind_str(),
+                r.key.value(),
+                r.source.as_str(),
+                r.minutes,
+                r.first_ts,
+                r.last_ts,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(rows.len())
+}
+
 /// Where the current stretch starts for the live tier: the latest interval
 /// end (any source) or the end of the latest AFK gap ≥ 5 min inside
 /// `[floor, now)`, else `floor`.
@@ -3165,8 +3399,11 @@ pub struct FeedClaim {
     /// `derived` | `user` | `prepass`.
     pub source: String,
     pub confidence: f64,
-    /// The pre-pass rule that matched (`prepass` rows; kept on a `keep`).
+    /// The pre-pass rule that matched (`prepass` rows; kept on a `keep`),
+    /// or the segmenter's evidence line (`segment` rows).
     pub reason: Option<String>,
+    /// `segment` rows: whether the scorer's margin cleared delta.
+    pub confident: Option<bool>,
 }
 
 /// One block of the Home feed (m24): an interval of any source, or an
@@ -3199,7 +3436,7 @@ pub fn feed_blocks(
     let mut blocks = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT i.id, i.task_id, t.label, t.project, i.start_ts, MIN(i.end_ts, ?2),
-                i.confidence, i.source, i.reason
+                i.confidence, i.source, i.reason, i.confident
          FROM intervals i JOIN tasks t ON t.id = i.task_id
          WHERE i.start_ts >= ?1 AND i.start_ts < ?2
          ORDER BY i.start_ts DESC, i.id DESC LIMIT ?3",
@@ -3220,6 +3457,7 @@ pub fn feed_blocks(
             source: row.get(7)?,
             confidence: row.get(6)?,
             reason: row.get(8)?,
+            confident: row.get::<_, Option<i64>>(9)?.map(|v| v != 0),
         };
         let mut ms = 0;
         let mut lines = Vec::new();

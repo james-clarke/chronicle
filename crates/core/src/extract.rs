@@ -581,7 +581,11 @@ fn nearest_writer<F: Fn(&ActivityEvent) -> bool>(
             best = Some((i, key));
         }
     }
-    if any_writes { best.map(|(i, _)| i) } else { None }
+    if any_writes {
+        best.map(|(i, _)| i)
+    } else {
+        None
+    }
 }
 
 fn detail_i64s(detail: Option<&str>, field: &str) -> Vec<i64> {
@@ -1735,8 +1739,24 @@ mod tests {
         assert_eq!(kinds(&a, AnchorKind::Branch), ["m31"]);
         // Rows without write times (captured before m30 chunk 2.5) all attach.
         let legacy = vec![
-            ev(ActivityKind::AiSession, 0, 60 * m, "chronicle", "m30", "sess-a", None),
-            ev(ActivityKind::AiSession, 0, 60 * m, "chronicle", "m31", "sess-b", None),
+            ev(
+                ActivityKind::AiSession,
+                0,
+                60 * m,
+                "chronicle",
+                "m30",
+                "sess-a",
+                None,
+            ),
+            ev(
+                ActivityKind::AiSession,
+                0,
+                60 * m,
+                "chronicle",
+                "m31",
+                "sess-b",
+                None,
+            ),
         ];
         let a = from_activity("Terminator", 10 * m, 15 * m, &[], &legacy, &r);
         assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a", "sess-b"]);
@@ -1747,10 +1767,34 @@ mod tests {
         let r = re();
         let m = 60_000;
         let events = vec![
-            ev(ActivityKind::Cwd, 0, 12 * m, "chronicle", "", "cwd:1:chronicle", None),
-            ev(ActivityKind::Cwd, 11 * m, 30 * m, "mailer", "", "cwd:1:mailer", None),
+            ev(
+                ActivityKind::Cwd,
+                0,
+                12 * m,
+                "chronicle",
+                "",
+                "cwd:1:chronicle",
+                None,
+            ),
+            ev(
+                ActivityKind::Cwd,
+                11 * m,
+                30 * m,
+                "mailer",
+                "",
+                "cwd:1:mailer",
+                None,
+            ),
             ev(ActivityKind::Checkout, 0, 0, "chronicle", "m30", "", None),
-            ev(ActivityKind::Checkout, 0, 0, "mailer", "ACME-1-x", "", None),
+            ev(
+                ActivityKind::Checkout,
+                0,
+                0,
+                "mailer",
+                "ACME-1-x",
+                "",
+                None,
+            ),
         ];
         // Both rows overlap [10, 20); the shell was last seen in mailer.
         let a = from_activity("Terminator", 10 * m, 20 * m, &[], &events, &r);
@@ -1759,8 +1803,24 @@ mod tests {
         // A short visit to mailer that ended before the span did leaves the
         // span in chronicle, where the shell still is.
         let visit = vec![
-            ev(ActivityKind::Cwd, 0, 40 * m, "chronicle", "", "cwd:1:chronicle", None),
-            ev(ActivityKind::Cwd, 11 * m, 12 * m, "mailer", "", "cwd:1:mailer", None),
+            ev(
+                ActivityKind::Cwd,
+                0,
+                40 * m,
+                "chronicle",
+                "",
+                "cwd:1:chronicle",
+                None,
+            ),
+            ev(
+                ActivityKind::Cwd,
+                11 * m,
+                12 * m,
+                "mailer",
+                "",
+                "cwd:1:mailer",
+                None,
+            ),
         ];
         let a = from_activity("Terminator", 10 * m, 20 * m, &[], &visit, &r);
         assert_eq!(kinds(&a, AnchorKind::Place), ["chronicle"]);

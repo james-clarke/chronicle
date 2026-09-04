@@ -209,6 +209,11 @@ enum Cmd {
         /// (merge probes span the folded task's own intervals).
         #[arg(long, default_value = "all")]
         probes: String,
+        /// With --scorer: cut each window with the m30 segmenter first and
+        /// score its segments (fixture mode walks the persona fixtures cold;
+        /// replay mode takes the minute-weighted majority over a probe).
+        #[arg(long)]
+        segment: bool,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -274,11 +279,20 @@ fn main() -> anyhow::Result<()> {
             out,
             scorer,
             probes,
+            segment,
         } => {
             if replay {
                 let set = chronicle_core::replay::ProbeSet::parse(&probes)
                     .ok_or_else(|| anyhow::anyhow!("--probes must be all, direct or source"))?;
-                replay_eval(&data_dir, since, model.as_deref(), scorer, set, out.as_deref())
+                replay_eval(
+                    &data_dir,
+                    since,
+                    model.as_deref(),
+                    scorer,
+                    segment,
+                    set,
+                    out.as_deref(),
+                )
             } else {
                 bench(
                     &data_dir,
@@ -289,6 +303,7 @@ fn main() -> anyhow::Result<()> {
                     model.as_deref(),
                     no_mcp,
                     scorer,
+                    segment,
                 )
             }
         }
