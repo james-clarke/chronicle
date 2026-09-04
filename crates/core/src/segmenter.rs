@@ -559,6 +559,7 @@ pub fn decide(
             end_ts: c.hi,
             minutes: c.minutes,
             keys: c.keys.clone(),
+            vec: None,
         };
         let mut label = evidence.describe(2);
         if label.is_empty() {
@@ -866,6 +867,7 @@ mod tests {
                     value: (*v).to_owned(),
                 })
                 .collect(),
+            vec: None,
         }
     }
 
@@ -1068,6 +1070,7 @@ mod tests {
             task_id: 7,
             minutes,
             last_ts: Some(0),
+            vec: None,
         }];
         (profiles, HashMap::from([(7, "m30 work".to_owned())]))
     }

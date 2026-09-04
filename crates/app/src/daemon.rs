@@ -383,6 +383,10 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     let mut scheduler = Scheduler::new();
     let _ = chronicle_core::storage::set_derive_progress(&conn, None);
     let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+    // The soft tier's embedding model (m30 chunk 6), loaded on first use
+    // when `embed_model` names a file that exists; `Some(None)` = tried and
+    // failed, do not retry every tick.
+    let mut embedder: Option<Option<chronicle_derive::embed::Embedder>> = None;
     let mut idle_since: Option<i64> = None;
     // Fires once per idle stretch: remembers which idle_since epoch already
     // queued checkpoints, cleared when the user comes back.
@@ -441,6 +445,7 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
+                embed_new_spans(&mut conn, &config, data_dir, &mut embedder);
                 let segmenter = config.derive_mode == "segmenter";
                 if config.prepass_secs > 0
                     && last_prepass.elapsed() >= Duration::from_secs(u64::from(config.prepass_secs))
@@ -1318,6 +1323,59 @@ pub(crate) fn spawn_ai_job_worker(job_id: i64) -> std::io::Result<Child> {
 
 /// Derive when AFK ≥ `derive_idle_secs`, or the 1-min load is low enough
 /// that inference won't be noticed.
+/// Spans embedded per tick; new focus spans arrive a few a minute, and a
+/// backlog after enabling the model drains a few hundred a minute.
+const EMBED_PER_TICK: usize = 200;
+/// Embed the focus spans that have no vector yet (m30 chunk 6), when an
+/// embedding model is configured and loads.
+fn embed_new_spans(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    embedder: &mut Option<Option<chronicle_derive::embed::Embedder>>,
+) {
+    use chronicle_core::storage;
+    let Some(path) =
+        chronicle_derive::model::resolve_embed(config.embed_model.as_deref(), data_dir)
+    else {
+        return;
+    };
+    let e = embedder.get_or_insert_with(|| match chronicle_derive::embed::Embedder::load(&path) {
+        Ok(e) => Some(e),
+        Err(err) => {
+            tracing::error!("embedding model failed to load: {err}");
+            None
+        }
+    });
+    let Some(e) = e else { return };
+    let pending = match storage::spans_missing_embeddings(conn, EMBED_PER_TICK) {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("embedding query failed: {err}");
+            return;
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let texts: Vec<String> = pending
+        .iter()
+        .map(|(_, app, title)| format!("{app}: {title}"))
+        .collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    match e.embed(&refs) {
+        Ok(vecs) => {
+            let rows: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, ..)| *id).zip(vecs).collect();
+            if let Err(err) = storage::store_span_embeddings(conn, &rows) {
+                tracing::error!("storing embeddings failed: {err}");
+            } else {
+                tracing::debug!(n = rows.len(), "spans embedded");
+            }
+        }
+        Err(err) => tracing::error!("embedding failed: {err}"),
+    }
+}
+
 /// The segmenter's batch tier (m30 chunk 3): every batch the model would
 /// have derived is re-scored with the day's profiles instead, in-process,
 /// no idle gate — it is a few milliseconds of SQL and arithmetic. A few

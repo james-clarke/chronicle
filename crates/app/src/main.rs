@@ -93,6 +93,9 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Embed every focus span that has no vector yet with the configured
+    /// `embed_model` (m30 chunk 6), then rebuild the task centroids.
+    BackfillEmbeddings,
     /// Internal: recompute span anchors (m30) for spans since a local day.
     #[command(hide = true)]
     BackfillAnchors {
@@ -219,6 +222,10 @@ enum Cmd {
         /// worst tenth of placements. Uses --since.
         #[arg(long)]
         calibrate: bool,
+        /// Time an embedding GGUF over recent titles (m30 chunk 6 gate:
+        /// p95 under 20 ms per title on this CPU).
+        #[arg(long)]
+        embed: Option<PathBuf>,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -286,8 +293,11 @@ fn main() -> anyhow::Result<()> {
             probes,
             segment,
             calibrate,
+            embed,
         } => {
-            if calibrate {
+            if let Some(path) = embed {
+                bench::embed_bench(&data_dir, &path)
+            } else if calibrate {
                 bench::calibrate(&data_dir, since)
             } else if replay {
                 let set = chronicle_core::replay::ProbeSet::parse(&probes)
@@ -320,6 +330,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
         Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
+        Cmd::BackfillEmbeddings => bench::backfill_embeddings(&data_dir),
         Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),
         Cmd::BackfillEvidence => backfill_evidence(&data_dir),
         Cmd::Evidence { task, top } => evidence_report(&data_dir, task, top),
@@ -340,6 +351,7 @@ fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
                     "unknown preset {name:?}; available: {}",
                     model::PRESETS
                         .iter()
+                        .chain(model::EMBED_PRESETS.iter())
                         .map(|p| p.name)
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -360,7 +372,7 @@ fn model_cmd(data_dir: &Path, cmd: ModelCmd) -> anyhow::Result<()> {
         }
         ModelCmd::List => {
             let config = Config::load(&data_dir.join("config.toml"))?;
-            for spec in model::PRESETS {
+            for spec in model::PRESETS.iter().chain(model::EMBED_PRESETS.iter()) {
                 let path = model::models_dir(data_dir).join(spec.file);
                 let state = if path.exists() {
                     "downloaded"

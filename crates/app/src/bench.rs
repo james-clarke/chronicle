@@ -225,6 +225,7 @@ fn fixture_anchored_spans(
             app: s.app.clone(),
             title: s.title.clone(),
             anchors: chronicle_core::extract::extract(&s.app, &s.title, s.url.as_deref(), re),
+            vec: None,
         })
         .collect();
     out.sort_by_key(|s| s.start_ts);
@@ -427,6 +428,7 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 app: s.app.clone(),
                 title: s.title.clone(),
                 anchors: extract::extract(&s.app, &s.title, s.url.as_deref(), &re),
+                vec: None,
             })
             .collect();
         aspans.sort_by_key(|s| s.start_ts);
@@ -605,6 +607,66 @@ fn print_totals(
         serde_json::json!([lenient, results.len()]),
     );
     totals
+}
+
+/// `chronicle backfill-embeddings` (m30 chunk 6): every focus span without
+/// a vector, in batches, then the task centroids.
+pub(crate) fn backfill_embeddings(data_dir: &Path) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let path = chronicle_derive::model::resolve_embed(config.embed_model.as_deref(), data_dir)
+        .context("set `embed_model` in config.toml (e.g. `chronicle model pull bge-small` then `embed_model = \"bge-small\"`)")?;
+    let embedder = chronicle_derive::embed::Embedder::load(&path)?;
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let mut total = 0;
+    loop {
+        let pending = storage::spans_missing_embeddings(&conn, 500)?;
+        if pending.is_empty() {
+            break;
+        }
+        let texts: Vec<String> = pending
+            .iter()
+            .map(|(_, app, title)| format!("{app}: {title}"))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vecs = embedder.embed(&refs)?;
+        let rows: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, ..)| *id).zip(vecs).collect();
+        storage::store_span_embeddings(&mut conn, &rows)?;
+        total += rows.len();
+        println!("embedded {total} spans");
+    }
+    let n = storage::rebuild_task_embeddings(&mut conn, &[])?;
+    println!("{total} spans embedded; {n} task centroids");
+    Ok(())
+}
+
+/// `chronicle bench --embed <gguf>` (m30 chunk 6): the latency gate for the
+/// soft tier. Embeds up to 500 recent distinct titles one at a time, as the
+/// daemon would per span, and prints the percentiles against the 20 ms
+/// target.
+pub(crate) fn embed_bench(data_dir: &Path, model: &Path) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let titles = storage::recent_titles(&conn, 500)?;
+    if titles.is_empty() {
+        bail!("no focus titles stored yet");
+    }
+    let stats = chronicle_derive::embed::bench(model, &titles)?;
+    println!(
+        "{}: {} titles, dim {}, load {:.0} ms, p50 {:.1} ms, p95 {:.1} ms, mean {:.1} ms",
+        model.display(),
+        stats.n,
+        stats.dim,
+        stats.load_ms,
+        stats.p50_ms,
+        stats.p95_ms,
+        stats.mean_ms
+    );
+    println!(
+        "gate (p95 < 20 ms): {}",
+        if stats.p95_ms < 20.0 { "PASS" } else { "FAIL" }
+    );
+    Ok(())
 }
 
 /// `chronicle bench --calibrate` (m30 chunk 4): what the verdict log says

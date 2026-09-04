@@ -4,6 +4,7 @@
 mod backend;
 pub mod chat;
 pub mod describe;
+pub mod embed;
 pub mod model;
 pub mod runner;
 

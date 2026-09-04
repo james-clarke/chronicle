@@ -144,7 +144,7 @@ impl Key {
 }
 
 /// A focus span with its stored anchors.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnchoredSpan {
     pub id: i64,
     pub start_ts: i64,
@@ -152,6 +152,38 @@ pub struct AnchoredSpan {
     pub app: String,
     pub title: String,
     pub anchors: Vec<Anchor>,
+    /// The title's embedding (m30 chunk 6), when the soft tier has a model.
+    pub vec: Option<Vec<f32>>,
+}
+
+/// Minute-weighted mean of `parts`, L2-normalised; `None` with nothing to
+/// average. Vectors of differing length are skipped.
+pub fn centroid(parts: &[(&[f32], f64)]) -> Option<Vec<f32>> {
+    let dim = parts.iter().map(|(v, _)| v.len()).find(|d| *d > 0)?;
+    let mut acc = vec![0.0f32; dim];
+    let mut total = 0.0;
+    for (v, w) in parts.iter().filter(|(v, w)| v.len() == dim && *w > 0.0) {
+        for (a, x) in acc.iter_mut().zip(v.iter()) {
+            *a += x * *w as f32;
+        }
+        total += w;
+    }
+    if total <= 0.0 {
+        return None;
+    }
+    let norm = acc.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm <= 0.0 {
+        return None;
+    }
+    Some(acc.iter().map(|x| x / norm).collect())
+}
+
+/// Cosine of two normalised vectors (0 when lengths differ).
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Lower-case title terms worth matching on: at least [`MIN_TERM_CHARS`],
@@ -202,6 +234,9 @@ pub struct Params {
     /// A task touched within this long before the segment gets the bonus.
     pub recency_ms: i64,
     pub recency_bonus: f64,
+    /// The soft tier's ceiling (m30 chunk 6): a task's score gains this
+    /// times the cosine between the segment's and the task's vectors.
+    pub embed_bonus: f64,
 }
 
 impl Default for Params {
@@ -215,6 +250,7 @@ impl Default for Params {
             delta: 0.25,
             recency_ms: 2 * 3_600_000,
             recency_bonus: 0.05,
+            embed_bonus: 0.15,
         }
     }
 }
@@ -266,6 +302,8 @@ pub struct Profile {
     pub minutes: HashMap<Key, f64>,
     /// End of the task's latest interval, if any.
     pub last_ts: Option<i64>,
+    /// Centroid of the task's embedded spans (m30 chunk 6), if any.
+    pub vec: Option<Vec<f32>>,
 }
 
 impl Profile {
@@ -278,6 +316,7 @@ impl Profile {
                 task_id: r.task_id,
                 minutes: HashMap::new(),
                 last_ts: None,
+                vec: None,
             });
             *p.minutes.entry(r.key.clone()).or_insert(0.0) += r.minutes;
         }
@@ -550,8 +589,27 @@ pub fn build_profiles(
                 task_id: t.id,
                 minutes: HashMap::new(),
                 last_ts,
+                vec: None,
             });
         }
+    }
+    // Centroids from the embedded spans under each task's intervals.
+    for pr in &mut profiles {
+        let parts: Vec<(&[f32], f64)> = before
+            .iter()
+            .filter(|iv| iv.task_id == pr.task_id)
+            .flat_map(|iv| {
+                spans
+                    .iter()
+                    .filter(move |s| s.end_ts > iv.start_ts && s.start_ts < iv.end_ts)
+                    .filter_map(move |s| {
+                        let v = s.vec.as_deref()?;
+                        let ov = s.end_ts.min(iv.end_ts) - s.start_ts.max(iv.start_ts);
+                        Some((v, ov as f64 / 60_000.0))
+                    })
+            })
+            .collect();
+        pr.vec = centroid(&parts);
     }
     profiles.sort_by_key(|p| p.task_id);
     profiles
@@ -565,6 +623,8 @@ pub struct Segment {
     /// Focus minutes inside the range.
     pub minutes: f64,
     pub keys: HashMap<Key, f64>,
+    /// Minute-weighted centroid of the spans' embeddings, if any carry one.
+    pub vec: Option<Vec<f32>>,
 }
 
 impl Segment {
@@ -596,11 +656,20 @@ impl Segment {
             .into_iter()
             .map(|(k, (m, _, _))| (k, m))
             .collect();
+        let parts: Vec<(&[f32], f64)> = kept
+            .iter()
+            .filter_map(|s| {
+                let v = s.vec.as_deref()?;
+                Some((v, minutes(overlap_ms((s.start_ts, s.end_ts), (lo, hi)))))
+            })
+            .collect();
+        let vec = centroid(&parts);
         Segment {
             start_ts: lo,
             end_ts: hi,
             minutes: minutes(focus),
             keys,
+            vec,
         }
     }
 
@@ -761,6 +830,9 @@ pub fn score(seg: &Segment, profiles: &[Profile], p: &Params) -> Verdict {
             if recent {
                 score += p.recency_bonus;
             }
+            if let (Some(sv), Some(pv)) = (&seg.vec, &pr.vec) {
+                score += p.embed_bonus * f64::from(cosine(sv, pv).max(0.0));
+            }
             Candidate {
                 task_id: pr.task_id,
                 score,
@@ -843,6 +915,7 @@ mod tests {
                     value: (*v).to_owned(),
                 })
                 .collect(),
+            vec: None,
         }
     }
 

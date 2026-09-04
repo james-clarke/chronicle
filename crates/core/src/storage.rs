@@ -47,6 +47,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/019_segment_rows.sql")),
         M::up(include_str!("../migrations/020_verdict_log.sql")),
         M::up(include_str!("../migrations/021_interval_kind.sql")),
+        M::up(include_str!("../migrations/022_embeddings.sql")),
     ])
 });
 
@@ -763,8 +764,9 @@ pub fn anchored_spans(
 ) -> Result<Vec<profile::AnchoredSpan>, StorageError> {
     use crate::extract::{Anchor, AnchorKind};
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value
+        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value, e.vec
          FROM spans s LEFT JOIN span_anchors a ON a.span_id = s.id
+                      LEFT JOIN span_embeddings e ON e.span_id = s.id
          WHERE s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
          ORDER BY s.start_ts, s.id",
     )?;
@@ -777,11 +779,12 @@ pub fn anchored_spans(
             r.get::<_, String>(4)?,
             r.get::<_, Option<String>>(5)?,
             r.get::<_, Option<String>>(6)?,
+            r.get::<_, Option<Vec<u8>>>(7)?,
         ))
     })?;
     let mut out: Vec<profile::AnchoredSpan> = Vec::new();
     for row in rows {
-        let (id, start_ts, end_ts, app, title, kind, value) = row?;
+        let (id, start_ts, end_ts, app, title, kind, value, vec) = row?;
         if out.last().is_none_or(|s| s.id != id) {
             out.push(profile::AnchoredSpan {
                 id,
@@ -790,6 +793,7 @@ pub fn anchored_spans(
                 app,
                 title,
                 anchors: Vec::new(),
+                vec: vec.as_deref().map(blob_to_vec),
             });
         }
         if let (Some(kind), Some(value)) = (kind, value)
@@ -849,6 +853,7 @@ pub fn rebuild_task_evidence(
         }
     }
     tx.commit()?;
+    rebuild_task_embeddings(conn, &[])?;
     Ok(rows.len())
 }
 
@@ -2814,7 +2819,113 @@ pub fn live_profiles(
         .prepare("SELECT id, label FROM tasks")?
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<_, _>>()?;
-    Ok((profile::Profile::from_rows(&rows, &last), labels))
+    let mut profiles = profile::Profile::from_rows(&rows, &last);
+    let vecs: std::collections::HashMap<i64, Vec<f32>> = conn
+        .prepare("SELECT task_id, vec FROM task_embeddings")?
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, blob_to_vec(&r.get::<_, Vec<u8>>(1)?)))
+        })?
+        .collect::<Result<_, _>>()?;
+    for p in &mut profiles {
+        p.vec = vecs.get(&p.task_id).cloned();
+    }
+    Ok((profiles, labels))
+}
+
+fn blob_to_vec(b: &[u8]) -> Vec<f32> {
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect()
+}
+
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Focus spans with no embedding yet, newest first: `(id, app, title)`.
+pub fn spans_missing_embeddings(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(i64, String, String)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.app, s.title FROM spans s LEFT JOIN span_embeddings e ON e.span_id = s.id
+         WHERE s.kind='focus' AND e.span_id IS NULL AND s.title <> ''
+         ORDER BY s.start_ts DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn store_span_embeddings(
+    conn: &mut Connection,
+    rows: &[(i64, Vec<f32>)],
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    {
+        let mut ins =
+            tx.prepare("INSERT OR REPLACE INTO span_embeddings (span_id, vec) VALUES (?1, ?2)")?;
+        for (id, v) in rows {
+            ins.execute(params![id, vec_to_blob(v)])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Recompute the centroid of every task in `task_ids` (all tasks when
+/// empty): the minute-weighted mean of the embedded spans under its
+/// intervals, normalised. Tasks with no embedded span lose their row.
+pub fn rebuild_task_embeddings(
+    conn: &mut Connection,
+    task_ids: &[i64],
+) -> Result<usize, StorageError> {
+    let ids: Vec<i64> = if task_ids.is_empty() {
+        conn.prepare("SELECT id FROM tasks")?
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<Result<_, _>>()?
+    } else {
+        task_ids.to_vec()
+    };
+    let tx = conn.transaction()?;
+    let mut n = 0;
+    {
+        let mut q = tx.prepare(
+            "SELECT e.vec, SUM(MIN(s.end_ts, i.end_ts) - MAX(s.start_ts, i.start_ts))
+             FROM intervals i JOIN spans s ON s.kind='focus' AND s.end_ts > i.start_ts AND s.start_ts < i.end_ts
+                              JOIN span_embeddings e ON e.span_id = s.id
+             WHERE i.task_id = ?1 GROUP BY s.id",
+        )?;
+        for id in &ids {
+            let parts: Vec<(Vec<f32>, f64)> = q
+                .query_map([id], |r| {
+                    Ok((
+                        blob_to_vec(&r.get::<_, Vec<u8>>(0)?),
+                        r.get::<_, i64>(1)? as f64 / 60_000.0,
+                    ))
+                })?
+                .collect::<Result<_, _>>()?;
+            let weighted: Vec<(&[f32], f64)> =
+                parts.iter().map(|(v, m)| (v.as_slice(), *m)).collect();
+            match profile::centroid(&weighted) {
+                Some(c) => {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO task_embeddings (task_id, vec) VALUES (?1, ?2)",
+                        params![id, vec_to_blob(&c)],
+                    )?;
+                    n += 1;
+                }
+                None => {
+                    tx.execute("DELETE FROM task_embeddings WHERE task_id=?1", [id])?;
+                }
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(n)
 }
 
 /// Close the verdict-log entries of `interval_ids` with `outcome`
@@ -3008,6 +3119,19 @@ pub fn infer_projects(conn: &Connection, saturate_min: f64) -> Result<usize, Sto
     )?)
 }
 
+/// Up to `n` distinct recent focus titles, newest first (the embedding
+/// bench's corpus).
+pub fn recent_titles(conn: &Connection, n: usize) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT title FROM spans WHERE kind='focus' AND title <> '' GROUP BY title
+         ORDER BY MAX(start_ts) DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([n as i64], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 /// `(margin, confident, outcome)` of every closed verdict since `since_ms`,
 /// for `bench --calibrate`.
 pub fn verdict_outcomes(
@@ -3083,6 +3207,7 @@ pub fn refresh_task_evidence(
         }
     }
     tx.commit()?;
+    rebuild_task_embeddings(conn, task_ids)?;
     Ok(rows.len())
 }
 

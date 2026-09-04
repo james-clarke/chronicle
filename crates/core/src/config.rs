@@ -55,6 +55,10 @@ pub struct Config {
     /// Segmenter: minutes a stretch the scorer calls new must last before
     /// a task is created for it.
     pub segment_new_task_min: u32,
+    /// Embedding model for the soft tier (m30 chunk 6): a file name in the
+    /// models directory (`chronicle model pull bge-small`) or a path. Unset
+    /// = no vectors; title words alone carry the soft tier.
+    pub embed_model: Option<String>,
     /// Segmenter: the score margin a placement needs to skip "to confirm".
     /// Unset = the scorer's default; `chronicle bench --calibrate` prints
     /// the value the verdict log supports.
@@ -136,6 +140,7 @@ impl Default for Config {
             segment_switch_min: 3,
             segment_new_task_min: 10,
             scorer_delta: None,
+            embed_model: None,
             port: 5600,
             cors_allow: Vec::new(),
             browser_apps: [

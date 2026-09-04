@@ -37,12 +37,42 @@ pub const PRESETS: &[ModelSpec] = &[
     },
 ];
 
+/// Embedding models for the soft tier (m30 chunk 6): opt-in through
+/// `embed_model`; never a derive candidate. bge-small passed the latency
+/// gate on the reference laptop (p95 7 ms per title); EmbeddingGemma-300m
+/// did not (p95 29 ms).
+pub const EMBED_PRESETS: &[ModelSpec] = &[ModelSpec {
+    name: "bge-small",
+    repo: "CompendiumLabs/bge-small-en-v1.5-gguf",
+    file: "bge-small-en-v1.5-q8_0.gguf",
+}];
+
 pub fn default_preset() -> &'static ModelSpec {
     &PRESETS[0]
 }
 
+/// The embedding model file from `embed_model`: a path, or a file name
+/// (or preset name) inside the models directory. None when unset or
+/// missing.
+pub fn resolve_embed(embed_model: Option<&str>, data_dir: &Path) -> Option<PathBuf> {
+    let name = embed_model?;
+    let direct = PathBuf::from(name);
+    if direct.is_absolute() && direct.exists() {
+        return Some(direct);
+    }
+    let file = EMBED_PRESETS
+        .iter()
+        .find(|p| p.name == name)
+        .map_or(name, |p| p.file);
+    let p = models_dir(data_dir).join(file);
+    p.exists().then_some(p)
+}
+
 pub fn preset(name: &str) -> Option<&'static ModelSpec> {
-    PRESETS.iter().find(|p| p.name == name)
+    PRESETS
+        .iter()
+        .chain(EMBED_PRESETS.iter())
+        .find(|p| p.name == name)
 }
 
 pub fn models_dir(data_dir: &Path) -> PathBuf {
