@@ -10,6 +10,7 @@ pub mod heartbeats;
 pub mod insights;
 pub mod intent;
 pub mod merge;
+pub mod models_config;
 pub mod prepass;
 pub mod profile;
 pub mod proposals;

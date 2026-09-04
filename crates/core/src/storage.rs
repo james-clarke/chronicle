@@ -48,6 +48,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/020_verdict_log.sql")),
         M::up(include_str!("../migrations/021_interval_kind.sql")),
         M::up(include_str!("../migrations/022_embeddings.sql")),
+        M::up(include_str!("../migrations/023_ai_job_usage.sql")),
     ])
 });
 
@@ -1111,6 +1112,41 @@ pub fn next_eligible_ai_job(
     Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
 }
 
+/// `next_eligible_ai_job` restricted to a set of kinds (m31: a cloud outage
+/// falls back to the kinds the local model still serves, or a caller wants
+/// only the kinds a live backend covers). `include` true means `kind IN
+/// (..)`, false means `kind NOT IN (..)`. An empty `kinds` list is `None`
+/// when including (nothing to pick from) and identical to
+/// `next_eligible_ai_job` when excluding (nothing excluded).
+pub fn next_eligible_ai_job_in(
+    conn: &Connection,
+    min_priority: i64,
+    kinds: &[&str],
+    include: bool,
+) -> Result<Option<i64>, StorageError> {
+    if kinds.is_empty() {
+        return if include {
+            Ok(None)
+        } else {
+            next_eligible_ai_job(conn, min_priority)
+        };
+    }
+    let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let op = if include { "IN" } else { "NOT IN" };
+    let sql = format!(
+        "SELECT id FROM ai_jobs WHERE {ELIGIBLE} AND priority >= ? AND kind {op} ({placeholders})
+         ORDER BY priority DESC, created_ts LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(kinds.len() + 1);
+    bound.push(&min_priority);
+    for kind in kinds {
+        bound.push(kind);
+    }
+    let mut rows = stmt.query(rusqlite::params_from_iter(bound))?;
+    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+}
+
 /// Worker-side claim: flips the job to `running` and burns an attempt.
 pub fn claim_ai_job(conn: &Connection, id: i64) -> Result<Option<AiJobRow>, StorageError> {
     let n = conn.execute(
@@ -1165,6 +1201,105 @@ pub fn skip_ai_job(conn: &Connection, id: i64, reason: &str) -> Result<(), Stora
         params![id, reason, now_ms()],
     )?;
     Ok(())
+}
+
+/// A cloud outage or rate limit: return the job to the queue without
+/// burning its retry budget (`claim_ai_job` already incremented `attempts`
+/// on the attempt that just failed; `ELIGIBLE` caps attempts < 2).
+pub fn defer_ai_job(conn: &Connection, id: i64, reason: &str) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE ai_jobs SET status='pending', attempts=MAX(attempts-1,0), error=?2,
+         started_ts=NULL WHERE id=?1",
+        params![id, reason],
+    )?;
+    Ok(())
+}
+
+/// m31: record which backend ran a job and what it cost, alongside its
+/// normal `complete_ai_job`/`fail_ai_job` transition.
+pub fn record_ai_job_usage(
+    conn: &Connection,
+    id: i64,
+    backend: &str,
+    prompt_tokens: i64,
+    gen_tokens: i64,
+    cost_usd: Option<f64>,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE ai_jobs SET backend=?2, prompt_tokens=?3, gen_tokens=?4, cost_usd=?5 WHERE id=?1",
+        params![id, backend, prompt_tokens, gen_tokens, cost_usd],
+    )?;
+    Ok(())
+}
+
+/// m31: chat has no queued job (it runs inline), but its cost still counts
+/// against the daily cap and the by-backend report. Inserts an
+/// already-`done` row with the usage columns set.
+pub fn insert_done_ai_job(
+    conn: &Connection,
+    kind: &str,
+    backend: &str,
+    prompt_tokens: i64,
+    gen_tokens: i64,
+    cost_usd: Option<f64>,
+) -> Result<i64, StorageError> {
+    let ts = now_ms();
+    conn.execute(
+        "INSERT INTO ai_jobs
+         (kind, status, priority, attempts, created_ts, started_ts, finished_ts, payload,
+          backend, prompt_tokens, gen_tokens, cost_usd)
+         VALUES (?1, 'done', 0, 1, ?2, ?2, ?2, '{}', ?3, ?4, ?5, ?6)",
+        params![kind, ts, backend, prompt_tokens, gen_tokens, cost_usd],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Today's total spend across every job that ran on a cloud backend.
+pub fn cost_today(conn: &Connection, day_start_ms: i64) -> Result<f64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(cost_usd),0) FROM ai_jobs
+         WHERE finished_ts >= ?1 AND cost_usd IS NOT NULL",
+        [day_start_ms],
+        |r| r.get(0),
+    )?)
+}
+
+/// One kind/backend pair's usage for the day — the settings panel's usage
+/// table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiJobUsageRow {
+    pub kind: String,
+    pub backend: String,
+    pub count: i64,
+    pub prompt_tokens: i64,
+    pub gen_tokens: i64,
+    pub cost_usd: f64,
+}
+
+/// Today's done jobs that ran on a cloud backend, grouped by (kind,
+/// backend).
+pub fn ai_jobs_today_by_backend(
+    conn: &Connection,
+    day_start_ms: i64,
+) -> Result<Vec<AiJobUsageRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, backend, COUNT(*), COALESCE(SUM(prompt_tokens),0),
+                COALESCE(SUM(gen_tokens),0), COALESCE(SUM(cost_usd),0)
+         FROM ai_jobs
+         WHERE finished_ts >= ?1 AND status='done' AND backend IS NOT NULL
+         GROUP BY kind, backend ORDER BY kind",
+    )?;
+    let rows = stmt.query_map([day_start_ms], |r| {
+        Ok(AiJobUsageRow {
+            kind: r.get(0)?,
+            backend: r.get(1)?,
+            count: r.get(2)?,
+            prompt_tokens: r.get(3)?,
+            gen_tokens: r.get(4)?,
+            cost_usd: r.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Newest job of `kind`, any status: (status, created, error) — the
@@ -4908,6 +5043,117 @@ mod tests {
         super::claim_ai_job(&conn, low).unwrap().unwrap();
         super::fail_ai_job(&conn, low, "boom").unwrap();
         assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), None);
+    }
+
+    // A cloud outage defers the job instead of failing it: the attempt just
+    // burned by claim is refunded and the job is eligible again immediately.
+    #[test]
+    fn defer_ai_job_refunds_the_attempt() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts(1_000);
+        let id = super::enqueue_ai_job(&conn, ts, "journal", 0, "{}").unwrap();
+
+        super::claim_ai_job(&conn, id).unwrap().unwrap();
+        super::defer_ai_job(&conn, id, "cloud unreachable").unwrap();
+        assert_eq!(
+            super::ai_job_status(&conn, id).unwrap(),
+            Some(("pending".into(), Some("cloud unreachable".into())))
+        );
+        assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(id));
+
+        // Deferring never burns the two-attempt budget: this can repeat
+        // without the job ever dropping out via ELIGIBLE's attempts < 2.
+        super::claim_ai_job(&conn, id).unwrap().unwrap();
+        super::defer_ai_job(&conn, id, "cloud unreachable").unwrap();
+        assert_eq!(super::next_eligible_ai_job(&conn, 0).unwrap(), Some(id));
+    }
+
+    #[test]
+    fn record_usage_feeds_cost_today_and_by_backend() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts(1_000);
+        let job = super::enqueue_ai_job(&conn, ts, "journal", 0, "{}").unwrap();
+        super::claim_ai_job(&conn, job).unwrap().unwrap();
+        super::record_ai_job_usage(&conn, job, "anthropic", 500, 80, Some(0.02)).unwrap();
+        super::complete_ai_job(&conn, job, "ok").unwrap();
+
+        assert_eq!(super::cost_today(&conn, 0).unwrap(), 0.02);
+        // A window that starts after the job finished sees none of it.
+        assert_eq!(
+            super::cost_today(&conn, super::now_ms() + 1_000).unwrap(),
+            0.0
+        );
+
+        let rows = super::ai_jobs_today_by_backend(&conn, 0).unwrap();
+        assert_eq!(
+            rows,
+            vec![super::AiJobUsageRow {
+                kind: "journal".into(),
+                backend: "anthropic".into(),
+                count: 1,
+                prompt_tokens: 500,
+                gen_tokens: 80,
+                cost_usd: 0.02,
+            }]
+        );
+    }
+
+    #[test]
+    fn next_eligible_ai_job_in_include_exclude_and_empty() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = crate::types::ms_to_ts(1_000);
+        let journal = super::enqueue_ai_job(&conn, ts, "journal", 0, "{}").unwrap();
+        let chat = super::enqueue_ai_job(&conn, ts, "chat", 0, "{}").unwrap();
+
+        // Include: only kinds in the list are candidates.
+        assert_eq!(
+            super::next_eligible_ai_job_in(&conn, 0, &["chat"], true).unwrap(),
+            Some(chat)
+        );
+        // Exclude: everything but the listed kinds.
+        assert_eq!(
+            super::next_eligible_ai_job_in(&conn, 0, &["chat"], false).unwrap(),
+            Some(journal)
+        );
+        // Empty list: include finds nothing, exclude matches the unfiltered
+        // query (whichever job wins priority/order ties).
+        assert_eq!(
+            super::next_eligible_ai_job_in(&conn, 0, &[], true).unwrap(),
+            None
+        );
+        assert_eq!(
+            super::next_eligible_ai_job_in(&conn, 0, &[], false).unwrap(),
+            super::next_eligible_ai_job(&conn, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn insert_done_ai_job_appears_in_by_backend() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let id =
+            super::insert_done_ai_job(&conn, "chat", "anthropic", 1_200, 300, Some(0.05)).unwrap();
+        assert_eq!(
+            super::ai_job_status(&conn, id).unwrap(),
+            Some(("done".into(), None))
+        );
+
+        let rows = super::ai_jobs_today_by_backend(&conn, 0).unwrap();
+        assert_eq!(
+            rows,
+            vec![super::AiJobUsageRow {
+                kind: "chat".into(),
+                backend: "anthropic".into(),
+                count: 1,
+                prompt_tokens: 1_200,
+                gen_tokens: 300,
+                cost_usd: 0.05,
+            }]
+        );
+        assert_eq!(super::cost_today(&conn, 0).unwrap(), 0.05);
     }
 
     // 008 adds the workspace tables; task deletion cascades workspace rows
