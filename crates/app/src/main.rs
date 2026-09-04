@@ -180,6 +180,12 @@ enum Cmd {
         /// Replay: write the per-probe results as JSON here for diffing.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Score with the m30 evidence profiler instead of (or alongside) a
+        /// model: no llama load. Fixture mode: persona fixtures with
+        /// `.expect.json` groups. Replay mode: scores probes against the
+        /// profiler and, if a model also runs, a combined verdict.
+        #[arg(long)]
+        scorer: bool,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -243,9 +249,10 @@ fn main() -> anyhow::Result<()> {
             replay,
             since,
             out,
+            scorer,
         } => {
             if replay {
-                replay_eval(&data_dir, since, model.as_deref(), out.as_deref())
+                replay_eval(&data_dir, since, model.as_deref(), scorer, out.as_deref())
             } else {
                 bench(
                     &data_dir,
@@ -255,6 +262,7 @@ fn main() -> anyhow::Result<()> {
                     only.as_deref(),
                     model.as_deref(),
                     no_mcp,
+                    scorer,
                 )
             }
         }

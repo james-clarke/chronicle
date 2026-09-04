@@ -6,10 +6,23 @@ use chronicle_core::config::Config;
 use jiff::{Timestamp, civil, tz::TimeZone};
 
 use crate::derive::{AFK_SPLIT_MS, COALESCE_GAP_MIN, OPEN_CAP, afk_gaps_min, build_batch_digest};
+
+// (name, digest, open tasks, expectations, AFK gaps ≥ 5 min in window
+// minutes, sessionized spans — the last only needed by --scorer)
+type Case = (
+    String,
+    String,
+    Vec<chronicle_core::types::OpenTask>,
+    Option<chronicle_core::eval::Expectations>,
+    Vec<(i64, i64)>,
+    Vec<chronicle_core::sessionizer::SpanDraft>,
+);
+
 /// M4 benchmark gate: run every downloaded preset over fixture streams and
 /// real batches, print tasks + timing side by side. Fixtures with a
 /// `<name>.expect.json` are scored deterministically (post-merge output);
 /// judgment on the rest stays human.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bench(
     data_dir: &Path,
     fixtures: &Path,
@@ -18,20 +31,13 @@ pub(crate) fn bench(
     only: Option<&str>,
     model_filter: Option<&str>,
     no_mcp: bool,
+    scorer: bool,
 ) -> anyhow::Result<()> {
     use chronicle_core::eval::Expectations;
-    use chronicle_core::types::{Event, OpenTask};
+    use chronicle_core::types::Event;
     use chronicle_core::{digest, sessionizer, storage};
 
     let config = Config::load(&data_dir.join("config.toml"))?;
-    // (name, digest, open tasks, expectations, AFK gaps ≥ 5 min in window minutes)
-    type Case = (
-        String,
-        String,
-        Vec<OpenTask>,
-        Option<Expectations>,
-        Vec<(i64, i64)>,
-    );
     let mut cases: Vec<Case> = Vec::new();
 
     if fixtures.is_dir() {
@@ -87,6 +93,7 @@ pub(crate) fn bench(
                 open,
                 expect,
                 gaps,
+                spans,
             ));
         }
     }
@@ -105,7 +112,14 @@ pub(crate) fn bench(
             };
             let open = storage::open_tasks(&conn, OPEN_CAP)?;
             let bd = build_batch_digest(&conn, &config, data_dir, &batch, open, !no_mcp)?;
-            cases.push((format!("batch:{id}"), bd.digest, bd.open, None, bd.gaps));
+            cases.push((
+                format!("batch:{id}"),
+                bd.digest,
+                bd.open,
+                None,
+                bd.gaps,
+                spans,
+            ));
         }
     }
     if let Some(filter) = only {
@@ -123,13 +137,16 @@ pub(crate) fn bench(
         }
         return Ok(());
     }
+    if scorer {
+        return scorer_fixture_eval(&cases, &config);
+    }
 
     let models = bench_models(data_dir, model_filter)?;
 
     for (name, path) in &models {
         let model = chronicle_derive::DeriveModel::load(path)?;
         let mut session = model.session()?;
-        for (case, digest_text, open, expect, gaps) in &cases {
+        for (case, digest_text, open, expect, gaps, _spans) in &cases {
             println!(
                 "\n=== {case} [{name}] (digest ~{} tokens)",
                 digest::approx_tokens(digest_text)
@@ -176,6 +193,144 @@ pub(crate) fn bench(
     Ok(())
 }
 
+/// `chronicle bench --scorer` (fixture mode, m30 chunk 2): score the m30
+/// evidence profiler against persona fixtures whose `.expect.json` carries
+/// `groups` — no model load. Each fixture's groups become synthetic tasks
+/// and their ranges are walked in time order, teaching the profiler the
+/// ground truth after every range (as a user confirmation would): a range
+/// on a group not taught yet must score "new" (`best: None`), one on a
+/// group already taught must resolve back to that same task.
+// (group index, minute range, ms range)
+type FlatRange = (usize, (i64, i64), (i64, i64));
+
+fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
+    use chronicle_core::extract;
+    use chronicle_core::profile::{self, Params, Segment};
+    use chronicle_core::replay::{IntervalRow, TaskRow};
+    use chronicle_core::sessionizer::SpanKind;
+    use std::collections::HashSet;
+
+    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let params = Params::default();
+    let (mut fixtures_ok, mut fixtures_n) = (0usize, 0usize);
+
+    for (case, _digest, _open, expect, _gaps, spans) in cases {
+        let Some(exp) = expect else { continue };
+        if exp.groups.is_empty() {
+            continue;
+        }
+        println!("\n=== {case} [scorer] ({} groups)", exp.groups.len());
+        // Ranges in `.expect.json` are minute offsets from the window start
+        // (end-exclusive; see bench()'s fixture loop, which uses the same
+        // origin for `afk_gaps_min`).
+        let origin = spans.first().map_or(0, |s| s.start.as_millisecond());
+
+        let mut aspans: Vec<profile::AnchoredSpan> = spans
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.kind == SpanKind::Focus)
+            .map(|(i, s)| profile::AnchoredSpan {
+                id: i as i64,
+                start_ts: s.start.as_millisecond(),
+                end_ts: s.end.as_millisecond(),
+                app: s.app.clone(),
+                title: s.title.clone(),
+                anchors: extract::extract(&s.app, &s.title, s.url.as_deref(), &re),
+            })
+            .collect();
+        aspans.sort_by_key(|s| s.start_ts);
+
+        let tasks: Vec<TaskRow> = exp
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(gi, g)| {
+                let earliest = g.ranges.iter().map(|r| r.0).min().unwrap_or(0);
+                TaskRow {
+                    id: (gi + 1) as i64,
+                    label: g.name.clone(),
+                    project: g.project.clone(),
+                    declared: false,
+                    closed: false,
+                    created_ts: origin + earliest * 60_000,
+                    closed_ts: None,
+                }
+            })
+            .collect();
+
+        // Flatten and walk in time order.
+        let mut flat: Vec<FlatRange> = exp
+            .groups
+            .iter()
+            .enumerate()
+            .flat_map(|(gi, g)| {
+                g.ranges
+                    .iter()
+                    .map(move |&r| (gi, r, (origin + r.0 * 60_000, origin + r.1 * 60_000)))
+            })
+            .collect();
+        flat.sort_by_key(|(_, _, ms)| ms.0);
+
+        let mut seen_intervals: Vec<IntervalRow> = Vec::new();
+        let mut seen_groups: HashSet<usize> = HashSet::new();
+        let (mut ok, mut n) = (0usize, 0usize);
+        let (mut ok_c, mut n_c) = (0usize, 0usize);
+        for (idx, (gi, min_range, ms_range)) in flat.iter().enumerate() {
+            let task_id = (*gi + 1) as i64;
+            let profiles = profile::build_profiles(
+                &tasks,
+                &seen_intervals,
+                &aspans,
+                &[],
+                &re,
+                ms_range.0,
+                &params,
+            );
+            let seg = Segment::from_spans(&aspans, ms_range.0, ms_range.1);
+            let v = profile::score(&seg, &profiles, &params);
+            let expected = seen_groups.contains(gi).then_some(task_id);
+            let pass = v.best == expected;
+            n += 1;
+            if pass {
+                ok += 1;
+            }
+            if v.confident {
+                n_c += 1;
+                if pass {
+                    ok_c += 1;
+                }
+            }
+            let verdict = if pass { "PASS" } else { "FAIL" };
+            let show = |t: Option<i64>| t.map_or("new".to_string(), |id| id.to_string());
+            println!(
+                "  [{verdict}] {case} {} {:02}:{:02}\u{2013}{:02}:{:02}: best={} expected={} margin={:.2} {}",
+                exp.groups[*gi].name,
+                min_range.0 / 60,
+                min_range.0 % 60,
+                min_range.1 / 60,
+                min_range.1 % 60,
+                show(v.best),
+                show(expected),
+                v.margin,
+                if v.confident { "confident" } else { "unsure" },
+            );
+            seen_intervals.push(IntervalRow {
+                id: idx as i64,
+                task_id,
+                batch_id: None,
+                start_ts: ms_range.0,
+                end_ts: ms_range.1,
+            });
+            seen_groups.insert(*gi);
+        }
+        println!("  {case} scorer: {ok}/{n} (confident {ok_c}/{n_c})");
+        fixtures_ok += ok;
+        fixtures_n += n;
+    }
+    println!("\nscorer fixtures: {fixtures_ok}/{fixtures_n}");
+    Ok(())
+}
+
 /// Ephemeral derivation worker: claim batch → digest → infer → write tasks →
 /// exit. Any failure marks the batch failed (retry-once via attempts cap).
 /// Downloaded model presets, optionally filtered by name substring.
@@ -207,11 +362,14 @@ pub(crate) fn replay_eval(
     data_dir: &Path,
     since_days: u64,
     model_filter: Option<&str>,
+    scorer: bool,
     out: Option<&Path>,
 ) -> anyhow::Result<()> {
-    use chronicle_core::replay::{self, Check};
+    use chronicle_core::profile::{self, Params, Segment};
+    use chronicle_core::replay::{self, Check, Replayed};
     use chronicle_core::types::TaskSlot;
     use chronicle_core::{digest, merge, storage};
+    use std::collections::HashMap;
 
     let config = Config::load(&data_dir.join("config.toml"))?;
     let conn = storage::open(&data_dir.join("chronicle.db"))?;
@@ -242,13 +400,137 @@ pub(crate) fn replay_eval(
         batch_ids.len(),
         skipped.len()
     );
-    let models = bench_models(data_dir, model_filter)?;
+
+    // The scorer pass never loads a model: run it up front (batches share
+    // `open_tasks_at` with the model path below) and keep, per probe, both
+    // its verdict (for the calibration block and `--out`) and its
+    // `Replayed` (reused by the combined pass once models have run).
+    let mut scorer_results: Vec<replay::ProbeResult> = Vec::new();
+    let mut scorer_verdicts: Vec<(Option<i64>, f64, bool)> = Vec::new();
+    let mut scorer_by_probe: HashMap<(i64, i64), (bool, Replayed)> = HashMap::new();
+    let mut scorer_json: Option<serde_json::Value> = None;
+    if scorer {
+        let spans = storage::anchored_spans(&conn, 0, i64::MAX)?;
+        let params = Params::default();
+        let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+        for &bid in &batch_ids {
+            let batch = storage::batch_row(&conn, bid)?
+                .with_context(|| format!("batch {bid} vanished mid-replay"))?;
+            let open_at = replay::open_tasks_at(
+                &rows.tasks,
+                &rows.intervals,
+                &rows.corrections,
+                batch.end_ts,
+                8,
+            );
+            let profiles = profile::build_profiles(
+                &rows.tasks,
+                &rows.intervals,
+                &spans,
+                &rows.corrections,
+                &re,
+                batch.start_ts,
+                &params,
+            );
+            for p in probes.iter().filter(|p| p.batch_id == bid) {
+                let seg = Segment::from_spans(&spans, p.range.0, p.range.1);
+                let v = profile::score(&seg, &profiles, &params);
+                let label = match v.best {
+                    Some(id) => rows
+                        .tasks
+                        .iter()
+                        .find(|t| t.id == id)
+                        .map(|t| replay::label_at(t, batch.end_ts, &rows.corrections).0)
+                        .unwrap_or_default(),
+                    None => seg.describe(3),
+                };
+                let replayed = Replayed {
+                    task_id: v.best,
+                    label,
+                    start_offset_min: (p.range.0 - batch.start_ts) / 60_000,
+                    end_offset_min: (p.range.1 - batch.start_ts + 59_999) / 60_000,
+                };
+                let r = replay::score(p, batch.start_ts, std::slice::from_ref(&replayed), &open_at);
+                let verdict = if r.pass { "PASS" } else { "FAIL" };
+                println!(
+                    "[{verdict}] scorer c{} {} {}: best={} margin={:.2} {} — {}",
+                    r.correction_id,
+                    r.kind,
+                    r.check.name(),
+                    v.best.map_or("new".to_string(), |id| id.to_string()),
+                    v.margin,
+                    if v.confident { "confident" } else { "unsure" },
+                    r.detail
+                );
+                scorer_by_probe.insert((p.correction_id, p.batch_id), (v.confident, replayed));
+                scorer_verdicts.push((v.best, v.margin, v.confident));
+                scorer_results.push(r);
+            }
+        }
+        let mut scorer_totals = serde_json::Map::new();
+        println!("\n=== scorer replay score");
+        let mut ok_all = 0;
+        for check in [Check::Placed, Check::Label, Check::NotEjected] {
+            let n = scorer_results.iter().filter(|r| r.check == check).count();
+            let ok = scorer_results
+                .iter()
+                .filter(|r| r.check == check && r.pass)
+                .count();
+            ok_all += ok;
+            if n > 0 {
+                println!("  {}: {ok}/{n}", check.name());
+            }
+            scorer_totals.insert(check.name().into(), serde_json::json!([ok, n]));
+        }
+        println!("  total: {ok_all}/{}", scorer_results.len());
+        scorer_totals.insert(
+            "total".into(),
+            serde_json::json!([ok_all, scorer_results.len()]),
+        );
+        let n_conf = scorer_verdicts.iter().filter(|(.., c)| *c).count();
+        let ok_conf = scorer_results
+            .iter()
+            .zip(&scorer_verdicts)
+            .filter(|(_, (.., c))| *c)
+            .filter(|(r, _)| r.pass)
+            .count();
+        let n_uns = scorer_verdicts.len() - n_conf;
+        let ok_uns = scorer_results
+            .iter()
+            .zip(&scorer_verdicts)
+            .filter(|(_, (.., c))| !*c)
+            .filter(|(r, _)| r.pass)
+            .count();
+        println!("  confident: {n_conf} (pass {ok_conf}/{n_conf})");
+        println!("  unsure: {n_uns} (pass {ok_uns}/{n_uns})");
+        let new_verdicts = scorer_verdicts.iter().filter(|(b, ..)| b.is_none()).count();
+        println!("  new-task verdicts: {new_verdicts}");
+        scorer_totals.insert("confident".into(), serde_json::json!([ok_conf, n_conf]));
+        scorer_totals.insert("unsure".into(), serde_json::json!([ok_uns, n_uns]));
+        scorer_totals.insert("new_task_verdicts".into(), serde_json::json!(new_verdicts));
+        scorer_json = Some(serde_json::json!({
+            "totals": scorer_totals,
+            "probes": scorer_results,
+        }));
+    }
+
+    // `--scorer` without an explicit `--model` skips model loading entirely
+    // (the fast path the scorer pass above is for); with `--model` given, or
+    // without `--scorer` at all, behave as before.
+    let models: Vec<(&'static str, PathBuf)> = if scorer && model_filter.is_none() {
+        Vec::new()
+    } else {
+        bench_models(data_dir, model_filter)?
+    };
+    let combine = scorer && !models.is_empty();
 
     let mut report = Vec::new();
+    let mut combined_by_model = serde_json::Map::new();
     for (name, path) in &models {
         let model = chronicle_derive::DeriveModel::load(path)?;
         let mut session = model.session()?;
         let mut results: Vec<replay::ProbeResult> = Vec::new();
+        let mut combined_results: Vec<replay::ProbeResult> = Vec::new();
         for &bid in &batch_ids {
             let batch = storage::batch_row(&conn, bid)?
                 .with_context(|| format!("batch {bid} vanished mid-replay"))?;
@@ -322,20 +604,45 @@ pub(crate) fn replay_eval(
                             r.check.name(),
                             r.detail
                         );
+                        if combine {
+                            let cr = match scorer_by_probe.get(&(p.correction_id, p.batch_id)) {
+                                Some((true, sr)) => replay::score(
+                                    p,
+                                    batch.start_ts,
+                                    std::slice::from_ref(sr),
+                                    &open_at,
+                                ),
+                                _ => r.clone(),
+                            };
+                            combined_results.push(cr);
+                        }
                         results.push(r);
                     }
                 }
                 Err(e) => {
                     println!("--- FAILED in {:.1}s: {e:#}", t0.elapsed().as_secs_f64());
                     for p in bprobes {
-                        results.push(replay::ProbeResult {
+                        let fail = replay::ProbeResult {
                             correction_id: p.correction_id,
                             batch_id: p.batch_id,
                             kind: p.kind.clone(),
                             check: p.check,
                             pass: false,
                             detail: format!("derive failed: {e:#}"),
-                        });
+                        };
+                        if combine {
+                            let cr = match scorer_by_probe.get(&(p.correction_id, p.batch_id)) {
+                                Some((true, sr)) => replay::score(
+                                    p,
+                                    batch.start_ts,
+                                    std::slice::from_ref(sr),
+                                    &open_at,
+                                ),
+                                _ => fail.clone(),
+                            };
+                            combined_results.push(cr);
+                        }
+                        results.push(fail);
                     }
                 }
             }
@@ -365,9 +672,46 @@ pub(crate) fn replay_eval(
             "totals": totals,
             "probes": results,
         }));
+
+        if combine {
+            let mut combined_totals = serde_json::Map::new();
+            println!("\n=== combined (scorer when confident, else {name}) replay score");
+            let mut c_ok_all = 0;
+            for check in [Check::Placed, Check::Label, Check::NotEjected] {
+                let n = combined_results.iter().filter(|r| r.check == check).count();
+                let ok = combined_results
+                    .iter()
+                    .filter(|r| r.check == check && r.pass)
+                    .count();
+                c_ok_all += ok;
+                if n > 0 {
+                    println!("  {}: {ok}/{n}", check.name());
+                }
+                combined_totals.insert(check.name().into(), serde_json::json!([ok, n]));
+            }
+            println!("  total: {c_ok_all}/{}", combined_results.len());
+            combined_totals.insert(
+                "total".into(),
+                serde_json::json!([c_ok_all, combined_results.len()]),
+            );
+            combined_by_model.insert(
+                (*name).to_string(),
+                serde_json::json!({
+                    "totals": combined_totals,
+                    "probes": combined_results,
+                }),
+            );
+        }
     }
     if let Some(out) = out {
-        std::fs::write(out, serde_json::to_string_pretty(&report)?)
+        let mut output = serde_json::json!({ "models": report });
+        if let Some(sj) = scorer_json {
+            output["scorer"] = sj;
+        }
+        if !combined_by_model.is_empty() {
+            output["combined"] = serde_json::Value::Object(combined_by_model);
+        }
+        std::fs::write(out, serde_json::to_string_pretty(&output)?)
             .with_context(|| format!("writing {}", out.display()))?;
         println!("wrote {}", out.display());
     }
