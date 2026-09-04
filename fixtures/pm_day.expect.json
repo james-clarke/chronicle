@@ -1,0 +1,35 @@
+{
+  "open_tasks": [
+    {
+      "label": "shipping the Q4 pricing page",
+      "project": "product",
+      "declared": true
+    },
+    {
+      "label": "reviewing the onboarding funnel drop-off",
+      "project": "growth"
+    }
+  ],
+  "groups": [
+    {
+      "name": "pricing",
+      "ranges": [[0, 46], [49, 90], [120, 124], [300, 390]],
+      "project": "product",
+      "label_any": ["pricing"]
+    },
+    {
+      "name": "onboarding",
+      "ranges": [[90, 120], [124, 165], [405, 480]],
+      "project": "growth",
+      "label_any": ["onboarding"]
+    },
+    {
+      "name": "roadmap",
+      "ranges": [[240, 300]],
+      "label_any": ["roadmap"]
+    }
+  ],
+  "forbid_label_tokens": ["expense", "workday", "verge", "inbox"],
+  "max_tasks": 6,
+  "max_intervals": 10
+}

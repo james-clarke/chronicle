@@ -1,0 +1,36 @@
+{
+  "open_tasks": [
+    {
+      "label": "Northwind brand refresh",
+      "project": "northwind",
+      "declared": true
+    },
+    {
+      "label": "Contoso web redesign",
+      "project": "contoso"
+    }
+  ],
+  "groups": [
+    {
+      "name": "northwind",
+      "ranges": [[0, 46], [49, 90], [120, 124], [270, 330]],
+      "project": "northwind",
+      "label_any": ["northwind"]
+    },
+    {
+      "name": "contoso",
+      "ranges": [[90, 120], [124, 165], [345, 480]],
+      "project": "contoso",
+      "label_any": ["contoso"]
+    },
+    {
+      "name": "timesheets",
+      "ranges": [[240, 270]],
+      "project": "studio",
+      "label_any": ["harvest", "timesheet", "invoic"]
+    }
+  ],
+  "forbid_label_tokens": ["dribbble", "behance", "typewolf"],
+  "max_tasks": 5,
+  "max_intervals": 10
+}
