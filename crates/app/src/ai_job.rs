@@ -33,7 +33,14 @@ pub(crate) fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> 
     let Some(job) = storage::claim_ai_job(&conn, job_id)? else {
         bail!("ai job {job_id} is not eligible")
     };
-    match run_routed(&conn, &config, data_dir, model_path.as_deref(), &models, &job) {
+    match run_routed(
+        &conn,
+        &config,
+        data_dir,
+        model_path.as_deref(),
+        &models,
+        &job,
+    ) {
         Ok(result) => {
             storage::complete_ai_job(&conn, job_id, &result)?;
             tracing::info!(job_id, kind = %job.kind, "ai job done");
@@ -195,9 +202,17 @@ impl Engine {
         }
     }
 
-    fn describe_task(&self, label: &str, project: Option<&str>, evidence: &str) -> anyhow::Result<String> {
+    fn describe_task(
+        &self,
+        label: &str,
+        project: Option<&str>,
+        evidence: &str,
+    ) -> anyhow::Result<String> {
         let prompt = prompts::render_description(label, project, evidence);
-        non_empty(self.complete(JobKind::TaskDescription, &prompt)?, "description")
+        non_empty(
+            self.complete(JobKind::TaskDescription, &prompt)?,
+            "description",
+        )
     }
 
     fn journal_entry(
@@ -230,7 +245,8 @@ impl Engine {
         journal: &str,
     ) -> anyhow::Result<(String, String)> {
         let prompt = prompts::render_checkpoint(label, project, context, journal);
-        let (state, next) = prompts::parse_checkpoint(&self.complete(JobKind::Checkpoint, &prompt)?)?;
+        let (state, next) =
+            prompts::parse_checkpoint(&self.complete(JobKind::Checkpoint, &prompt)?)?;
         Ok((clip(state, 300), clip(next, 300)))
     }
 

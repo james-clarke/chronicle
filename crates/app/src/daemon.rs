@@ -979,7 +979,8 @@ impl Scheduler {
                 let _ = storage::fail_ai_job(conn, id, "worker died");
             }
             Ok(Some((status, detail)))
-                if status == "pending" && detail.as_deref().is_some_and(|d| d.starts_with("cloud:")) =>
+                if status == "pending"
+                    && detail.as_deref().is_some_and(|d| d.starts_with("cloud:")) =>
             {
                 let wait = self.cloud_backoff;
                 self.cloud_backoff_until = Some(Instant::now() + wait);

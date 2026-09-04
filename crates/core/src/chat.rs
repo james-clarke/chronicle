@@ -17,11 +17,35 @@ use crate::storage::{self, StorageError};
 use crate::types::{ActivityKind, Task, ms_to_ts, ts_to_ms};
 use crate::{digest, report, timeref};
 
-/// Hard cap ≈ digest::MAX_TOKENS under the digest's chars-per-token heuristic.
-const MAX_CHARS: usize = digest::max_chars(digest::MAX_TOKENS);
 const FTS_K: usize = 12;
 /// Rows of the per-task totals table a quantity question gets.
 const TABLE_ROWS: usize = 40;
+
+/// How much context a question may carry: the local 4B gets
+/// `digest::MAX_TOKENS`; a cloud backend (m31) gets a budget an order of
+/// magnitude larger, and the row caps scale with it.
+#[derive(Debug, Clone, Copy)]
+pub struct Budget {
+    pub max_chars: usize,
+    pub table_rows: usize,
+    pub fts_k: usize,
+}
+
+impl Budget {
+    pub fn for_tokens(max_tokens: usize) -> Self {
+        let scale = (max_tokens / digest::MAX_TOKENS).clamp(1, 8);
+        Self {
+            max_chars: digest::max_chars(max_tokens),
+            table_rows: TABLE_ROWS * scale,
+            fts_k: FTS_K * scale,
+        }
+    }
+
+    /// The local model's budget.
+    pub fn local() -> Self {
+        Self::for_tokens(digest::MAX_TOKENS)
+    }
+}
 
 /// What an answer was built from, for the panel's "Read 14 blocks ·
 /// Thu 3 Sep 08:00–14:56" footer and the row list it expands to.
@@ -42,22 +66,32 @@ pub fn build_context(
     question: &str,
     now: &Zoned,
 ) -> Result<(String, ChatContextInfo), StorageError> {
+    build_context_with(conn, question, now, Budget::local())
+}
+
+/// [`build_context`] under an explicit budget.
+pub fn build_context_with(
+    conn: &Connection,
+    question: &str,
+    now: &Zoned,
+    budget: Budget,
+) -> Result<(String, ChatContextInfo), StorageError> {
     let tz = now.time_zone();
     let (mut out, mut info) = match resolve_range(conn, question, now)? {
-        Some((lo, hi)) => range_context(conn, question, lo, hi, tz)?,
+        Some((lo, hi)) => range_context(conn, question, lo, hi, tz, budget)?,
         // A quantity question has to arrive with the totals table — the
         // prompt tells the model to refuse the total without one — and FTS
         // context carries none. This week stands in for the missing phrase.
         None if is_quantity_question(question) => {
             let (lo, hi) = this_week_range(now);
-            range_context(conn, question, lo, hi, tz)?
+            range_context(conn, question, lo, hi, tz, budget)?
         }
         None => {
-            let (fts, fts_info) = fts_context(conn, question, tz)?;
+            let (fts, fts_info) = fts_context(conn, question, tz, budget)?;
             if fts.is_empty() {
                 // Nothing matched: today's activity beats an empty prompt.
                 let (lo, hi) = today_range(now);
-                let (ctx, info) = range_context(conn, question, lo, hi, tz)?;
+                let (ctx, info) = range_context(conn, question, lo, hi, tz, budget)?;
                 (
                     format!("(no data matched the question; showing today)\n{ctx}"),
                     info,
@@ -67,7 +101,7 @@ pub fn build_context(
             }
         }
     };
-    digest::truncate_chars(&mut out, MAX_CHARS);
+    digest::truncate_chars(&mut out, budget.max_chars);
     // Truncation drops rows off the tail of the prompt; the footer must
     // count only the ones the model actually received.
     info.rows.retain(|r| out.contains(r.as_str()));
@@ -171,6 +205,16 @@ pub fn build_task_context(
     task_id: i64,
     tz: &TimeZone,
 ) -> Result<String, StorageError> {
+    build_task_context_with(conn, task_id, tz, Budget::local())
+}
+
+/// [`build_task_context`] under an explicit budget.
+pub fn build_task_context_with(
+    conn: &Connection,
+    task_id: i64,
+    tz: &TimeZone,
+    budget: Budget,
+) -> Result<String, StorageError> {
     let (label, project, external_ref): (String, Option<String>, Option<String>) = conn.query_row(
         "SELECT label, project, external_ref FROM tasks WHERE id=?1",
         [task_id],
@@ -215,7 +259,7 @@ pub fn build_task_context(
             let _ = writeln!(out, "\n## Screen evidence\n{}", evidence.trim());
         }
     }
-    digest::truncate_chars(&mut out, MAX_CHARS);
+    digest::truncate_chars(&mut out, budget.max_chars);
     Ok(out)
 }
 
@@ -247,6 +291,7 @@ fn range_context(
     lo: i64,
     hi: i64,
     tz: &TimeZone,
+    budget: Budget,
 ) -> Result<(String, ChatContextInfo), StorageError> {
     let tasks = storage::tasks_in_range(conn, lo, hi)?;
     let spans = storage::spans_in_range(conn, lo, hi)?;
@@ -262,7 +307,7 @@ fn range_context(
         tz.iana_name().unwrap_or("local"),
     );
 
-    // Ahead of ## Tasks so totals survive the MAX_CHARS truncation, and
+    // Ahead of ## Tasks so totals survive the budget truncation, and
     // over the full vec, not the take(60) display cap below.
     let totals = report::project_totals(&tasks, lo, hi);
     if !totals.is_empty() {
@@ -278,7 +323,7 @@ fn range_context(
             let _ = write!(
                 out,
                 "\n## Time per task (computed from the database; quote these figures verbatim)\n{}",
-                report::totals_table(&per_task, TABLE_ROWS)
+                report::totals_table(&per_task, budget.table_rows)
             );
         }
     }
@@ -348,10 +393,11 @@ fn fts_context(
     conn: &Connection,
     question: &str,
     tz: &TimeZone,
+    budget: Budget,
 ) -> Result<(String, ChatContextInfo), StorageError> {
     let query = storage::fts_query_from_text(question);
-    let tasks = storage::search_tasks(conn, &query, FTS_K)?;
-    let spans = storage::search_spans(conn, &query, FTS_K)?;
+    let tasks = storage::search_tasks(conn, &query, budget.fts_k)?;
+    let spans = storage::search_spans(conn, &query, budget.fts_k)?;
     if tasks.is_empty() && spans.is_empty() {
         return Ok((String::new(), ChatContextInfo::default()));
     }
