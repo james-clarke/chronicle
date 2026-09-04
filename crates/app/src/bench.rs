@@ -914,3 +914,53 @@ pub(crate) fn anchor_report(data_dir: &Path, days: u32, top: usize) -> anyhow::R
     }
     Ok(())
 }
+
+/// `chronicle backfill-evidence`: recompute `task_evidence` for every task
+/// from stored intervals, anchored spans and corrections.
+pub(crate) fn backfill_evidence(data_dir: &Path) -> anyhow::Result<()> {
+    use chronicle_core::{profile, storage};
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let now_ts = Timestamp::now().as_millisecond();
+    let n = storage::rebuild_task_evidence(&mut conn, &re, &profile::Params::default(), now_ts)?;
+    println!("rebuilt {n} task_evidence rows");
+    Ok(())
+}
+
+/// `chronicle evidence`: a task's evidence rows, or a summary of the
+/// strongest evidence across all tasks.
+pub(crate) fn evidence_report(
+    data_dir: &Path,
+    task: Option<i64>,
+    top: usize,
+) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    if let Some(task_id) = task {
+        let mut rows = storage::task_evidence(&conn, task_id)?;
+        rows.sort_by_key(|row| row.key.is_term());
+        let total = rows.len();
+        for row in rows.iter().take(60) {
+            println!(
+                "  {:8} {:>7.1}m  {:10} {}",
+                row.key.kind_str(),
+                row.minutes,
+                row.source.as_str(),
+                row.key.value()
+            );
+        }
+        if total > 60 {
+            println!("… and {} more", total - 60);
+        }
+    } else {
+        let summary = storage::evidence_summary(&conn, top)?;
+        for task in &summary {
+            println!("#{} {} — {} rows", task.task_id, task.label, task.rows);
+            for (kind, value, minutes) in &task.top {
+                println!("  {kind}={value} {minutes:.0}m");
+            }
+        }
+    }
+    Ok(())
+}

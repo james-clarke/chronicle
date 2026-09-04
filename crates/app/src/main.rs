@@ -9,7 +9,10 @@ mod status;
 mod ui;
 
 use ai_job::ai_job_worker;
-use bench::{backfill_coalesce, backfill_descriptions, bench, replay_eval};
+use bench::{
+    backfill_coalesce, backfill_descriptions, backfill_evidence, bench, evidence_report,
+    replay_eval,
+};
 use capture::gcal_login;
 use chat_worker::chat_worker;
 use daemon::{run, send_ctrl, socket_path};
@@ -105,6 +108,20 @@ enum Cmd {
         days: u32,
         /// Values to list.
         #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
+    /// Internal: one-off rebuild of `task_evidence` from stored intervals,
+    /// anchored spans and corrections.
+    #[command(hide = true)]
+    BackfillEvidence,
+    /// Show a task's evidence rows, or a summary of the strongest evidence
+    /// across all tasks.
+    Evidence {
+        /// Show this task's evidence rows instead of the cross-task summary.
+        #[arg(long)]
+        task: Option<i64>,
+        /// Entries to list per task in the summary.
+        #[arg(long, default_value_t = 5)]
         top: usize,
     },
     /// Generate descriptions for closed tasks that lack one, newest first.
@@ -272,6 +289,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
         Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
         Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),
+        Cmd::BackfillEvidence => backfill_evidence(&data_dir),
+        Cmd::Evidence { task, top } => evidence_report(&data_dir, task, top),
         Cmd::GcalLogin {
             client_id,
             client_secret,
