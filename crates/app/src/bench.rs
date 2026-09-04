@@ -728,6 +728,49 @@ pub(crate) fn calibrate(data_dir: &Path, since_days: u64) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// One derive engine for the replay: the local session or a cloud backend
+/// (m31 chunk 0). Both take the same digest and return the same `DeriveRun`.
+enum ReplayEngine<'m> {
+    Local(chronicle_derive::DeriveSession<'m>),
+    Cloud(&'m dyn chronicle_derive::text::TextBackend),
+}
+
+impl ReplayEngine<'_> {
+    /// The run plus its dollar cost (cloud only).
+    fn infer(
+        &mut self,
+        digest: &str,
+    ) -> anyhow::Result<(chronicle_derive::DeriveRun, Option<f64>)> {
+        use chronicle_derive::runner::{Prompt, RunStats, finish_derive};
+        use chronicle_derive::text::{JobKind, Request};
+        match self {
+            ReplayEngine::Local(s) => Ok((s.infer(digest, &mut |_| {})?, None)),
+            ReplayEngine::Cloud(b) => {
+                let rendered = Prompt::Batch.render(digest);
+                let schema: serde_json::Value = serde_json::from_str(Prompt::Batch.schema_json())?;
+                let req = Request {
+                    job: JobKind::Derive,
+                    system: None,
+                    user: chronicle_derive::prompts::strip_no_think(&rendered),
+                    history: &[],
+                    schema: Some(&schema),
+                    max_output: 0,
+                };
+                let c = b.complete(&req, &mut |_| {})?;
+                let cost = chronicle_derive::cloud::cost_usd(b.model(), &c);
+                let stats = RunStats {
+                    prompt_tokens: c.input_tokens as usize,
+                    cached_prefix_tokens: c.cache_read_tokens as usize,
+                    gen_tokens: c.output_tokens as usize,
+                    prompt_eval_ms: 0,
+                    gen_ms: c.wall_ms,
+                };
+                Ok((finish_derive(c.text, stats)?, cost))
+            }
+        }
+    }
+}
+
 /// `chronicle bench --replay`: re-derive every done batch a recent correction
 /// touched, with the open-task list as it stood at the batch's end, and score
 /// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it
@@ -736,6 +779,7 @@ pub(crate) fn replay_eval(
     data_dir: &Path,
     since_days: u64,
     model_filter: Option<&str>,
+    backend: Option<&str>,
     scorer: bool,
     segment: bool,
     probe_set: chronicle_core::replay::ProbeSet,
@@ -937,18 +981,45 @@ pub(crate) fn replay_eval(
     // `--scorer` without an explicit `--model` skips model loading entirely
     // (the fast path the scorer pass above is for); with `--model` given, or
     // without `--scorer` at all, behave as before.
-    let models: Vec<(&'static str, PathBuf)> = if scorer && model_filter.is_none() {
+    // m31 chunk 0: `--backend <name>` replays through a cloud backend from
+    // models.toml instead of a downloaded model, same digest, same scoring.
+    let cloud: Option<(String, Box<dyn chronicle_derive::text::TextBackend>)> = match backend {
+        Some(name) => {
+            let mc = chronicle_core::models_config::ModelsConfig::load(data_dir)?;
+            let cfg = mc
+                .backends
+                .get(name)
+                .with_context(|| format!("no [backends.{name}] in models.toml"))?;
+            Some((name.to_owned(), chronicle_derive::cloud::build(name, cfg)?))
+        }
+        None => None,
+    };
+    let models: Vec<(String, Option<PathBuf>)> = if let Some((name, _)) = &cloud {
+        vec![(name.clone(), None)]
+    } else if scorer && model_filter.is_none() {
         Vec::new()
     } else {
         bench_models(data_dir, model_filter)?
+            .into_iter()
+            .map(|(n, p)| (n.to_owned(), Some(p)))
+            .collect()
     };
     let combine = scorer && !models.is_empty();
 
     let mut report = Vec::new();
     let mut combined_by_model = serde_json::Map::new();
     for (name, path) in &models {
-        let model = chronicle_derive::DeriveModel::load(path)?;
-        let mut session = model.session()?;
+        let name = name.as_str();
+        let local_model;
+        let mut engine = match path {
+            Some(path) => {
+                local_model = chronicle_derive::DeriveModel::load(path)?;
+                ReplayEngine::Local(local_model.session()?)
+            }
+            None => ReplayEngine::Cloud(cloud.as_ref().expect("cloud backend").1.as_ref()),
+        };
+        let mut spent_usd = 0.0;
+        let mut spent_wall = 0.0;
         let mut results: Vec<replay::ProbeResult> = Vec::new();
         let mut combined_results: Vec<replay::ProbeResult> = Vec::new();
         for &bid in &batch_ids {
@@ -971,9 +1042,17 @@ pub(crate) fn replay_eval(
                 digest::approx_tokens(&bd.digest)
             );
             let t0 = Instant::now();
-            match session.infer(&bd.digest, &mut |_| {}) {
-                Ok(run) => {
+            match engine.infer(&bd.digest) {
+                Ok((run, cost)) => {
                     let cached = run.cached_prefix_tokens;
+                    spent_wall += t0.elapsed().as_secs_f64();
+                    if let Some(c) = cost {
+                        spent_usd += c;
+                        println!(
+                            "--- {} prompt + {} gen tokens, ${c:.4}",
+                            run.prompt_tokens, run.gen_tokens
+                        );
+                    }
                     let drafts = merge::sanitize_intervals(run.intervals, bd.open.len());
                     let (slots, linked) = merge::link_intervals(&drafts, &bd.open);
                     let linked = merge::coalesce(linked, &bd.gaps, COALESCE_GAP_MIN);
@@ -1074,12 +1153,20 @@ pub(crate) fn replay_eval(
             }
         }
         let totals = print_totals(&format!("{name} replay score"), &results);
+        if path.is_none() {
+            println!(
+                "{name}: {} batches in {spent_wall:.1}s wall, ${spent_usd:.4} total",
+                batch_ids.len()
+            );
+        }
         report.push(serde_json::json!({
             "model": name,
             "since_days": since_days,
             "generated_ts": Timestamp::now().as_millisecond(),
             "skipped": skipped,
             "totals": totals,
+            "wall_secs": spent_wall,
+            "cost_usd": spent_usd,
             "probes": results,
         }));
 
@@ -1089,7 +1176,7 @@ pub(crate) fn replay_eval(
                 &combined_results,
             );
             combined_by_model.insert(
-                (*name).to_string(),
+                name.to_string(),
                 serde_json::json!({
                     "totals": combined_totals,
                     "probes": combined_results,

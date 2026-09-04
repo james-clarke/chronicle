@@ -187,6 +187,10 @@ enum Cmd {
         /// Only run models whose preset name contains this substring.
         #[arg(long)]
         model: Option<String>,
+        /// Replay through a cloud backend named in models.toml instead of a
+        /// downloaded model (m31 chunk 0 gate).
+        #[arg(long)]
+        backend: Option<String>,
         /// Skip MCP context for --batch cases (offline; replay never gathers it).
         #[arg(long)]
         no_mcp: bool,
@@ -294,6 +298,7 @@ fn main() -> anyhow::Result<()> {
             segment,
             calibrate,
             embed,
+            backend,
         } => {
             if let Some(path) = embed {
                 bench::embed_bench(&data_dir, &path)
@@ -306,6 +311,7 @@ fn main() -> anyhow::Result<()> {
                     &data_dir,
                     since,
                     model.as_deref(),
+                    backend.as_deref(),
                     scorer,
                     segment,
                     set,

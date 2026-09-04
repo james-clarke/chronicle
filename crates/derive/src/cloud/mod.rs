@@ -5,7 +5,24 @@
 pub mod anthropic;
 pub mod sse;
 
-use crate::text::{Completion, JobKind};
+use chronicle_core::models_config::{BackendCfg, BackendKind};
+
+use crate::text::{Completion, JobKind, TextBackend};
+
+/// The backend a `[backends.<name>]` entry describes.
+pub fn build(name: &str, cfg: &BackendCfg) -> anyhow::Result<Box<dyn TextBackend>> {
+    match cfg.kind {
+        BackendKind::Anthropic => Ok(Box::new(anthropic::AnthropicBackend::new(
+            name,
+            &cfg.model,
+            &cfg.api_key,
+            cfg.base_url.as_deref(),
+        ))),
+        BackendKind::OpenAiCompat => {
+            anyhow::bail!("backend {name}: openai_compat arrives in m31 chunk 3")
+        }
+    }
+}
 
 /// Why a cloud call failed, classified so the caller can decide between
 /// retry, fall back to local, and give up. Messages carry the provider's

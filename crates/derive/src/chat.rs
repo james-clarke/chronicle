@@ -18,7 +18,7 @@ use llama_cpp_2::token::LlamaToken;
 
 use crate::backend::{self, N_BATCH};
 
-const SYSTEM_PROMPT: &str = include_str!("../../../prompts/chat_v1.txt");
+pub const SYSTEM_PROMPT: &str = include_str!("../../../prompts/chat_v1.txt");
 
 const N_CTX: u32 = 4096;
 const MAX_GEN: usize = 1024;
