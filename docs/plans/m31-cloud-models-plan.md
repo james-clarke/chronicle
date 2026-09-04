@@ -1,6 +1,6 @@
 # M31 — Cloud models: BYOK, sign-in, and a hosted tier
 
-Status: **research + plan, no code** (2026-09-04). Runs after m30 completes;
+Status: **chunks 0 + 1 shipped 2026-09-04** (branch `m31`; see "Shipped" at the end). Originally research + plan (2026-09-04). Runs after m30 completes;
 m30 chunk 2 (scorer gate) is in progress in another session and this plan
 does not touch its files. Four sub-agents (codebase seams, live DB volumes,
 Rust client crates + provider APIs, prior art + hosted-tier economics)
@@ -494,3 +494,66 @@ backend / capture-config / ui) once the trait from 1 is on main.
   `output_config.format`, adaptive thinking default, `effort`, cache
   minimums 512/1024 tokens, list prices) from the Claude API reference
   cached 2026-06-24.
+
+## Shipped (2026-09-04, chunks 0 + 1)
+
+Seven commits on `m31` (c198692 → e10f790), 230 tests, clippy clean.
+
+- **Engine split** (`c198692`): `derive::prompts` renders every describer
+  prompt and parses its output for both engines; `derive::text` holds
+  `TextBackend` / `JobKind` / `Request` / `Completion`; `Prompt::render`
+  and `runner::finish_derive` expose the batch path; JSON schemas sit next
+  to each GBNF in `grammars/*.json` with a test pinning them to the
+  structured-output subset. Deviations from the design above: the trait is
+  in `text.rs` (`backend.rs` was already llama plumbing), `[routes]` keys
+  are the `ai_jobs.kind` strings verbatim (`name_task`, not `naming`), and
+  templates stay one user message with only the `/no_think` head stripped
+  (the instruction heads are under every cache minimum).
+- **Anthropic backend** (`650013d`): `derive::cloud::anthropic` on ureq 3,
+  streaming SSE, `output_config.format` json_schema for JSON jobs, `effort`
+  per job (low naming/description, medium journal/derive, high chat/
+  narrative/standup), retries on 429/529/5xx with `retry-after`, classified
+  `CloudError` whose text never carries the key, price table with cache
+  reads at 0.1×. Four loopback mock tests.
+- **`models.toml`** (`0a8bbfa`): `core::models_config`, 0600 atomic save,
+  `route_for` / presets / `remove_backend`; migration 023 adds `backend`,
+  `prompt_tokens`, `gen_tokens`, `cost_usd` to `ai_jobs`; `defer_ai_job`
+  refunds the attempt; kind-filtered `next_eligible_ai_job_in`; chat writes
+  a done row through `insert_done_ai_job`.
+- **Chunk 0 hook** (`ebd55ce`): `bench --replay --backend <name>` runs the
+  same digest through the cloud backend and scores identically, printing
+  tokens and dollars per batch. **The gate itself has not run: no key on
+  this box.** To run it: add `[backends.anthropic]` to
+  `~/.local/share/chronicle/models.toml`, then
+  `chronicle bench --replay --backend anthropic --since 7` against the
+  local baseline (37/134 scorer, 44/134 qwen3-4b per the m30 doc). The
+  number decides the `derive` route default and whether chunk 2 exists.
+- **Routing in the worker** (`36d0952`): cloud first when routed and under
+  the cap, fall back to the local model on any `CloudError`, defer with a
+  `cloud: …` reason when there is no local model; the daemon runs cloud
+  jobs in a second slot with no idle/battery gate, backs off 1→10 min after
+  a deferral, and re-reads `models.toml` on mtime change (no restart).
+- **Chat** (`7699f96`): `chat::Budget` parameterises the context (24k
+  tokens on cloud vs 2.2k local, table and FTS caps scale); the whole
+  conversation goes as history; streaming unchanged.
+- **Settings › Model** (`e10f790`): cloud backends card, routing grid with
+  the two presets, daily cap, computed egress line
+  ("1 chat + 1 suggest task + 1 task description to anthropic
+  (claude-opus-5) · MCP context fetches today 18 · posts today 0"),
+  `can_run(kind)` replaces `model_missing` on Home/Reports/Onboarding/Chat.
+  Rename is remove + re-add; presets target the first backend by name.
+
+Verified offline in a sandbox (`XDG_DATA_HOME` copy of the live DB,
+`scripts/mock_messages_api.py` on 127.0.0.1:5799 as `base_url`):
+task_description on cloud → done with `backend=anthropic`, 1500/40 tokens,
+$0.0085; mock returning 500 with no local model → job back to `pending`,
+attempts 0, error `cloud: provider error 500: api_error: boom`; same with
+the models dir linked → three retries then "running local", done in 20 s;
+chat → system prompt + 3-message history, effort high, 28 context blocks,
+`ai_jobs` chat row; suggest_task → `json_schema` request, parsed. Not
+verified: the daemon's cloud slot end to end (needs a sandbox daemon,
+which opens a second UI window), and anything against the real API.
+
+Open for chunk 2+: the OpenAI-compatible backend (`cloud::build` bails on
+`openai_compat`), onboarding three-door and the redaction pass, cost rollup
+in Reports, the derive/live route once the gate number exists.
