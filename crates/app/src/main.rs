@@ -203,6 +203,12 @@ enum Cmd {
         /// profiler and, if a model also runs, a combined verdict.
         #[arg(long)]
         scorer: bool,
+        /// Replay: which corrections become probes — `all` (merge probes
+        /// span the target's intervals; the model's gate), `direct`
+        /// (assign/reassign/eject only; the scorer's gate) or `source`
+        /// (merge probes span the folded task's own intervals).
+        #[arg(long, default_value = "all")]
+        probes: String,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -267,9 +273,12 @@ fn main() -> anyhow::Result<()> {
             since,
             out,
             scorer,
+            probes,
         } => {
             if replay {
-                replay_eval(&data_dir, since, model.as_deref(), scorer, out.as_deref())
+                let set = chronicle_core::replay::ProbeSet::parse(&probes)
+                    .ok_or_else(|| anyhow::anyhow!("--probes must be all, direct or source"))?;
+                replay_eval(&data_dir, since, model.as_deref(), scorer, set, out.as_deref())
             } else {
                 bench(
                     &data_dir,

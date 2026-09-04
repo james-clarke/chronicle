@@ -31,6 +31,9 @@ const PROMPT_CHARS: usize = 120;
 /// Prompts and touched paths kept per segment for the span anchors.
 const MAX_PROMPTS: usize = 12;
 const MAX_PATHS: usize = 40;
+/// Write minutes kept per segment (the newest); a segment ends at a 30-min
+/// pause, so this covers four hours of continuous writing.
+const MAX_WRITES: usize = 240;
 /// A pause between transcript lines longer than this ends the span.
 const SESSION_GAP: Duration = Duration::from_secs(30 * 60);
 
@@ -69,16 +72,28 @@ struct Segment {
     /// Files the tool read or edited, relative to the cwd, first-seen
     /// order, up to `MAX_PATHS`.
     paths: Vec<String>,
+    /// When the transcript was written to, one entry per distinct minute
+    /// (UTC ms, oldest first), the newest `MAX_WRITES` kept. The anchor
+    /// extractor attaches a terminal span to the session that wrote most
+    /// recently before or during it.
+    writes: Vec<i64>,
     /// `end` as of the last emitted event.
     sent: Option<Timestamp>,
 }
 
 impl Segment {
     fn detail(&self) -> Option<String> {
-        if self.prompts.is_empty() && self.paths.is_empty() {
+        if self.prompts.is_empty() && self.paths.is_empty() && self.writes.is_empty() {
             return None;
         }
-        Some(serde_json::json!({ "prompts": self.prompts, "paths": self.paths }).to_string())
+        Some(
+            serde_json::json!({
+                "prompts": self.prompts,
+                "paths": self.paths,
+                "writes": self.writes,
+            })
+            .to_string(),
+        )
     }
 }
 
@@ -295,6 +310,7 @@ fn absorb(state: &mut FileState, line: &Line) {
                 prompt: line.prompt.clone(),
                 prompts: Vec::new(),
                 paths: Vec::new(),
+                writes: Vec::new(),
                 sent: None,
             };
             seg.absorb_detail(line);
@@ -305,6 +321,13 @@ fn absorb(state: &mut FileState, line: &Line) {
 
 impl Segment {
     fn absorb_detail(&mut self, line: &Line) {
+        let minute = line.ts.as_millisecond() / 60_000 * 60_000;
+        if self.writes.last() != Some(&minute) {
+            self.writes.push(minute);
+            if self.writes.len() > MAX_WRITES {
+                self.writes.remove(0);
+            }
+        }
         if let Some(p) = &line.prompt
             && self.prompts.len() < MAX_PROMPTS
             && self.prompts.last() != Some(p)
@@ -463,6 +486,24 @@ mod tests {
     }
 
     #[test]
+    fn writes_are_bucketed_to_the_minute() {
+        let mut state = FileState::default();
+        absorb(&mut state, &parse_line(USER).unwrap());
+        let burst = USER.replace("19:00:00.000", "19:00:40.000");
+        absorb(&mut state, &parse_line(&burst).unwrap());
+        let later = USER.replace("19:00:00.000", "19:01:30.000");
+        absorb(&mut state, &parse_line(&later).unwrap());
+        let seg = &state.segments[0];
+        let m = |s: &str| ts(s).as_millisecond();
+        assert_eq!(
+            seg.writes,
+            [m("2026-09-02T19:00:00Z"), m("2026-09-02T19:01:00Z")]
+        );
+        let d: serde_json::Value = serde_json::from_str(&seg.detail().unwrap()).unwrap();
+        assert_eq!(d["writes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn scan_tracks_growth_and_skips_subagent_dirs() {
         let root = std::env::temp_dir().join(format!("chronicle-ai-{}", std::process::id()));
         let project = root.join("-home-u-dev-app");
@@ -489,7 +530,9 @@ mod tests {
         assert_eq!(e.summary.as_deref(), Some("fix the flaky test"));
         assert_eq!(
             e.detail.as_deref(),
-            Some(r#"{"paths":["src/lib.rs"],"prompts":["fix the flaky test"]}"#)
+            Some(
+                r#"{"paths":["src/lib.rs"],"prompts":["fix the flaky test"],"writes":[1788375600000,1788375900000]}"#
+            )
         );
         assert!(p.scan(now).is_empty(), "nothing moved");
 

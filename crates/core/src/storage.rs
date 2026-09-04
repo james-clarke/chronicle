@@ -43,6 +43,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/015_extra_indexes.sql")),
         M::up(include_str!("../migrations/016_span_anchors.sql")),
         M::up(include_str!("../migrations/017_task_evidence.sql")),
+        M::up(include_str!("../migrations/018_interval_origin.sql")),
     ])
 });
 
@@ -456,7 +457,7 @@ pub fn replay_rows(conn: &Connection, since_ms: i64) -> Result<ReplayRows, Stora
         .collect::<Result<_, _>>()?;
     let intervals = conn
         .prepare(
-            "SELECT id, task_id, batch_id, start_ts, end_ts FROM intervals ORDER BY start_ts, id",
+            "SELECT id, task_id, batch_id, start_ts, end_ts, origin_task_id FROM intervals ORDER BY start_ts, id",
         )?
         .query_map([], |r| {
             Ok(replay::IntervalRow {
@@ -465,6 +466,7 @@ pub fn replay_rows(conn: &Connection, since_ms: i64) -> Result<ReplayRows, Stora
                 batch_id: r.get(2)?,
                 start_ts: r.get(3)?,
                 end_ts: r.get(4)?,
+                origin_task_id: r.get(5)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -2058,8 +2060,8 @@ pub fn store_derivation(
         };
         for (s, e) in subtract_ranges(ts_to_ms(iv.start_ts), ts_to_ms(iv.end_ts), &user_rows) {
             tx.execute(
-                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, origin_task_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?1)",
                 params![task_id, batch_id, s, e, iv.confidence],
             )?;
             stored.push((*task_id, s, e));
@@ -2338,8 +2340,8 @@ pub fn assign_unassigned(
             continue;
         }
         tx.execute(
-            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source)
-             VALUES (?1, ?2, ?3, ?4, 1.0, 'user')",
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, origin_task_id)
+             VALUES (?1, ?2, ?3, ?4, 1.0, 'user', ?1)",
             params![to_task, batch, s, e],
         )?;
         first_interval.get_or_insert(tx.last_insert_rowid());
@@ -2404,8 +2406,8 @@ pub fn split_interval(
         )?;
         if e < hi {
             tx.execute(
-                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, origin_task_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?1)",
                 params![task_id, batch_id, e, hi, confidence, source],
             )?;
         }
@@ -2529,8 +2531,8 @@ pub fn replace_derived_rows(
     )?;
     for r in rows {
         tx.execute(
-            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, origin_task_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?1)",
             params![r.task_id, batch_id, r.start_ts, r.end_ts, r.confidence],
         )?;
     }
@@ -2551,9 +2553,9 @@ pub fn clear_prepass(conn: &Connection, lo: i64, hi: i64) -> Result<usize, Stora
 /// the batch its start falls in (NULL over the tail).
 pub fn insert_prepass(conn: &Connection, p: &Placement) -> Result<(), StorageError> {
     conn.execute(
-        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason)
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id)
          VALUES (?1, (SELECT id FROM batches WHERE start_ts <= ?2 AND end_ts > ?2),
-                 ?2, ?3, 0.5, 'prepass', ?4)",
+                 ?2, ?3, 0.5, 'prepass', ?4, ?1)",
         params![p.task_id, p.start_ts, p.end_ts, p.reason],
     )?;
     Ok(())
@@ -2589,8 +2591,8 @@ pub fn insert_live_interval(
         [lo, hi],
     )?;
     tx.execute(
-        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason)
-         VALUES (?1, NULL, ?2, ?3, ?4, 'live', 'live')",
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id)
+         VALUES (?1, NULL, ?2, ?3, ?4, 'live', 'live', ?1)",
         params![task_id, lo, hi, confidence],
     )?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;

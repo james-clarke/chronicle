@@ -411,9 +411,46 @@ pub fn from_activity(
             || e.repo.is_empty()
             || own_places.iter().any(|p| p.eq_ignore_ascii_case(&e.repo))
     };
-    for e in events.iter().filter(|e| overlaps(e)) {
+    // Concurrent sessions in one place: the span belongs to the one whose
+    // transcript was written to most recently before or during it. Rows
+    // captured before the collector recorded write times carry no
+    // `writes`, and for those every overlapping session still attaches.
+    let session_ok = |e: &ActivityEvent| {
+        e.kind == ActivityKind::AiSession && overlaps(e) && hosts_tool && same_place(e)
+    };
+    let chosen_session = nearest_writer(events, session_ok, end_ms);
+    // A bare terminal's place is where its shell was last seen, not every
+    // directory it visited while the span was open.
+    let shell_ok = |e: &ActivityEvent| {
+        matches!(e.kind, ActivityKind::Shell | ActivityKind::Cwd)
+            && overlaps(e)
+            && fam == Family::Terminal
+            && same_place(e)
+    };
+    let chosen_shell = if own_places.is_empty() {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| shell_ok(e))
+            .max_by_key(|(_, e)| {
+                // A row still being refreshed at the span's end is where
+                // the shell is; among those the latest arrival wins. With
+                // none alive, the place the shell left last.
+                let lo = e.ts.as_millisecond();
+                let hi = e.end_ts.unwrap_or(e.ts).as_millisecond();
+                let alive = hi >= end_ms;
+                (alive, if alive { lo } else { hi })
+            })
+            .map(|(i, _)| i)
+    } else {
+        None
+    };
+    for (i, e) in events.iter().enumerate().filter(|(_, e)| overlaps(e)) {
         match e.kind {
             ActivityKind::AiSession if hosts_tool && same_place(e) => {
+                if chosen_session.is_some_and(|c| c != i) {
+                    continue;
+                }
                 if let Some(id) = &e.ext_id {
                     out.push(Anchor::new(AnchorKind::Session, id.clone()));
                 }
@@ -434,6 +471,9 @@ pub fn from_activity(
                 }
             }
             ActivityKind::Shell | ActivityKind::Cwd if fam == Family::Terminal && same_place(e) => {
+                if own_places.is_empty() && chosen_shell != Some(i) {
+                    continue;
+                }
                 push_scope(&mut out, &e.repo, "", ticket_re);
             }
             ActivityKind::Meeting => {
@@ -507,6 +547,54 @@ fn push_scope(out: &mut Vec<Anchor>, repo: &str, branch: &str, ticket_re: &Regex
             out.push(Anchor::new(AnchorKind::Item, key.as_str()));
         }
     }
+}
+
+/// Among the events `ok` admits, the index of the session whose latest
+/// write at or before `end_ms` is the most recent (a write inside the span
+/// beats one before it; ties go to the later-ending session). `None` when
+/// no admitted event carries write times — the caller then keeps them all.
+/// A session whose kept writes all fall after the span loses to any with
+/// one before its end, and among only such sessions the earliest wins.
+fn nearest_writer<F: Fn(&ActivityEvent) -> bool>(
+    events: &[ActivityEvent],
+    ok: F,
+    end_ms: i64,
+) -> Option<usize> {
+    let mut best: Option<(usize, (bool, i64, i64))> = None;
+    let mut any_writes = false;
+    for (i, e) in events.iter().enumerate().filter(|(_, e)| ok(e)) {
+        let writes = detail_i64s(e.detail.as_deref(), "writes");
+        if writes.is_empty() {
+            continue;
+        }
+        any_writes = true;
+        let before = writes.iter().copied().filter(|&w| w <= end_ms).max();
+        let key = match before {
+            Some(w) => (true, w, e.end_ts.unwrap_or(e.ts).as_millisecond()),
+            None => (
+                false,
+                -writes.iter().copied().min().unwrap_or(i64::MAX),
+                e.end_ts.unwrap_or(e.ts).as_millisecond(),
+            ),
+        };
+        if best.is_none_or(|(_, k)| key > k) {
+            best = Some((i, key));
+        }
+    }
+    if any_writes { best.map(|(i, _)| i) } else { None }
+}
+
+fn detail_i64s(detail: Option<&str>, field: &str) -> Vec<i64> {
+    let Some(detail) = detail else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    v.get(field)
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|n| n.as_i64()).collect())
+        .unwrap_or_default()
 }
 
 fn detail_strings(detail: Option<&str>, field: &str) -> Vec<String> {
@@ -1603,6 +1691,83 @@ mod tests {
         // A span that names a place gets that repo's latest checkout as its branch.
         let own = vec![Anchor::new(AnchorKind::Place, "chronicle")];
         let a = from_activity("Terminator", 50 * m, 55 * m, &own, &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+    }
+
+    #[test]
+    fn concurrent_sessions_attach_by_nearest_write() {
+        let r = re();
+        let m = 60_000;
+        let writes = |ts: &[i64]| {
+            let w: Vec<i64> = ts.iter().map(|t| t * m).collect();
+            serde_json::json!({ "prompts": [], "paths": [], "writes": w }).to_string()
+        };
+        let events = vec![
+            ev(
+                ActivityKind::AiSession,
+                0,
+                60 * m,
+                "chronicle",
+                "m30",
+                "sess-a",
+                Some(&writes(&[0, 5, 12, 40])),
+            ),
+            ev(
+                ActivityKind::AiSession,
+                0,
+                60 * m,
+                "chronicle",
+                "m31",
+                "sess-b",
+                Some(&writes(&[1, 8, 25])),
+            ),
+        ];
+        // sess-a wrote at 12, inside [10, 15): it wins over sess-b's 8.
+        let a = from_activity("Terminator", 10 * m, 15 * m, &[], &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+        // Nothing written in [20, 24): the most recent write before it (sess-a at 12
+        // vs sess-b at 8) still picks sess-a; at [26, 30) sess-b's 25 is nearest.
+        let a = from_activity("Terminator", 20 * m, 24 * m, &[], &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
+        let a = from_activity("Terminator", 26 * m, 30 * m, &[], &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-b"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["m31"]);
+        // Rows without write times (captured before m30 chunk 2.5) all attach.
+        let legacy = vec![
+            ev(ActivityKind::AiSession, 0, 60 * m, "chronicle", "m30", "sess-a", None),
+            ev(ActivityKind::AiSession, 0, 60 * m, "chronicle", "m31", "sess-b", None),
+        ];
+        let a = from_activity("Terminator", 10 * m, 15 * m, &[], &legacy, &r);
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a", "sess-b"]);
+    }
+
+    #[test]
+    fn bare_terminal_takes_the_last_seen_place() {
+        let r = re();
+        let m = 60_000;
+        let events = vec![
+            ev(ActivityKind::Cwd, 0, 12 * m, "chronicle", "", "cwd:1:chronicle", None),
+            ev(ActivityKind::Cwd, 11 * m, 30 * m, "mailer", "", "cwd:1:mailer", None),
+            ev(ActivityKind::Checkout, 0, 0, "chronicle", "m30", "", None),
+            ev(ActivityKind::Checkout, 0, 0, "mailer", "ACME-1-x", "", None),
+        ];
+        // Both rows overlap [10, 20); the shell was last seen in mailer.
+        let a = from_activity("Terminator", 10 * m, 20 * m, &[], &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Place), ["mailer"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["ACME-1-x"]);
+        // A short visit to mailer that ended before the span did leaves the
+        // span in chronicle, where the shell still is.
+        let visit = vec![
+            ev(ActivityKind::Cwd, 0, 40 * m, "chronicle", "", "cwd:1:chronicle", None),
+            ev(ActivityKind::Cwd, 11 * m, 12 * m, "mailer", "", "cwd:1:mailer", None),
+        ];
+        let a = from_activity("Terminator", 10 * m, 20 * m, &[], &visit, &r);
+        assert_eq!(kinds(&a, AnchorKind::Place), ["chronicle"]);
+        // A terminal naming its own place keeps it; other places' rows add nothing.
+        let own = vec![Anchor::new(AnchorKind::Place, "chronicle")];
+        let a = from_activity("Terminator", 10 * m, 20 * m, &own, &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Place), ["chronicle"]);
         assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
     }
 

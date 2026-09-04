@@ -32,6 +32,35 @@ pub struct IntervalRow {
     pub batch_id: Option<i64>,
     pub start_ts: i64,
     pub end_ts: i64,
+    /// The task the row was first placed under (m30 chunk 2.5); `None`
+    /// for rows older than migration 018.
+    pub origin_task_id: Option<i64>,
+}
+
+/// Which corrections become probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProbeSet {
+    /// Every kind; merge probes span the target's intervals in the batch
+    /// (the model's regression gate since m27).
+    #[default]
+    All,
+    /// `assign`, `reassign` and `eject` only: the direct placements, the
+    /// scorer's own unit.
+    Direct,
+    /// As `All`, but a merge probe spans only the intervals that were the
+    /// *source* task's (by `origin_task_id`), not the target's union.
+    Source,
+}
+
+impl ProbeSet {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "all" => Some(Self::All),
+            "direct" => Some(Self::Direct),
+            "source" => Some(Self::Source),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +166,7 @@ const KINDS: [&str; 5] = ["rename", "reassign", "merge", "eject", "assign"];
 
 /// Turn corrections into probes. Returns the probes plus one line per
 /// correction that could not be scored and why.
-pub fn build_probes(rows: &Rows<'_>) -> (Vec<Probe>, Vec<String>) {
+pub fn build_probes(rows: &Rows<'_>, set: ProbeSet) -> (Vec<Probe>, Vec<String>) {
     let mut probes = Vec::new();
     let mut skipped = Vec::new();
     let task = |id: i64| rows.tasks.iter().find(|t| t.id == id);
@@ -148,6 +177,9 @@ pub fn build_probes(rows: &Rows<'_>) -> (Vec<Probe>, Vec<String>) {
 
     for c in rows.corrections {
         if !KINDS.contains(&c.kind.as_str()) {
+            continue;
+        }
+        if set == ProbeSet::Direct && matches!(c.kind.as_str(), "merge" | "rename") {
             continue;
         }
         match c.kind.as_str() {
@@ -197,10 +229,32 @@ pub fn build_probes(rows: &Rows<'_>) -> (Vec<Probe>, Vec<String>) {
                     Check::Placed
                 };
                 // One probe per batch: the task's intervals there, as a
-                // range from the first start to the last end.
+                // range from the first start to the last end. Under
+                // `Source` a merge spans only what the folded task owned.
+                let source = if set == ProbeSet::Source && c.kind == "merge" {
+                    match merge_source(c, rows) {
+                        Some(id) if rows.intervals.iter().any(|iv| iv.origin_task_id == Some(id)) => {
+                            Some(id)
+                        }
+                        Some(_) => {
+                            skip(c, "no origin rows (pre-018)");
+                            continue;
+                        }
+                        None => {
+                            skip(c, "source task not found");
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let owned = |iv: &IntervalRow| match source {
+                    Some(id) => iv.origin_task_id == Some(id),
+                    None => iv.task_id == target,
+                };
                 let mut per_batch: std::collections::BTreeMap<i64, (i64, i64)> =
                     std::collections::BTreeMap::new();
-                for iv in rows.intervals.iter().filter(|iv| iv.task_id == target) {
+                for iv in rows.intervals.iter().filter(|iv| owned(iv)) {
                     let Some(batch_id) = batch_for(iv, rows.batches) else {
                         continue;
                     };
@@ -301,6 +355,18 @@ pub fn merged_into(target: i64, after_ts: i64, rows: &Rows<'_>) -> Vec<i64> {
         .filter(|t| final_target(t.id, after_ts, rows) == target)
         .map(|t| t.id)
         .collect()
+}
+
+/// The task a `merge` correction folded away: the closed task carrying
+/// `old_label` that closed when the correction was written.
+const MERGE_CLOSE_SLACK_MS: i64 = 2_000;
+fn merge_source(c: &CorrectionRow, rows: &Rows<'_>) -> Option<i64> {
+    rows.tasks
+        .iter()
+        .filter(|t| t.closed && t.label == c.old_label)
+        .filter(|t| t.closed_ts.is_some_and(|ts| (ts - c.ts).abs() <= MERGE_CLOSE_SLACK_MS))
+        .min_by_key(|t| (t.closed_ts.unwrap_or(0) - c.ts).abs())
+        .map(|t| t.id)
 }
 
 /// Follow merges forward from `task_id`: a closed task whose label a later
@@ -529,6 +595,7 @@ mod tests {
             batch_id: Some(batch_id),
             start_ts: lo,
             end_ts: hi,
+            origin_task_id: Some(task_id),
         }
     }
     fn corr(
@@ -566,6 +633,60 @@ mod tests {
                 end_ts: 60 * M,
             },
         ]
+    }
+
+    #[test]
+    fn direct_and_source_probe_sets() {
+        // Task 10 ("old work") was merged into 20 at 50m; interval 8 was
+        // 10's own (origin), interval 5 was always 20's.
+        let tasks = vec![
+            task(10, "old work", false, Some(50 * M)),
+            task(20, "real work", true, None),
+        ];
+        let mut own = iv(8, 20, 1, 14 * M, 16 * M);
+        own.origin_task_id = Some(10);
+        let intervals = vec![iv(5, 20, 1, 2 * M, 12 * M), own, iv(6, 20, 2, 31 * M, 40 * M)];
+        let corrections = vec![
+            corr(1, 45 * M, "reassign", 20, "x", "real work", Some(5)),
+            corr(2, 50 * M, "merge", 20, "old work", "real work", None),
+        ];
+        let b = batches();
+        let rows = Rows {
+            corrections: &corrections,
+            intervals: &intervals,
+            tasks: &tasks,
+            batches: &b,
+        };
+        let (all, _) = build_probes(&rows, ProbeSet::All);
+        let merge_all: Vec<_> = all.iter().filter(|p| p.kind == "merge").collect();
+        assert_eq!(merge_all.len(), 1);
+        assert_eq!(merge_all[0].range, (2 * M, 16 * M), "target's union");
+        let (direct, _) = build_probes(&rows, ProbeSet::Direct);
+        assert!(direct.iter().all(|p| p.kind == "reassign"), "{direct:?}");
+        assert_eq!(direct.len(), 1);
+        let (source, _) = build_probes(&rows, ProbeSet::Source);
+        let merge_src: Vec<_> = source.iter().filter(|p| p.kind == "merge").collect();
+        assert_eq!(merge_src.len(), 1);
+        assert_eq!(merge_src[0].range, (14 * M, 16 * M), "the folded task's own rows");
+        assert_eq!(merge_src[0].task_id, 20);
+        // Without origin rows the merge is skipped with a reason, not scored.
+        let legacy: Vec<IntervalRow> = intervals
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                r.origin_task_id = None;
+                r
+            })
+            .collect();
+        let rows = Rows {
+            corrections: &corrections,
+            intervals: &legacy,
+            tasks: &tasks,
+            batches: &b,
+        };
+        let (source, skipped) = build_probes(&rows, ProbeSet::Source);
+        assert!(source.iter().all(|p| p.kind != "merge"));
+        assert!(skipped.iter().any(|s| s.contains("pre-018")), "{skipped:?}");
     }
 
     #[test]
@@ -614,7 +735,7 @@ mod tests {
             tasks: &tasks,
             batches: &b,
         };
-        let (probes, skipped) = build_probes(&rows);
+        let (probes, skipped) = build_probes(&rows, ProbeSet::All);
         assert_eq!(final_target(10, 45 * M, &rows), 20);
         let kinds: Vec<(i64, &str, i64)> = probes
             .iter()

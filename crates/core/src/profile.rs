@@ -819,6 +819,7 @@ mod tests {
             batch_id: Some(1),
             start_ts: lo,
             end_ts: hi,
+            origin_task_id: Some(task_id),
         }
     }
 

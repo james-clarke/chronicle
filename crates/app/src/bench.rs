@@ -321,6 +321,7 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 batch_id: None,
                 start_ts: ms_range.0,
                 end_ts: ms_range.1,
+                origin_task_id: Some(task_id),
             });
             seen_groups.insert(*gi);
         }
@@ -425,6 +426,7 @@ pub(crate) fn replay_eval(
     since_days: u64,
     model_filter: Option<&str>,
     scorer: bool,
+    probe_set: chronicle_core::replay::ProbeSet,
     out: Option<&Path>,
 ) -> anyhow::Result<()> {
     use chronicle_core::profile::{self, Params, Segment};
@@ -443,7 +445,7 @@ pub(crate) fn replay_eval(
         tasks: &rows.tasks,
         batches: &rows.batches,
     };
-    let (probes, skipped) = replay::build_probes(&view);
+    let (probes, skipped) = replay::build_probes(&view, probe_set);
     for s in &skipped {
         println!("skip {s}");
     }
