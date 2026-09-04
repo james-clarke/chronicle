@@ -29,6 +29,9 @@ const LIVE_GRAMMAR: &str = include_str!("../../../grammars/live_output_v1.gbnf")
 const LIVE_PROMPT: &str = include_str!("../../../prompts/live_v1.txt");
 const CONSOLIDATE_GRAMMAR: &str = include_str!("../../../grammars/consolidate_v1.gbnf");
 const CONSOLIDATE_PROMPT: &str = include_str!("../../../prompts/consolidate_v1.txt");
+const BATCH_SCHEMA: &str = include_str!("../../../grammars/task_output_v4.json");
+const LIVE_SCHEMA: &str = include_str!("../../../grammars/live_output_v1.json");
+const CONSOLIDATE_SCHEMA: &str = include_str!("../../../grammars/consolidate_v1.json");
 
 /// Batch tier context. The live tier gets a smaller one (`LIVE_N_CTX`) so
 /// its KV cache stays cheap to hold; it still clears `digest::MAX_TOKENS`
@@ -48,6 +51,19 @@ pub enum Prompt {
 }
 
 impl Prompt {
+    /// The rendered user message: instruction template plus digest. The
+    /// cloud path (m31) sends exactly this, minus the `/no_think` head.
+    pub fn render(self, digest: &str) -> String {
+        self.text().replace("{digest}", digest)
+    }
+    /// JSON schema the output satisfies (cloud backends), next to the GBNF.
+    pub fn schema_json(self) -> &'static str {
+        match self {
+            Prompt::Batch => BATCH_SCHEMA,
+            Prompt::Live => LIVE_SCHEMA,
+            Prompt::Consolidate => CONSOLIDATE_SCHEMA,
+        }
+    }
     fn text(self) -> &'static str {
         match self {
             Prompt::Batch => BATCH_PROMPT,
@@ -177,17 +193,7 @@ impl DeriveSession<'_> {
             self.prompt
         );
         let (raw, stats) = self.generate(digest, on_token)?;
-        let parsed: DeriveOutput = serde_json::from_str(&raw)
-            .with_context(|| format!("model output is not valid interval JSON: {raw}"))?;
-        Ok(DeriveRun {
-            intervals: parsed.intervals,
-            raw,
-            prompt_tokens: stats.prompt_tokens,
-            cached_prefix_tokens: stats.cached_prefix_tokens,
-            gen_tokens: stats.gen_tokens,
-            prompt_eval_ms: stats.prompt_eval_ms,
-            gen_ms: stats.gen_ms,
-        })
+        finish_derive(raw, stats)
     }
 
     /// Label the current stretch (live tier).
@@ -300,12 +306,28 @@ impl DeriveSession<'_> {
     }
 }
 
+/// Parse a batch-tier completion into a [`DeriveRun`]; shared by the local
+/// session and the cloud replay engine.
+pub fn finish_derive(raw: String, stats: RunStats) -> anyhow::Result<DeriveRun> {
+    let parsed: DeriveOutput = serde_json::from_str(&raw)
+        .with_context(|| format!("model output is not valid interval JSON: {raw}"))?;
+    Ok(DeriveRun {
+        intervals: parsed.intervals,
+        raw,
+        prompt_tokens: stats.prompt_tokens,
+        cached_prefix_tokens: stats.cached_prefix_tokens,
+        gen_tokens: stats.gen_tokens,
+        prompt_eval_ms: stats.prompt_eval_ms,
+        gen_ms: stats.gen_ms,
+    })
+}
+
 fn tokenize_prompt(
     model: &LlamaModel,
     prompt: Prompt,
     digest: &str,
 ) -> anyhow::Result<Vec<LlamaToken>> {
-    let content = prompt.text().replace("{digest}", digest);
+    let content = prompt.render(digest);
     let tmpl = model
         .chat_template(None)
         .context("model has no embedded chat template")?;
@@ -329,6 +351,8 @@ mod tests {
         ] {
             assert!(p.text().contains("{digest}"), "{p:?}");
             assert!(p.grammar().contains("root ::="), "{p:?}");
+            let schema: serde_json::Value = serde_json::from_str(p.schema_json()).unwrap();
+            assert_eq!(schema["additionalProperties"], false, "{p:?}");
         }
         let live: super::LiveDraft = serde_json::from_str(
             r#"{"ref": 2, "label": null, "project": null, "confidence": 0.7}"#,

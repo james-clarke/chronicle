@@ -6,7 +6,9 @@ pub mod chat;
 pub mod describe;
 pub mod embed;
 pub mod model;
+pub mod prompts;
 pub mod runner;
+pub mod text;
 
 pub use chat::{ChatModel, ChatSession};
 pub use runner::{

@@ -5,7 +5,7 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -16,15 +16,8 @@ use chronicle_core::types::SuggestedTask;
 
 use crate::backend::{self, N_BATCH};
 use crate::chat::ThinkFilter;
-
-const DESCRIPTION_PROMPT: &str = include_str!("../../../prompts/task_description_v1.txt");
-const SUGGEST_PROMPT: &str = include_str!("../../../prompts/suggest_task_v1.txt");
-const NARRATIVE_PROMPT: &str = include_str!("../../../prompts/narrative_v1.txt");
-const JOURNAL_PROMPT: &str = include_str!("../../../prompts/journal_v1.txt");
-const CHECKPOINT_PROMPT: &str = include_str!("../../../prompts/checkpoint_v1.txt");
-const STANDUP_PROMPT: &str = include_str!("../../../prompts/standup_v1.txt");
-const CHECKPOINT_GRAMMAR: &str = include_str!("../../../grammars/checkpoint_v1.gbnf");
-const SUGGEST_GRAMMAR: &str = include_str!("../../../grammars/suggest_task_v1.gbnf");
+use crate::prompts::{self, CHECKPOINT_GRAMMAR, SUGGEST_GRAMMAR, non_empty};
+use crate::text::JobKind;
 
 const N_CTX: u32 = 4096;
 /// Descriptions and narratives are a few sentences; suggestions one JSON object.
@@ -48,16 +41,8 @@ impl Describer {
         project: Option<&str>,
         evidence: &str,
     ) -> anyhow::Result<String> {
-        let project_line = project.map(|p| format!(" [{p}]")).unwrap_or_default();
-        let prompt = DESCRIPTION_PROMPT
-            .replace("{label}", label)
-            .replace("{project_line}", &project_line)
-            .replace("{evidence}", evidence);
-        let out = self.generate(&prompt, None)?;
-        if out.trim().is_empty() {
-            bail!("model produced an empty description");
-        }
-        Ok(out.trim().to_owned())
+        let prompt = prompts::render_description(label, project, evidence);
+        non_empty(self.generate(&prompt, None)?, "description")
     }
 
     /// 1-3 sentence journal entry for one batch's slice of a task. `context`
@@ -71,44 +56,21 @@ impl Describer {
         git: &str,
         evidence: &str,
     ) -> anyhow::Result<String> {
-        let project_line = project.map(|p| format!(" [{p}]")).unwrap_or_default();
-        let context_section = if context.trim().is_empty() {
-            String::new()
-        } else {
-            format!("Ticket context:\n{}\n", context.trim())
-        };
-        let prompt = JOURNAL_PROMPT
-            .replace("{label}", label)
-            .replace("{project_line}", &project_line)
-            .replace("{context_section}", &context_section)
-            .replace("{git}", if git.trim().is_empty() { "(none)" } else { git })
-            .replace("{evidence}", evidence);
-        let out = self.generate(&prompt, None)?;
-        if out.trim().is_empty() {
-            bail!("model produced an empty journal entry");
-        }
-        Ok(out.trim().to_owned())
+        let prompt = prompts::render_journal(label, project, context, git, evidence);
+        non_empty(self.generate(&prompt, None)?, "journal entry")
     }
 
     /// 2-4 sentence narrative over a pre-rendered stats digest.
     pub fn narrative(&self, digest: &str) -> anyhow::Result<String> {
-        let prompt = NARRATIVE_PROMPT.replace("{digest}", digest);
-        let out = self.generate(&prompt, None)?;
-        if out.trim().is_empty() {
-            bail!("model produced an empty narrative");
-        }
-        Ok(out.trim().to_owned())
+        let prompt = prompts::render_narrative(digest);
+        non_empty(self.generate(&prompt, None)?, "narrative")
     }
 
     /// Morning standup draft (one short paragraph per task) over a
     /// pre-rendered digest of a day's journal entries and checkpoints.
     pub fn standup(&self, digest: &str) -> anyhow::Result<String> {
-        let prompt = STANDUP_PROMPT.replace("{digest}", digest);
-        let out = self.generate(&prompt, None)?;
-        if out.trim().is_empty() {
-            bail!("model produced an empty standup draft");
-        }
-        Ok(out.trim().to_owned())
+        let prompt = prompts::render_standup(digest);
+        non_empty(self.generate(&prompt, None)?, "standup draft")
     }
 
     /// Grammar-constrained checkpoint: (state, next_steps) from the task's
@@ -120,35 +82,31 @@ impl Describer {
         context: &str,
         journal: &str,
     ) -> anyhow::Result<(String, String)> {
-        #[derive(serde::Deserialize)]
-        struct Out {
-            state: String,
-            next_steps: String,
-        }
-        let project_line = project.map(|p| format!(" [{p}]")).unwrap_or_default();
-        let context_section = if context.trim().is_empty() {
-            String::new()
-        } else {
-            format!("Ticket context:\n{}\n", context.trim())
-        };
-        let prompt = CHECKPOINT_PROMPT
-            .replace("{label}", label)
-            .replace("{project_line}", &project_line)
-            .replace("{context_section}", &context_section)
-            .replace("{journal}", journal);
+        let prompt = prompts::render_checkpoint(label, project, context, journal);
         let out = self.generate(&prompt, Some(CHECKPOINT_GRAMMAR))?;
-        let parsed: Out = serde_json::from_str(&out)
-            .with_context(|| format!("model output is not valid checkpoint JSON: {out}"))?;
-        Ok((parsed.state, parsed.next_steps))
+        prompts::parse_checkpoint(&out)
     }
 
     /// Grammar-constrained declare suggestion from a recent-activity digest.
     pub fn suggest_task(&self, digest: &str) -> anyhow::Result<SuggestedTask> {
-        let prompt = SUGGEST_PROMPT.replace("{digest}", digest);
+        let prompt = prompts::render_suggest(digest);
         let out = self.generate(&prompt, Some(SUGGEST_GRAMMAR))?;
-        let parsed: SuggestedTask = serde_json::from_str(&out)
-            .with_context(|| format!("model output is not valid suggestion JSON: {out}"))?;
-        Ok(parsed)
+        prompts::parse_suggest(&out)
+    }
+
+    /// The [`crate::text::TextBackend`] shape over the local model: the job
+    /// picks its grammar; the caller has already rendered the prompt.
+    pub fn complete(&self, job: JobKind, prompt: &str) -> anyhow::Result<String> {
+        self.generate(prompt, Self::grammar_for(job))
+    }
+
+    /// GBNF for a JSON job on the local engine; prose jobs run free.
+    pub fn grammar_for(job: JobKind) -> Option<&'static str> {
+        match job {
+            JobKind::Checkpoint => Some(CHECKPOINT_GRAMMAR),
+            JobKind::SuggestTask | JobKind::NameTask => Some(SUGGEST_GRAMMAR),
+            _ => None,
+        }
     }
 
     /// One prompt in, one bounded completion out; fresh context per call.

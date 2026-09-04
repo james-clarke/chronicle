@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "ref": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "label": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "confidence": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "ref",
+    "label",
+    "project",
+    "confidence"
+  ],
+  "additionalProperties": false
+}

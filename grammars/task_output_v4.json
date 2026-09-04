@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "properties": {
+    "intervals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": "integer"
+          },
+          "end": {
+            "type": "integer"
+          },
+          "confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "ref",
+          "label",
+          "project",
+          "start",
+          "end",
+          "confidence"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "intervals"
+  ],
+  "additionalProperties": false
+}

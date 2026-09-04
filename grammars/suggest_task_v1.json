@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "label": {
+      "type": "string"
+    },
+    "project": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "label",
+    "project",
+    "description"
+  ],
+  "additionalProperties": false
+}
