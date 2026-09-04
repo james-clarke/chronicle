@@ -474,6 +474,9 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 }
                 if segmenter {
                     reconcile_due(&mut conn, &config, &distractions);
+                    if let Err(e) = chronicle_core::segmenter::daily(&mut conn, &config, now) {
+                        tracing::error!("segmenter daily housekeeping failed: {e}");
+                    }
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);

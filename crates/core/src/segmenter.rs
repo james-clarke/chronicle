@@ -384,6 +384,10 @@ pub struct Placement {
     pub confidence: f64,
     pub confident: bool,
     pub reason: String,
+    /// Winner minus runner-up, for the verdict log.
+    pub margin: f64,
+    /// The task that came second (for a new-task verdict, the best task).
+    pub runner_up: Option<i64>,
 }
 
 fn label_of(labels: &HashMap<i64, String>, id: i64) -> String {
@@ -423,6 +427,8 @@ fn place_existing(seg: &Segment, v: &Verdict, labels: &HashMap<i64, String>) -> 
         confidence: v.ranked.first().map_or(0.0, |c| c.score),
         confident: v.confident,
         reason,
+        margin: v.margin,
+        runner_up: v.runner_up().flatten(),
     })
 }
 
@@ -520,6 +526,8 @@ pub fn decide(
                 confidence: v.new_task,
                 confident: v.confident,
                 reason: "new".to_owned(),
+                margin: v.margin,
+                runner_up: v.ranked.first().map(|c| c.task_id),
             });
         }
     }
@@ -552,6 +560,8 @@ pub fn decide(
             confidence: scored[i].2.new_task,
             confident: false,
             reason: format!("between {} and a new task", label_of(labels, *a)),
+            margin: 0.0,
+            runner_up: None,
         });
     }
     // 4. Contiguous rows on one target become one.
@@ -564,6 +574,7 @@ pub fn decide(
             last.hi = last.hi.max(p.hi);
             last.confident = last.confident && p.confident;
             last.confidence = last.confidence.min(p.confidence);
+            last.margin = last.margin.min(p.margin);
             continue;
         }
         out.push(p);
@@ -584,7 +595,111 @@ pub fn run(
     let lo = storage::latest_done_batch_end(conn)?
         .unwrap_or(0)
         .max(hi - MAX_WINDOW_MS);
+    // A correction from the last little while has taught something: its
+    // tasks' evidence is refreshed before the window is scored again.
+    let corrected = storage::recently_corrected_tasks(conn, hi - CORRECTION_LOOKBACK_MS)?;
+    if !corrected.is_empty() {
+        storage::refresh_task_evidence(conn, &ticket_re(config), &params(config), hi, &corrected)?;
+    }
     place_window(conn, config, lo, hi, None, now, distractions)
+}
+
+/// How far back the live tick looks for corrections to learn from: two
+/// ticks, so none is missed and none is refreshed forever.
+const CORRECTION_LOOKBACK_MS: i64 = 2 * 60_000;
+
+fn ticket_re(config: &Config) -> Regex {
+    Regex::new(&config.ticket_regex)
+        .or_else(|_| Regex::new(&Config::default().ticket_regex))
+        .expect("default ticket regex compiles")
+}
+
+/// Scorer tunables: the defaults, with delta from the config when set
+/// (`chronicle bench --calibrate` says what the verdict log supports).
+pub fn params(config: &Config) -> Params {
+    let mut p = Params::default();
+    if let Some(d) = config.scorer_delta {
+        p.delta = d;
+    }
+    p
+}
+
+/// After a correction (m30 chunk 4): re-score the day's reconciled batches
+/// and its live tail with the profiles as they stand now, so one keep or
+/// move fixes every stretch it teaches about. Rows the user placed are
+/// untouched. When rows moved, a `rescore` correction holds the snapshot
+/// for undo; returns `(correction id, rows moved)`.
+pub fn rescore_day(
+    conn: &mut Connection,
+    config: &Config,
+    now: Timestamp,
+    distractions: &[Regex],
+    day: &str,
+    day_lo: i64,
+    day_hi: i64,
+) -> Result<Option<(i64, usize)>, StorageError> {
+    let corrected =
+        storage::recently_corrected_tasks(conn, ts_to_ms(now) - CORRECTION_LOOKBACK_MS)?;
+    if !corrected.is_empty() {
+        storage::refresh_task_evidence(
+            conn,
+            &ticket_re(config),
+            &params(config),
+            ts_to_ms(now),
+            &corrected,
+        )?;
+    }
+    let before = storage::segment_rows(conn, day_lo, day_hi)?;
+    for batch_id in storage::done_batches_in(conn, day_lo, day_hi)? {
+        if let Some((lo, hi)) = storage::batch_range(conn, batch_id)? {
+            place_window(conn, config, lo, hi, Some(batch_id), now, distractions)?;
+        }
+    }
+    let hi = ts_to_ms(now).min(day_hi);
+    let lo = storage::latest_done_batch_end(conn)?
+        .unwrap_or(0)
+        .max(hi - MAX_WINDOW_MS)
+        .max(day_lo);
+    if lo < hi {
+        place_window(conn, config, lo, hi, None, now, distractions)?;
+    }
+    let after = storage::segment_rows(conn, day_lo, day_hi)?;
+    let owner_before = |lo: i64, hi: i64| -> Option<i64> {
+        before
+            .iter()
+            .map(|r| (r.task_id, r.end_ts.min(hi) - r.start_ts.max(lo)))
+            .filter(|(_, ov)| *ov > 0)
+            .max_by_key(|(_, ov)| *ov)
+            .map(|(t, _)| t)
+    };
+    let moved = after
+        .iter()
+        .filter(|r| owner_before(r.start_ts, r.end_ts).is_some_and(|t| t != r.task_id))
+        .count();
+    if moved == 0 {
+        return Ok(None);
+    }
+    let id = storage::record_rescore(conn, now, day, &before, moved)?;
+    Ok(Some((id, moved)))
+}
+
+/// Once a day in segmenter mode: verdicts left alone become right, the
+/// evidence cache is rebuilt in full so decay advances, and derived tasks
+/// with no project take the place their evidence saturates.
+pub fn daily(conn: &mut Connection, config: &Config, now: Timestamp) -> Result<(), StorageError> {
+    let now_ms = ts_to_ms(now);
+    let last = storage::get_meta(conn, "segmenter_daily_ts")?
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if now_ms - last < 86_400_000 {
+        return Ok(());
+    }
+    let p = params(config);
+    storage::passive_accept(conn, now)?;
+    storage::rebuild_task_evidence(conn, &ticket_re(config), &p, now_ms)?;
+    storage::infer_projects(conn, p.saturate_min)?;
+    storage::set_meta(conn, "segmenter_daily_ts", Some(&now_ms.to_string()))?;
+    Ok(())
 }
 
 /// The batch tier under the segmenter: re-score the batch's window with the
@@ -615,10 +730,8 @@ fn place_window(
     now: Timestamp,
     distractions: &[Regex],
 ) -> Result<Vec<Placement>, StorageError> {
-    let ticket_re = Regex::new(&config.ticket_regex)
-        .or_else(|_| Regex::new(&Config::default().ticket_regex))
-        .expect("default ticket regex compiles");
-    let params = Params::default();
+    let ticket_re = ticket_re(config);
+    let params = params(config);
     let sp = SegParams::from_config(config);
     let spans = storage::anchored_spans(conn, lo, hi)?;
     if spans.is_empty() {

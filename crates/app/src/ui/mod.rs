@@ -452,6 +452,8 @@ enum Action {
     TidyToday,
     /// Reverse today's consolidation run (its `consolidate` correction id).
     UndoTidy(i64),
+    /// Put back the rows the last same-day re-score moved (m30 chunk 4).
+    UndoRescore(i64),
     /// Pull a feed block out of its task ('eject' correction).
     EjectBlock {
         interval_id: i64,
@@ -565,6 +567,9 @@ struct TimelineApp {
     /// Today's consolidation stamp when the shown day is today: None = not
     /// run, Some(0) = ran with no change, Some(id) = undoable.
     tidy: Option<Option<i64>>,
+    /// The shown day's last same-day re-score (m30 chunk 4): the `rescore`
+    /// correction id and the rows it moved, for the "undo" button.
+    rescore: Option<(i64, usize)>,
     /// Settings › Derivation's Pipeline card (m27 chunk 7), refreshed with
     /// the reload while the panel is open.
     pipeline: Option<settings::PipelineInfo>,
@@ -778,6 +783,7 @@ impl TimelineApp {
             feed: Vec::new(),
             progress: None,
             tidy: None,
+            rescore: None,
             pipeline: None,
             unassigned_ms: 0,
             proposals: Vec::new(),
@@ -987,6 +993,11 @@ impl TimelineApp {
         } else {
             None
         };
+        self.rescore = self.conn.as_ref().and_then(|c| {
+            chronicle_core::storage::rescore_of_day(c, &self.day.to_string())
+                .ok()
+                .flatten()
+        });
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
         }
@@ -1564,6 +1575,14 @@ impl TimelineApp {
         let now = jiff::Timestamp::now();
         // Some = a triage assign ran; ms claimed feeds the panel's status.
         let mut claimed: Option<i64> = None;
+        let teaches = matches!(
+            action,
+            Action::AssignRuns { .. }
+                | Action::KeepBlock(_)
+                | Action::EjectBlock { .. }
+                | Action::ReassignSession { .. }
+                | Action::Merge { .. }
+        );
         let result = match action {
             Action::AssignRuns { runs, to_task } => {
                 assign_runs(conn, now, &runs, to_task, &mut claimed)
@@ -1577,6 +1596,9 @@ impl TimelineApp {
                 Ok(())
             }
             Action::UndoTidy(id) => chronicle_core::storage::consolidate_undo(conn, id),
+            Action::UndoRescore(id) => {
+                chronicle_core::storage::rescore_undo(conn, id, &self.day.to_string()).map(|_| ())
+            }
             Action::KeepBlock(interval_id) => {
                 chronicle_core::storage::keep_interval(conn, now, interval_id)
             }
@@ -1894,6 +1916,40 @@ impl TimelineApp {
                 }
             }
         };
+        // In segmenter mode a correction teaches the day: re-score it now so
+        // every stretch the correction speaks to moves with it.
+        if result.is_ok()
+            && teaches
+            && let Some(config) = self.config.as_ref()
+            && config.derive_mode == "segmenter"
+            && let Some(conn) = self.conn.as_mut()
+        {
+            let distractions =
+                chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+            let day = self.day.to_string();
+            let lo = self
+                .day
+                .to_zoned(self.tz.clone())
+                .map(|z| z.timestamp().as_millisecond())
+                .unwrap_or(0);
+            let hi = lo + 86_400_000;
+            match chronicle_core::segmenter::rescore_day(
+                conn,
+                config,
+                now,
+                &distractions,
+                &day,
+                lo,
+                hi,
+            ) {
+                Ok(moved) => {
+                    if moved.is_some() {
+                        self.rescore = moved;
+                    }
+                }
+                Err(e) => tracing::warn!("same-day re-score failed: {e}"),
+            }
+        }
         if let Some(panel) = &mut self.triage
             && let Some(ms) = claimed
         {

@@ -55,6 +55,10 @@ pub struct Config {
     /// Segmenter: minutes a stretch the scorer calls new must last before
     /// a task is created for it.
     pub segment_new_task_min: u32,
+    /// Segmenter: the score margin a placement needs to skip "to confirm".
+    /// Unset = the scorer's default; `chronicle bench --calibrate` prints
+    /// the value the verdict log supports.
+    pub scorer_delta: Option<f64>,
     /// AW-compatible HTTP server port.
     pub port: u16,
     /// Extra CORS origin regexes for sideloaded browser extensions
@@ -131,6 +135,7 @@ impl Default for Config {
             derive_mode: "model".into(),
             segment_switch_min: 3,
             segment_new_task_min: 10,
+            scorer_delta: None,
             port: 5600,
             cors_allow: Vec::new(),
             browser_apps: [

@@ -45,6 +45,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/017_task_evidence.sql")),
         M::up(include_str!("../migrations/018_interval_origin.sql")),
         M::up(include_str!("../migrations/019_segment_rows.sql")),
+        M::up(include_str!("../migrations/020_verdict_log.sql")),
     ])
 });
 
@@ -2208,6 +2209,7 @@ pub fn reassign_intervals(
             "UPDATE intervals SET task_id=?1, source='user' WHERE id=?2",
             params![to_task, interval_id],
         )?;
+        mark_verdicts(&tx, &[interval_id], "wrong")?;
     }
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
@@ -2379,6 +2381,7 @@ pub fn split_interval(
     end_ts: i64,
 ) -> Result<i64, StorageError> {
     let tx = conn.transaction()?;
+    mark_verdicts(&tx, &[interval_id], "wrong")?;
     let (task_id, batch_id, lo, hi, confidence, source): (i64, Option<i64>, i64, i64, f64, String) =
         tx.query_row(
             "SELECT task_id, batch_id, start_ts, end_ts, confidence, source
@@ -2698,7 +2701,30 @@ pub fn store_segments(
                          ?3, ?4, ?5, 'segment', ?6, ?1, ?7)",
                 params![task_id, batch_id, s, e, p.confidence, p.reason, p.confident as i64],
             )?;
+            // Reconciled rows are stable (the live tick rewrites only the
+            // tail), so they are the ones whose fate can be logged.
+            if batch_id.is_some() {
+                tx.execute(
+                    "INSERT INTO verdict_log (interval_id, ts, task_id, runner_up, margin, confident)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        tx.last_insert_rowid(),
+                        s,
+                        task_id,
+                        p.runner_up,
+                        p.margin,
+                        p.confident as i64
+                    ],
+                )?;
+            }
             wrote = true;
+        }
+        if wrote && matches!(p.target, Target::Existing(_)) {
+            // A closed task its own evidence brought back reopens itself.
+            tx.execute(
+                "UPDATE tasks SET status='open', closed_ts=NULL WHERE id=?1 AND status='closed'",
+                [task_id],
+            )?;
         }
         if wrote && !touched.contains(&task_id) {
             touched.push(task_id);
@@ -2723,10 +2749,14 @@ pub fn live_profiles(
     ),
     StorageError,
 > {
+    // Closed tasks stay scoreable on their strong anchors only: an item,
+    // branch or document coming back reopens the task; a shared place or
+    // a stray word does not.
     let mut stmt = conn.prepare(
         "SELECT e.task_id, e.kind, e.value, e.source, e.minutes, e.first_ts, e.last_ts
          FROM task_evidence e JOIN tasks t ON t.id = e.task_id
-         WHERE t.status = 'open'",
+         WHERE t.status = 'open'
+            OR e.kind IN ('item', 'change', 'branch', 'session', 'event')",
     )?;
     let mut rows = Vec::new();
     for row in stmt.query_map([], |r| {
@@ -2771,10 +2801,219 @@ pub fn live_profiles(
         })?
         .collect::<Result<_, _>>()?;
     let labels = conn
-        .prepare("SELECT id, label FROM tasks WHERE status='open'")?
+        .prepare("SELECT id, label FROM tasks")?
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<_, _>>()?;
     Ok((profile::Profile::from_rows(&rows, &last), labels))
+}
+
+/// Close the verdict-log entries of `interval_ids` with `outcome`
+/// ('right' | 'wrong') where still open.
+fn mark_verdicts(
+    conn: &Connection,
+    interval_ids: &[i64],
+    outcome: &str,
+) -> Result<(), StorageError> {
+    for id in interval_ids {
+        conn.execute(
+            "UPDATE verdict_log SET outcome=?2 WHERE interval_id=?1 AND outcome IS NULL",
+            params![id, outcome],
+        )?;
+    }
+    Ok(())
+}
+
+/// Tasks a correction touched since `since_ms`: the correction's task and,
+/// through its interval, the task the row sits under now and came from.
+pub fn recently_corrected_tasks(
+    conn: &Connection,
+    since_ms: i64,
+) -> Result<Vec<i64>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT c.task_id FROM corrections c WHERE c.ts >= ?1
+         UNION SELECT DISTINCT i.task_id FROM corrections c JOIN intervals i ON i.id = c.interval_id WHERE c.ts >= ?1
+         UNION SELECT DISTINCT i.origin_task_id FROM corrections c JOIN intervals i ON i.id = c.interval_id
+             WHERE c.ts >= ?1 AND i.origin_task_id IS NOT NULL",
+    )?;
+    let ids = stmt
+        .query_map([since_ms], |r| r.get::<_, i64>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+
+/// A `segment` row as the same-day re-score snapshots it (m30 chunk 4).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SegmentRow {
+    pub task_id: i64,
+    pub batch_id: Option<i64>,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub confidence: f64,
+    pub confident: Option<bool>,
+    pub reason: Option<String>,
+}
+
+/// The `segment` rows starting in `[lo, hi)`, by start.
+pub fn segment_rows(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SegmentRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, batch_id, start_ts, end_ts, confidence, confident, reason FROM intervals
+         WHERE source='segment' AND start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts",
+    )?;
+    let rows = stmt
+        .query_map([lo, hi], |r| {
+            Ok(SegmentRow {
+                task_id: r.get(0)?,
+                batch_id: r.get(1)?,
+                start_ts: r.get(2)?,
+                end_ts: r.get(3)?,
+                confidence: r.get(4)?,
+                confident: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
+                reason: r.get(6)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Done batches overlapping `[lo, hi)`, oldest first.
+pub fn done_batches_in(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<i64>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM batches WHERE status='done' AND start_ts < ?2 AND end_ts > ?1 ORDER BY start_ts",
+    )?;
+    let ids = stmt
+        .query_map([lo, hi], |r| r.get::<_, i64>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+
+/// Record a same-day re-score that moved rows: a `rescore` correction whose
+/// `ctx` is the snapshot to put back, stamped on the day. Returns its id.
+pub fn record_rescore(
+    conn: &Connection,
+    now: jiff::Timestamp,
+    day: &str,
+    before: &[SegmentRow],
+    moved: usize,
+) -> Result<i64, StorageError> {
+    let ctx = serde_json::to_string(before).unwrap_or_default();
+    conn.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
+         VALUES (?1, 0, ?2, '', NULL, NULL, ?3, 'rescore')",
+        params![ts_to_ms(now), format!("moved {moved}"), ctx],
+    )?;
+    let id = conn.last_insert_rowid();
+    set_meta(
+        conn,
+        &format!("rescored:{day}"),
+        Some(&format!("{id}:{moved}")),
+    )?;
+    Ok(id)
+}
+
+/// The day's last re-score stamp: `(correction id, rows moved)`.
+pub fn rescore_of_day(conn: &Connection, day: &str) -> Result<Option<(i64, usize)>, StorageError> {
+    Ok(get_meta(conn, &format!("rescored:{day}"))?.and_then(|v| {
+        let (id, moved) = v.split_once(':')?;
+        Some((id.parse().ok()?, moved.parse().ok()?))
+    }))
+}
+
+/// Put back the `segment` rows a re-score replaced: the snapshot's span
+/// loses its current segment rows and gets the snapshot's (rows whose task
+/// is gone are dropped). The `rescore` correction and the day stamp go.
+pub fn rescore_undo(
+    conn: &mut Connection,
+    correction_id: i64,
+    day: &str,
+) -> Result<usize, StorageError> {
+    use rusqlite::OptionalExtension;
+    let tx = conn.transaction()?;
+    let Some(ctx) = tx
+        .query_row(
+            "SELECT ctx FROM corrections WHERE id=?1 AND kind='rescore'",
+            [correction_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(0);
+    };
+    let before: Vec<SegmentRow> = serde_json::from_str(&ctx).unwrap_or_default();
+    let (lo, hi) = match (
+        before.iter().map(|r| r.start_ts).min(),
+        before.iter().map(|r| r.end_ts).max(),
+    ) {
+        (Some(lo), Some(hi)) => (lo, hi),
+        _ => (0, 0),
+    };
+    tx.execute(
+        "DELETE FROM intervals WHERE source='segment' AND start_ts >= ?1 AND start_ts < ?2",
+        [lo, hi],
+    )?;
+    let mut n = 0;
+    for r in &before {
+        n += tx.execute(
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id, confident)
+             SELECT ?1, ?2, ?3, ?4, ?5, 'segment', ?6, ?1, ?7 WHERE EXISTS (SELECT 1 FROM tasks WHERE id=?1)",
+            params![
+                r.task_id,
+                r.batch_id,
+                r.start_ts,
+                r.end_ts,
+                r.confidence,
+                r.reason,
+                r.confident.map(i64::from)
+            ],
+        )?;
+    }
+    tx.execute("DELETE FROM corrections WHERE id=?1", [correction_id])?;
+    set_meta(&tx, &format!("rescored:{day}"), None)?;
+    tx.commit()?;
+    Ok(n)
+}
+
+/// Verdicts left alone for a day are taken as right (m30 chunk 4: passive
+/// acceptance). Returns the rows closed.
+pub fn passive_accept(conn: &Connection, now: jiff::Timestamp) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "UPDATE verdict_log SET outcome='right' WHERE outcome IS NULL AND ts < ?1",
+        [ts_to_ms(now) - 86_400_000],
+    )?)
+}
+
+/// Derived tasks with no project take the place their evidence saturates
+/// (m30 chunk 4: learned projects). Returns the tasks updated.
+pub fn infer_projects(conn: &Connection, saturate_min: f64) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "UPDATE tasks SET project = (
+             SELECT e.value FROM task_evidence e
+             WHERE e.task_id = tasks.id AND e.kind = 'place' AND e.minutes >= ?1
+             ORDER BY e.minutes DESC LIMIT 1)
+         WHERE source='derived' AND project IS NULL
+           AND EXISTS (SELECT 1 FROM task_evidence e WHERE e.task_id = tasks.id AND e.kind = 'place' AND e.minutes >= ?1)",
+        [saturate_min],
+    )?)
+}
+
+/// `(margin, confident, outcome)` of every closed verdict since `since_ms`,
+/// for `bench --calibrate`.
+pub fn verdict_outcomes(
+    conn: &Connection,
+    since_ms: i64,
+) -> Result<Vec<(f64, bool, String)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT margin, confident, outcome FROM verdict_log WHERE ts >= ?1 AND outcome IS NOT NULL",
+    )?;
+    let rows = stmt
+        .query_map([since_ms], |r| {
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, i64>(1)? != 0,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
 }
 
 /// Rebuild the `task_evidence` rows of `task_ids` only, from the full
@@ -3514,6 +3753,7 @@ pub fn keep_interval(
         "UPDATE intervals SET source='user', confidence=1.0 WHERE id=?1",
         [interval_id],
     )?;
+    mark_verdicts(&tx, &[interval_id], "right")?;
     let (label, project): (String, Option<String>) = tx.query_row(
         "SELECT label, project FROM tasks WHERE id=?1",
         [task_id],
@@ -3564,6 +3804,11 @@ pub fn merge_task(
             new_project,
             ctx
         ],
+    )?;
+    tx.execute(
+        "UPDATE verdict_log SET outcome='wrong' WHERE outcome IS NULL AND interval_id IN
+             (SELECT id FROM intervals WHERE task_id=?1 AND source='segment')",
+        [from_task],
     )?;
     tx.execute(
         "UPDATE intervals SET task_id=?1 WHERE task_id=?2",

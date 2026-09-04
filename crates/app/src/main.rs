@@ -214,6 +214,11 @@ enum Cmd {
         /// replay mode takes the minute-weighted majority over a probe).
         #[arg(long)]
         segment: bool,
+        /// Read the segmenter's verdict log (m30 chunk 4): corrected share
+        /// per margin bucket, and the delta at which "to confirm" covers the
+        /// worst tenth of placements. Uses --since.
+        #[arg(long)]
+        calibrate: bool,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -280,8 +285,11 @@ fn main() -> anyhow::Result<()> {
             scorer,
             probes,
             segment,
+            calibrate,
         } => {
-            if replay {
+            if calibrate {
+                bench::calibrate(&data_dir, since)
+            } else if replay {
                 let set = chronicle_core::replay::ProbeSet::parse(&probes)
                     .ok_or_else(|| anyhow::anyhow!("--probes must be all, direct or source"))?;
                 replay_eval(

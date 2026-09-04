@@ -607,6 +607,65 @@ fn print_totals(
     totals
 }
 
+/// `chronicle bench --calibrate` (m30 chunk 4): what the verdict log says
+/// about the scorer's margins — per 0.05 bucket, how many placements the
+/// user corrected — and the delta under which the worst tenth of placements
+/// would read "to confirm".
+pub(crate) fn calibrate(data_dir: &Path, since_days: u64) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let since_ms = Timestamp::now().as_millisecond() - since_days as i64 * 86_400_000;
+    let mut rows = storage::verdict_outcomes(&conn, since_ms)?;
+    if rows.is_empty() {
+        println!(
+            "no closed verdicts in the last {since_days} days (segmenter mode writes them on reconcile; corrections and a day's silence close them)"
+        );
+        return Ok(());
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let wrong = |r: &(f64, bool, String)| r.2 == "wrong";
+    println!(
+        "{} closed verdicts, {} corrected",
+        rows.len(),
+        rows.iter().filter(|r| wrong(r)).count()
+    );
+    println!("margin     n   wrong  share");
+    let mut lo = 0.0;
+    while lo < 1.0 {
+        let hi = lo + 0.05;
+        let bucket: Vec<_> = rows
+            .iter()
+            .filter(|r| r.0 >= lo && (r.0 < hi || (hi >= 1.0 && r.0 <= 1.0)))
+            .collect();
+        if !bucket.is_empty() {
+            let w = bucket.iter().filter(|r| wrong(r)).count();
+            println!(
+                "{lo:.2}-{hi:.2} {:4} {:6}  {:3.0}%",
+                bucket.len(),
+                w,
+                w as f64 / bucket.len() as f64 * 100.0
+            );
+        }
+        lo = hi;
+    }
+    // Delta so that the lowest-margin tenth is "to confirm".
+    let tenth = rows.len().div_ceil(10);
+    let suggested = rows.get(tenth.saturating_sub(1)).map_or(0.0, |r| r.0);
+    let above: Vec<_> = rows.iter().filter(|r| r.0 >= suggested).collect();
+    let wrong_above = above.iter().filter(|r| wrong(r)).count();
+    println!(
+        "delta {suggested:.2} puts the worst {tenth} of {} to confirm; above it {wrong_above} of {} were corrected ({:.0}%). Set `scorer_delta = {suggested:.2}` in config.toml to use it.",
+        rows.len(),
+        above.len(),
+        if above.is_empty() {
+            0.0
+        } else {
+            wrong_above as f64 / above.len() as f64 * 100.0
+        }
+    );
+    Ok(())
+}
+
 /// `chronicle bench --replay`: re-derive every done batch a recent correction
 /// touched, with the open-task list as it stood at the batch's end, and score
 /// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it

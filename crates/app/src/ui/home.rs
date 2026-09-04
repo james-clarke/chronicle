@@ -321,6 +321,7 @@ impl TimelineApp {
                                     candidates: &candidates,
                                     progress: self.progress.as_ref(),
                                     tidy: self.tidy,
+                                    rescore: self.rescore,
                                 },
                                 &mut self.new_label,
                                 &mut pending,
@@ -558,6 +559,7 @@ impl TimelineApp {
                                 candidates: &candidates,
                                 progress: self.progress.as_ref(),
                                 tidy: self.tidy,
+            rescore: self.rescore,
                             },
                             new_label,
                             &mut pending,
@@ -1053,6 +1055,8 @@ struct FeedSection<'a> {
     progress: Option<&'a chronicle_core::storage::DeriveProgress>,
     /// Today's consolidation stamp (see `HomeData::tidy`); None off today.
     tidy: Option<Option<i64>>,
+    /// The day's last same-day re-score: `(correction id, rows moved)`.
+    rescore: Option<(i64, usize)>,
 }
 
 /// A progress row older than this is a stale meta value from a dead worker.
@@ -1077,6 +1081,7 @@ fn feed_section_ui(
         candidates,
         progress,
         tidy,
+        rescore,
     } = f;
     let progress = progress
         .filter(|p| jiff::Timestamp::now().as_millisecond() - p.started_ts < PROGRESS_STALE_MS);
@@ -1091,6 +1096,16 @@ fn feed_section_ui(
                 .clicked()
             {
                 *open_triage = true;
+            }
+            if let Some((id, moved)) = rescore
+                && moved > 0
+                && theme::ghost_button(ui, &format!("undo re-score ({moved} moved)"))
+                    .on_hover_text(
+                        "your last correction re-scored the day and moved these rows; put them back",
+                    )
+                    .clicked()
+            {
+                *pending = Some(Action::UndoRescore(id));
             }
             match tidy {
                 Some(Some(id)) if id > 0 => {
