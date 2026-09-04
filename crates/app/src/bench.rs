@@ -387,10 +387,26 @@ fn print_totals(
         .collect();
     println!("  by kind: {}", kinds.join(", "));
     let lenient = results.iter().filter(|r| r.lenient).count();
+    // Several corrections over one task (a run of merges into it) repeat
+    // the same probe; count each distinct (batch, task, range, check) once.
+    let mut unique: std::collections::BTreeMap<(i64, i64, (i64, i64), Check), bool> =
+        std::collections::BTreeMap::new();
+    for r in results {
+        let e = unique
+            .entry((r.batch_id, r.task_id, r.range_min, r.check))
+            .or_insert(false);
+        *e |= r.pass;
+    }
+    let unique_ok = unique.values().filter(|p| **p).count();
     println!(
-        "  total: {ok_all}/{} (lenient {lenient}/{})",
+        "  total: {ok_all}/{} (lenient {lenient}/{}; unique probes {unique_ok}/{})",
         results.len(),
-        results.len()
+        results.len(),
+        unique.len()
+    );
+    totals.insert(
+        "unique".into(),
+        serde_json::json!([unique_ok, unique.len()]),
     );
     totals.insert("total".into(), serde_json::json!([ok_all, results.len()]));
     totals.insert(
@@ -684,6 +700,11 @@ pub(crate) fn replay_eval(
                         let fail = replay::ProbeResult {
                             correction_id: p.correction_id,
                             batch_id: p.batch_id,
+                            task_id: p.task_id,
+                            range_min: (
+                                (p.range.0 - batch.start_ts) / 60_000,
+                                (p.range.1 - batch.start_ts + 59_999) / 60_000,
+                            ),
                             kind: p.kind.clone(),
                             check: p.check,
                             pass: false,

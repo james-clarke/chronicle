@@ -52,7 +52,7 @@ pub struct BatchRow {
     pub end_ts: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Check {
     /// The corrected range resolves to the task the user ended on.
@@ -111,6 +111,10 @@ pub struct Replayed {
 pub struct ProbeResult {
     pub correction_id: i64,
     pub batch_id: i64,
+    /// The probe's target task.
+    pub task_id: i64,
+    /// The probe's range as batch-relative minutes, `[lo, hi)`.
+    pub range_min: (i64, i64),
     pub kind: String,
     pub check: Check,
     pub pass: bool,
@@ -451,6 +455,8 @@ pub fn score(
     let base = |pass: bool, detail: String| ProbeResult {
         correction_id: probe.correction_id,
         batch_id: probe.batch_id,
+        task_id: probe.task_id,
+        range_min: (lo, hi),
         kind: probe.kind.clone(),
         check: probe.check,
         pass,
