@@ -178,6 +178,7 @@ impl Span {
             kind: ActivityKind::Shell,
             ext_id: Some(format!("{}#{}", self.cwd, self.start_ms)),
             summary: Some(self.summary()),
+            detail: None,
         }
     }
 }

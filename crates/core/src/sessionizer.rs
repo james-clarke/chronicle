@@ -6,6 +6,8 @@ use std::ops::Range;
 use jiff::Timestamp;
 use rusqlite::Connection;
 
+use regex::Regex;
+
 use crate::config::Config;
 use crate::storage::{self, StorageError};
 use crate::types::Event;
@@ -280,5 +282,12 @@ pub fn refresh(conn: &mut Connection, config: &Config, now: Timestamp) -> Result
     }
     let spans = sessionize(&events, now, config);
     let batches = assign_batches(&spans, config);
-    storage::replace_tail(conn, t0, &spans, &batches)
+    storage::replace_tail(conn, t0, &spans, &batches)?;
+    // Anchors follow the tail: recomputed on every refresh until the batch
+    // closes, so late collector events (a session log polled 20 s later)
+    // still attach.
+    if let Ok(re) = Regex::new(&config.ticket_regex) {
+        storage::anchor_spans(conn, t0, i64::MAX, &re)?;
+    }
+    Ok(())
 }

@@ -387,7 +387,7 @@ fn parse_events(
                 .or_else(|| known.get(id).copied());
             if let Some(ts) = start {
                 cancelled.insert(id);
-                out.push(meeting(ts, ts, id, None));
+                out.push(meeting(ts, ts, id, None, Vec::new()));
             }
             continue;
         }
@@ -408,6 +408,7 @@ fn parse_events(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
+            attendees(item),
         ));
     }
     // Sorted so the emitted order does not depend on the map's iteration.
@@ -423,12 +424,18 @@ fn parse_events(
     gone.sort_unstable();
     out.extend(
         gone.into_iter()
-            .map(|(id, start)| meeting(*start, *start, id, None)),
+            .map(|(id, start)| meeting(*start, *start, id, None, Vec::new())),
     );
     (out, seen)
 }
 
-fn meeting(ts: Timestamp, end: Timestamp, id: &str, summary: Option<String>) -> ActivityEvent {
+fn meeting(
+    ts: Timestamp,
+    end: Timestamp,
+    id: &str,
+    summary: Option<String>,
+    attendees: Vec<String>,
+) -> ActivityEvent {
     ActivityEvent {
         ts,
         end_ts: Some(end),
@@ -437,7 +444,33 @@ fn meeting(ts: Timestamp, end: Timestamp, id: &str, summary: Option<String>) -> 
         kind: ActivityKind::Meeting,
         ext_id: Some(id.to_owned()),
         summary,
+        detail: (!attendees.is_empty())
+            .then(|| serde_json::json!({ "attendees": attendees }).to_string()),
     }
+}
+
+/// The other people on the invite (display name, else email), in the
+/// order the API lists them; the user and resource rooms are not people
+/// the meeting is "with".
+fn attendees(item: &serde_json::Value) -> Vec<String> {
+    const MAX: usize = 12;
+    item.get("attendees")
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|p| p.get("self").and_then(|s| s.as_bool()) != Some(true))
+                .filter(|p| p.get("resource").and_then(|s| s.as_bool()) != Some(true))
+                .filter_map(|p| {
+                    p.get("displayName")
+                        .and_then(|n| n.as_str())
+                        .filter(|n| !n.trim().is_empty())
+                        .or_else(|| p.get("email").and_then(|e| e.as_str()))
+                        .map(|s| s.trim().to_owned())
+                })
+                .take(MAX)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Timed events only: an all-day event has `date`, not `dateTime`.

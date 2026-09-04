@@ -5,6 +5,9 @@ active 50s · afk 0s · 3 switches
 - Code: 40s
 - Firefox: 10s
 
+## Documents
+digest.rs 30s, Jira ACME-7 board 10s, storage.rs 10s
+
 ## Timeline (minute offsets from window start)
 - 0–1m Code: chronicle — digest.rs
 

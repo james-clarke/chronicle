@@ -37,6 +37,10 @@ pub struct ActivityEvent {
     pub ext_id: Option<String>,
     /// Commit subject, first prompt, PR title, calling app.
     pub summary: Option<String>,
+    /// Per-kind JSON the anchors read (m30): `{"path","language"}` for
+    /// edits, `{"prompts":[..],"paths":[..]}` for AI sessions,
+    /// `{"attendees":[..]}` for meetings. `None` for kinds without one.
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,10 @@ pub enum ActivityKind {
     Edit,
     /// Shell commands folded per cwd repo (m26 chunk 4); never the command line.
     Shell,
+    /// Working directory of the focused terminal's shell, read from the
+    /// process tree on focus (m30): one row per `(terminal pid, place)`,
+    /// `ts` first seen, `end_ts` last seen. Anchors only; never rendered.
+    Cwd,
 }
 
 /// How a repeated observation of the same `ext_id` is stored.
@@ -70,7 +78,7 @@ pub enum Dedupe {
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 9] = [
+    pub const ALL: [ActivityKind; 10] = [
         ActivityKind::Checkout,
         ActivityKind::Commit,
         ActivityKind::AiSession,
@@ -80,6 +88,7 @@ impl ActivityKind {
         ActivityKind::Meeting,
         ActivityKind::Edit,
         ActivityKind::Shell,
+        ActivityKind::Cwd,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -93,6 +102,7 @@ impl ActivityKind {
             ActivityKind::Meeting => "meeting",
             ActivityKind::Edit => "edit",
             ActivityKind::Shell => "shell",
+            ActivityKind::Cwd => "cwd",
         }
     }
 
@@ -118,7 +128,8 @@ impl ActivityKind {
             | ActivityKind::Call
             | ActivityKind::Meeting
             | ActivityKind::Edit
-            | ActivityKind::Shell => Dedupe::Upsert,
+            | ActivityKind::Shell
+            | ActivityKind::Cwd => Dedupe::Upsert,
             ActivityKind::PrAuthored | ActivityKind::PrReviewed => Dedupe::Ignore,
         }
     }

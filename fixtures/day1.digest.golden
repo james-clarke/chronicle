@@ -5,6 +5,9 @@ active 28m00s · afk 0s · 6 switches
 - Terminator: 19m22s
 - firefox: 8m30s
 
+## Documents
+std::sync::mpsc - Rust 7m00s, Rust std docs 1m30s
+
 ## Timeline (minute offsets from window start)
 - 0–6m Terminator: vim src/main.rs
 - 6–7m firefox: Rust std docs — Mozilla Firefox + Terminator: vim src/main.rs

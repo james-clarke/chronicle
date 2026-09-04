@@ -1695,7 +1695,7 @@ fn activity_glyph(kind: chronicle_core::types::ActivityKind) -> &'static str {
         K::Call => theme::icon::PHONE_CALL,
         K::Meeting => theme::icon::CALENDAR,
         K::Edit => theme::icon::CODE,
-        K::Shell => theme::icon::TERMINAL,
+        K::Shell | K::Cwd => theme::icon::TERMINAL,
     }
 }
 
@@ -1715,6 +1715,7 @@ fn activity_kind_name(kind: chronicle_core::types::ActivityKind) -> &'static str
         K::Meeting => "calendar event",
         K::Edit => "editor time",
         K::Shell => "shell commands",
+        K::Cwd => "terminal working directory",
     }
 }
 

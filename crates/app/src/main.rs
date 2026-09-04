@@ -9,7 +9,10 @@ mod status;
 mod ui;
 
 use ai_job::ai_job_worker;
-use bench::{backfill_coalesce, backfill_descriptions, bench, replay_eval};
+use bench::{
+    backfill_coalesce, backfill_descriptions, backfill_evidence, bench, evidence_report,
+    replay_eval,
+};
 use capture::gcal_login;
 use chat_worker::chat_worker;
 use daemon::{run, send_ctrl, socket_path};
@@ -90,6 +93,37 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Internal: recompute span anchors (m30) for spans since a local day.
+    #[command(hide = true)]
+    BackfillAnchors {
+        /// Spans starting on or after this local day; default: everything.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: Option<String>,
+    },
+    /// How much focus time carries an anchor (work item, document, place…),
+    /// and which anchors cover the most time.
+    Anchors {
+        /// Window in days ending now.
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Values to list.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
+    /// Internal: one-off rebuild of `task_evidence` from stored intervals,
+    /// anchored spans and corrections.
+    #[command(hide = true)]
+    BackfillEvidence,
+    /// Show a task's evidence rows, or a summary of the strongest evidence
+    /// across all tasks.
+    Evidence {
+        /// Show this task's evidence rows instead of the cross-task summary.
+        #[arg(long)]
+        task: Option<i64>,
+        /// Entries to list per task in the summary.
+        #[arg(long, default_value_t = 5)]
+        top: usize,
+    },
     /// Generate descriptions for closed tasks that lack one, newest first.
     BackfillDescriptions {
         /// Max tasks to describe this run; rerun to continue.
@@ -163,6 +197,12 @@ enum Cmd {
         /// Replay: write the per-probe results as JSON here for diffing.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Score with the m30 evidence profiler instead of (or alongside) a
+        /// model: no llama load. Fixture mode: persona fixtures with
+        /// `.expect.json` groups. Replay mode: scores probes against the
+        /// profiler and, if a model also runs, a combined verdict.
+        #[arg(long)]
+        scorer: bool,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -226,9 +266,10 @@ fn main() -> anyhow::Result<()> {
             replay,
             since,
             out,
+            scorer,
         } => {
             if replay {
-                replay_eval(&data_dir, since, model.as_deref(), out.as_deref())
+                replay_eval(&data_dir, since, model.as_deref(), scorer, out.as_deref())
             } else {
                 bench(
                     &data_dir,
@@ -238,6 +279,7 @@ fn main() -> anyhow::Result<()> {
                     only.as_deref(),
                     model.as_deref(),
                     no_mcp,
+                    scorer,
                 )
             }
         }
@@ -245,6 +287,10 @@ fn main() -> anyhow::Result<()> {
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
+        Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
+        Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),
+        Cmd::BackfillEvidence => backfill_evidence(&data_dir),
+        Cmd::Evidence { task, top } => evidence_report(&data_dir, task, top),
         Cmd::GcalLogin {
             client_id,
             client_secret,

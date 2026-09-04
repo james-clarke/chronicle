@@ -3,9 +3,11 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use regex::Regex;
 use rusqlite::{Connection, params};
 use rusqlite_migration::{M, Migrations};
 
+use crate::profile;
 use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
 use crate::types::{
     ActivityEvent, ActivityKind, CaptureEvent, Correction, Dedupe, Event, FocusEvent, NewInterval,
@@ -39,6 +41,8 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/013_proposals.sql")),
         M::up(include_str!("../migrations/014_derive_metrics.sql")),
         M::up(include_str!("../migrations/015_extra_indexes.sql")),
+        M::up(include_str!("../migrations/016_span_anchors.sql")),
+        M::up(include_str!("../migrations/017_task_evidence.sql")),
     ])
 });
 
@@ -114,14 +118,16 @@ pub fn insert_activity_event(conn: &Connection, e: &ActivityEvent) -> Result<(),
             if let Some(ext) = &e.ext_id {
                 let n = conn.execute(
                     "UPDATE activity_events SET ts=?3, end_ts=?4,
-                            summary=COALESCE(NULLIF(?5, ''), summary)
+                            summary=COALESCE(NULLIF(?5, ''), summary),
+                            detail=COALESCE(?6, detail)
                      WHERE kind=?1 AND ext_id=?2",
                     params![
                         e.kind.as_str(),
                         ext,
                         ts_to_ms(e.ts),
                         e.end_ts.map(ts_to_ms),
-                        e.summary
+                        e.summary,
+                        e.detail
                     ],
                 )?;
                 if n > 0 {
@@ -133,8 +139,8 @@ pub fn insert_activity_event(conn: &Connection, e: &ActivityEvent) -> Result<(),
     }
     conn.execute(
         "INSERT OR IGNORE INTO activity_events
-             (ts, end_ts, repo, branch, kind, ext_id, summary)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (ts, end_ts, repo, branch, kind, ext_id, summary, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             ts_to_ms(e.ts),
             e.end_ts.map(ts_to_ms),
@@ -142,7 +148,8 @@ pub fn insert_activity_event(conn: &Connection, e: &ActivityEvent) -> Result<(),
             e.branch,
             e.kind.as_str(),
             e.ext_id,
-            e.summary
+            e.summary,
+            e.detail
         ],
     )?;
     Ok(())
@@ -162,11 +169,13 @@ fn activity_from_row_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<Ac
         kind: ActivityKind::parse(&kind).unwrap_or(ActivityKind::Checkout),
         ext_id: r.get(at + 5)?,
         summary: r.get(at + 6)?,
+        detail: r.get(at + 7)?,
     })
 }
 
-const ACTIVITY_COLS: &str = "ts, end_ts, repo, branch, kind, ext_id, summary";
-const ACTIVITY_COLS_V: &str = "v.ts, v.end_ts, v.repo, v.branch, v.kind, v.ext_id, v.summary";
+const ACTIVITY_COLS: &str = "ts, end_ts, repo, branch, kind, ext_id, summary, detail";
+const ACTIVITY_COLS_V: &str =
+    "v.ts, v.end_ts, v.repo, v.branch, v.kind, v.ext_id, v.summary, v.detail";
 const VCS_KINDS: &str = "kind IN ('checkout','commit')";
 const VCS_KINDS_A: &str = "a.kind IN ('checkout','commit')";
 
@@ -272,7 +281,7 @@ pub fn activity_unplaced_in_range(
 ) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {ACTIVITY_COLS_V} FROM activity_events v
-         WHERE v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
+         WHERE v.kind != 'cwd' AND v.kind != 'checkout' AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
            AND NOT EXISTS (SELECT 1 FROM intervals i
                            WHERE v.ts < i.end_ts AND COALESCE(v.end_ts, v.ts) >= i.start_ts)
          ORDER BY v.ts, v.id"
@@ -315,7 +324,7 @@ fn activity_by_task(
             AND (LOWER(a.repo) = LOWER(t.project)
                  OR (t.external_ref IS NOT NULL AND {VCS_KINDS_A}
                      AND instr(a.branch, t.external_ref) > 0))
-           WHERE t.id IN (SELECT task_id FROM intervals
+           WHERE v.kind != 'cwd' AND t.id IN (SELECT task_id FROM intervals
                           WHERE start_ts < ?2 AND end_ts >= ?1)
          )
          SELECT DISTINCT i.task_id, {ACTIVITY_COLS_V} FROM activity_events v
@@ -538,6 +547,13 @@ pub fn replace_tail(
     batches: &[BatchDraft],
 ) -> Result<(), StorageError> {
     let tx = conn.transaction()?;
+    // Span ids are reused once the newest rows go, so their anchors go with
+    // them inside the same transaction.
+    tx.execute(
+        "DELETE FROM span_anchors WHERE span_id IN
+             (SELECT id FROM spans WHERE batch_id IS NULL AND start_ts >= ?1)",
+        [t0],
+    )?;
     tx.execute(
         "DELETE FROM spans WHERE batch_id IS NULL AND start_ts >= ?1",
         [t0],
@@ -571,6 +587,391 @@ pub fn replace_tail(
     attach_tail_intervals(&tx)?;
     tx.commit()?;
     Ok(())
+}
+
+// ------------------------------------------------------------ span anchors
+
+/// Recompute anchors for focus spans starting in `[lo, hi)`: the span's own
+/// title/URL anchors plus the collector events that overlap it. Existing
+/// rows for those spans are replaced. Returns the number of spans that got
+/// at least one anchor.
+pub fn anchor_spans(
+    conn: &mut Connection,
+    lo: i64,
+    hi: i64,
+    ticket_re: &Regex,
+) -> Result<usize, StorageError> {
+    use crate::extract::{self, Anchor};
+    const HISTORY_MS: i64 = 7 * 86_400_000;
+    let spans: Vec<(i64, i64, i64, String, String, Option<String>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, start_ts, end_ts, app, title, url FROM spans
+             WHERE kind = 'focus' AND start_ts >= ?1 AND start_ts < ?2
+             ORDER BY start_ts",
+        )?;
+        let rows = stmt.query_map([lo, hi], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if spans.is_empty() {
+        return Ok(0);
+    }
+    let last_end = spans.iter().map(|s| s.2).max().unwrap_or(hi);
+    let events = activity_in_range(conn, lo - HISTORY_MS, last_end + 1)?;
+    let tx = conn.transaction()?;
+    let mut anchored = 0;
+    {
+        let mut del = tx.prepare("DELETE FROM span_anchors WHERE span_id = ?1")?;
+        let mut ins = tx.prepare(
+            "INSERT OR IGNORE INTO span_anchors (span_id, kind, value) VALUES (?1, ?2, ?3)",
+        )?;
+        for (id, start, end, app, title, url) in &spans {
+            let own = extract::extract(app, title, url.as_deref(), ticket_re);
+            let more = extract::from_activity(app, *start, *end, &own, &events, ticket_re);
+            let all: Vec<Anchor> = extract::merge(own, more);
+            del.execute([id])?;
+            if all.is_empty() {
+                continue;
+            }
+            anchored += 1;
+            for a in &all {
+                ins.execute(params![id, a.kind.as_str(), a.value])?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(anchored)
+}
+
+/// Anchors on one span, kind order then value.
+pub fn span_anchors(
+    conn: &Connection,
+    span_id: i64,
+) -> Result<Vec<crate::extract::Anchor>, StorageError> {
+    let mut stmt = conn
+        .prepare("SELECT kind, value FROM span_anchors WHERE span_id = ?1 ORDER BY kind, value")?;
+    let rows = stmt.query_map([span_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (kind, value) = row?;
+        if let Some(kind) = crate::extract::AnchorKind::parse(&kind) {
+            out.push(crate::extract::Anchor { kind, value });
+        }
+    }
+    Ok(out)
+}
+
+/// How much focus time in `[lo, hi)` carries an anchor, by the strongest
+/// kind on each span, plus the values that cover the most time.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AnchorCoverage {
+    pub focus_ms: i64,
+    pub strong_ms: i64,
+    pub medium_ms: i64,
+    pub weak_ms: i64,
+    /// `(kind, value, ms)`, most time first.
+    pub top: Vec<(String, String, i64)>,
+}
+
+pub fn anchor_coverage(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+    top_n: usize,
+) -> Result<AnchorCoverage, StorageError> {
+    use crate::extract::{AnchorKind, Strength};
+    let mut cov = AnchorCoverage::default();
+    let mut stmt = conn.prepare(
+        "SELECT s.id, MIN(s.end_ts, ?2) - MAX(s.start_ts, ?1), a.kind, a.value
+         FROM spans s LEFT JOIN span_anchors a ON a.span_id = s.id
+         WHERE s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
+         ORDER BY s.id",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut by_value: HashMap<(String, String), i64> = HashMap::new();
+    let mut cur: Option<(i64, i64, Option<Strength>)> = None;
+    let flush = |cur: &Option<(i64, i64, Option<Strength>)>, cov: &mut AnchorCoverage| {
+        if let Some((_, ms, best)) = cur {
+            cov.focus_ms += ms;
+            match best {
+                Some(Strength::Strong) => cov.strong_ms += ms,
+                Some(Strength::Medium) => cov.medium_ms += ms,
+                Some(Strength::Weak) => cov.weak_ms += ms,
+                None => {}
+            }
+        }
+    };
+    for row in rows {
+        let (id, ms, kind, value) = row?;
+        if cur.as_ref().is_none_or(|c| c.0 != id) {
+            flush(&cur, &mut cov);
+            cur = Some((id, ms.max(0), None));
+        }
+        if let (Some(kind), Some(value)) = (kind, value)
+            && let Some(k) = AnchorKind::parse(&kind)
+        {
+            let c = cur.as_mut().expect("set above");
+            c.2 = Some(c.2.map_or(k.strength(), |s| s.max(k.strength())));
+            *by_value.entry((kind, value)).or_default() += ms.max(0);
+        }
+    }
+    flush(&cur, &mut cov);
+    let mut top: Vec<(String, String, i64)> = by_value
+        .into_iter()
+        .map(|((k, v), ms)| (k, v, ms))
+        .collect();
+    top.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    top.truncate(top_n);
+    cov.top = top;
+    Ok(cov)
+}
+
+// ------------------------------------------------------------ task evidence
+
+/// Focus spans overlapping `[lo, hi)`, each with its stored anchors, sorted
+/// by `start_ts, id`. One query (LEFT JOIN, ordered), not N+1.
+pub fn anchored_spans(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<profile::AnchoredSpan>, StorageError> {
+    use crate::extract::{Anchor, AnchorKind};
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value
+         FROM spans s LEFT JOIN span_anchors a ON a.span_id = s.id
+         WHERE s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
+         ORDER BY s.start_ts, s.id",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+    let mut out: Vec<profile::AnchoredSpan> = Vec::new();
+    for row in rows {
+        let (id, start_ts, end_ts, app, title, kind, value) = row?;
+        if out.last().is_none_or(|s| s.id != id) {
+            out.push(profile::AnchoredSpan {
+                id,
+                start_ts,
+                end_ts,
+                app,
+                title,
+                anchors: Vec::new(),
+            });
+        }
+        if let (Some(kind), Some(value)) = (kind, value)
+            && let Some(k) = AnchorKind::parse(&kind)
+        {
+            out.last_mut()
+                .expect("pushed above")
+                .anchors
+                .push(Anchor { kind: k, value });
+        }
+    }
+    Ok(out)
+}
+
+/// Rebuild `task_evidence` from scratch: `DELETE` then re-derive every row
+/// via [`profile::build_evidence`] from the full history as of `now_ts`.
+/// Returns the row count.
+pub fn rebuild_task_evidence(
+    conn: &mut Connection,
+    ticket_re: &Regex,
+    params: &profile::Params,
+    now_ts: i64,
+) -> Result<usize, StorageError> {
+    let ReplayRows {
+        corrections,
+        intervals,
+        tasks,
+        ..
+    } = replay_rows(conn, 0)?;
+    let spans = anchored_spans(conn, 0, i64::MAX)?;
+    let rows = profile::build_evidence(
+        &tasks,
+        &intervals,
+        &spans,
+        &corrections,
+        ticket_re,
+        now_ts,
+        params,
+    );
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM task_evidence", [])?;
+    {
+        let mut ins = tx.prepare(
+            "INSERT INTO task_evidence (task_id, kind, value, source, minutes, first_ts, last_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for r in &rows {
+            ins.execute(params![
+                r.task_id,
+                r.key.kind_str(),
+                r.key.value(),
+                r.source.as_str(),
+                r.minutes,
+                r.first_ts,
+                r.last_ts,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(rows.len())
+}
+
+/// One task's evidence rows, ordered by minutes desc.
+pub fn task_evidence(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Vec<profile::EvidenceRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, value, source, minutes, first_ts, last_ts FROM task_evidence
+         WHERE task_id = ?1 ORDER BY minutes DESC",
+    )?;
+    let rows = stmt.query_map([task_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, f64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (kind, value, source, minutes, first_ts, last_ts) = row?;
+        let (Some(key), Some(source)) = (
+            profile::Key::parse(&kind, &value),
+            profile::Source::parse(&source),
+        ) else {
+            continue;
+        };
+        out.push(profile::EvidenceRow {
+            task_id,
+            key,
+            minutes,
+            first_ts,
+            last_ts,
+            source,
+        });
+    }
+    Ok(out)
+}
+
+/// One task's evidence, summarized for display: its label, row count, and
+/// its strongest anchors.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvidenceSummary {
+    pub task_id: i64,
+    pub label: String,
+    pub rows: usize,
+    /// `(kind, value, minutes)`, largest sum first, kind `term` excluded.
+    pub top: Vec<(String, String, f64)>,
+}
+
+/// One entry per task with `task_evidence` rows, ordered by total positive
+/// minutes desc. `top` is the `top` largest `(kind, value, minutes)` summed
+/// across sources, excluding kind `term`.
+pub fn evidence_summary(
+    conn: &Connection,
+    top: usize,
+) -> Result<Vec<EvidenceSummary>, StorageError> {
+    struct Acc {
+        label: String,
+        rows: usize,
+        total: f64,
+        by_key: HashMap<(String, String), f64>,
+    }
+    let mut stmt = conn.prepare(
+        "SELECT e.task_id, t.label, e.kind, e.value, e.minutes
+         FROM task_evidence e JOIN tasks t ON t.id = e.task_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, f64>(4)?,
+        ))
+    })?;
+    let mut by_task: HashMap<i64, Acc> = HashMap::new();
+    for row in rows {
+        let (task_id, label, kind, value, minutes) = row?;
+        let acc = by_task.entry(task_id).or_insert_with(|| Acc {
+            label,
+            rows: 0,
+            total: 0.0,
+            by_key: HashMap::new(),
+        });
+        acc.rows += 1;
+        if minutes > 0.0 {
+            acc.total += minutes;
+        }
+        if kind != "term" {
+            *acc.by_key.entry((kind, value)).or_insert(0.0) += minutes;
+        }
+    }
+    let mut ranked: Vec<(i64, Acc)> = by_task.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.total
+            .partial_cmp(&a.1.total)
+            .unwrap()
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    Ok(ranked
+        .into_iter()
+        .map(|(task_id, acc)| {
+            let mut top_v: Vec<(String, String, f64)> = acc
+                .by_key
+                .into_iter()
+                .filter(|(_, m)| *m > 0.0)
+                .map(|((k, v), m)| (k, v, m))
+                .collect();
+            top_v.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap()
+                    .then_with(|| a.0.cmp(&b.0))
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            top_v.truncate(top);
+            EvidenceSummary {
+                task_id,
+                label: acc.label,
+                rows: acc.rows,
+                top: top_v,
+            }
+        })
+        .collect())
 }
 
 /// Intervals placed over the live tail (NULL batch) take the batch their
@@ -872,10 +1273,14 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageE
 /// requires it), user-declared tasks are never pruned, and a batch survives
 /// while spans or intervals still reference it.
 pub fn prune(conn: &Connection, cutoff_ms: i64, batch: usize) -> Result<u64, StorageError> {
-    const STMTS: [&str; 10] = [
+    const STMTS: [&str; 11] = [
         "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE ts < ?1 LIMIT ?2)",
         "DELETE FROM spans WHERE id IN (SELECT id FROM spans WHERE end_ts < ?1 LIMIT ?2)",
+        // Old spans have low ids that nothing reuses, so their anchors can
+        // trail the span delete by a statement.
+        "DELETE FROM span_anchors WHERE rowid IN (SELECT rowid FROM span_anchors \
+         WHERE span_id NOT IN (SELECT id FROM spans) LIMIT ?2)",
         "DELETE FROM intervals WHERE id IN (SELECT id FROM intervals WHERE end_ts < ?1 \
          AND id NOT IN (SELECT interval_id FROM corrections WHERE interval_id IS NOT NULL) \
          LIMIT ?2)",
@@ -3788,6 +4193,7 @@ mod tests {
                 ext_id,
                 end_ts: None,
                 summary: None,
+                detail: None,
             }
         };
         assert!(super::latest_vcs_event_per_repo(&conn).unwrap().is_empty());
@@ -4222,5 +4628,93 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![100, 85]
         );
+    }
+
+    // `anchored_spans` sorts by start_ts/id, folds each span's anchors off
+    // one joined query, and never picks up the afk span.
+    #[test]
+    fn anchored_spans_sorted_and_excludes_afk() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO spans (id, start_ts, end_ts, app, title, kind) VALUES
+                 (1, 0, 10, 'code', 'billing.rs - app', 'focus'),
+                 (2, 10, 20, '', '', 'afk'),
+                 (3, 20, 30, 'code', 'mail.rs - app', 'focus');
+             INSERT INTO span_anchors (span_id, kind, value) VALUES
+                 (1, 'item', 'ACME-1'),
+                 (1, 'place', 'app'),
+                 (3, 'item', 'ACME-2');",
+        )
+        .unwrap();
+
+        let spans = super::anchored_spans(&conn, 0, 30).unwrap();
+        assert_eq!(
+            spans.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1, 3],
+            "afk span excluded, focus spans sorted by start_ts"
+        );
+        assert_eq!(spans[0].anchors.len(), 2, "{:?}", spans[0].anchors);
+        assert_eq!(spans[1].anchors.len(), 1, "{:?}", spans[1].anchors);
+        assert_eq!(
+            spans[1].anchors[0],
+            crate::extract::Anchor {
+                kind: crate::extract::AnchorKind::Item,
+                value: "ACME-2".into()
+            }
+        );
+        // Outside the window, no spans come back.
+        assert!(super::anchored_spans(&conn, 100, 200).unwrap().is_empty());
+    }
+
+    // `rebuild_task_evidence` deletes and re-derives every row from the
+    // replay rows and anchored spans; `task_evidence` reads them back with
+    // the anchor an interval's span carried.
+    #[test]
+    fn rebuild_task_evidence_and_task_evidence_round_trip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        const MIN: i64 = 60_000;
+        conn.execute_batch(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 40, 'done');
+             INSERT INTO tasks (id, label, project, status, source, created_ts) VALUES
+                 (1, 'ACME-1 billing', NULL, 'open', 'derived', 0),
+                 (2, 'ACME-2 emails', NULL, 'open', 'derived', 0);
+             INSERT INTO intervals (id, task_id, batch_id, start_ts, end_ts, confidence) VALUES
+                 (1, 1, 1, 0, 20, 0.9),
+                 (2, 2, 1, 20, 40, 0.9);
+             INSERT INTO spans (id, start_ts, end_ts, app, title, kind, batch_id) VALUES
+                 (1, 0, 20, 'code', 'billing.rs - app', 'focus', 1),
+                 (2, 20, 40, 'code', 'mail.rs - app', 'focus', 1);
+             INSERT INTO span_anchors (span_id, kind, value) VALUES
+                 (1, 'item', 'ACME-1'),
+                 (2, 'item', 'ACME-2');",
+        )
+        .unwrap();
+
+        let ticket_re = regex::Regex::new("[A-Z][A-Z0-9]+-[0-9]+").unwrap();
+        let params = crate::profile::Params::default();
+        let n = super::rebuild_task_evidence(&mut conn, &ticket_re, &params, 60 * MIN).unwrap();
+        assert!(n > 0, "rebuild produced rows");
+
+        let rows = super::task_evidence(&conn, 1).unwrap();
+        assert!(!rows.is_empty(), "task 1 has evidence rows");
+        let item = crate::profile::Key::Anchor(crate::extract::AnchorKind::Item, "ACME-1".into());
+        assert!(
+            rows.iter().any(|r| r.key == item),
+            "task 1's evidence carries its span's item anchor: {rows:?}"
+        );
+        // Rows come back sorted by minutes desc.
+        for w in rows.windows(2) {
+            assert!(w[0].minutes >= w[1].minutes, "{rows:?}");
+        }
+
+        // A second rebuild replaces rather than duplicates.
+        let n2 = super::rebuild_task_evidence(&mut conn, &ticket_re, &params, 60 * MIN).unwrap();
+        assert_eq!(n, n2, "rebuild is idempotent");
+        let total: i64 = conn
+            .query_row("SELECT count(*) FROM task_evidence", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total as usize, n2);
     }
 }
