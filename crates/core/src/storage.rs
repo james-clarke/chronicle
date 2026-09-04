@@ -954,6 +954,7 @@ pub fn evidence_summary(
             let mut top_v: Vec<(String, String, f64)> = acc
                 .by_key
                 .into_iter()
+                .filter(|(_, m)| *m > 0.0)
                 .map(|((k, v), m)| (k, v, m))
                 .collect();
             top_v.sort_by(|a, b| {

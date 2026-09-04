@@ -80,6 +80,8 @@ const TERM_STOP: &[&str] = &[
 
 /// How long an eject may precede the assign that recovers its range.
 const EJECT_PAIR_MS: i64 = 120_000;
+/// Longest focus span the sessionizer emits, for the sorted-scan skip.
+const MAX_SPAN_MS: i64 = 6 * 3_600_000;
 
 /// One evidence key: a typed anchor or a title term.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -290,7 +292,7 @@ impl Profile {
     /// Saturation of a key: 0 (none or negative) to 1 (a full match).
     pub fn sat(&self, key: &Key, p: &Params) -> f64 {
         let m = self.minutes.get(key).copied().unwrap_or(0.0);
-        (m / p.saturate_min).clamp(0.0, 1.0)
+        (m / p.saturate_min.max(f64::EPSILON)).clamp(0.0, 1.0)
     }
 }
 
@@ -305,7 +307,12 @@ fn minutes(ms: i64) -> f64 {
 /// Minutes of each key across the spans overlapping `range`.
 fn keys_in(spans: &[AnchoredSpan], range: (i64, i64)) -> HashMap<Key, (f64, i64, i64)> {
     let mut out: HashMap<Key, (f64, i64, i64)> = HashMap::new();
-    for s in spans {
+    // Spans are sorted by start; skip straight to the first that can
+    // overlap. (A span longer than any before it could start earlier and
+    // still overlap; focus spans are minutes long, so the miss is bounded
+    // by that.)
+    let first = spans.partition_point(|s| s.start_ts < range.0 - MAX_SPAN_MS);
+    for s in &spans[first..] {
         if s.end_ts <= range.0 {
             continue;
         }
@@ -369,12 +376,19 @@ pub fn build_evidence(
     }
 
     let interval = |id: i64| intervals.iter().find(|iv| iv.id == id);
+    // The task a reassign moved time away from, by its label then: the one
+    // live task with that label, else the one closed task.
     let task_by_label = |label: &str| {
-        let mut hits = tasks.iter().filter(|t| t.label == label);
-        match (hits.next(), hits.next()) {
-            (Some(t), None) => Some(t.id),
-            _ => None,
-        }
+        let one = |closed: bool| {
+            let mut hits = tasks
+                .iter()
+                .filter(|t| t.label == label && live.contains_key(&t.id) != closed);
+            match (hits.next(), hits.next()) {
+                (Some(t), None) => Some(t.id),
+                _ => None,
+            }
+        };
+        one(false).or_else(|| one(true))
     };
     // A correction counts as `correction_min` minutes spread over the
     // range's keys by their share of it.
@@ -395,7 +409,7 @@ pub fn build_evidence(
             );
         }
     };
-    for c in corrections.iter().filter(|c| c.ts < before_ts) {
+    for c in corrections.iter().filter(|c| c.ts <= before_ts) {
         match c.kind.as_str() {
             "assign" | "reassign" => {
                 let Some(iv) = c.interval_id.and_then(interval) else {
@@ -429,6 +443,7 @@ pub fn build_evidence(
     let items: Vec<&str> = {
         let mut v: Vec<&str> = spans
             .iter()
+            .filter(|s| s.end_ts <= before_ts)
             .flat_map(|s| s.anchors.iter())
             .filter(|a| a.kind == AnchorKind::Item)
             .map(|a| a.value.as_str())
