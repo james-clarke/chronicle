@@ -96,9 +96,10 @@ section { padding: 72px 0; }
   list-style: none;
   padding: 0;
   margin: 0;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  max-width: 30em;
 }
 .nos li {
   display: flex;
@@ -138,7 +139,7 @@ section { padding: 72px 0; }
   object-fit: cover;
   opacity: 0;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line);
-  animation: 12s var(--ease) infinite;
+  animation: 14s var(--ease) infinite;
 }
 .hero-art .desk.win { animation-name: desk-win; }
 .hero-art .desk.mac { animation-name: desk-mac; }
@@ -149,26 +150,26 @@ section { padding: 72px 0; }
   width: 100%;
   transform-origin: 0 0;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line);
-  animation: app-corner 12s var(--ease) infinite;
+  animation: app-corner 14s var(--ease) infinite;
   will-change: transform;
 }
-/* full → windows corner → full → mac corner → full, 12 s */
+/* full 4 s → windows corner 1.7 s → full 4 s → mac corner 1.7 s → full, 14 s loop */
 @keyframes app-corner {
-  0%, 15%   { transform: translate(0, 0) scale(1); }
-  21%, 40%  { transform: translate(62.5%, 57.9%) scale(0.36); }
-  46%, 60%  { transform: translate(0, 0) scale(1); }
-  66%, 85%  { transform: translate(62.5%, 4.2%) scale(0.36); }
-  91%, 100% { transform: translate(0, 0) scale(1); }
+  0%, 28%   { transform: translate(0, 0) scale(1); }
+  33%, 45%  { transform: translate(62.5%, 57.9%) scale(0.36); }
+  50%, 78%  { transform: translate(0, 0) scale(1); }
+  83%, 95%  { transform: translate(62.5%, 4.2%) scale(0.36); }
+  100%      { transform: translate(0, 0) scale(1); }
 }
 @keyframes desk-win {
-  0%, 15%   { opacity: 0; }
-  21%, 40%  { opacity: 1; }
-  46%, 100% { opacity: 0; }
+  0%, 28%   { opacity: 0; }
+  33%, 45%  { opacity: 1; }
+  50%, 100% { opacity: 0; }
 }
 @keyframes desk-mac {
-  0%, 60%   { opacity: 0; }
-  66%, 85%  { opacity: 1; }
-  91%, 100% { opacity: 0; }
+  0%, 78%   { opacity: 0; }
+  83%, 95%  { opacity: 1; }
+  100%      { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .hero-art .desk, .hero-art .app { animation: none; }
@@ -392,54 +393,6 @@ section { padding: 72px 0; }
 .panel code { font-size: inherit; }
 .panel.shot img { display: block; width: 100%; height: auto; }
 
-/* settings › model card */
-.mcard { padding: 14px 18px 16px; font-family: var(--mono); font-size: 0.76rem; color: var(--soft); }
-.mrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
-.mrow.head { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
-.mname { color: var(--text); font-weight: 600; }
-.mkey { color: var(--muted); }
-.chip {
-  margin-left: auto;
-  padding: 2px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  font-size: 0.68rem;
-  white-space: nowrap;
-}
-.chip.ok { color: var(--green); border-color: rgba(39, 169, 127, 0.45); }
-.routes {
-  list-style: none;
-  margin: 0;
-  padding: 10px 0;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 28px;
-}
-.routes li {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  padding: 5px 0;
-  border-bottom: 1px dashed var(--line);
-}
-.routes i { font-style: normal; padding: 2px 8px; border-radius: 6px; font-size: 0.7rem; white-space: nowrap; }
-.routes i.cloud { background: rgba(94, 135, 234, 0.18); color: #a3b8f0; }
-.routes i.local { background: rgba(139, 146, 156, 0.16); color: var(--soft); }
-.mrow.cap { padding-top: 10px; }
-.mrow.cap b { color: var(--text); font-weight: 600; }
-.mfile { margin-left: auto; color: var(--muted); }
-.egress {
-  margin: 12px 0 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.72rem;
-  line-height: 1.55;
-}
-
 /* footer */
 .foot {
   max-width: var(--max);
@@ -470,10 +423,6 @@ section { padding: 72px 0; }
   .tip { min-width: 12em; white-space: normal; }
 }
 
-@media (max-width: 520px) {
-  .routes { grid-template-columns: 1fr; }
-  .mfile { margin-left: 0; }
-}
 @media (max-width: 420px) {
   .nos li { white-space: normal; }
 }

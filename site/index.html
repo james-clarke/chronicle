@@ -25,9 +25,9 @@
       <li>no account</li>
       <li>no server</li>
       <li>no telemetry</li>
-      <li>no cloud model unless you add one</li>
       <li>no screenshots</li>
       <li>no keylogging</li>
+      <li>no cloud model by default</li>
     </ul>
   </div>
   <div class="hero-art">
@@ -170,7 +170,7 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
       </div>
       <figure class="panel shot">
         <figcaption>settings › derivation</figcaption>
-        <img src="img/pipeline.webp" width="678" height="540" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, background under 10 minutes; then the pipeline card with the model file, worker idle, 2 pending batches, the last derive as batch 73 at 14:00 in 139.9 seconds with its prompt token count, and buttons to show the digest and the last output" loading="lazy">
+        <img src="img/pipeline.webp" width="880" height="590" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, a placement switch for the evidence-scoring segmenter, background under 10 minutes; then the pipeline card with the model file, worker idle, 1 pending batch, the last derive as batch 89 at 13:54 in 76.9 seconds with its prompt and output token counts, and buttons to show the digest and the last output" loading="lazy">
       </figure>
     </li>
 
@@ -178,34 +178,11 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
       <div class="stage-text">
         <h3>Your own key, if you want</h3>
         <p>Local until you paste an API key. Then pick what goes out: writing and chat, or everything. Two dollars a day, then local. The key sits in one file only you can read.</p>
-        <p>One line says what left the machine today. With no key it ends in “nothing else”.</p>
+        <p>Storage &amp; server keeps one line that says what left the machine today. With no key it ends in “nothing else”.</p>
       </div>
-      <figure class="panel model">
+      <figure class="panel shot">
         <figcaption>settings › model</figcaption>
-        <div class="mcard">
-          <div class="mrow head">
-            <span class="mname">anthropic</span>
-            <span class="mmodel">claude-sonnet-5</span>
-            <code class="mkey">sk-ant-a…k3Qa</code>
-            <span class="chip ok">ok · 1.2 s</span>
-          </div>
-          <ul class="routes" aria-label="Where each kind of job runs">
-            <li><span>chat</span><i class="cloud">anthropic</i></li>
-            <li><span>journal</span><i class="cloud">anthropic</i></li>
-            <li><span>standup</span><i class="cloud">anthropic</i></li>
-            <li><span>task description</span><i class="cloud">anthropic</i></li>
-            <li><span>name new tasks</span><i class="cloud">anthropic</i></li>
-            <li><span>derive batches</span><i class="local">local</i></li>
-            <li><span>live tier</span><i class="local">local</i></li>
-            <li><span>tidy day</span><i class="local">local</i></li>
-          </ul>
-          <div class="mrow cap">
-            <span>daily cap <b>$2.00</b></span>
-            <span>today <b>$0.31</b></span>
-            <span class="mfile">models.toml · 0600</span>
-          </div>
-          <p class="egress">what leaves this machine today: the model download (once, on demand) · 6 journal + 3 chat to anthropic (claude-sonnet-5) · MCP context fetches today 2 · posts today 0</p>
-        </div>
+        <img src="img/model.webp" width="880" height="900" alt="Chronicle settings, model: the local model path, then cloud backends with one row, anthropic, claude-sonnet-5, tested in 1180 ms, a note that prompts routed there go to Anthropic under its commercial API terms, and the routing grid with chat, narrative, standup, journal, task description, checkpoint, suggest task and name new tasks set to anthropic, tidy day and derive batches set to local" loading="lazy">
       </figure>
     </li>
 
