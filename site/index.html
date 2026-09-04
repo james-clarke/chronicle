@@ -3,14 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chronicle — your day, written down</title>
+  <title>chronicle</title>
   <meta name="description" content="Chronicle runs in the background and turns the windows you were in into the tasks you were actually doing. Standup, timeline, reports and chat from one file on your own disk. No account, no server, no telemetry.">
+  <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header class="top">
-  <a class="brand" href="#"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>chronicle</a>
+  <a class="brand" href="#"><img class="mark" src="img/mark.svg" width="26" height="12" alt="">chronicle</a>
   <a class="top-link" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Get in touch</a>
 </header>
 
@@ -33,8 +34,6 @@
     <img class="desk win" src="img/desk-win.webp" width="1200" height="675" alt="" aria-hidden="true">
     <img class="desk mac" src="img/desk-mac.webp" width="1600" height="900" alt="" aria-hidden="true">
     <img class="app" src="img/home-wide.webp" width="1478" height="1080" alt="Chronicle home, dragged wide: the tasks being worked on with time today and next step on the left, the feed of the day's blocks on the right">
-    <span class="os win" aria-hidden="true">bottom right, above the taskbar</span>
-    <span class="os mac" aria-hidden="true">top right, under the menu bar</span>
   </div>
 </section>
 
@@ -88,79 +87,9 @@
   </figure>
 </section>
 
-<section class="feature">
-  <figure class="shot">
-    <img src="img/chat.webp" width="678" height="1062" alt="Chronicle chat: 'what was I doing before the 13:58 call?' answered by the local model with the task and time ranges as links and a per-task totals table" loading="lazy">
-  </figure>
-  <div class="feature-text">
-    <h2>Ask your own history.</h2>
-    <p>What was I doing Tuesday before the call? How much of this month went to the launch? Ask in plain words, get an answer with times attached.</p>
-    <p class="fine">The model runs inside the app, on your CPU: Qwen3 4B, 2.4 GB on disk, downloaded once. It reads the rows for the time you asked about and nothing else. With your own API key, chat can go to a cloud model instead; then the day’s digest and the whole conversation go with the question, and Settings says so.</p>
-  </div>
-</section>
-
-<section class="feature cloud">
-  <div class="feature-text">
-    <h2>Your own key, if you want a bigger model.</h2>
-    <p>Everything runs on the local model until you paste an API key into Settings. Then you choose what goes out: the writing and the chat, or everything, one kind of job at a time.</p>
-    <p>Placing your time stays local unless you send it. A job the cloud fails or refuses falls back to the local model. Spend is capped per day, two dollars unless you change it, and past the cap the day runs local. The key sits in one file in your data folder that only your user can read. One line in Settings says what left the machine today, and with no key it ends in “nothing else”.</p>
-    <p class="fine">Anthropic today; OpenAI-compatible endpoints next. The key is yours and so is the bill. There is no Chronicle account in between.</p>
-  </div>
-  <pre class="stage-data settings"><code>backends  anthropic · claude-sonnet-5 · key sk-ant-a…k3Qa
-          models.toml · mode 0600 · in your data folder
-
-routing   chat               anthropic
-          journal            anthropic
-          standup            anthropic
-          task description   anthropic
-          name new tasks     anthropic
-          derive batches     local
-          live tier          local
-          tidy day           local
-
-cap       $2.00 a day · today’s spend $0.31
-
-egress    what leaves this machine today: the model download
-          (once, on demand) · 6 journal + 3 chat to anthropic
-          (claude-sonnet-5) · MCP context fetches today 2
-          · posts today 0</code></pre>
-</section>
-
-<section class="feature sources">
-  <div class="feature-text">
-    <h2>Sees more, if you let it.</h2>
-    <p>The window title is the whole record until you flip a switch. Each source says what it reads, and nothing talks to a server unless you turned it on.</p>
-    <ul class="tags" aria-label="Sources today">
-      <li><i class="on"></i>git repos</li>
-      <li><i class="on"></i>AI coding sessions</li>
-      <li><i class="on"></i>pull requests</li>
-      <li><i class="on"></i>calls</li>
-      <li><i class="on"></i>editor heartbeats</li>
-      <li><i class="on"></i>shell history</li>
-      <li><i class="on"></i>Google Calendar</li>
-      <li><i class="on"></i>Jira over MCP</li>
-      <li><i class="on"></i>any MCP server</li>
-    </ul>
-    <p class="tags-label">Next, in the order people ask</p>
-    <ul class="tags soon" aria-label="Sources coming next">
-      <li><i></i>GitHub</li>
-      <li><i></i>Outlook calendar</li>
-      <li><i></i>CalDAV</li>
-      <li><i></i>Slack</li>
-      <li><i></i>Linear</li>
-      <li><i></i>Notion</li>
-      <li><i></i>browser history</li>
-      <li><i></i>Obsidian</li>
-    </ul>
-  </div>
-  <figure class="shot">
-    <img src="img/sources.webp" width="678" height="578" alt="Chronicle settings, local sources: six switches, each with a note on what it reads" loading="lazy">
-  </figure>
-</section>
-
 <section class="how">
   <h2>How it works</h2>
-  <p class="section-lede">A morning, from the first window to the standup line. Seven steps, and the same morning's data at each one.</p>
+  <p class="section-lede">One morning, from the first window to the standup line. Same data at every step.</p>
 
   <div class="stage-heads" aria-hidden="true">
     <span>What happens</span>
@@ -172,113 +101,111 @@ egress    what leaves this machine today: the model download
     <li class="stage">
       <div class="stage-text">
         <h3>Sees</h3>
-        <p>A small background process notices which window is in front and when you step away. It keeps the name of the app and the title of the window: the document, the sheet, the tab, the call. That is the whole record. No keystrokes, no screenshots, no clipboard.</p>
-        <p>Where it can, it also picks up the things that say what the work was: a call starting, a meeting on the calendar, the branch or folder in a terminal title, a ticket number in a tab, a commit landing in a repo you listed.</p>
-        <p>Each stretch gets its evidence written down beside it, typed: the ticket key, the document, the site, the branch, the folder a terminal was in, read from the process rather than guessed from the title, the people on a calendar invite. The rules read that first, and so does everything after them.</p>
+        <p>Which window is in front, and when you step away. App name and title; no keystrokes, no screenshots, no clipboard.</p>
+        <p>Calls, calendar, ticket keys, the folder a terminal is in: noted beside each stretch. Five minutes away closes the batch.</p>
       </div>
-      <pre class="stage-data"><code>09:02:14  focus    Chrome   Q3 launch brief – Google Docs
-          anchor   doc Q3 launch brief · docs.google.com
+      <figure class="panel">
+        <figcaption>focus events · one batch</figcaption>
+        <pre><code>09:02:14  focus    Chrome   Q3 launch brief – Google Docs
 09:31:40  focus    Slack    #launch-planning
-09:40:05  focus    Zoom     Launch sync
 09:40:00  meeting  Launch sync · calendar · 09:40–10:15
-          anchor   people 4 · from the invite
 09:40:11  call     microphone on
 10:12:22  focus    Chrome   LAUNCH-241 Landing page copy – Jira
-          anchor   item LAUNCH-241 · atlassian.net
-10:40:10  focus    Figma    Landing page v2</code></pre>
+          anchor   item LAUNCH-241
+10:40:10  focus    Figma    Landing page v2
+11:20:00  away     5m · batch closed · 5 spans</code></pre>
+      </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Groups</h3>
-        <p>Raw focus events are noisy, so they get folded into spans. A title that changes but stays mostly the same is one span. Anything shorter than five seconds is counted as switching, not work. Ten minutes of work and then five minutes away closes the batch; half an hour away closes it whatever happened.</p>
+        <h3>Places</h3>
+        <p>Every minute, plain rules: a ticket key in a branch or a tab, the project folder, a window you filed before. Provisional, marked to confirm.</p>
+        <p>When the batch closes, the local model reads a short digest and places the rest. Eight blocks at most, about two minutes on a laptop CPU.</p>
       </div>
-      <pre class="stage-data"><code>span   09:02–09:31  Chrome   Q3 launch brief – Google Docs
-span   09:31–09:40  Slack    #launch-planning
-span   09:40–10:12  Zoom     Launch sync · on a call
-span   10:12–10:40  Chrome   LAUNCH-241 Landing page copy – Jira
-span   10:40–11:15  Figma    Landing page v2
-batch  09:02–11:15  5 spans · 32m on a call · 4 switches
-       closed at 11:20 · away 5m</code></pre>
-    </li>
+      <figure class="panel">
+        <figcaption>rules, then the model</figcaption>
+        <pre><code>rules   10:12–10:40  LAUNCH-241 landing page copy
+        title has LAUNCH-241 · 0.50 · to confirm
 
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Recognises</h3>
-        <p>Before any model runs, a few plain rules take a first pass every minute, in a fixed order. A branch name that carries a ticket key. A ticket key in a tab or its address. The project folder a file is in, if that task was touched in the last two hours. A window that looks like one you filed before. A match is written down as provisional, with the rule that placed it, so the feed and the timeline fill in while you are still working.</p>
-        <p>Every five minutes the model also looks at the stretch still open and places it at a discount, until the batch closes and the full pass replaces both.</p>
-        <p>There is a second engine behind a switch in Settings. It places time from the written-down evidence alone, with no model in the loop, and only asks one to name what is new. It is off by default because on my own weeks the model still beats it.</p>
-      </div>
-      <pre class="stage-data"><code>rules  09:02–09:31  → Q3 launch brief
-       reason: past correction
-               "Chrome · Q3 launch brief" → Q3 launch brief
-       confidence 0.50  to confirm
+model   09:02–09:31  Q3 launch brief               0.90
+        09:31–10:12  launch sync · Q3 launch       0.85
+        10:12–11:15  LAUNCH-241 landing page copy  0.90
 
-       10:12–10:40  → LAUNCH-241 landing page copy
-       reason: title LAUNCH-241
-       confidence 0.50  to confirm
-
-       09:31–10:12  no rule matched · waiting for the model</code></pre>
-    </li>
-
-    <li class="stage">
-      <div class="stage-text">
-        <h3>Thinks</h3>
-        <p>When a batch closes, it is turned into a short digest: apps by time, sites visited, calls and other activity, the ticket keys that were on screen, a minute-by-minute line of what was in front, and the tasks already open, numbered. If a ticket tracker is connected, the ticket's summary goes in too. A language model running inside the app reads the digest and answers with blocks, each linked to an open task by its number or given a new name, with a start and end in minutes. The answer has to fit a fixed shape, at most eight blocks, so it cannot wander. Neighbouring blocks for one task are merged before they are stored, and they replace the provisional rows.</p>
-        <p>On a laptop CPU a batch takes about two minutes. The part of the prompt that does not change between batches stays in the model's cache, so reading the next one takes about half as long.</p>
-      </div>
-      <pre class="stage-data"><code>digest  apps     Chrome 57m · Figma 35m · Zoom 32m · Slack 9m
-        call     09:40–10:12 · meeting Launch sync
-        keys     LAUNCH-241 · 28 min on screen
-        open     1 Q3 launch brief
-                 2 LAUNCH-241 landing page copy
-        context  LAUNCH-241 (Jira): rewrite the hero and
-                 the pricing row for the Q3 launch
-
-model   {"ref": 1, "label": null, "project": null,
-         "start": 0, "end": 29, "confidence": 0.9}
-        {"ref": null, "label": "launch sync",
-         "project": "Q3 launch",
-         "start": 29, "end": 70, "confidence": 0.85}
-        {"ref": 2, "label": null, "project": null,
-         "start": 70, "end": 133, "confidence": 0.9}
-
-stored  3 blocks · replaces 2 provisional rows</code></pre>
+stored  3 blocks · replaces 1 provisional row</code></pre>
+      </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Learns</h3>
-        <p>It will be wrong sometimes. When you rename, move or throw out a block, the correction is stored with the context it was made in: the app and the window title. The next pass reads those first. Throwing a block out of a task is remembered as a hard no, so the same guess is not made again. Loose time gets folded into runs you can file in one go, with the task pre-filled from what you did last time.</p>
-        <p>Once a day, at the first quiet moment after two in the afternoon or at six, slivers under three minutes with no project or ticket of their own that sit between two blocks of the same task fold into it. One tidy a day, and one undo.</p>
+        <p>It will be wrong sometimes. Rename, move or throw out a block; the correction is kept with the window it was made in and read first next time. Thrown out is a hard no.</p>
+        <p>Loose time folds into runs you file in one go, task pre-filled. Once a day, slivers tidy into their neighbours; one undo.</p>
       </div>
-      <figure class="stage-shot">
+      <figure class="panel shot">
+        <figcaption>organize · unassigned time</figcaption>
         <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
-        <figcaption>Organize: unassigned time, one run at a time, task pre-filled.</figcaption>
       </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Writes</h3>
-        <p>The standup draft, the timeline, the task cards, the reports and the chat all read the same table. Nothing is worked out twice and nothing is stored anywhere else.</p>
+        <p>Standup, timeline, task cards, reports, chat. One table; nothing worked out twice, nothing stored anywhere else.</p>
       </div>
-      <pre class="stage-data"><code>standup   Yesterday: landing page copy and the launch brief
+      <figure class="panel">
+        <figcaption>same rows, four ways</figcaption>
+        <pre><code>standup   Yesterday: landing page copy and the launch brief
           (LAUNCH-241, 2h13m) · launch sync (32m)
 timeline  09:02 ──────────────── 11:15  Q3 launch
 report    Q3 launch · LAUNCH-241 · 2.2 h
 chat      "what did I do before the launch sync?" → same rows</code></pre>
+      </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Shows its work</h3>
-        <p>Settings keeps the pipeline in view: which model file is loaded, whether the worker is running or idle, how many batches are waiting, the last batch with its time and token counts, and the last live pass. Two buttons show the exact digest the model read and the exact answer it gave. If a block is in the wrong place, you can see why.</p>
-        <p>Settings › Model does the same for what goes out: the backend each kind of job is routed to, today’s spend against the cap, and one line that says what left the machine today.</p>
+        <p>Settings keeps the pipeline in view: the model loaded, the worker, batches waiting, the last batch with its tokens. Two buttons: the digest the model read, the answer it gave.</p>
       </div>
-      <figure class="stage-shot wide">
+      <figure class="panel shot">
+        <figcaption>settings › derivation</figcaption>
         <img src="img/pipeline.webp" width="678" height="540" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, background under 10 minutes; then the pipeline card with the model file, worker idle, 2 pending batches, the last derive as batch 73 at 14:00 in 139.9 seconds with its prompt token count, and buttons to show the digest and the last output" loading="lazy">
-        <figcaption>Settings › Derivation: the worker, the last batch, the digest and the answer.</figcaption>
+      </figure>
+    </li>
+
+    <li class="stage">
+      <div class="stage-text">
+        <h3>Your own key, if you want</h3>
+        <p>Local until you paste an API key. Then pick what goes out: writing and chat, or everything. Two dollars a day, then local. The key sits in one file only you can read.</p>
+        <p>One line says what left the machine today. With no key it ends in “nothing else”.</p>
+      </div>
+      <figure class="panel model">
+        <figcaption>settings › model</figcaption>
+        <div class="mcard">
+          <div class="mrow head">
+            <span class="mname">anthropic</span>
+            <span class="mmodel">claude-sonnet-5</span>
+            <code class="mkey">sk-ant-a…k3Qa</code>
+            <span class="chip ok">ok · 1.2 s</span>
+          </div>
+          <ul class="routes" aria-label="Where each kind of job runs">
+            <li><span>chat</span><i class="cloud">anthropic</i></li>
+            <li><span>journal</span><i class="cloud">anthropic</i></li>
+            <li><span>standup</span><i class="cloud">anthropic</i></li>
+            <li><span>task description</span><i class="cloud">anthropic</i></li>
+            <li><span>name new tasks</span><i class="cloud">anthropic</i></li>
+            <li><span>derive batches</span><i class="local">local</i></li>
+            <li><span>live tier</span><i class="local">local</i></li>
+            <li><span>tidy day</span><i class="local">local</i></li>
+          </ul>
+          <div class="mrow cap">
+            <span>daily cap <b>$2.00</b></span>
+            <span>today <b>$0.31</b></span>
+            <span class="mfile">models.toml · 0600</span>
+          </div>
+          <p class="egress">what leaves this machine today: the model download (once, on demand) · 6 journal + 3 chat to anthropic (claude-sonnet-5) · MCP context fetches today 2 · posts today 0</p>
+        </div>
       </figure>
     </li>
 
@@ -288,8 +215,7 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
 </main>
 
 <footer class="foot">
-  <p>Linux today. macOS and Windows next. <a href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Ask for a build.</a></p>
-  <p class="fine">One SQLite file in your home folder. No scripts on this page either.</p>
+  <p>built by: <a href="https://jclarke.sh">jclarke.sh</a></p>
 </footer>
 
 </body>
