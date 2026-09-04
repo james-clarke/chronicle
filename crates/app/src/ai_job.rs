@@ -1,14 +1,23 @@
+use std::cell::RefCell;
 use std::path::Path;
 
 use crate::daemon::bump_day_counter_by;
 use crate::status::{fmt_secs, init_logging};
 use anyhow::{Context, bail};
 use chronicle_core::config::Config;
-use jiff::{Timestamp, tz::TimeZone};
+use chronicle_core::models_config::ModelsConfig;
+use chronicle_core::types::SuggestedTask;
+use chronicle_derive::cloud::{self, CloudError};
+use chronicle_derive::describe::Describer;
+use chronicle_derive::prompts::{self, non_empty, strip_no_think};
+use chronicle_derive::text::{Completion, JobKind, Request, TextBackend};
+use jiff::{Timestamp, Zoned, tz::TimeZone};
 
 /// Ephemeral AI-job worker: claim job → kind-specific inference → store
 /// result → exit. Any failure marks the job failed (retry-once via attempts
-/// cap), mirroring the derive worker.
+/// cap), mirroring the derive worker. A cloud route (m31) is tried first;
+/// a cloud failure falls back to the local model when one is downloaded
+/// and otherwise returns the job to the queue with the reason on it.
 pub(crate) fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> {
     use chronicle_core::storage;
     let _guard = init_logging(data_dir)?;
@@ -17,10 +26,14 @@ pub(crate) fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> 
     // No unconditional model gate: fetch_context runs LLM-free; the LLM arms
     // bail individually when no model resolves.
     let model_path = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir);
+    let models = ModelsConfig::load(data_dir).unwrap_or_else(|e| {
+        tracing::error!("models.toml unreadable, running local: {e:#}");
+        ModelsConfig::default()
+    });
     let Some(job) = storage::claim_ai_job(&conn, job_id)? else {
         bail!("ai job {job_id} is not eligible")
     };
-    match run_ai_job(&conn, &config, data_dir, model_path.as_deref(), &job) {
+    match run_routed(&conn, &config, data_dir, model_path.as_deref(), &models, &job) {
         Ok(result) => {
             storage::complete_ai_job(&conn, job_id, &result)?;
             tracing::info!(job_id, kind = %job.kind, "ai job done");
@@ -31,6 +44,11 @@ pub(crate) fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> 
             storage::skip_ai_job(&conn, job_id, &e.to_string())?;
             Ok(())
         }
+        Err(e) if e.is::<DeferJob>() => {
+            tracing::warn!(job_id, kind = %job.kind, "ai job deferred: {e}");
+            storage::defer_ai_job(&conn, job_id, &e.to_string())?;
+            Ok(())
+        }
         Err(e) => {
             tracing::error!(job_id, kind = %job.kind, "ai job failed: {e:#}");
             storage::fail_ai_job(&conn, job_id, &format!("{e:#}"))?;
@@ -38,6 +56,216 @@ pub(crate) fn ai_job_worker(data_dir: &Path, job_id: i64) -> anyhow::Result<()> 
         }
     }
 }
+
+/// Route the job (m31): cloud when `models.toml` says so and the daily cap
+/// has room, else local; a cloud failure falls back to local, or defers the
+/// job when there is no local model.
+fn run_routed(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    model_path: Option<&Path>,
+    models: &ModelsConfig,
+    job: &chronicle_core::storage::AiJobRow,
+) -> anyhow::Result<String> {
+    use chronicle_core::storage;
+    if job.kind == "fetch_context" {
+        return run_ai_job(conn, config, data_dir, &Engine::None, job);
+    }
+    let mut cloud_reason: Option<String> = None;
+    if let Some((name, cfg)) = models.route_for(&job.kind) {
+        let day_start = day_start_ms();
+        let spent = storage::cost_today(conn, day_start)?;
+        if models.max_usd_per_day > 0.0 && spent >= models.max_usd_per_day {
+            let today = Zoned::now().date().to_string();
+            let _ = storage::set_meta(conn, &format!("cloud_cap_hit:{today}"), Some(&today));
+            cloud_reason = Some(format!(
+                "cloud: daily cap reached (${spent:.2} of ${:.2})",
+                models.max_usd_per_day
+            ));
+        } else {
+            match cloud::build(name, cfg) {
+                Ok(backend) => {
+                    let engine = Engine::Cloud {
+                        name: name.to_owned(),
+                        model: cfg.model.clone(),
+                        backend,
+                        usage: RefCell::new(None),
+                    };
+                    match run_ai_job(conn, config, data_dir, &engine, job) {
+                        Ok(result) => {
+                            if let Engine::Cloud { usage, .. } = &engine
+                                && let Some(c) = usage.borrow().as_ref()
+                            {
+                                storage::record_ai_job_usage(
+                                    conn,
+                                    job.id,
+                                    name,
+                                    i64::from(c.input_tokens),
+                                    i64::from(c.output_tokens),
+                                    cloud::cost_usd(&cfg.model, c),
+                                )?;
+                            }
+                            return Ok(result);
+                        }
+                        // A cloud failure is about the wire, not the job;
+                        // anything else (no evidence, bad payload) is final.
+                        Err(e) if e.is::<CloudError>() => cloud_reason = Some(e.to_string()),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => cloud_reason = Some(format!("cloud: {e}")),
+            }
+        }
+    }
+    match (model_path, cloud_reason) {
+        (Some(path), reason) => {
+            if let Some(r) = &reason {
+                tracing::warn!(job_id = job.id, "{r}; running local");
+            }
+            let engine = Engine::Local(Describer::load(path)?);
+            run_ai_job(conn, config, data_dir, &engine, job)
+        }
+        (None, Some(reason)) => Err(DeferJob(reason).into()),
+        (None, None) => Err(anyhow::anyhow!(
+            "no model available; run `chronicle model pull` or add a cloud backend in Settings"
+        )),
+    }
+}
+
+/// Local midnight, epoch ms: the daily cap's window.
+pub(crate) fn day_start_ms() -> i64 {
+    Zoned::now()
+        .start_of_day()
+        .map(|z| z.timestamp().as_millisecond())
+        .unwrap_or(0)
+}
+
+/// Which engine answers the describer family for one job.
+pub(crate) enum Engine {
+    Local(Describer),
+    Cloud {
+        name: String,
+        model: String,
+        backend: Box<dyn TextBackend>,
+        /// The one completion this job made, for `ai_jobs` usage columns.
+        usage: RefCell<Option<Completion>>,
+    },
+    /// No model at all (fetch_context needs none; any LLM arm bails).
+    None,
+}
+
+impl Engine {
+    fn complete(&self, job: JobKind, prompt: &str) -> anyhow::Result<String> {
+        match self {
+            Engine::Local(d) => d.complete(job, prompt),
+            Engine::Cloud { backend, usage, .. } => {
+                let schema: Option<serde_json::Value> = match job {
+                    JobKind::Checkpoint => Some(serde_json::from_str(prompts::CHECKPOINT_SCHEMA)?),
+                    JobKind::SuggestTask | JobKind::NameTask => {
+                        Some(serde_json::from_str(prompts::SUGGEST_SCHEMA)?)
+                    }
+                    _ => None,
+                };
+                let req = Request {
+                    job,
+                    system: None,
+                    user: strip_no_think(prompt),
+                    history: &[],
+                    schema: schema.as_ref(),
+                    max_output: 0,
+                };
+                let c = backend.complete(&req, &mut |_| {})?;
+                let text = c.text.clone();
+                *usage.borrow_mut() = Some(c);
+                Ok(text)
+            }
+            Engine::None => bail!(
+                "no model available; run `chronicle model pull` or add a cloud backend in Settings"
+            ),
+        }
+    }
+
+    /// Where the job ran, for logs.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Engine::Local(_) => "local".into(),
+            Engine::Cloud { name, model, .. } => format!("{name} ({model})"),
+            Engine::None => "none".into(),
+        }
+    }
+
+    fn describe_task(&self, label: &str, project: Option<&str>, evidence: &str) -> anyhow::Result<String> {
+        let prompt = prompts::render_description(label, project, evidence);
+        non_empty(self.complete(JobKind::TaskDescription, &prompt)?, "description")
+    }
+
+    fn journal_entry(
+        &self,
+        label: &str,
+        project: Option<&str>,
+        context: &str,
+        git: &str,
+        evidence: &str,
+    ) -> anyhow::Result<String> {
+        let prompt = prompts::render_journal(label, project, context, git, evidence);
+        non_empty(self.complete(JobKind::Journal, &prompt)?, "journal entry")
+    }
+
+    fn narrative(&self, digest: &str) -> anyhow::Result<String> {
+        let prompt = prompts::render_narrative(digest);
+        non_empty(self.complete(JobKind::Narrative, &prompt)?, "narrative")
+    }
+
+    fn standup(&self, digest: &str) -> anyhow::Result<String> {
+        let prompt = prompts::render_standup(digest);
+        non_empty(self.complete(JobKind::Standup, &prompt)?, "standup draft")
+    }
+
+    fn checkpoint(
+        &self,
+        label: &str,
+        project: Option<&str>,
+        context: &str,
+        journal: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let prompt = prompts::render_checkpoint(label, project, context, journal);
+        let (state, next) = prompts::parse_checkpoint(&self.complete(JobKind::Checkpoint, &prompt)?)?;
+        Ok((clip(state, 300), clip(next, 300)))
+    }
+
+    /// `job` is `SuggestTask` or `NameTask`; both use the suggestion prompt.
+    fn suggest_task(&self, job: JobKind, digest: &str) -> anyhow::Result<SuggestedTask> {
+        let prompt = prompts::render_suggest(digest);
+        let mut s = prompts::parse_suggest(&self.complete(job, &prompt)?)?;
+        s.label = clip(s.label, 160);
+        s.project = s.project.map(|p| clip(p, 160));
+        s.description = s.description.map(|d| clip(d, 160));
+        Ok(s)
+    }
+}
+
+/// The grammar's per-field cap, applied after the parse so a cloud model
+/// (schema only, no length bound) lands where the local one does.
+fn clip(s: String, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s;
+    }
+    s.chars().take(max_chars).collect()
+}
+
+/// A cloud route failed and no local model can take the job: back to the
+/// queue with the reason, attempt refunded (m31).
+#[derive(Debug)]
+pub(crate) struct DeferJob(String);
+
+impl std::fmt::Display for DeferJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for DeferJob {}
 
 /// An AI job whose premise no longer holds: terminal but not a failure.
 #[derive(Debug)]
@@ -66,7 +294,7 @@ pub(crate) fn run_ai_job(
     conn: &rusqlite::Connection,
     config: &Config,
     data_dir: &Path,
-    model_path: Option<&Path>,
+    engine: &Engine,
     job: &chronicle_core::storage::AiJobRow,
 ) -> anyhow::Result<String> {
     use chronicle_core::{insights, report, storage};
@@ -92,8 +320,7 @@ pub(crate) fn run_ai_job(
         storage::upsert_task_context(conn, task_id, "mcp", Timestamp::now(), &content)?;
         return Ok(content);
     }
-    let model_path = model_path.context("no model available; run `chronicle model pull`")?;
-    let describer = chronicle_derive::describe::Describer::load(model_path)?;
+    tracing::debug!(job_id = job.id, kind = %job.kind, engine = %engine.label(), "ai job engine");
     match job.kind.as_str() {
         "task_description" => {
             let task_id = payload["task_id"]
@@ -104,7 +331,7 @@ pub(crate) fn run_ai_job(
             if evidence.trim().is_empty() {
                 bail!("no span evidence for task {task_id}");
             }
-            let desc = describer.describe_task(&label, project.as_deref(), &evidence)?;
+            let desc = engine.describe_task(&label, project.as_deref(), &evidence)?;
             storage::set_task_description(conn, task_id, Some(&desc))?;
             Ok(desc)
         }
@@ -135,7 +362,7 @@ pub(crate) fn run_ai_job(
                 None,
                 None,
             );
-            let s = describer.suggest_task(&digest)?;
+            let s = engine.suggest_task(JobKind::SuggestTask, &digest)?;
             Ok(serde_json::to_string(&s)?)
         }
         "name_task" => {
@@ -167,7 +394,7 @@ pub(crate) fn run_ai_job(
                 None,
                 None,
             );
-            let s = describer.suggest_task(&digest)?;
+            let s = engine.suggest_task(JobKind::NameTask, &digest)?;
             let n = conn.execute(
                 "UPDATE tasks SET label=?1, project=COALESCE(project, ?2)
                  WHERE id=?3 AND source='derived' AND label=?4",
@@ -215,7 +442,7 @@ pub(crate) fn run_ai_job(
                 );
             }
             let entry =
-                describer.journal_entry(&label, project.as_deref(), &context, &git, &evidence)?;
+                engine.journal_entry(&label, project.as_deref(), &context, &git, &evidence)?;
             storage::insert_journal_entry(
                 conn,
                 task_id,
@@ -249,7 +476,7 @@ pub(crate) fn run_ai_job(
                 .map(|(_, c)| c.chars().take(2400).collect())
                 .unwrap_or_default();
             let (state, next_steps) =
-                describer.checkpoint(&label, project.as_deref(), &context, &journal)?;
+                engine.checkpoint(&label, project.as_deref(), &context, &journal)?;
             storage::upsert_checkpoint(conn, task_id, Timestamp::now(), &state, &next_steps)?;
             Ok(format!("{state}\n{next_steps}"))
         }
@@ -279,7 +506,7 @@ pub(crate) fn run_ai_job(
                 (pr.grand_total_ms > 0).then(|| insights::delta(&r, &pr))
             });
             let digest = insights::narrative_digest(&r, &metrics, &apps, delta.as_ref());
-            let text = describer.narrative(&digest)?;
+            let text = engine.narrative(&digest)?;
             let hash = insights::report_data_hash(&r);
             storage::upsert_narrative(conn, lo, hi, hash, Timestamp::now(), &text)?;
             Ok(text)
@@ -308,7 +535,7 @@ pub(crate) fn run_ai_job(
                 fallback
             } else {
                 let plan = chronicle_core::intent::plan_body(conn, day)?;
-                describer.standup(&standup_digest_text(&rows, &tz, plan.as_deref()))?
+                engine.standup(&standup_digest_text(&rows, &tz, plan.as_deref()))?
             };
             storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
             Ok(text)

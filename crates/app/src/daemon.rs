@@ -634,10 +634,27 @@ pub(crate) const LIVE_SLOW: Duration = Duration::from_secs(60);
 /// Daemon-side backstop over the worker's own idle exit.
 pub(crate) const RESIDENT_IDLE_GRACE_SECS: u64 = 60;
 
+/// A cloud job's own retries fit in 120 s; past this the worker is stuck.
+pub(crate) const CLOUD_JOB_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const CLOUD_BACKOFF_MIN: Duration = Duration::from_secs(60);
+pub(crate) const CLOUD_BACKOFF_MAX: Duration = Duration::from_secs(600);
+
 pub(crate) struct Scheduler {
     /// AI jobs stay one-shot subprocesses (`Describer`/`ChatModel`); at most
     /// one inference process works at a time, derive or ai-job.
     ai_job: Option<(Child, Instant, i64)>,
+    /// A second slot for jobs routed to a cloud backend (m31): they wait on
+    /// the network, not the CPU, so they neither queue behind a local batch
+    /// nor hold one up, and they skip the idle and battery gates.
+    cloud_job: Option<(Child, Instant, i64)>,
+    /// Job kinds `models.toml` currently routes to a cloud backend, and the
+    /// file's mtime they were read at.
+    cloud_kinds: Vec<String>,
+    cloud_kinds_mtime: Option<std::time::SystemTime>,
+    /// After a cloud job came back deferred (`cloud: …`), hold the slot
+    /// until then; doubles from 1 to 10 minutes and resets on success.
+    cloud_backoff_until: Option<Instant>,
+    cloud_backoff: Duration,
     resident: Option<Resident>,
     last_live: Option<Instant>,
     /// Wall time of the last live pass; over `LIVE_SLOW` skips one pass.
@@ -675,7 +692,12 @@ pub(crate) fn status_json(
     ui_child: &mut Option<Child>,
     started: Instant,
 ) -> String {
-    let busy = scheduler.busy();
+    let busy = scheduler.busy().or_else(|| {
+        scheduler
+            .cloud_job
+            .as_ref()
+            .map(|(_, started, id)| (format!("cloud job {id}"), *started))
+    });
     let status = DaemonStatus {
         uptime_secs: started.elapsed().as_secs(),
         derive_active: busy.is_some(),
@@ -719,6 +741,11 @@ impl Scheduler {
     fn new() -> Self {
         Self {
             ai_job: None,
+            cloud_job: None,
+            cloud_kinds: Vec::new(),
+            cloud_kinds_mtime: None,
+            cloud_backoff_until: None,
+            cloud_backoff: CLOUD_BACKOFF_MIN,
             resident: None,
             last_live: None,
             last_live_took: None,
@@ -736,7 +763,8 @@ impl Scheduler {
         }
     }
 
-    /// What the inference slot is doing, and since when.
+    /// What the local inference slot is doing, and since when. The cloud
+    /// slot (m31) is separate: it never blocks derivation or a live pass.
     fn busy(&self) -> Option<(String, Instant)> {
         if let Some((_, started, id)) = &self.ai_job {
             return Some((format!("ai job {id}"), *started));
@@ -814,15 +842,21 @@ impl Scheduler {
     ) {
         use chronicle_core::storage;
         self.reap_ai_job(conn);
+        self.reap_cloud_job(conn);
         self.poll_resident(conn, config);
+        self.refresh_cloud_kinds(data_dir);
+        self.maybe_cloud_job(conn);
         if self.busy().is_some() {
-            return; // one inference process at a time
+            return; // one local inference process at a time
         }
+        let cloud_owned = self.cloud_kinds.clone();
+        let cloud: Vec<&str> = cloud_owned.iter().map(String::as_str).collect();
         // An interactive AI job (a user actively waiting on a suggestion)
         // jumps the idle gate; background jobs and derivation respect it.
-        let interactive = storage::next_eligible_ai_job(conn, storage::AI_JOB_INTERACTIVE)
-            .ok()
-            .flatten();
+        let interactive =
+            storage::next_eligible_ai_job_in(conn, storage::AI_JOB_INTERACTIVE, &cloud, false)
+                .ok()
+                .flatten();
         if interactive.is_none() && !force && !derive_gates_open(config, idle_since) {
             return;
         }
@@ -854,8 +888,109 @@ impl Scheduler {
         if self.maybe_consolidate(conn, config, idle_since) {
             return;
         }
-        if let Ok(Some(job_id)) = storage::next_eligible_ai_job(conn, i64::MIN) {
+        if let Ok(Some(job_id)) = storage::next_eligible_ai_job_in(conn, i64::MIN, &cloud, false) {
             self.spawn_ai_job(job_id);
+        }
+    }
+
+    /// Re-read the routing table when `models.toml` changed (Settings
+    /// writes it while the daemon runs; config.toml needs a restart, this
+    /// does not).
+    fn refresh_cloud_kinds(&mut self, data_dir: &Path) {
+        use chronicle_core::models_config::ModelsConfig;
+        let mtime = std::fs::metadata(ModelsConfig::path(data_dir))
+            .and_then(|m| m.modified())
+            .ok();
+        if mtime == self.cloud_kinds_mtime && (mtime.is_some() || self.cloud_kinds.is_empty()) {
+            return;
+        }
+        self.cloud_kinds_mtime = mtime;
+        self.cloud_kinds = match ModelsConfig::load(data_dir) {
+            Ok(m) => m.cloud_kinds(),
+            Err(e) => {
+                tracing::error!("models.toml unreadable: {e:#}");
+                Vec::new()
+            }
+        };
+        tracing::info!(kinds = ?self.cloud_kinds, "cloud routes loaded");
+    }
+
+    /// Dispatch one cloud-routed job into the cloud slot: no idle, battery
+    /// or local-model gate, no wait on the local slot.
+    fn maybe_cloud_job(&mut self, conn: &rusqlite::Connection) {
+        use chronicle_core::storage;
+        if self.cloud_job.is_some() || self.cloud_kinds.is_empty() {
+            return;
+        }
+        if self.cloud_backoff_until.is_some_and(|t| Instant::now() < t) {
+            return;
+        }
+        let kinds: Vec<&str> = self.cloud_kinds.iter().map(String::as_str).collect();
+        match storage::next_eligible_ai_job_in(conn, i64::MIN, &kinds, true) {
+            Ok(Some(job_id)) => match spawn_ai_job_worker(job_id) {
+                Ok(child) => {
+                    tracing::info!(id = job_id, "cloud ai-job worker spawned");
+                    self.cloud_job = Some((child, Instant::now(), job_id));
+                }
+                Err(e) => tracing::error!(id = job_id, "failed to spawn cloud ai-job worker: {e}"),
+            },
+            Ok(None) => {}
+            Err(e) => tracing::error!("eligible cloud job query failed: {e}"),
+        }
+    }
+
+    /// The cloud slot's reaper: a worker that left its job `pending` with a
+    /// `cloud:` reason hit the provider or the cap; back off before the
+    /// next one. A job that finished clears the backoff.
+    fn reap_cloud_job(&mut self, conn: &rusqlite::Connection) {
+        use chronicle_core::storage;
+        let Some((child, started, id)) = &mut self.cloud_job else {
+            return;
+        };
+        let id = *id;
+        let finished = match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    tracing::warn!(id, %status, "cloud ai-job worker failed");
+                }
+                true
+            }
+            Ok(None) => {
+                if started.elapsed() >= CLOUD_JOB_TIMEOUT {
+                    tracing::warn!(id, "cloud ai-job worker timed out; killing");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                tracing::error!(id, "cloud ai-job worker wait failed: {e}");
+                true
+            }
+        };
+        if !finished {
+            return;
+        }
+        self.cloud_job = None;
+        match storage::ai_job_status(conn, id) {
+            Ok(Some((status, _))) if status == "running" => {
+                let _ = storage::fail_ai_job(conn, id, "worker died");
+            }
+            Ok(Some((status, detail)))
+                if status == "pending" && detail.as_deref().is_some_and(|d| d.starts_with("cloud:")) =>
+            {
+                let wait = self.cloud_backoff;
+                self.cloud_backoff_until = Some(Instant::now() + wait);
+                self.cloud_backoff = (wait * 2).min(CLOUD_BACKOFF_MAX);
+                tracing::warn!(id, secs = wait.as_secs(), "cloud job deferred; backing off");
+            }
+            Ok(Some((status, _))) if status == "done" => {
+                self.cloud_backoff = CLOUD_BACKOFF_MIN;
+                self.cloud_backoff_until = None;
+            }
+            _ => {}
         }
     }
 
