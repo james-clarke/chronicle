@@ -3,6 +3,7 @@
 
 mod backend;
 pub mod chat;
+pub mod cloud;
 pub mod describe;
 pub mod embed;
 pub mod model;
