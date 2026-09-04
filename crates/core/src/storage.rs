@@ -46,6 +46,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/018_interval_origin.sql")),
         M::up(include_str!("../migrations/019_segment_rows.sql")),
         M::up(include_str!("../migrations/020_verdict_log.sql")),
+        M::up(include_str!("../migrations/021_interval_kind.sql")),
     ])
 });
 
@@ -2696,10 +2697,19 @@ pub fn store_segments(
         for (s, e) in subtract_ranges(p.lo, p.hi, &user_rows) {
             tx.execute(
                 "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source,
-                                        reason, origin_task_id, confident)
+                                        reason, origin_task_id, confident, kind)
                  VALUES (?1, COALESCE(?2, (SELECT id FROM batches WHERE start_ts <= ?3 AND end_ts > ?3)),
-                         ?3, ?4, ?5, 'segment', ?6, ?1, ?7)",
-                params![task_id, batch_id, s, e, p.confidence, p.reason, p.confident as i64],
+                         ?3, ?4, ?5, 'segment', ?6, ?1, ?7, ?8)",
+                params![
+                    task_id,
+                    batch_id,
+                    s,
+                    e,
+                    p.confidence,
+                    p.reason,
+                    p.confident as i64,
+                    p.kind
+                ],
             )?;
             // Reconciled rows are stable (the live tick rewrites only the
             // tail), so they are the ones whose fate can be logged.
@@ -2851,12 +2861,13 @@ pub struct SegmentRow {
     pub confidence: f64,
     pub confident: Option<bool>,
     pub reason: Option<String>,
+    pub kind: Option<String>,
 }
 
 /// The `segment` rows starting in `[lo, hi)`, by start.
 pub fn segment_rows(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SegmentRow>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, batch_id, start_ts, end_ts, confidence, confident, reason FROM intervals
+        "SELECT task_id, batch_id, start_ts, end_ts, confidence, confident, reason, kind FROM intervals
          WHERE source='segment' AND start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts",
     )?;
     let rows = stmt
@@ -2869,6 +2880,7 @@ pub fn segment_rows(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SegmentRo
                 confidence: r.get(4)?,
                 confident: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
                 reason: r.get(6)?,
+                kind: r.get(7)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -2953,8 +2965,8 @@ pub fn rescore_undo(
     let mut n = 0;
     for r in &before {
         n += tx.execute(
-            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id, confident)
-             SELECT ?1, ?2, ?3, ?4, ?5, 'segment', ?6, ?1, ?7 WHERE EXISTS (SELECT 1 FROM tasks WHERE id=?1)",
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id, confident, kind)
+             SELECT ?1, ?2, ?3, ?4, ?5, 'segment', ?6, ?1, ?7, ?8 WHERE EXISTS (SELECT 1 FROM tasks WHERE id=?1)",
             params![
                 r.task_id,
                 r.batch_id,
@@ -2962,7 +2974,8 @@ pub fn rescore_undo(
                 r.end_ts,
                 r.confidence,
                 r.reason,
-                r.confident.map(i64::from)
+                r.confident.map(i64::from),
+                r.kind
             ],
         )?;
     }
@@ -3643,6 +3656,8 @@ pub struct FeedClaim {
     pub reason: Option<String>,
     /// `segment` rows: whether the scorer's margin cleared delta.
     pub confident: Option<bool>,
+    /// `segment` rows: the kind of work (author, agent, review, …).
+    pub kind: Option<String>,
 }
 
 /// One block of the Home feed (m24): an interval of any source, or an
@@ -3675,7 +3690,7 @@ pub fn feed_blocks(
     let mut blocks = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT i.id, i.task_id, t.label, t.project, i.start_ts, MIN(i.end_ts, ?2),
-                i.confidence, i.source, i.reason, i.confident
+                i.confidence, i.source, i.reason, i.confident, i.kind
          FROM intervals i JOIN tasks t ON t.id = i.task_id
          WHERE i.start_ts >= ?1 AND i.start_ts < ?2
          ORDER BY i.start_ts DESC, i.id DESC LIMIT ?3",
@@ -3697,6 +3712,7 @@ pub fn feed_blocks(
             confidence: row.get(6)?,
             reason: row.get(8)?,
             confident: row.get::<_, Option<i64>>(9)?.map(|v| v != 0),
+            kind: row.get(10)?,
         };
         let mut ms = 0;
         let mut lines = Vec::new();
@@ -4028,11 +4044,12 @@ fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         declared: r.get(7)?,
         description: r.get(8)?,
         external_ref: r.get(9)?,
+        kind: r.get(10)?,
     })
 }
 
 const TASK_COLS: &str = "t.id, i.id, t.label, t.project, i.start_ts, i.end_ts, i.confidence, \
-     t.source='user', t.description, t.external_ref";
+     t.source='user', t.description, t.external_ref, i.kind";
 
 pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, StorageError> {
     let mut stmt = conn.prepare(&format!(

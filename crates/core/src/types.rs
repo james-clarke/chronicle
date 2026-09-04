@@ -186,6 +186,8 @@ pub struct Task {
     pub description: Option<String>,
     /// External anchor (ticket key), set deterministically from branch names.
     pub external_ref: Option<String>,
+    /// The kind of work the interval was (m30 chunk 5; `segment` rows only).
+    pub kind: Option<String>,
 }
 
 /// A past user correction surfaced into the digest as few-shot guidance.

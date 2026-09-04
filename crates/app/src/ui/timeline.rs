@@ -1195,6 +1195,12 @@ fn detail_ui(
             theme::badge(ui, "stuck", theme::palette::AMBER);
         }
     });
+    let mix = chronicle_core::report::kind_mix(&group.by_kind);
+    if !mix.is_empty() {
+        ui.add_space(theme::SPACE_XS);
+        ui.weak(mix)
+            .on_hover_text("how the time was spent, by kind of work (m30)");
+    }
     ui.add_space(theme::SPACE_SM);
     theme::summary_line(ui, group.ai_summary.as_deref(), true);
     if group.ai_pending {

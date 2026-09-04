@@ -118,6 +118,20 @@ pub struct TaskRow {
     /// [`RangeReport::days`].
     pub by_day: Vec<i64>,
     pub total_ms: i64,
+    /// Milliseconds per kind of work (m30 chunk 5), biggest first; only
+    /// the intervals that carry a kind count.
+    pub by_kind: Vec<(String, i64)>,
+}
+
+/// "agent 1h 30m · review 25m": a task's kind mix, biggest first, up to
+/// three kinds. Empty when nothing carries a kind.
+pub fn kind_mix(by_kind: &[(String, i64)]) -> String {
+    by_kind
+        .iter()
+        .take(3)
+        .map(|(k, ms)| format!("{k} {}", fmt_dur(*ms)))
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
 }
 
 #[derive(Debug, Clone)]
@@ -166,6 +180,7 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
                         project: t.project.as_deref().unwrap_or(UNTAGGED).to_string(),
                         by_day: vec![0; days.len()],
                         total_ms: 0,
+                        by_kind: Vec::new(),
                     });
                     rows.last_mut().expect("just pushed")
                 }
@@ -173,7 +188,16 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
             row.by_day[i] += ms;
             row.total_ms += ms;
             grand_total_ms += ms;
+            if let Some(kind) = &t.kind {
+                match row.by_kind.iter_mut().find(|(k, _)| k == kind) {
+                    Some(e) => e.1 += ms,
+                    None => row.by_kind.push((kind.clone(), ms)),
+                }
+            }
         }
+    }
+    for r in &mut rows {
+        r.by_kind.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.total_ms));
     let (lo, hi) = (bounds[0], bounds[days.len()]);
@@ -264,6 +288,7 @@ mod tests {
             declared: false,
             external_ref: None,
             description: None,
+            kind: None,
         }
     }
 

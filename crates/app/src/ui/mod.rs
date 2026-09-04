@@ -264,6 +264,8 @@ struct TaskGroup {
     evidence: Vec<EvidenceApp>,
     /// Sum of interval durations clamped to the shown day.
     total_ms: i64,
+    /// Milliseconds per kind of work (m30 chunk 5), biggest first.
+    by_kind: Vec<(String, i64)>,
     /// 1-2 sentence summary from `tasks.description` (AI-written on close,
     /// user-editable).
     ai_summary: Option<String>,
@@ -1285,11 +1287,19 @@ impl TimelineApp {
                         checkpoint: None,
                         background: false,
                         stuck: self.stuck.contains(&t.id),
+                        by_kind: Vec::new(),
                     });
                     groups.last_mut().expect("just pushed")
                 }
             };
             group.total_ms += end_ms - start_ms;
+            if let Some(kind) = &t.kind {
+                match group.by_kind.iter_mut().find(|(k, _)| k == kind) {
+                    Some(e) => e.1 += end_ms - start_ms,
+                    None => group.by_kind.push((kind.clone(), end_ms - start_ms)),
+                }
+                group.by_kind.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
+            }
             match group.sessions.last_mut() {
                 Some(s) if start_ms - s.end.timestamp().as_millisecond() <= SESSION_GAP_MS => {
                     if end.timestamp() > s.end.timestamp() {

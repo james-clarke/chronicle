@@ -16,7 +16,7 @@ use regex::Regex;
 use rusqlite::Connection;
 
 use crate::config::Config;
-use crate::extract::{AnchorKind, Strength};
+use crate::extract::{AnchorKind, Family, Strength};
 use crate::profile::{self, AnchoredSpan, Key, Params, Profile, Segment, Verdict};
 use crate::storage::{self, StorageError};
 use crate::types::ts_to_ms;
@@ -388,6 +388,72 @@ pub struct Placement {
     pub margin: f64,
     /// The task that came second (for a new-task verdict, the best task).
     pub runner_up: Option<i64>,
+    /// The kind of work: see [`kind_of`].
+    pub kind: String,
+}
+
+/// The kinds of work a segment can be, general across roles.
+pub const KINDS: [&str; 9] = [
+    "author",
+    "agent",
+    "review",
+    "communicate",
+    "meet",
+    "plan",
+    "read",
+    "admin",
+    "break",
+];
+
+/// One span's kind from its app family and anchors: an editor, design or
+/// office window is `author`; a terminal with an agent session `agent`,
+/// without one `author`; a change page or a git GUI `review`; a tracker
+/// page (item, no change) `plan`; a calendar entry `meet`, as is a meeting
+/// app; chat and mail `communicate`; a document or site with nothing more
+/// `read`; a distraction `break`.
+fn span_kind(span: &AnchoredSpan, distractions: &[Regex]) -> &'static str {
+    if crate::evidence::is_distraction(&span.app, &span.title, distractions) {
+        return "break";
+    }
+    let has = |k: AnchorKind| span.anchors.iter().any(|a| a.kind == k);
+    if has(AnchorKind::Event) {
+        return "meet";
+    }
+    match crate::extract::family(&span.app) {
+        Family::Editor | Family::Document => "author",
+        Family::Terminal if has(AnchorKind::Session) => "agent",
+        Family::Terminal => "author",
+        Family::Vcs => "review",
+        Family::Chat | Family::Mail => "communicate",
+        Family::Meeting => "meet",
+        Family::Browser | Family::Other => {
+            if has(AnchorKind::Change) {
+                "review"
+            } else if has(AnchorKind::Item) {
+                "plan"
+            } else {
+                "read"
+            }
+        }
+    }
+}
+
+/// The kind of work over `[lo, hi)`: the kind its spans spent most time
+/// on, `break` only when nothing else is there.
+pub fn kind_of(spans: &[AnchoredSpan], lo: i64, hi: i64, distractions: &[Regex]) -> &'static str {
+    let mut ms: HashMap<&'static str, i64> = HashMap::new();
+    for s in spans.iter().filter(|s| s.end_ts > lo && s.start_ts < hi) {
+        let ov = s.end_ts.min(hi) - s.start_ts.max(lo);
+        if ov > 0 {
+            *ms.entry(span_kind(s, distractions)).or_insert(0) += ov;
+        }
+    }
+    let work = ms
+        .iter()
+        .filter(|(k, _)| **k != "break")
+        .max_by_key(|(k, m)| (**m, std::cmp::Reverse(**k)))
+        .map(|(k, _)| *k);
+    work.unwrap_or(if ms.is_empty() { "read" } else { "break" })
 }
 
 fn label_of(labels: &HashMap<i64, String>, id: i64) -> String {
@@ -429,6 +495,7 @@ fn place_existing(seg: &Segment, v: &Verdict, labels: &HashMap<i64, String>) -> 
         reason,
         margin: v.margin,
         runner_up: v.runner_up().flatten(),
+        kind: String::new(),
     })
 }
 
@@ -528,6 +595,7 @@ pub fn decide(
                 reason: "new".to_owned(),
                 margin: v.margin,
                 runner_up: v.ranked.first().map(|c| c.task_id),
+                kind: String::new(),
             });
         }
     }
@@ -562,6 +630,7 @@ pub fn decide(
             reason: format!("between {} and a new task", label_of(labels, *a)),
             margin: 0.0,
             runner_up: None,
+            kind: String::new(),
         });
     }
     // 4. Contiguous rows on one target become one.
@@ -578,6 +647,9 @@ pub fn decide(
             continue;
         }
         out.push(p);
+    }
+    for p in &mut out {
+        p.kind = kind_of(spans, p.lo, p.hi, distractions).to_owned();
     }
     out
 }
@@ -1047,6 +1119,41 @@ mod tests {
             out.iter().all(|p| p.target == Target::Existing(7)),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn kinds_follow_family_and_anchors() {
+        let d = crate::evidence::compile_patterns(&["YouTube".to_owned()]);
+        let agent = span(
+            1,
+            0,
+            10,
+            "Terminator",
+            "✳ fix tests",
+            &[
+                (AnchorKind::Session, "s1"),
+                (AnchorKind::Place, "chronicle"),
+            ],
+        );
+        let pr = span(
+            2,
+            10,
+            12,
+            "Firefox",
+            "PR #5",
+            &[(AnchorKind::Change, "acme/x#5")],
+        );
+        let video = span(3, 12, 20, "Firefox", "Cats - YouTube", &[]);
+        let spans = vec![agent, pr, video];
+        assert_eq!(kind_of(&spans, 0, 10 * M, &d), "agent");
+        assert_eq!(kind_of(&spans, 10 * M, 12 * M, &d), "review");
+        // Break time never wins while any work is inside the range …
+        assert_eq!(kind_of(&spans, 0, 20 * M, &d), "agent");
+        // … but a stretch of nothing else is a break.
+        assert_eq!(kind_of(&spans, 12 * M, 20 * M, &d), "break");
+        assert_eq!(kind_of(&[code(4, 0, 5, "m30")], 0, 5 * M, &d), "author");
+        assert_eq!(kind_of(&[chat(5, 0, 5)], 0, 5 * M, &d), "communicate");
+        assert_eq!(kind_of(&[notion(6, 0, 5)], 0, 5 * M, &d), "read");
     }
 
     #[test]

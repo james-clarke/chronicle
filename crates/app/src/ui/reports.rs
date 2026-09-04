@@ -466,10 +466,14 @@ fn project_group(
             let row_w = width - indent - LEGEND_PCT_COL - ui.spacing().item_spacing.x;
             let resp = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-                    theme::ListRow::new(&t.label)
+                    let mut row = theme::ListRow::new(&t.label)
                         .dot(task_color(t))
-                        .num(fmt_dur(t.total_ms))
-                        .show(ui, row_w, |_| {});
+                        .num(fmt_dur(t.total_ms));
+                    let mix = chronicle_core::report::kind_mix(&t.by_kind);
+                    if !mix.is_empty() {
+                        row = row.meta(None, mix);
+                    }
+                    row.show(ui, row_w, |_| {});
                 })
                 .response;
             if resp.clicked() {

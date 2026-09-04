@@ -251,6 +251,7 @@ mod tests {
             declared: false,
             external_ref: None,
             description: None,
+            kind: None,
         }
     }
 

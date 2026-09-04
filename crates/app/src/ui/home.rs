@@ -847,8 +847,12 @@ fn feed_row(
                             Some(("placed", theme::palette::TEXT_DIM)),
                             format!("matched \u{b7} {why}"),
                             format!(
-                                "segmenter: matched the task's evidence \u{b7} score {:.0}%",
-                                c.confidence * 100.0
+                                "segmenter: matched the task's evidence \u{b7} score {:.0}%{}",
+                                c.confidence * 100.0,
+                                c.kind
+                                    .as_deref()
+                                    .map(|k| format!(" \u{b7} {k}"))
+                                    .unwrap_or_default()
                             ),
                         )
                     }
@@ -1099,7 +1103,7 @@ fn feed_section_ui(
             }
             if let Some((id, moved)) = rescore
                 && moved > 0
-                && theme::ghost_button(ui, &format!("undo re-score ({moved} moved)"))
+                && theme::ghost_button(ui, format!("undo re-score ({moved} moved)"))
                     .on_hover_text(
                         "your last correction re-scored the day and moved these rows; put them back",
                     )
