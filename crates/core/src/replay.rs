@@ -91,6 +91,10 @@ pub struct Probe {
     /// as distinctive.
     pub old_label: String,
     pub check: Check,
+    /// Tasks the user later merged into `task_id` (transitively). Landing
+    /// the range on one of them is landing it on the same work; the merge
+    /// happened after the batch, so no predictor could know it yet.
+    pub also: Vec<i64>,
 }
 
 /// The eval's view of one replayed interval, already linked and resolved.
@@ -110,6 +114,10 @@ pub struct ProbeResult {
     pub kind: String,
     pub check: Check,
     pub pass: bool,
+    /// `pass`, or a "new task" verdict over a range whose task did not
+    /// exist at the batch's end: the predictor was right to start one, it
+    /// just could not name it in the eval's terms.
+    pub lenient: bool,
     pub detail: String,
 }
 
@@ -166,6 +174,7 @@ pub fn build_probes(rows: &Rows<'_>) -> (Vec<Probe>, Vec<String>) {
                     task_label: t.label.clone(),
                     old_label: c.old_label.clone(),
                     check: Check::Placed,
+                    also: Vec::new(),
                 });
             }
             "merge" | "rename" => {
@@ -225,6 +234,7 @@ pub fn build_probes(rows: &Rows<'_>) -> (Vec<Probe>, Vec<String>) {
                         },
                         old_label: c.old_label.clone(),
                         check,
+                        also: Vec::new(),
                     });
                 }
                 if n == 0 {
@@ -262,12 +272,31 @@ pub fn build_probes(rows: &Rows<'_>) -> (Vec<Probe>, Vec<String>) {
                     task_label: c.old_label.clone(),
                     old_label: String::new(),
                     check: Check::NotEjected,
+                    also: Vec::new(),
                 });
             }
             _ => {}
         }
     }
+    for p in &mut probes {
+        let batch_end = rows
+            .batches
+            .iter()
+            .find(|b| b.id == p.batch_id)
+            .map_or(p.range.1, |b| b.end_ts);
+        p.also = merged_into(p.task_id, batch_end, rows);
+    }
     (probes, skipped)
+}
+
+/// Closed tasks whose merge chain after `after_ts` ends at `target`.
+pub fn merged_into(target: i64, after_ts: i64, rows: &Rows<'_>) -> Vec<i64> {
+    rows.tasks
+        .iter()
+        .filter(|t| t.id != target && t.closed)
+        .filter(|t| final_target(t.id, after_ts, rows) == target)
+        .map(|t| t.id)
+        .collect()
 }
 
 /// Follow merges forward from `task_id`: a closed task whose label a later
@@ -425,8 +454,10 @@ pub fn score(
         kind: probe.kind.clone(),
         check: probe.check,
         pass,
+        lenient: pass,
         detail,
     };
+    let is_target = |id: Option<i64>| id.is_some_and(|id| id == probe.task_id || probe.also.contains(&id));
     let Some(d) = dominant else {
         return base(
             probe.check == Check::NotEjected,
@@ -440,18 +471,26 @@ pub fn score(
             if d.task_id == Some(probe.task_id) {
                 return base(true, format!("{where_} (ref)"));
             }
+            if is_target(d.task_id) {
+                return base(true, format!("{where_} (merged into it later)"));
+            }
             let in_list = open_at.iter().any(|t| t.id == probe.task_id);
             if !in_list && shares_token(&d.label, &tokens) {
                 return base(true, format!("{where_} (by label; task not open then)"));
             }
-            base(false, format!("{where_}; wanted {}", probe.task_label))
+            let mut r = base(false, format!("{where_}; wanted {}", probe.task_label));
+            if !in_list && d.task_id.is_none() {
+                r.lenient = true;
+                r.detail.push_str(" (new; task not open then)");
+            }
+            r
         }
         Check::Label => {
             let pass = shares_token(&d.label, &tokens);
             base(pass, format!("{where_}; wanted one of {tokens:?}"))
         }
         Check::NotEjected => {
-            let same_task = d.task_id == Some(probe.task_id);
+            let same_task = is_target(d.task_id);
             let same_label = shares_token(&d.label, &tokens);
             base(
                 !(same_task || same_label),
@@ -652,6 +691,7 @@ mod tests {
             task_label: task_label.into(),
             old_label: old.into(),
             check,
+            also: Vec::new(),
         };
         assert!(
             score(

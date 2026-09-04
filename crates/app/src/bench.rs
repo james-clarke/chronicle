@@ -358,6 +358,43 @@ pub(crate) fn bench_models(
 /// touched, with the open-task list as it stood at the batch's end, and score
 /// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it
 /// is live data and would make runs incomparable.
+
+/// Print per-check and total pass counts (strict, then lenient) under a
+/// heading; return them as the JSON `totals` object.
+fn print_totals(
+    heading: &str,
+    results: &[chronicle_core::replay::ProbeResult],
+) -> serde_json::Map<String, serde_json::Value> {
+    use chronicle_core::replay::Check;
+    let mut totals = serde_json::Map::new();
+    println!("\n=== {heading}");
+    let mut ok_all = 0;
+    for check in [Check::Placed, Check::Label, Check::NotEjected] {
+        let n = results.iter().filter(|r| r.check == check).count();
+        let ok = results
+            .iter()
+            .filter(|r| r.check == check && r.pass)
+            .count();
+        ok_all += ok;
+        if n > 0 {
+            println!("  {}: {ok}/{n}", check.name());
+        }
+        totals.insert(check.name().into(), serde_json::json!([ok, n]));
+    }
+    let lenient = results.iter().filter(|r| r.lenient).count();
+    println!(
+        "  total: {ok_all}/{} (lenient {lenient}/{})",
+        results.len(),
+        results.len()
+    );
+    totals.insert("total".into(), serde_json::json!([ok_all, results.len()]));
+    totals.insert(
+        "lenient".into(),
+        serde_json::json!([lenient, results.len()]),
+    );
+    totals
+}
+
 pub(crate) fn replay_eval(
     data_dir: &Path,
     since_days: u64,
@@ -366,7 +403,7 @@ pub(crate) fn replay_eval(
     out: Option<&Path>,
 ) -> anyhow::Result<()> {
     use chronicle_core::profile::{self, Params, Segment};
-    use chronicle_core::replay::{self, Check, Replayed};
+    use chronicle_core::replay::{self, Replayed};
     use chronicle_core::types::TaskSlot;
     use chronicle_core::{digest, merge, storage};
     use std::collections::HashMap;
@@ -462,31 +499,43 @@ pub(crate) fn replay_eval(
                     if v.confident { "confident" } else { "unsure" },
                     r.detail
                 );
+                if !r.pass && std::env::var_os("CHRONICLE_SCORER_DEBUG").is_some() {
+                    let rank = v.ranked.iter().position(|c| c.task_id == p.task_id);
+                    let wanted = profiles.iter().find(|pr| pr.task_id == p.task_id);
+                    let mut keys: Vec<(&profile::Key, f64)> =
+                        seg.keys.iter().map(|(k, m)| (k, *m)).collect();
+                    keys.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    let seg_keys: Vec<String> = keys
+                        .iter()
+                        .filter(|(k, _)| !k.is_term())
+                        .take(8)
+                        .map(|(k, m)| {
+                            let sat = wanted.map_or(-1.0, |w| w.sat(k, &params));
+                            format!("{}={} {:.0}m sat{:.1}", k.kind_str(), k.value(), m, sat)
+                        })
+                        .collect();
+                    let top: Vec<String> = v
+                        .ranked
+                        .iter()
+                        .take(3)
+                        .map(|c| format!("{}:{:.2}", c.task_id, c.score))
+                        .collect();
+                    println!(
+                        "      wanted={} rank={} profile={} seg={:.0}m top=[{}] keys=[{}]",
+                        p.task_id,
+                        rank.map_or("-".into(), |r| (r + 1).to_string()),
+                        wanted.map_or("none".into(), |w| format!("{}keys", w.minutes.len())),
+                        seg.minutes,
+                        top.join(" "),
+                        seg_keys.join("; ")
+                    );
+                }
                 scorer_by_probe.insert((p.correction_id, p.batch_id), (v.confident, replayed));
                 scorer_verdicts.push((v.best, v.margin, v.confident));
                 scorer_results.push(r);
             }
         }
-        let mut scorer_totals = serde_json::Map::new();
-        println!("\n=== scorer replay score");
-        let mut ok_all = 0;
-        for check in [Check::Placed, Check::Label, Check::NotEjected] {
-            let n = scorer_results.iter().filter(|r| r.check == check).count();
-            let ok = scorer_results
-                .iter()
-                .filter(|r| r.check == check && r.pass)
-                .count();
-            ok_all += ok;
-            if n > 0 {
-                println!("  {}: {ok}/{n}", check.name());
-            }
-            scorer_totals.insert(check.name().into(), serde_json::json!([ok, n]));
-        }
-        println!("  total: {ok_all}/{}", scorer_results.len());
-        scorer_totals.insert(
-            "total".into(),
-            serde_json::json!([ok_all, scorer_results.len()]),
-        );
+        let mut scorer_totals = print_totals("scorer replay score", &scorer_results);
         let n_conf = scorer_verdicts.iter().filter(|(.., c)| *c).count();
         let ok_conf = scorer_results
             .iter()
@@ -628,6 +677,7 @@ pub(crate) fn replay_eval(
                             kind: p.kind.clone(),
                             check: p.check,
                             pass: false,
+                            lenient: false,
                             detail: format!("derive failed: {e:#}"),
                         };
                         if combine {
@@ -647,23 +697,7 @@ pub(crate) fn replay_eval(
                 }
             }
         }
-        let mut totals = serde_json::Map::new();
-        println!("\n=== {name} replay score");
-        let mut ok_all = 0;
-        for check in [Check::Placed, Check::Label, Check::NotEjected] {
-            let n = results.iter().filter(|r| r.check == check).count();
-            let ok = results
-                .iter()
-                .filter(|r| r.check == check && r.pass)
-                .count();
-            ok_all += ok;
-            if n > 0 {
-                println!("  {}: {ok}/{n}", check.name());
-            }
-            totals.insert(check.name().into(), serde_json::json!([ok, n]));
-        }
-        println!("  total: {ok_all}/{}", results.len());
-        totals.insert("total".into(), serde_json::json!([ok_all, results.len()]));
+        let totals = print_totals(&format!("{name} replay score"), &results);
         report.push(serde_json::json!({
             "model": name,
             "since_days": since_days,
@@ -674,25 +708,9 @@ pub(crate) fn replay_eval(
         }));
 
         if combine {
-            let mut combined_totals = serde_json::Map::new();
-            println!("\n=== combined (scorer when confident, else {name}) replay score");
-            let mut c_ok_all = 0;
-            for check in [Check::Placed, Check::Label, Check::NotEjected] {
-                let n = combined_results.iter().filter(|r| r.check == check).count();
-                let ok = combined_results
-                    .iter()
-                    .filter(|r| r.check == check && r.pass)
-                    .count();
-                c_ok_all += ok;
-                if n > 0 {
-                    println!("  {}: {ok}/{n}", check.name());
-                }
-                combined_totals.insert(check.name().into(), serde_json::json!([ok, n]));
-            }
-            println!("  total: {c_ok_all}/{}", combined_results.len());
-            combined_totals.insert(
-                "total".into(),
-                serde_json::json!([c_ok_all, combined_results.len()]),
+            let combined_totals = print_totals(
+                &format!("combined (scorer when confident, else {name}) replay score"),
+                &combined_results,
             );
             combined_by_model.insert(
                 (*name).to_string(),
