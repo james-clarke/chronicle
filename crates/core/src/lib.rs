@@ -11,6 +11,7 @@ pub mod insights;
 pub mod intent;
 pub mod merge;
 pub mod prepass;
+pub mod profile;
 pub mod proposals;
 pub mod replay;
 pub mod report;
