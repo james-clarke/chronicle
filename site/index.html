@@ -24,7 +24,7 @@
       <li>no account</li>
       <li>no server</li>
       <li>no telemetry</li>
-      <li>no cloud model</li>
+      <li>no cloud model unless you add one</li>
       <li>no screenshots</li>
       <li>no keylogging</li>
     </ul>
@@ -95,8 +95,35 @@
   <div class="feature-text">
     <h2>Ask your own history.</h2>
     <p>What was I doing Tuesday before the call? How much of this month went to the launch? Ask in plain words, get an answer with times attached.</p>
-    <p class="fine">The model runs inside the app, on your CPU: 2.4 GB on disk, downloaded once. It reads the rows for the time you asked about and nothing else.</p>
+    <p class="fine">The model runs inside the app, on your CPU: Qwen3 4B, 2.4 GB on disk, downloaded once. It reads the rows for the time you asked about and nothing else. With your own API key, chat can go to a cloud model instead; then the day’s digest and the whole conversation go with the question, and Settings says so.</p>
   </div>
+</section>
+
+<section class="feature cloud">
+  <div class="feature-text">
+    <h2>Your own key, if you want a bigger model.</h2>
+    <p>Everything runs on the local model until you paste an API key into Settings. Then you choose what goes out: the writing and the chat, or everything, one kind of job at a time.</p>
+    <p>Placing your time stays local unless you send it. A job the cloud fails or refuses falls back to the local model. Spend is capped per day, two dollars unless you change it, and past the cap the day runs local. The key sits in one file in your data folder that only your user can read. One line in Settings says what left the machine today, and with no key it ends in “nothing else”.</p>
+    <p class="fine">Anthropic today; OpenAI-compatible endpoints next. The key is yours and so is the bill. There is no Chronicle account in between.</p>
+  </div>
+  <pre class="stage-data settings"><code>backends  anthropic · claude-sonnet-5 · key sk-ant-a…k3Qa
+          models.toml · mode 0600 · in your data folder
+
+routing   chat               anthropic
+          journal            anthropic
+          standup            anthropic
+          task description   anthropic
+          name new tasks     anthropic
+          derive batches     local
+          live tier          local
+          tidy day           local
+
+cap       $2.00 a day · today’s spend $0.31
+
+egress    what leaves this machine today: the model download
+          (once, on demand) · 6 journal + 3 chat to anthropic
+          (claude-sonnet-5) · MCP context fetches today 2
+          · posts today 0</code></pre>
 </section>
 
 <section class="feature sources">
@@ -109,19 +136,19 @@
       <li><i class="on"></i>pull requests</li>
       <li><i class="on"></i>calls</li>
       <li><i class="on"></i>editor heartbeats</li>
+      <li><i class="on"></i>shell history</li>
+      <li><i class="on"></i>Google Calendar</li>
       <li><i class="on"></i>Jira over MCP</li>
       <li><i class="on"></i>any MCP server</li>
     </ul>
     <p class="tags-label">Next, in the order people ask</p>
     <ul class="tags soon" aria-label="Sources coming next">
       <li><i></i>GitHub</li>
-      <li><i></i>Google Calendar</li>
       <li><i></i>Outlook calendar</li>
       <li><i></i>CalDAV</li>
       <li><i></i>Slack</li>
       <li><i></i>Linear</li>
       <li><i></i>Notion</li>
-      <li><i></i>shell history</li>
       <li><i></i>browser history</li>
       <li><i></i>Obsidian</li>
     </ul>
@@ -147,13 +174,17 @@
         <h3>Sees</h3>
         <p>A small background process notices which window is in front and when you step away. It keeps the name of the app and the title of the window: the document, the sheet, the tab, the call. That is the whole record. No keystrokes, no screenshots, no clipboard.</p>
         <p>Where it can, it also picks up the things that say what the work was: a call starting, a meeting on the calendar, the branch or folder in a terminal title, a ticket number in a tab, a commit landing in a repo you listed.</p>
+        <p>Each stretch gets its evidence written down beside it, typed: the ticket key, the document, the site, the branch, the folder a terminal was in, read from the process rather than guessed from the title, the people on a calendar invite. The rules read that first, and so does everything after them.</p>
       </div>
       <pre class="stage-data"><code>09:02:14  focus    Chrome   Q3 launch brief – Google Docs
+          anchor   doc Q3 launch brief · docs.google.com
 09:31:40  focus    Slack    #launch-planning
 09:40:05  focus    Zoom     Launch sync
 09:40:00  meeting  Launch sync · calendar · 09:40–10:15
+          anchor   people 4 · from the invite
 09:40:11  call     microphone on
 10:12:22  focus    Chrome   LAUNCH-241 Landing page copy – Jira
+          anchor   item LAUNCH-241 · atlassian.net
 10:40:10  focus    Figma    Landing page v2</code></pre>
     </li>
 
@@ -176,6 +207,7 @@ batch  09:02–11:15  5 spans · 32m on a call · 4 switches
         <h3>Recognises</h3>
         <p>Before any model runs, a few plain rules take a first pass every minute, in a fixed order. A branch name that carries a ticket key. A ticket key in a tab or its address. The project folder a file is in, if that task was touched in the last two hours. A window that looks like one you filed before. A match is written down as provisional, with the rule that placed it, so the feed and the timeline fill in while you are still working.</p>
         <p>Every five minutes the model also looks at the stretch still open and places it at a discount, until the batch closes and the full pass replaces both.</p>
+        <p>There is a second engine behind a switch in Settings. It places time from the written-down evidence alone, with no model in the loop, and only asks one to name what is new. It is off by default because on my own weeks the model still beats it.</p>
       </div>
       <pre class="stage-data"><code>rules  09:02–09:31  → Q3 launch brief
        reason: past correction
@@ -242,6 +274,7 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
       <div class="stage-text">
         <h3>Shows its work</h3>
         <p>Settings keeps the pipeline in view: which model file is loaded, whether the worker is running or idle, how many batches are waiting, the last batch with its time and token counts, and the last live pass. Two buttons show the exact digest the model read and the exact answer it gave. If a block is in the wrong place, you can see why.</p>
+        <p>Settings › Model does the same for what goes out: the backend each kind of job is routed to, today’s spend against the cap, and one line that says what left the machine today.</p>
       </div>
       <figure class="stage-shot wide">
         <img src="img/pipeline.webp" width="678" height="540" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, background under 10 minutes; then the pipeline card with the model file, worker idle, 2 pending batches, the last derive as batch 73 at 14:00 in 139.9 seconds with its prompt token count, and buttons to show the digest and the last output" loading="lazy">

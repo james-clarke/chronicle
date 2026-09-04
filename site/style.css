@@ -100,8 +100,8 @@ section { padding: 72px 0; }
   list-style: none;
   padding: 0;
   margin: 0;
-  display: grid;
-  grid-template-columns: repeat(3, max-content);
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .nos li {
@@ -326,6 +326,8 @@ section { padding: 72px 0; }
 .feature-text p { max-width: 30em; color: var(--soft); }
 .feature-text h2 + p { color: var(--text); font-size: 1.1rem; }
 .sources { grid-template-columns: 1fr 1fr; }
+.cloud { grid-template-columns: 1fr 1.15fr; }
+.cloud .stage-data { align-self: center; min-width: 0; }
 .sources .shot img { max-width: 480px; }
 
 .tags {
@@ -474,8 +476,7 @@ section { padding: 72px 0; }
   section { padding: 44px 0; }
   .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 24px; }
   .hero::before { display: none; }
-  .nos { grid-template-columns: repeat(2, max-content); }
-  .feature, .sources { grid-template-columns: 1fr; gap: 28px; }
+  .feature, .sources, .cloud { grid-template-columns: 1fr; gap: 28px; }
   .sources .shot { order: 2; }
   .wide-shot { margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .wide-shot img { width: 760px; max-width: none; }
@@ -489,6 +490,5 @@ section { padding: 72px 0; }
 }
 
 @media (max-width: 420px) {
-  .nos { grid-template-columns: 1fr 1fr; }
   .nos li { white-space: normal; }
 }
