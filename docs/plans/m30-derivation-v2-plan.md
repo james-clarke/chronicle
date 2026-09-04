@@ -486,3 +486,131 @@ owns the onboarding UI; a docs line for now), the `/proc` probe is
 untested live (needs the daemon restarted on this build), Mac/Windows
 capture. Deploy waits for m29 to land first (migration 016 would strand
 an older binary; see the m29 conflict note).
+
+### Chunk 2 — profiles and scorer, offline (2026-09-04, branch `m30`)
+
+What landed: migration 017 (`task_evidence(task_id, kind, value, source,
+minutes, first_ts, last_ts)`, keyed on all four, indexed on `(kind,
+value)`). `core::profile`, pure: `Key` (an anchor kind + value, or a title
+`term`), `EvidenceRow`, `Profile`, `Segment`, `Params`, `build_evidence` /
+`build_profiles` (as of a timestamp: intervals ended by then, decayed with
+a 14-day half-life; assign/reassign/merge corrections add one saturated
+match on the moved range's keys to the target and, for a reassign, take
+one from the source; an eject takes one from the ejected task over the
+range its paired assign recovers; each live task's label keys — ticket
+keys, plus bare numbers matched to item values seen anywhere — and its
+project count as one saturated match), `Segment::from_spans_skipping`
+(keys of the spans over a range, minutes each, distraction spans left
+out), `score` → `Verdict { ranked, new_task, best, margin, confident }`.
+`storage::anchored_spans`, `rebuild_task_evidence`, `task_evidence`,
+`evidence_summary`; `chronicle backfill-evidence` and `chronicle evidence
+[--task N] [--top K]`. `bench --replay --scorer` scores every probe with
+the scorer alone (no model load), and with `--model` also prints the
+combined result (scorer when confident, else the model); `bench --scorer`
+walks each fixture's expectation groups in time order, teaching the
+profile from the ranges already seen and asking the scorer about the
+next. Two persona fixtures with no developer tooling: `pm_day` (Notion,
+Figma, Slack, Meet, Linear, Sheets; four tasks with excursions and
+distractions) and `agency_day` (two clients across Figma, Notion, Slack,
+Zoom, Gmail, plus timesheets).
+
+How the score ended up, after three rounds against the replay: a task's
+score is the share of the segment's *known* evidence it explains — per
+key `weight × discount × share of the segment × saturation`, over the
+same at saturation 1 across keys some live profile carries — scaled by
+the known share of the evidence; the discount is `1/n` for a key `n`
+live profiles carry, so a place or branch every task in a repo shares
+cannot pick between them; keys no profile has seen are novelty weighted
+by kind (item, change, branch, event 1.0; place, doc 0.5; session 0.25;
+people, domain 0) and "new task" scores the larger of 0.35 and the
+novel share; terms count at most 30% of the hard mass; recency within
+2 h adds 0.05; a winner is confident at margin ≥ 0.25 and never with an
+empty segment. The first version (plain weighted sum) put every
+repo-wide segment at 3–5 points for every task in the repo and called
+the wrong one confident.
+
+The replay was made fair to both predictors: a probe now accepts the
+tasks the user later merged into its target (`Probe.also`, since the
+merge happened after the batch), and a "new task" verdict over a range
+whose task did not exist at the batch's end counts as a lenient pass
+(the model got that credit through its label; the scorer has no namer
+yet). Totals print strict, lenient, per kind, and over unique
+`(batch, task, range, check)` probes — a run of eleven merges into one
+task repeats one probe eleven times.
+
+Numbers, sandbox copy of the live DB (migration 15 live; the copy took
+016/017 and `backfill-anchors`), `--since 7`: 134 probes from 38
+corrections over 41 batches, 72 unique.
+
+| predictor | strict | lenient | unique | assign | merge | eject | confident |
+|---|---|---|---|---|---|---|---|
+| scorer alone | 37/134 | 46/134 | 24/72 | 5/15 | 31/117 | 1/2 | 4 of 25 right |
+| qwen3-4b (m27 path) | 44/134 | 57/134 | 33/72 | 6/15 | 37/117 | 1/2 | — |
+| combined | 35/134 | 51/134 | 27/72 | 5/15 | 29/117 | 1/2 | |
+
+Persona fixtures, scorer alone, cold start: `pm_day` 7/8 (the roadmap
+meeting lands on the pricing task: Notion's `Product` workspace is a
+known place and the deck and page are only 0.5-weight novelty),
+`agency_day` 8/8, `day3_sms` 3/4, `day4_heroku` 1/1 — 19/21, confident
+verdicts all right.
+
+What the replay says, read with the debug dump (`CHRONICLE_SCORER_DEBUG=1`
+prints the wanted task's rank, the top three scores and the segment's
+keys with the wanted profile's saturation for every failed probe):
+
+- 117 of 134 probes are merge probes, and their ranges are the union of
+  the target's intervals in the batch, so a "user experience review and
+  tweaks" probe spans a YouTube break, a LinkedIn page and a
+  `ACME-10787` PR review. Twelve of the 38 corrections are merges of
+  model-named slivers into that one task. The truth this replay carries
+  is mostly "what the user folded into the catch-all", not "which task
+  this stretch was".
+- The two catch-alls (task 60, 60–330 keys; task 73) carry every key the
+  week produced, including each other's items: `ACME-11342` is
+  saturated in both, so a backend segment ties at 0.91 vs 0.90 and the
+  scorer says unsure. That is the design (to confirm, two options), and
+  the eval counts it as a miss.
+- 31 probes want a task that had no profile at the batch's start (the
+  model created it in that batch). The scorer says "new" for 22 of
+  them (lenient passes) and picks the repo's magnet task for the rest:
+  a new task in the same repo, branch and session as the old one has
+  nothing but a new conversation title to show for it.
+- Same-place concurrency is real: a terminal span at that time carried
+  `branch=main`, `branch=staging`, `branch=ACME-11342`, three places
+  and two sessions at once (chunk 1 attaches the latest checkout per
+  named place and every overlapping session to a bare terminal). The
+  cwd probe and per-write session timestamps are what fixes that, not
+  the scorer.
+
+Verdict against the gate ("scorer alone beats the model on the same
+probes"): **not met.** 37 vs 44 strict, 46 vs 57 lenient, 24 vs 33
+unique; combined is worse than the model alone because the scorer's
+confident verdicts are wrong more often than not. The fixtures hold
+(19/21), so the mechanism is sound where anchors are clean; on this
+developer's week the anchors are not clean (same-place concurrency,
+two catch-all tasks) and the ground truth is mostly merge unions. Chunk
+2 ships as infrastructure — no behaviour changes, the table is a cache,
+the CLI is read-only — and chunk 3 does not start on this number.
+
+What would move it, in order of expected gain, none of it tuning:
+
+1. Re-anchor the week with the cwd probe live (chunk 1 landed it after
+   these spans were captured) and attach sessions by nearest log write
+   with per-write timestamps, so a terminal span carries one place, one
+   branch and one session. Then re-run: the ties at 0.91/0.90 and the
+   three-branch segments are that.
+2. A replay that scores the scorer's own unit: probes from
+   `assign`/`reassign`/`eject` only (the direct placements, 17 here), or
+   merge probes over the source task's intervals rather than the
+   target's union. Keep the m27 numbers as the model's regression gate,
+   add this as the scorer's.
+3. The namer, so "new task" verdicts can be checked by label like the
+   model's are (22 of the scorer's lenient passes are that).
+4. δ from data (chunk 4) — with 25 confident verdicts and 4 right, the
+   current δ is not a confidence.
+
+Not done in chunk 2: live accrual of `task_evidence` (the table is a
+rebuild-only cache until chunk 3 writes it on interval close and on
+correction), δ from data (chunk 4), the namer for new clusters (the
+scorer's `Segment::describe` is a placeholder label), a fixture-level
+debug dump.
