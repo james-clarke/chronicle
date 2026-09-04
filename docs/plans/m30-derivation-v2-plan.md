@@ -614,3 +614,113 @@ rebuild-only cache until chunk 3 writes it on interval close and on
 correction), δ from data (chunk 4), the namer for new clusters (the
 scorer's `Segment::describe` is a placeholder label), a fixture-level
 debug dump.
+
+### Chunk 2.5 — clean evidence, scorer-native replay (2026-09-04, 21589b4)
+
+Deployed first (774afa1, the chunk 1–2 merge) so the cwd probe collects
+live data. Then: the tool-session collector records the minute of every
+transcript write (`writes` in the activity row's detail, newest 240 kept);
+`extract::from_activity` attaches a terminal or editor span to the one
+session whose latest write is at or before the span's end (legacy rows
+without `writes` still attach every overlapping session, so old anchors
+do not change under `backfill-anchors`); a bare terminal takes the place
+its shell was last seen in (the `Cwd` row still alive at the span's end,
+else the one that ended last), not every directory it visited.
+Migration 018 adds `intervals.origin_task_id` (set on every insert, never
+touched by merge or reassign). `bench --replay --probes all|direct|source`:
+`direct` = assign/reassign/eject only (the scorer's unit), `source` =
+merge probes over the folded task's own rows (needs origin rows, so it
+only speaks for merges after 018).
+
+Sandbox numbers, same week as chunk 2 plus the day's corrections: `all`
+39/137 strict (46 lenient; chunk 2 was 37/134), `direct` 7/19 strict,
+10/19 lenient. The gate re-run on clean anchors waits for a few days of
+capture (≈2026-09-08): `backfill-anchors --since 2026-09-04`,
+`backfill-evidence`, then `bench --replay --scorer --since 4 --probes
+direct`.
+
+### Chunk 3 — segmenter + scorer as the live path (2026-09-04, e1518b9)
+
+Behind `derive_mode = "segmenter"` (default `model`; Settings ›
+Derivation has the toggle). `core::segmenter`: a span continues the open
+segment when it shares a strong/medium anchor, or a leading title word
+(five letters or more, tool names stopped) with it; a strong anchor
+swapped for another of its kind (branch for branch, item for item)
+cuts at once after `segment_switch_min` (3); a run of unrelated spans
+cuts at its start once it holds 3 minutes; chat, plain terminals and
+distractions stretch whatever is open; an AFK gap of 5 minutes closes;
+a short segment between two about the same thing folds. `decide` scores
+each segment against the live profiles (`task_evidence`, refreshed per
+touched task after every write and every correction, in full daily),
+clusters the "new" verdicts by what they share and creates one task per
+cluster once it holds `segment_new_task_min` (10) minutes — with a
+placeholder label from its anchors and a `name_task` job (the
+`suggest_task` digest path) to name it; a short leftover new stretch
+between two placements on one task joins it unsure; contiguous rows on
+one target merge. Rows are `source='segment'` with `confident` (019),
+shown as "placed" or "to confirm" in the feed, keepable like pre-pass
+rows. The batch tier under this mode is `segmenter::reconcile`: the
+batch window re-scored in-process with the day's profiles, marked done
+with zero tokens; the resident model runs only for naming and narrative.
+
+`bench --scorer --segment`: the persona fixtures cold (declared tasks'
+label keys only, one pass, no teaching) — 5/9 groups: agency 2/3 (one
+client's ranges split across two clusters), pm_day 2/3 (the roadmap
+meeting shares the `Product` place with the pricing pages, as in chunk
+2), day4 1/1, day3 0/2 (a 25-minute fixture: everything lands in one new
+cluster). Coverage 75–100 %, median segment 6–10 minutes, 34 segments
+→ 29 rows on the PM day. `bench --replay --scorer --segment` (probe =
+minute-weighted majority over the segmenter's own cuts): 37/137 `all`,
+6/19 `direct` — within two of the scorer on the probe's range. Live
+check against a sandbox copy of the DB (own `XDG_RUNTIME_DIR` so the
+socket does not collide): batch 86 reconciled on start into two
+confident rows on the right task; the tail wrote nothing because its
+only new stretch was six minutes on a new document.
+
+### Chunk 4 — learning and calibration (2026-09-04, 3cff71f)
+
+Migration 020 `verdict_log`: one row per reconciled segment row (task,
+runner-up, margin, confident); `keep` closes it right, reassign/eject
+close it wrong, a merge closes the folded task's rows wrong, and rows
+left alone for a day close right (`passive_accept`, daily). `bench
+--calibrate [--since N]` prints the corrected share per 0.05 margin
+bucket and the delta that puts the lowest tenth "to confirm";
+`scorer_delta` in config overrides `Params::delta`. A correction in
+segmenter mode re-scores the day (`segmenter::rescore_day`: every done
+batch and the tail, user rows untouched); when rows moved, a `rescore`
+correction holds the snapshot and Home's feed header shows "undo
+re-score (N moved)". Closed tasks stay scoreable on strong anchors only
+and reopen when they win. Derived tasks with no project take the place
+their evidence saturates (daily). The digest's few-shot section stays
+until chunk 7.
+
+### Chunk 5 — kinds (2026-09-04, 8989cc1)
+
+Migration 021 `intervals.kind`: `author | agent | review | communicate |
+meet | plan | read | admin | break` from each span's app family and
+anchors (editor/document/terminal → author, terminal with a session →
+agent, change page or git GUI → review, item page → plan, calendar
+entry or meeting app → meet, chat/mail → communicate, else read;
+distractions → break, which only wins an empty stretch), minute-
+weighted per row. Reports and the task detail show the mix ("agent 1h
+30m · review 25m"); the day view's excursion folding comes from `decide`
+merging contiguous rows, so no separate UI fold was needed.
+
+### Chunk 6 — embeddings (2026-09-04, 1120655)
+
+`bench --embed <gguf>` over 500 stored titles, one at a time: bge-small
+(q8, 384-d) p50 2.9 ms, p95 7.0 ms — passes the 20 ms gate;
+EmbeddingGemma-300m (q8, 768-d) p50 12.5 ms, p95 29.1 ms — fails, so the
+multilingual option waits for a smaller build. Migration 022
+`span_embeddings` / `task_embeddings`; the daemon embeds new focus spans
+each tick when `embed_model` is set (`chronicle model pull bge-small`,
+then `embed_model = "bge-small"`; `backfill-embeddings` for history);
+task centroids refresh with the evidence; the scorer adds up to 0.15 ×
+cosine. On this week's replay the term is neutral (39/137 `all`, 7/19
+`direct`, with or without), so it ships opt-in and off.
+
+### Chunk 7 — not started
+
+Waits for a week at `derive_mode = "segmenter"` by default; then
+`bench --replay --probes direct` and `all` on that week decide whether
+the pre-pass, the live tier and the model batch derive go.
