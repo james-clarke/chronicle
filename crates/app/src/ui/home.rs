@@ -145,7 +145,7 @@ impl TimelineApp {
     fn standup_card_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut generate = false;
         if self.standup.is_none() && self.standup_job.is_none() {
-            if !self.model_missing
+            if self.can_run("standup")
                 && ui
                     .small_button("draft standup")
                     .on_hover_text("draft a standup from yesterday's journals")
@@ -157,7 +157,7 @@ impl TimelineApp {
             ui.add_space(4.0);
             return generate;
         }
-        let model_missing = self.model_missing;
+        let can_standup = self.can_run("standup");
         let drafting = self.standup_job.is_some();
         let mut open = self.standup_open;
         // Collapsed: one line that says what is inside and that it was read.
@@ -181,7 +181,7 @@ impl TimelineApp {
             theme::card_header(ui, &title, Some(&mut open), |ui| {
                 if drafting {
                     ui.add(egui::Spinner::new().size(12.0));
-                } else if !model_missing && theme::ghost_button(ui, "redraft").clicked() {
+                } else if can_standup && theme::ghost_button(ui, "redraft").clicked() {
                     generate = true;
                 }
             });
@@ -350,6 +350,7 @@ impl TimelineApp {
                     self.service_card_ui(ui);
                     self.resume_card_ui(ui);
                     self.intent_card_ui(ui, &mut pending);
+                    let can_suggest = self.can_run("suggest_task");
                     let open_tasks = &self.open_tasks;
                     let closed_tasks = &self.closed_tasks;
                     let feed = &self.feed;
@@ -364,10 +365,9 @@ impl TimelineApp {
                     let merge_pick = &mut self.merge_pick;
                     let suggestion = &self.suggestion;
                     let declare_conflict = &mut self.declare_conflict;
-                    let model_missing = self.model_missing;
 
                     theme::section_header_with(ui, "Working on", None, |ui| {
-                        if model_missing {
+                        if !can_suggest {
                             return;
                         }
                         match suggestion {

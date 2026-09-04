@@ -21,7 +21,7 @@ impl TimelineApp {
         let mut jump: Option<(i64, jiff::civil::Date)> = None;
         let week_insights = &self.week_insights;
         let narrative_busy = self.narrative_job.is_some();
-        let model_missing = self.model_missing;
+        let narrative_blocked = !self.can_run("narrative");
         theme::page().show(ui, |ui| {
             if let Some(warning) = &self.warning {
                 ui.colored_label(ui.visuals().warn_fg_color, warning);
@@ -54,7 +54,13 @@ impl TimelineApp {
                     {
                         ui.add_space(theme::SECTION_GAP);
                         theme::section_header_with(ui, "Focus", None, |ui| {
-                            narrative_control(ui, wi, narrative_busy, model_missing, &mut pending);
+                            narrative_control(
+                                ui,
+                                wi,
+                                narrative_busy,
+                                narrative_blocked,
+                                &mut pending,
+                            );
                         });
                         ui.add_space(theme::SPACE_SM);
                         if let Some(text) = &wi.narrative {
@@ -107,7 +113,7 @@ fn narrative_control(
     ui: &mut egui::Ui,
     wi: &WeekInsights,
     busy: bool,
-    model_missing: bool,
+    blocked: bool,
     pending: &mut Option<Action>,
 ) {
     if busy {
@@ -115,7 +121,7 @@ fn narrative_control(
         ui.add(egui::Spinner::new().size(12.0));
         return;
     }
-    if model_missing || wi.narrative.is_some() {
+    if blocked || wi.narrative.is_some() {
         return;
     }
     let label = if wi.narrative_stale {

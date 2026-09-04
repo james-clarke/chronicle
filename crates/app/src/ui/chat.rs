@@ -647,6 +647,9 @@ impl TimelineApp {
         }
         let tz = self.tz.clone();
         let shown_day = self.day;
+        // Computed before `chat` takes a field-mutable borrow of `self`
+        // below (m31 c7): whether chat can run without a local model.
+        let chat_can_run = self.can_run("chat");
         let conn = self.conn.as_ref();
         let Some(chat) = &mut self.chat else {
             theme::page().show(ui, |ui| {
@@ -705,6 +708,7 @@ impl TimelineApp {
                                 .wrap(),
                             );
                             if error.contains("no model")
+                                && !chat_can_run
                                 && ui.small_button("download model").clicked()
                             {
                                 start_dl = true;

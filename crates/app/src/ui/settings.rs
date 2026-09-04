@@ -30,6 +30,9 @@ pub(super) struct SettingsPanel {
     git_repos: Vec<String>,
     sources: super::connections::LocalSources,
     connections: super::connections::Connections,
+    /// Cloud backends + routing (m31 c7); re-read from `models.toml` on
+    /// every save so the file stays the truth.
+    cloud: super::cloud::CloudPanel,
     /// Config as loaded (or last saved); fields without widgets pass through
     /// on save and the restart hint fires only when the file changes.
     base: chronicle_core::config::Config,
@@ -42,6 +45,9 @@ pub(super) struct SettingsPanel {
     /// the "what leaves this machine" line; read once, when the panel opens.
     fetches_today: i64,
     posts_today: i64,
+    /// Today's cloud job usage by kind/backend (m31 c7), for the same line;
+    /// read once, when the panel opens.
+    ai_usage_today: Vec<chronicle_core::storage::AiJobUsageRow>,
 }
 
 /// What the Pipeline card shows: the daemon's own view plus what the DB
@@ -156,10 +162,20 @@ impl SettingsPanel {
             output_view: None,
             sources: super::connections::LocalSources::from_config(&config),
             connections,
+            cloud: super::cloud::CloudPanel::load(data_dir, conn),
             base: config,
             status: None,
             fetches_today: counter("fetches"),
             posts_today: counter("posts"),
+            ai_usage_today: conn
+                .and_then(|c| {
+                    chronicle_core::storage::ai_jobs_today_by_backend(
+                        c,
+                        crate::ai_job::day_start_ms(),
+                    )
+                    .ok()
+                })
+                .unwrap_or_default(),
         })
     }
 
@@ -382,6 +398,55 @@ fn opt_path(s: &str) -> Option<PathBuf> {
     (!s.is_empty()).then(|| PathBuf::from(s))
 }
 
+/// "what leaves this machine today" (m31 c7): the model download mention,
+/// then today's cloud job usage grouped by backend ("14 journal + 3 chat to
+/// anthropic (claude-opus-5)"), then the existing MCP counts, then "nothing
+/// else" when no cloud rows.
+fn egress_line(
+    usage: &[chronicle_core::storage::AiJobUsageRow],
+    cfg: &chronicle_core::models_config::ModelsConfig,
+    fetches_today: i64,
+    posts_today: i64,
+) -> String {
+    let mut by_backend: std::collections::BTreeMap<
+        &str,
+        Vec<&chronicle_core::storage::AiJobUsageRow>,
+    > = std::collections::BTreeMap::new();
+    for row in usage {
+        by_backend
+            .entry(row.backend.as_str())
+            .or_default()
+            .push(row);
+    }
+    let mut parts = Vec::new();
+    for (backend, rows) in &by_backend {
+        let kinds = rows
+            .iter()
+            .map(|r| format!("{} {}", r.count, super::cloud::route_kind_label(&r.kind)))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let model = cfg
+            .backends
+            .get(*backend)
+            .map(|b| b.model.as_str())
+            .unwrap_or("?");
+        parts.push(format!("{kinds} to {backend} ({model})"));
+    }
+    let mut line =
+        "what leaves this machine today: the model download (once, on demand)".to_owned();
+    for part in &parts {
+        line.push_str(" \u{b7} ");
+        line.push_str(part);
+    }
+    line.push_str(&format!(
+        " \u{b7} MCP context fetches today {fetches_today} \u{b7} posts today {posts_today}"
+    ));
+    if parts.is_empty() {
+        line.push_str(" \u{b7} nothing else");
+    }
+    line
+}
+
 /// One regex per line; each must compile so a typo can't silently disable
 /// capture filtering after the next daemon restart.
 fn regex_lines(text: &str) -> Result<Vec<String>, String> {
@@ -419,6 +484,7 @@ impl TimelineApp {
         let spans_debug_now = self.spans_debug;
         let autohide_now = self.autohide;
         let mut autohide_toggle: Option<bool> = None;
+        let mut cloud_dirty = false;
         let conn = self.conn.as_ref();
         let pipeline = self.pipeline.as_ref();
         let tz = self.tz.clone();
@@ -510,6 +576,9 @@ impl TimelineApp {
                                     }
                                 },
                             }
+                            ui.add_space(theme::SPACE_LG);
+                            panel.cloud.ui(ui, conn, &data_dir);
+                            cloud_dirty |= panel.cloud.take_changed();
 
                             section(ui, "Capture", false, jump);
                             egui::Grid::new("settings_capture")
@@ -614,13 +683,15 @@ impl TimelineApp {
                                     ui.end_row();
                                 });
                             // Everything that ever leaves the machine, in
-                            // one line: the model download, the MCP reads,
-                            // and the writes the user clicked.
+                            // one line: the model download, today's cloud
+                            // job usage by backend, and the MCP reads.
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new(format!(
-                                        "what leaves this machine: the model download (once, on demand) \u{b7} MCP context fetches today {} \u{b7} posts today {}",
-                                        panel.fetches_today, panel.posts_today
+                                    egui::RichText::new(egress_line(
+                                        &panel.ai_usage_today,
+                                        panel.cloud.config(),
+                                        panel.fetches_today,
+                                        panel.posts_today,
                                     ))
                                     .text_style(theme::caption())
                                     .weak(),
@@ -695,6 +766,9 @@ impl TimelineApp {
         });
         if close {
             self.settings = None;
+        }
+        if cloud_dirty {
+            self.reload_cloud_kinds();
         }
         if let Some(d) = density_pick {
             theme::set_density(d);

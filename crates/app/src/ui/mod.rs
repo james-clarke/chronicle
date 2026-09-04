@@ -5,6 +5,7 @@
 //! `CHRONICLE_UI_AUTOHIDE=1` opts in.
 
 mod chat;
+mod cloud;
 mod connections;
 mod home;
 mod onboarding;
@@ -627,6 +628,13 @@ struct TimelineApp {
     triage_requested: bool,
     /// No usable model resolved (config override or default preset).
     model_missing: bool,
+    /// Job kinds whose `models.toml` route resolves to a live cloud
+    /// backend (m31 c7); refreshed with `model_missing` and again after
+    /// Settings saves the file.
+    cloud_kinds: Vec<String>,
+    /// Any `[backends.*]` configured, even before a route names one —
+    /// gates the onboarding "download model" card off.
+    has_cloud_backend: bool,
     /// Some = model download in flight or just finished.
     model_dl: Option<ModelDownload>,
     /// Selected PRESETS index in the onboarding card.
@@ -816,6 +824,8 @@ impl TimelineApp {
             triage: None,
             triage_requested: false,
             model_missing: false,
+            cloud_kinds: Vec::new(),
+            has_cloud_backend: false,
             model_dl: None,
             preset_pick: 0,
             service_card: onboarding::systemd_available() && !onboarding::service_unit_exists(),
@@ -1108,6 +1118,7 @@ impl TimelineApp {
         let model_path = self.config.as_ref().and_then(|c| c.model_path.clone());
         self.model_missing =
             chronicle_derive::model::resolve(model_path.as_deref(), &self.data_dir).is_none();
+        self.reload_cloud_kinds();
         if let Some(conn) = self.conn.as_ref()
             && !self.service_dismissed
         {
@@ -1117,6 +1128,23 @@ impl TimelineApp {
                     .flatten()
                     .is_some();
         }
+    }
+
+    /// Re-reads `models.toml` and refreshes `cloud_kinds` / `has_cloud_backend`
+    /// (m31 c7): called on the reload cadence and again after Settings saves
+    /// the file. A parse error is treated as "no cloud backends" — the
+    /// Settings panel surfaces the parse error itself.
+    pub(super) fn reload_cloud_kinds(&mut self) {
+        let cfg =
+            chronicle_core::models_config::ModelsConfig::load(&self.data_dir).unwrap_or_default();
+        self.has_cloud_backend = !cfg.backends.is_empty();
+        self.cloud_kinds = cfg.cloud_kinds();
+    }
+
+    /// A job kind can run: a local model resolves, or its route points at a
+    /// live cloud backend (m31 c7).
+    pub(super) fn can_run(&self, kind: &str) -> bool {
+        !self.model_missing || self.cloud_kinds.iter().any(|k| k == kind)
     }
 
     /// Advance in-flight AI job state (suggestion chip, narrative spinner).

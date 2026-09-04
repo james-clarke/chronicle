@@ -242,7 +242,10 @@ impl TimelineApp {
                 self.model_dl = None;
             }
         }
-        if !self.model_missing && self.model_dl.is_none() {
+        // A cloud backend counts as "a model is configured" even before a
+        // local model resolves (m31 c7): don't push the download card once
+        // BYOK is set up.
+        if (!self.model_missing || self.has_cloud_backend) && self.model_dl.is_none() {
             return;
         }
         let mut start: Option<&'static ModelSpec> = None;
