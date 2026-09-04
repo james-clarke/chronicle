@@ -45,3 +45,29 @@ child spawns (`own_exe` path).
 - `journalctl --user -u chronicle -f`
 - `~/.local/share/chronicle/logs/chronicle.log` (5 MB rotation, one `.1` backup)
 - Crash → auto-restart in 2 s (`Restart=on-failure`)
+
+## The site
+
+`site/` is static HTML + CSS, no scripts, no fonts fetched; keep it that way
+(the footer says so). Hosted on Render as a static site from `render.yaml`
+(publish path `./site`, `buildFilter` so only `site/**` changes redeploy;
+CI ignores `site/**` too).
+
+First-time setup, once a GitHub remote exists (repo is proprietary, keep it
+private):
+
+```sh
+gh auth login -h github.com
+gh repo create chronicle --private --source=. --remote=origin --push
+```
+
+Then Render dashboard → New → Blueprint → pick the repo; it reads
+`render.yaml` and creates `chronicle-site`. Custom domain and HTTPS are set on
+the service afterwards. Every later `git push` of `site/**` to `main`
+redeploys; nothing else does.
+
+Local check before pushing site changes: render the page headless at 1280,
+820 and 400 wide and look at it (`google-chrome --headless=new
+--screenshot=… --window-size=W,H file://…/site/index.html`; strip
+`loading="lazy"` into a temp copy first or offscreen images render as alt
+text).
