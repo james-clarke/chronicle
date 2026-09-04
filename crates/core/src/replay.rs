@@ -457,7 +457,8 @@ pub fn score(
         lenient: pass,
         detail,
     };
-    let is_target = |id: Option<i64>| id.is_some_and(|id| id == probe.task_id || probe.also.contains(&id));
+    let is_target =
+        |id: Option<i64>| id.is_some_and(|id| id == probe.task_id || probe.also.contains(&id));
     let Some(d) = dominant else {
         return base(
             probe.check == Check::NotEjected,

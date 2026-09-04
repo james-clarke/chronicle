@@ -211,6 +211,7 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
     use std::collections::HashSet;
 
     let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
     let params = Params::default();
     let (mut fixtures_ok, mut fixtures_n) = (0usize, 0usize);
 
@@ -286,7 +287,7 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 ms_range.0,
                 &params,
             );
-            let seg = Segment::from_spans(&aspans, ms_range.0, ms_range.1);
+            let seg = Segment::from_spans_skipping(&aspans, ms_range.0, ms_range.1, &distractions);
             let v = profile::score(&seg, &profiles, &params);
             let expected = seen_groups.contains(gi).then_some(task_id);
             let pass = v.best == expected;
@@ -354,11 +355,6 @@ pub(crate) fn bench_models(
     Ok(models)
 }
 
-/// `chronicle bench --replay`: re-derive every done batch a recent correction
-/// touched, with the open-task list as it stood at the batch's end, and score
-/// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it
-/// is live data and would make runs incomparable.
-
 /// Print per-check and total pass counts (strict, then lenient) under a
 /// heading; return them as the JSON `totals` object.
 fn print_totals(
@@ -381,6 +377,15 @@ fn print_totals(
         }
         totals.insert(check.name().into(), serde_json::json!([ok, n]));
     }
+    let kinds: Vec<String> = ["assign", "reassign", "merge", "rename", "eject"]
+        .iter()
+        .filter_map(|k| {
+            let n = results.iter().filter(|r| r.kind == *k).count();
+            let ok = results.iter().filter(|r| r.kind == *k && r.pass).count();
+            (n > 0).then(|| format!("{k} {ok}/{n}"))
+        })
+        .collect();
+    println!("  by kind: {}", kinds.join(", "));
     let lenient = results.iter().filter(|r| r.lenient).count();
     println!(
         "  total: {ok_all}/{} (lenient {lenient}/{})",
@@ -395,6 +400,10 @@ fn print_totals(
     totals
 }
 
+/// `chronicle bench --replay`: re-derive every done batch a recent correction
+/// touched, with the open-task list as it stood at the batch's end, and score
+/// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it
+/// is live data and would make runs incomparable.
 pub(crate) fn replay_eval(
     data_dir: &Path,
     since_days: u64,
@@ -450,6 +459,7 @@ pub(crate) fn replay_eval(
         let spans = storage::anchored_spans(&conn, 0, i64::MAX)?;
         let params = Params::default();
         let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+        let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
         for &bid in &batch_ids {
             let batch = storage::batch_row(&conn, bid)?
                 .with_context(|| format!("batch {bid} vanished mid-replay"))?;
@@ -470,7 +480,7 @@ pub(crate) fn replay_eval(
                 &params,
             );
             for p in probes.iter().filter(|p| p.batch_id == bid) {
-                let seg = Segment::from_spans(&spans, p.range.0, p.range.1);
+                let seg = Segment::from_spans_skipping(&spans, p.range.0, p.range.1, &distractions);
                 let v = profile::score(&seg, &profiles, &params);
                 let label = match v.best {
                     Some(id) => rows

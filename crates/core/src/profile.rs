@@ -25,9 +25,6 @@ pub fn strength_weight(s: Strength) -> f64 {
 
 /// Weight of one matching title term.
 pub const TERM_WEIGHT: f64 = 0.08;
-/// Cap on the summed term contribution, so many weak words never outrank a
-/// document or an item.
-pub const TERM_CAP: f64 = 0.3;
 /// Shortest title term kept.
 const MIN_TERM_CHARS: usize = 4;
 /// Title words that name browsers, apps and window furniture, not work.
@@ -92,6 +89,25 @@ pub enum Key {
 }
 
 impl Key {
+    /// How much a never-seen value of this kind argues for a new task: a
+    /// new item, change, branch or calendar entry does; a new repo or
+    /// document somewhat (a page is often the task, for people whose work
+    /// is pages); a new tool session much less (people start sessions
+    /// inside one task all day); a new person or site not at all.
+    pub fn novelty(&self) -> f64 {
+        match self {
+            Key::Anchor(k, _) => match k {
+                AnchorKind::Item | AnchorKind::Change | AnchorKind::Branch | AnchorKind::Event => {
+                    1.0
+                }
+                AnchorKind::Place | AnchorKind::Doc => 0.5,
+                AnchorKind::Session => 0.25,
+                AnchorKind::People | AnchorKind::Domain => 0.0,
+            },
+            Key::Term(_) => 0.0,
+        }
+    }
+
     pub fn kind_str(&self) -> &'static str {
         match self {
             Key::Anchor(k, _) => k.as_str(),
@@ -194,9 +210,9 @@ impl Default for Params {
             correction_min: 10.0,
             declared_min: 10.0,
             new_task: 0.35,
-            delta: 0.15,
+            delta: 0.25,
             recency_ms: 2 * 3_600_000,
-            recency_bonus: 0.1,
+            recency_bonus: 0.05,
         }
     }
 }
@@ -408,12 +424,42 @@ pub fn build_evidence(
         }
     }
 
+    // Item values seen anywhere, for labels that carry only the number
+    // ("11342: storing images" names ACME-11342).
+    let items: Vec<&str> = {
+        let mut v: Vec<&str> = spans
+            .iter()
+            .flat_map(|s| s.anchors.iter())
+            .filter(|a| a.kind == AnchorKind::Item)
+            .map(|a| a.value.as_str())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
     for t in live.values() {
         let (label, project) = crate::replay::label_at(t, before_ts, corrections);
-        for m in ticket_re.find_iter(&label) {
+        let mut declared: Vec<String> = ticket_re
+            .find_iter(&label)
+            .map(|m| m.as_str().to_owned())
+            .collect();
+        for num in label
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|n| n.len() >= 4)
+        {
+            declared.extend(
+                items
+                    .iter()
+                    .filter(|it| it.rsplit_once('-').is_some_and(|(_, n)| n == num))
+                    .map(|it| (*it).to_owned()),
+            );
+        }
+        declared.sort_unstable();
+        declared.dedup();
+        for item in declared {
             add(
                 t.id,
-                Key::Anchor(AnchorKind::Item, m.as_str().to_owned()),
+                Key::Anchor(AnchorKind::Item, item),
                 Source::Declared,
                 p.declared_min,
                 t.created_ts,
@@ -509,11 +555,29 @@ pub struct Segment {
 impl Segment {
     /// Keys of the spans overlapping `[lo, hi)`. `spans` sorted by start.
     pub fn from_spans(spans: &[AnchoredSpan], lo: i64, hi: i64) -> Segment {
+        Self::from_spans_skipping(spans, lo, hi, &[])
+    }
+
+    /// [`Segment::from_spans`] with spans matching a distraction pattern
+    /// left out: a video inside a work block is not evidence of anything.
+    /// Their minutes still count toward the segment's length.
+    pub fn from_spans_skipping(
+        spans: &[AnchoredSpan],
+        lo: i64,
+        hi: i64,
+        distractions: &[Regex],
+    ) -> Segment {
         let focus: i64 = spans
             .iter()
             .map(|s| overlap_ms((s.start_ts, s.end_ts), (lo, hi)))
             .sum();
-        let keys = keys_in(spans, (lo, hi))
+        let kept: Vec<AnchoredSpan> = spans
+            .iter()
+            .filter(|s| s.end_ts > lo && s.start_ts < hi)
+            .filter(|s| !crate::evidence::is_distraction(&s.app, &s.title, distractions))
+            .cloned()
+            .collect();
+        let keys = keys_in(&kept, (lo, hi))
             .into_iter()
             .map(|(k, (m, _, _))| (k, m))
             .collect();
@@ -585,34 +649,103 @@ impl Verdict {
     }
 }
 
-/// Score `seg` against `profiles`. Per task: sum over the segment's keys of
-/// `weight × saturation × share of the segment`, terms capped, plus the
-/// recency bonus. "New task" scores [`Params::new_task`].
+/// Saturation at which a key counts as "in" a profile when measuring how
+/// many tasks share it.
+const SHARED_SAT: f64 = 0.5;
+/// Terms may carry at most this share of the hard evidence mass.
+const TERM_SHARE: f64 = 0.3;
+/// Ceiling of a score built from terms alone (a segment with no anchors).
+const TERM_ONLY_CEIL: f64 = 0.6;
+
+/// Score `seg` against `profiles`. A task's score is the fraction of the
+/// segment's *known* evidence it explains: per key, `weight × discount ×
+/// share of the segment × saturation`, over the same sum at saturation 1
+/// across the keys at least one live profile carries. The discount is
+/// `1 / n` for a key `n` profiles carry, so a place or branch every task in
+/// a repo shares cannot decide between them while a key only one task has
+/// can. Keys no profile has ever seen are novelty, weighted by
+/// [`Key::novelty`]: a task's score is scaled by the known share of the
+/// (undiscounted) evidence and "new task" scores the larger of
+/// [`Params::new_task`] and the novel share, so a stretch of mostly new
+/// items, branches or places is a new task while new pages inside a known
+/// place are not. Terms are scaled to at most
+/// [`TERM_SHARE`] of the hard mass (or [`TERM_ONLY_CEIL`] alone). Plus the
+/// recency bonus. The winner is confident when its margin over the
+/// runner-up (new task included) clears [`Params::delta`]; a segment with
+/// no evidence at all is never confident.
 pub fn score(seg: &Segment, profiles: &[Profile], p: &Params) -> Verdict {
+    // (key, share, discount, known)
+    let keys: Vec<(&Key, f64, f64, bool)> = if seg.minutes > 0.0 {
+        seg.keys
+            .iter()
+            .map(|(k, m)| {
+                let n = profiles
+                    .iter()
+                    .filter(|pr| pr.sat(k, p) >= SHARED_SAT)
+                    .count();
+                let known = profiles.iter().any(|pr| pr.sat(k, p) > 0.0);
+                (k, (m / seg.minutes).min(1.0), 1.0 / n.max(1) as f64, known)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Discounted masses rank tasks against each other; raw masses say how
+    // much of the segment is novel.
+    let mass = |term: bool, known: bool, discounted: bool| -> f64 {
+        keys.iter()
+            .filter(|(k, _, _, kn)| k.is_term() == term && *kn == known)
+            .map(|(k, share, disc, _)| k.weight() * share * if discounted { *disc } else { 1.0 })
+            .sum()
+    };
+    let hard_known = mass(false, true, true);
+    let term_known = mass(true, true, true);
+    let term_scale = if term_known <= 0.0 {
+        0.0
+    } else if hard_known > 0.0 {
+        (TERM_SHARE * hard_known / term_known).min(1.0)
+    } else {
+        1.0
+    };
+    let denom = hard_known + term_scale * term_known;
+    let raw_known = mass(false, true, false);
+    let raw_novel: f64 = keys
+        .iter()
+        .filter(|(k, _, _, known)| !k.is_term() && !known)
+        .map(|(k, share, _, _)| k.weight() * k.novelty() * share)
+        .sum();
+    let known_share = if raw_known + raw_novel > 0.0 {
+        raw_known / (raw_known + raw_novel)
+    } else {
+        1.0
+    };
+    let new_task = p.new_task.max(1.0 - known_share);
     let mut ranked: Vec<Candidate> = profiles
         .iter()
         .map(|pr| {
-            let mut hard = 0.0;
-            let mut soft = 0.0;
-            if seg.minutes > 0.0 {
-                for (k, m) in &seg.keys {
-                    let sat = pr.sat(k, p);
-                    if sat <= 0.0 {
-                        continue;
-                    }
-                    let share = (m / seg.minutes).min(1.0);
-                    let v = k.weight() * sat * share;
-                    if k.is_term() {
-                        soft += v;
-                    } else {
-                        hard += v;
-                    }
+            let mut num = 0.0;
+            for (k, share, disc, _) in &keys {
+                let sat = pr.sat(k, p);
+                if sat <= 0.0 {
+                    continue;
                 }
+                let scale = if k.is_term() { term_scale } else { 1.0 };
+                num += k.weight() * disc * share * sat * scale;
+            }
+            let mut score = if denom > 0.0 {
+                num / denom * known_share
+            } else {
+                0.0
+            };
+            if hard_known <= 0.0 {
+                score *= TERM_ONLY_CEIL;
             }
             let recent = pr
                 .last_ts
                 .is_some_and(|l| l <= seg.start_ts && seg.start_ts - l <= p.recency_ms);
-            let score = hard + soft.min(TERM_CAP) + if recent { p.recency_bonus } else { 0.0 };
+            if recent {
+                score += p.recency_bonus;
+            }
             Candidate {
                 task_id: pr.task_id,
                 score,
@@ -626,22 +759,19 @@ pub fn score(seg: &Segment, profiles: &[Profile], p: &Params) -> Verdict {
             .then(a.task_id.cmp(&b.task_id))
     });
     let top = ranked.first().map(|c| c.score).unwrap_or(0.0);
-    let (best, margin) = if top > p.new_task {
-        let runner = ranked
-            .get(1)
-            .map(|c| c.score)
-            .unwrap_or(0.0)
-            .max(p.new_task);
+    let (best, margin) = if top > new_task {
+        let runner = ranked.get(1).map(|c| c.score).unwrap_or(0.0).max(new_task);
         (ranked.first().map(|c| c.task_id), top - runner)
     } else {
-        (None, p.new_task - top)
+        (None, new_task - top)
     };
+    let empty = keys.iter().all(|(k, ..)| k.is_term());
     Verdict {
         ranked,
-        new_task: p.new_task,
+        new_task,
         best,
         margin,
-        confident: margin >= p.delta,
+        confident: !empty && margin >= p.delta,
     }
 }
 
