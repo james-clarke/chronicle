@@ -513,11 +513,63 @@ fn place_existing(seg: &Segment, v: &Verdict, labels: &HashMap<i64, String>) -> 
     })
 }
 
+/// The place veto (m33 chunk C): a task declared in one project cannot
+/// take a segment whose dominant place is another repo, whatever its
+/// profile has learned — unless the segment carries a ticket the task's
+/// own label names (a ticket spanning repos is one task). A task with no
+/// project, a segment with no place, or a task whose project ties for
+/// the segment's top place are left alone. With the winner vetoed the
+/// verdict settles again on what remains, so the segment falls to the
+/// next task in its own repo or to a new one, not to the incumbent.
+fn place_veto(
+    v: &mut Verdict,
+    seg: &Segment,
+    profiles: &[Profile],
+    projects: &HashMap<i64, Option<String>>,
+    params: &Params,
+) {
+    let places = || {
+        seg.keys.iter().filter_map(|(k, m)| match k {
+            Key::Anchor(AnchorKind::Place, p) => Some((p.as_str(), *m)),
+            _ => None,
+        })
+    };
+    let Some((place, top)) = places().max_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.0.cmp(a.0))
+    }) else {
+        return;
+    };
+    v.retain(seg, params, |t| {
+        let Some(Some(project)) = projects.get(&t) else {
+            return true;
+        };
+        if project.eq_ignore_ascii_case(place) {
+            return true;
+        }
+        let own = places()
+            .filter(|(p, _)| p.eq_ignore_ascii_case(project))
+            .map(|(_, m)| m)
+            .fold(0.0, f64::max);
+        if own >= top {
+            return true;
+        }
+        profiles.iter().any(|pr| {
+            pr.task_id == t
+                && pr.declared.iter().any(|k| {
+                    matches!(k, Key::Anchor(AnchorKind::Item, _)) && seg.keys.contains_key(k)
+                })
+        })
+    });
+}
+
 /// Decide every segment in `spans` over `[lo, hi)`: score each against the
-/// profiles; the "new" stretches cluster by what they share, and a cluster
-/// with `new_task_min` focus minutes becomes one new task; a short "new"
-/// stretch left over between two placements on one task joins that task
-/// (unsure). Contiguous placements on one target merge into one row.
+/// profiles under the place veto; the "new" stretches cluster by what
+/// they share, and a cluster with `new_task_min` focus minutes becomes one
+/// new task; a short "new" stretch left over between two placements on
+/// one task joins that task (unsure). Contiguous placements on one target
+/// merge into one row.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
     spans: &[AnchoredSpan],
@@ -525,6 +577,7 @@ pub fn decide(
     hi: i64,
     profiles: &[Profile],
     labels: &HashMap<i64, String>,
+    projects: &HashMap<i64, Option<String>>,
     distractions: &[Regex],
     params: &Params,
     sp: &SegParams,
@@ -541,7 +594,8 @@ pub fn decide(
         if evidence.keys.is_empty() {
             continue;
         }
-        let v = profile::score(&evidence, profiles, params);
+        let mut v = profile::score(&evidence, profiles, params);
+        place_veto(&mut v, &evidence, profiles, projects, params);
         scored.push((seg, evidence, v));
     }
     // 2. Place on existing tasks.
@@ -1146,7 +1200,17 @@ pub fn place_dry(
     if spans.is_empty() {
         return Ok(Vec::new());
     }
-    let placements = decide(&spans, lo, hi, profiles, labels, distractions, &params, &sp);
+    let placements = decide(
+        &spans,
+        lo,
+        hi,
+        profiles,
+        labels,
+        projects,
+        distractions,
+        &params,
+        &sp,
+    );
     let sessions = storage::live_sessions(conn, lo, hi, &ticket_re)?;
     Ok(split_concurrent(
         placements,
@@ -1178,18 +1242,19 @@ fn place_window(
         return Ok(Vec::new());
     }
     let (profiles, labels) = storage::live_profiles(conn)?;
+    let projects = storage::task_projects(conn)?;
     let placements = decide(
         &spans,
         lo,
         hi,
         &profiles,
         &labels,
+        &projects,
         distractions,
         &params,
         &sp,
     );
     let sessions = storage::live_sessions(conn, lo, hi, &ticket_re)?;
-    let projects = storage::task_projects(conn)?;
     let placements = split_concurrent(
         placements,
         &spans,
@@ -1449,6 +1514,7 @@ mod tests {
         let profiles = vec![Profile {
             task_id: 7,
             minutes,
+            declared: Default::default(),
             last_ts: Some(0),
             vec: None,
         }];
@@ -1471,6 +1537,7 @@ mod tests {
             46 * M,
             &profiles,
             &labels,
+            &HashMap::new(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -1494,6 +1561,7 @@ mod tests {
             40 * M,
             &profiles,
             &labels,
+            &HashMap::new(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -1584,6 +1652,7 @@ mod tests {
             40 * M,
             &profiles,
             &labels,
+            &HashMap::new(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -1591,6 +1660,74 @@ mod tests {
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!((out[0].lo, out[0].hi), (0, 40 * M));
         assert!(!out[0].confident, "the folded stretch makes the row unsure");
+    }
+
+    /// A chronicle task that absorbed a morning of contoso work cannot take
+    /// the next contoso stretch (m33 chunk C), unless its own label names
+    /// the ticket on screen or it has no project at all.
+    #[test]
+    fn decide_vetoes_a_task_outside_the_segment_place() {
+        let contoso = |id: i64, lo: i64, hi: i64| {
+            span(
+                id,
+                lo,
+                hi,
+                "Code",
+                "tasks.py - contoso",
+                &[
+                    (AnchorKind::Place, "contoso"),
+                    (AnchorKind::Branch, "ACME-1"),
+                    (AnchorKind::Item, "ACME-1"),
+                ],
+            )
+        };
+        let spans = vec![contoso(1, 0, 12), contoso(2, 12, 24)];
+        let mut minutes = HashMap::new();
+        minutes.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Branch, "m30".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Branch, "ACME-1".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 30.0);
+        let profile = Profile {
+            task_id: 7,
+            minutes,
+            declared: Default::default(),
+            last_ts: Some(0),
+            vec: None,
+        };
+        let labels = HashMap::from([(7, "m30 work".to_owned())]);
+        let run = |profiles: &[Profile], projects: &HashMap<i64, Option<String>>| {
+            decide(
+                &spans,
+                0,
+                24 * M,
+                profiles,
+                &labels,
+                projects,
+                &[],
+                &Params::default(),
+                &SegParams::default(),
+            )
+        };
+        let chronicle = HashMap::from([(7, Some("chronicle".to_owned()))]);
+        let out = run(std::slice::from_ref(&profile), &chronicle);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            matches!(&out[0].target, Target::New { project: Some(p), .. } if p == "contoso"),
+            "{:?}",
+            out[0].target
+        );
+        assert_eq!(out[0].runner_up, None, "the vetoed task is no runner-up");
+        // The label names the ticket: one task across repos.
+        let mut declared = profile.clone();
+        declared
+            .declared
+            .insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()));
+        let out = run(std::slice::from_ref(&declared), &chronicle);
+        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
+        // No project: nothing to veto.
+        let out = run(std::slice::from_ref(&profile), &HashMap::from([(7, None)]));
+        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
     }
 
     /// Task 7 is chronicle work on `m30`, task 9 is contoso work on
@@ -1606,12 +1743,14 @@ mod tests {
             Profile {
                 task_id: 7,
                 minutes: a,
+                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },
             Profile {
                 task_id: 9,
                 minutes: b,
+                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },
@@ -1838,6 +1977,7 @@ mod tests {
         let profiles = vec![Profile {
             task_id: 85,
             minutes: a,
+            declared: Default::default(),
             last_ts: Some(0),
             vec: None,
         }];
@@ -1919,6 +2059,7 @@ mod tests {
         let profiles = vec![Profile {
             task_id: 85,
             minutes: a,
+            declared: Default::default(),
             last_ts: Some(0),
             vec: None,
         }];

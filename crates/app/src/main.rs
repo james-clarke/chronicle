@@ -255,6 +255,10 @@ enum Cmd {
         /// `2026-09-03T15:00..2026-09-03T16:44`.
         #[arg(long)]
         window: Option<String>,
+        /// With `--window`: score against the profiles as they stand now
+        /// (what the daemon's tick uses), not as of the window's start.
+        #[arg(long, requires = "window")]
+        live: bool,
         /// Time an embedding GGUF over recent titles (m30 chunk 6 gate:
         /// p95 under 20 ms per title on this CPU).
         #[arg(long)]
@@ -328,13 +332,14 @@ fn main() -> anyhow::Result<()> {
             calibrate,
             gaps,
             window,
+            live,
             embed,
             backend,
         } => {
             if let Some(path) = embed {
                 bench::embed_bench(&data_dir, &path)
             } else if let Some(spec) = window {
-                bench::window(&data_dir, &spec)
+                bench::window(&data_dir, &spec, live)
             } else if calibrate {
                 bench::calibrate(&data_dir, since)
             } else if gaps {

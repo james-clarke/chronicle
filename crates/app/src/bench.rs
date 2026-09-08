@@ -279,6 +279,8 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
             })
             .collect();
         let labels: HashMap<i64, String> = tasks.iter().map(|t| (t.id, t.label.clone())).collect();
+        let projects: HashMap<i64, Option<String>> =
+            tasks.iter().map(|t| (t.id, t.project.clone())).collect();
         let profiles = profile::build_profiles(&tasks, &[], &aspans, &[], &re, origin, &params);
         let segs = segmenter::segment(&aspans, &distractions, &sp);
         let placements = segmenter::decide(
@@ -287,6 +289,7 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
             end,
             &profiles,
             &labels,
+            &projects,
             &distractions,
             &params,
             &sp,
@@ -682,8 +685,10 @@ pub(crate) fn embed_bench(data_dir: &Path, model: &Path) -> anyhow::Result<()> {
 /// `bench --window START..END` (m32 chunk 3 gate): the window placed the
 /// way `segmenter::reconcile` would place it now, unwritten. Each row with
 /// its share and kind, then the window's wall time by project and by task
-/// (shares applied), and the check that the shares add up to it.
-pub(crate) fn window(data_dir: &Path, spec: &str) -> anyhow::Result<()> {
+/// (shares applied), and the check that the shares add up to it. Profiles
+/// as of the window's start the replay's way, or with `live` the cache as
+/// it stands (m33 chunk C gate: what the daemon's tick would do).
+pub(crate) fn window(data_dir: &Path, spec: &str, live: bool) -> anyhow::Result<()> {
     use chronicle_core::segmenter::{self, Target};
     use chronicle_core::storage;
     use std::collections::HashMap;
@@ -712,24 +717,32 @@ pub(crate) fn window(data_dir: &Path, spec: &str) -> anyhow::Result<()> {
     let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
     let params = segmenter::params(&config);
     // Profiles as of the window's start, the replay's way: tasks and
-    // evidence that existed then, not what was learned since.
-    let rows = storage::replay_rows(&conn, 0)?;
-    let all_spans = storage::anchored_spans(&conn, 0, lo)?;
-    let profiles = chronicle_core::profile::build_profiles(
-        &rows.tasks,
-        &rows.intervals,
-        &all_spans,
-        &rows.corrections,
-        &re,
-        lo,
-        &params,
-    );
-    let labels: HashMap<i64, String> = rows.tasks.iter().map(|t| (t.id, t.label.clone())).collect();
-    let projects: HashMap<i64, Option<String>> = rows
-        .tasks
-        .iter()
-        .map(|t| (t.id, t.project.clone()))
-        .collect();
+    // evidence that existed then, not what was learned since. With
+    // `live`, the cache as the daemon's tick reads it.
+    let (profiles, labels, projects) = if live {
+        let (profiles, labels) = storage::live_profiles(&conn)?;
+        (profiles, labels, storage::task_projects(&conn)?)
+    } else {
+        let rows = storage::replay_rows(&conn, 0)?;
+        let all_spans = storage::anchored_spans(&conn, 0, lo)?;
+        let profiles = chronicle_core::profile::build_profiles(
+            &rows.tasks,
+            &rows.intervals,
+            &all_spans,
+            &rows.corrections,
+            &re,
+            lo,
+            &params,
+        );
+        let labels: HashMap<i64, String> =
+            rows.tasks.iter().map(|t| (t.id, t.label.clone())).collect();
+        let projects: HashMap<i64, Option<String>> = rows
+            .tasks
+            .iter()
+            .map(|t| (t.id, t.project.clone()))
+            .collect();
+        (profiles, labels, projects)
+    };
     let placements = segmenter::place_dry(
         &conn,
         &config,
@@ -747,8 +760,12 @@ pub(crate) fn window(data_dir: &Path, spec: &str) -> anyhow::Result<()> {
         tasks.insert(id, (label, project));
     }
     println!(
-        "profiles as of {}: {} tasks with evidence",
-        hm(lo),
+        "profiles {}: {} tasks with evidence",
+        if live {
+            "as they stand now".to_owned()
+        } else {
+            format!("as of {}", hm(lo))
+        },
         profiles.len()
     );
     for pr in &profiles {
