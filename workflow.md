@@ -50,8 +50,14 @@ child spawns (`own_exe` path).
 
 `site/` is static HTML + CSS, no scripts, no fonts fetched; keep it that way
 (the footer says so). Hosted on Render as a static site from `render.yaml`
-(publish path `./site`, `buildFilter` so only `site/**` changes redeploy;
-CI ignores `site/**` too).
+(publish path `./site`; CI ignores `site/**`). Every push to `main` rebuilds:
+`sh site/build.sh` bakes the git pulse (last push, milestone badge, commits
+today / this week, 30-day strip), the footer numbers and the sharing URLs
+into `index.html` between `<!-- pulse -->`, `<!-- numbers -->` and
+`<!-- og -->` markers, then fails the build if the page breaks its budget
+(0 third-party requests, ≤ 2 KB inline JS, ≤ 250 KB above the fold, ≤ 900 KB
+total). The committed `index.html` keeps placeholders; preview a baked copy
+with `sh site/build.sh $TMPDIR/preview` rather than running it in place.
 
 First-time setup, once a GitHub remote exists (repo is proprietary, keep it
 private):
@@ -66,8 +72,9 @@ Then Render dashboard → New → Blueprint → pick the repo; it reads
 the service afterwards. Every later `git push` of `site/**` to `main`
 redeploys; nothing else does.
 
-Local check before pushing site changes: render the page headless at 1280,
-820 and 400 wide and look at it (`google-chrome --headless=new
---screenshot=… --window-size=W,H file://…/site/index.html`; strip
-`loading="lazy"` into a temp copy first or offscreen images render as alt
-text).
+Local check before pushing site changes: render the baked preview headless
+at 1280, 820 and 400 wide and look at it (`google-chrome --headless=new
+--screenshot=… --window-size=W,H --user-data-dir=<scratch>
+file://<preview>/index.html`; needs the tool sandbox off because Chrome
+writes under `~/.config`; strip `loading="lazy"` into a temp copy first or
+offscreen images render as alt text).

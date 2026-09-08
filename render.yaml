@@ -3,11 +3,7 @@ services:
     name: chronicle-site
     runtime: static
     staticPublishPath: ./site
-    buildCommand: ""
-    buildFilter:
-      paths:
-        - site/**
-        - render.yaml
+    buildCommand: sh site/build.sh
     headers:
       - path: /*
         name: X-Frame-Options
