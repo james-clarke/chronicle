@@ -8,10 +8,13 @@
 
 use std::fmt::Write;
 
+use jiff::Timestamp;
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
 
 use crate::digest::fmt_dur;
+use crate::sessionizer::AFK_SPLIT_MINS;
+use crate::storage::DaemonRun;
 use crate::types::Task;
 
 pub const UNTAGGED: &str = "(none)";
@@ -142,6 +145,54 @@ pub struct RangeReport {
     pub tasks: Vec<TaskRow>,
     pub projects: Vec<ProjectTotal>,
     pub grand_total_ms: i64,
+    pub tz: TimeZone,
+    /// Stretches inside the range with no capture (m32 chunk 0), from the
+    /// daemon ledger via [`capture_gaps`]; `build` leaves it empty.
+    pub gaps: Vec<(i64, i64)>,
+    /// Captured span time no done batch covers yet; `build` leaves it 0.
+    pub underived_ms: i64,
+}
+
+/// Stretches of `[lo, hi)` no ledger row covers, at least `AFK_SPLIT_MINS`
+/// long: a restart's few seconds are not worth a line. Time before the
+/// ledger's first row is unrecorded, not a gap; an open row runs to `hi`,
+/// so pass `hi` clamped to now.
+pub fn capture_gaps(
+    runs: &[DaemonRun],
+    ledger_start: Option<i64>,
+    lo: i64,
+    hi: i64,
+) -> Vec<(i64, i64)> {
+    let Some(first) = ledger_start else {
+        return Vec::new();
+    };
+    let lo = lo.max(first);
+    let mut gaps = Vec::new();
+    let mut cursor = lo;
+    for run in runs {
+        if cursor >= hi {
+            break;
+        }
+        if run.start_ts > cursor {
+            gaps.push((cursor, run.start_ts.min(hi)));
+        }
+        cursor = cursor.max(run.end_ts.unwrap_or(hi));
+    }
+    if cursor < hi {
+        gaps.push((cursor, hi));
+    }
+    gaps.retain(|(a, b)| b - a >= AFK_SPLIT_MINS * 60_000);
+    gaps
+}
+
+/// "Thu 18:25 → Mon 10:30" in the report's zone.
+pub fn fmt_gap(gap: (i64, i64), tz: &TimeZone) -> String {
+    let at = |ms: i64| {
+        Timestamp::from_millisecond(ms)
+            .map(|t| t.to_zoned(tz.clone()).strftime("%a %H:%M").to_string())
+            .unwrap_or_default()
+    };
+    format!("{} \u{2192} {}", at(gap.0), at(gap.1))
 }
 
 /// Bucket `tasks` (fetched via `tasks_in_range` for exactly the span of
@@ -206,6 +257,9 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
         tasks: rows,
         projects: project_totals(tasks, lo, hi),
         grand_total_ms,
+        tz: tz.clone(),
+        gaps: Vec::new(),
+        underived_ms: 0,
     })
 }
 
@@ -267,6 +321,17 @@ pub fn to_md(r: &RangeReport) -> String {
         let _ = writeln!(out, "- {}: {}", p.project, fmt_dur(p.total_ms));
     }
     let _ = writeln!(out, "- total: {}", fmt_dur(r.grand_total_ms));
+    if !r.gaps.is_empty() {
+        let gaps: Vec<String> = r.gaps.iter().map(|g| fmt_gap(*g, &r.tz)).collect();
+        let _ = writeln!(out, "- not captured: {}", gaps.join("; "));
+    }
+    if r.underived_ms > 0 {
+        let _ = writeln!(
+            out,
+            "- captured, not yet derived: {}",
+            fmt_dur(r.underived_ms)
+        );
+    }
     out
 }
 
@@ -388,5 +453,42 @@ mod tests {
              - a,b \"c\": 30m00s\n\
              - total: 2h00m\n"
         );
+    }
+
+    // m32 chunk 0: ledger gaps. Time before the first row is unrecorded, an
+    // open row runs to `hi`, and a restart's few seconds print nothing.
+    #[test]
+    fn capture_gaps_from_ledger() {
+        let h = 3_600_000;
+        let run = |id, start_ts, end_ts| DaemonRun {
+            id,
+            start_ts,
+            end_ts,
+            reason: None,
+        };
+        let runs = vec![
+            run(1, h, Some(2 * h)),
+            run(2, 2 * h + 10_000, Some(4 * h)),
+            run(3, 6 * h, None),
+        ];
+        assert_eq!(capture_gaps(&runs, Some(h), 0, 8 * h), vec![(4 * h, 6 * h)]);
+        assert_eq!(capture_gaps(&runs, Some(h), 0, 5 * h), vec![(4 * h, 5 * h)]);
+        assert!(capture_gaps(&runs, None, 0, 8 * h).is_empty());
+        assert!(capture_gaps(&[], Some(h), 0, h).is_empty());
+        assert_eq!(capture_gaps(&[], Some(h), 0, 3 * h), vec![(h, 3 * h)]);
+    }
+
+    #[test]
+    fn md_prints_gap_and_underived_lines() {
+        let mon = civil::date(2026, 8, 31);
+        let mut r = build(&[], vec![mon], &TimeZone::UTC).unwrap();
+        let lo = at(mon, 0, 0).timestamp().as_millisecond();
+        r.gaps = vec![(lo + 9 * 3_600_000, lo + 10 * 3_600_000 + 1_800_000)];
+        r.underived_ms = 170 * 60_000;
+        assert!(to_md(&r).ends_with(
+            "- total: 0s\n\
+             - not captured: Mon 09:00 \u{2192} Mon 10:30\n\
+             - captured, not yet derived: 2h50m\n"
+        ));
     }
 }

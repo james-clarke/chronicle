@@ -315,6 +315,9 @@ mod tests {
                 })
                 .collect(),
             grand_total_ms: total,
+            tz: jiff::tz::TimeZone::UTC,
+            gaps: Vec::new(),
+            underived_ms: 0,
         }
     }
 

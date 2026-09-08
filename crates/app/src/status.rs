@@ -117,6 +117,9 @@ pub(crate) struct DbStatus {
     pub(crate) last_prune_age_secs: Option<u64>,
     pub(crate) last_derive: Option<chronicle_core::storage::DeriveMetrics>,
     pub(crate) pending_batches: i64,
+    /// Today's ledger gaps and captured-but-underived time (m32 chunk 0).
+    pub(crate) not_captured_today_ms: i64,
+    pub(crate) underived_today_ms: i64,
 }
 
 pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
@@ -128,6 +131,8 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         last_prune_age_secs,
         last_derive,
         pending_batches,
+        not_captured_today_ms,
+        underived_today_ms,
     } = db;
     let mut out = String::new();
     match liveness {
@@ -185,6 +190,18 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         None => out.push_str("  last derive: none instrumented yet\n"),
     }
     out.push_str(&format!("  pending batches: {pending_batches}\n"));
+    if *not_captured_today_ms > 0 {
+        out.push_str(&format!(
+            "  not captured today: {}\n",
+            fmt_secs((*not_captured_today_ms / 1000) as u64)
+        ));
+    }
+    if *underived_today_ms > 0 {
+        out.push_str(&format!(
+            "  captured, not yet derived: {}\n",
+            fmt_secs((*underived_today_ms / 1000) as u64)
+        ));
+    }
     out.push_str(&format!(
         "  model: {}\n",
         model_file.as_deref().unwrap_or("not downloaded")
@@ -204,6 +221,17 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
     let config = Config::load(&data_dir.join("config.toml"))?;
     let now_ms = Timestamp::now().as_millisecond();
     let age = |ms: i64| ((now_ms - ms) / 1000).max(0) as u64;
+    let today_ms = Zoned::now()
+        .date()
+        .to_zoned(TimeZone::system())?
+        .timestamp()
+        .as_millisecond();
+    let (ledger_start, runs) = chronicle_core::storage::runs_for_report(&conn, today_ms, now_ms)?;
+    let not_captured_today_ms =
+        chronicle_core::report::capture_gaps(&runs, ledger_start, today_ms, now_ms)
+            .iter()
+            .map(|(a, b)| b - a)
+            .sum();
     let model_file =
         chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir).map(|p| {
             let file = p
@@ -229,6 +257,8 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             .map(age),
         last_derive: chronicle_core::storage::last_derive(&conn)?,
         pending_batches: chronicle_core::storage::pending_batch_count(&conn)?,
+        not_captured_today_ms,
+        underived_today_ms: chronicle_core::storage::underived_ms(&conn, today_ms, now_ms)?,
     };
 
     if json {
@@ -248,6 +278,8 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             "last_prune_age_secs": db.last_prune_age_secs,
             "last_derive": db.last_derive,
             "pending_batches": db.pending_batches,
+            "not_captured_today_ms": db.not_captured_today_ms,
+            "underived_today_ms": db.underived_today_ms,
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
@@ -294,7 +326,11 @@ pub(crate) fn report(
     .timestamp()
     .as_millisecond();
     let tasks = chronicle_core::storage::tasks_in_range(&conn, lo, hi)?;
-    let r = chronicle_core::report::build(&tasks, days, &tz)?;
+    let mut r = chronicle_core::report::build(&tasks, days, &tz)?;
+    let now = Timestamp::now().as_millisecond();
+    let (ledger_start, runs) = chronicle_core::storage::runs_for_report(&conn, lo, hi)?;
+    r.gaps = chronicle_core::report::capture_gaps(&runs, ledger_start, lo, hi.min(now));
+    r.underived_ms = chronicle_core::storage::underived_ms(&conn, lo, hi)?;
     match format {
         ReportFormat::Csv => print!("{}", chronicle_core::report::to_csv(&r)),
         ReportFormat::Md => print!("{}", chronicle_core::report::to_md(&r)),
