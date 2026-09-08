@@ -561,14 +561,15 @@ pub fn decide(
             keys: c.keys.clone(),
             vec: None,
         };
-        let mut label = evidence.describe(2);
+        let mut label = crate::evidence::strip_glyphs(&evidence.describe(2)).to_owned();
         if label.is_empty() {
             let mut words: Vec<(&String, f64)> = c.ties.iter().map(|(t, m)| (t, *m)).collect();
             words.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             label = words
                 .iter()
+                .map(|(t, _)| crate::evidence::strip_glyphs(t.as_str()))
+                .filter(|t| !t.is_empty())
                 .take(3)
-                .map(|(t, _)| t.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
         }

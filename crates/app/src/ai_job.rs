@@ -254,7 +254,11 @@ impl Engine {
     fn suggest_task(&self, job: JobKind, digest: &str) -> anyhow::Result<SuggestedTask> {
         let prompt = prompts::render_suggest(digest);
         let mut s = prompts::parse_suggest(&self.complete(job, &prompt)?)?;
-        s.label = clip(s.label, 160);
+        // Glyphs quoted from a terminal title must not become a label.
+        s.label = clip(
+            chronicle_core::evidence::strip_glyphs(&s.label).to_owned(),
+            160,
+        );
         s.project = s.project.map(|p| clip(p, 160));
         s.description = s.description.map(|d| clip(d, 160));
         Ok(s)
