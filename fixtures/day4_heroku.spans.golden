@@ -43,17 +43,15 @@
 14:06:22–14:06:31 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
 14:06:31–14:07:02 [focus] Google-chrome: northwind-memberships | Contoso Dashboard <https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/1/>
 14:07:02–14:07:38 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
-14:07:38–14:07:40 [context-switching]
-14:07:40–14:10:15 [afk]
-14:10:15–14:10:45 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+14:07:38–14:10:45 [focus] Google-chrome: northwind-memberships | Contoso Dashboard <https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/1/>
 14:10:45–14:10:48 [context-switching]
 14:10:48–14:12:43 [focus] Terminator: ✳ M7 human-verified progress
 14:12:43–14:12:54 [context-switching]
 14:12:54–14:13:13 [focus] Terminator: sam@workstation:~/dev/portfolio
 14:13:13–14:13:22 [focus] Terminator: ✳ bearblog.dev portfolio redesign
-14:13:22–14:13:46 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
-14:13:46–14:17:15 [afk]
-14:17:15–14:17:27 [focus] Terminator: ✳ Claude Code
+14:13:22–14:17:13 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+14:17:13–14:17:14 [context-switching]
+14:17:14–14:17:27 [focus] Terminator: ✳ Claude Code
 14:17:27–14:17:55 [focus] Terminator: ✳ Campaign SMS sending failure
 14:17:55–14:18:04 [context-switching]
 14:18:04–14:18:59 [focus] Google-chrome: For you - Assigned to me - Jira <https://acme.atlassian.net/jira/for-you?tab=assigned>

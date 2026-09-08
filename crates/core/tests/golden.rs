@@ -79,12 +79,235 @@ fn day1_batches() {
     assert_eq!(batches.len(), 1, "fixture should close exactly one batch");
     let batch = &batches[0];
     assert_eq!(batch.start.to_string(), "2026-08-26T17:00:00Z");
-    // m27: the 7-minute AFK gap at 17:28 closes the batch (28 active minutes
-    // ≥ batch_min_minutes) instead of the 30-minute cap at 17:40.
-    assert_eq!(batch.end.to_string(), "2026-08-26T17:28:00Z");
-    assert_eq!(spans[batch.spans.end].kind, SpanKind::Afk);
-    // The spans after the gap stay unbatched.
+    // m32 chunk 1: the 7-minute idle at 17:28 is quiet, not a gap (under
+    // `quiet_secs`), so the 30-minute cap closes the batch at 17:30 and the
+    // idle folds into the spans on either side of the 17:30 title change.
+    assert_eq!(batch.end.to_string(), "2026-08-26T17:30:00Z");
+    assert!(spans.iter().all(|s| s.kind != SpanKind::Afk), "{spans:?}");
+    assert_eq!(spans[batch.spans.end - 1].quiet_ms, 2 * 60_000);
+    assert_eq!(spans[batch.spans.end].quiet_ms, 5 * 60_000);
+    // The spans after the cap stay unbatched.
     assert!(batch.spans.end < spans.len() - 1);
+}
+
+// m32 chunk 1: idle keeps the span open as quiet time until it runs past
+// `quiet_secs` (no live context) or `away_secs` (an agent wrote to the
+// focused tool just before); then it closes where input stopped, exactly
+// as before. A lock closes at once; the screen may still change while quiet.
+mod quiet {
+    use super::*;
+    use chronicle_core::sessionizer::{LiveContext, sessionize_with};
+
+    fn at(sec: i64) -> Timestamp {
+        Timestamp::from_second(sec).unwrap()
+    }
+
+    fn ev(sec: i64, kind: &str, app: &str, title: &str, idle: Option<bool>) -> Event {
+        Event {
+            ts: at(sec),
+            kind: kind.into(),
+            app: app.into(),
+            title: title.into(),
+            url: None,
+            idle,
+        }
+    }
+
+    fn focus(sec: i64, app: &str, title: &str) -> Event {
+        ev(sec, "focus", app, title, None)
+    }
+
+    fn afk(sec: i64, idle: bool) -> Event {
+        ev(sec, "afk", "", "", Some(idle))
+    }
+
+    fn lock(sec: i64, locked: bool) -> Event {
+        ev(sec, "lock", "", "", Some(locked))
+    }
+
+    fn shape(spans: &[SpanDraft]) -> Vec<(i64, i64, SpanKind, i64)> {
+        spans
+            .iter()
+            .map(|s| {
+                (
+                    s.start.as_second(),
+                    s.end.as_second(),
+                    s.kind,
+                    s.quiet_ms / 1000,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn short_idle_folds_as_quiet() {
+        let config = Config::default();
+        let events = vec![focus(0, "firefox", "docs"), afk(100, true), afk(400, false)];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(shape(&spans), [(0, 1000, SpanKind::Focus, 300)]);
+        // Two stretches add up.
+        let events = vec![
+            focus(0, "firefox", "docs"),
+            afk(100, true),
+            afk(400, false),
+            afk(500, true),
+            afk(800, false),
+        ];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(shape(&spans), [(0, 1000, SpanKind::Focus, 600)]);
+    }
+
+    #[test]
+    fn idle_past_quiet_secs_closes_where_input_stopped() {
+        let config = Config::default();
+        let run = |back: i64| {
+            let events = vec![
+                focus(0, "firefox", "docs"),
+                afk(100, true),
+                afk(back, false),
+            ];
+            shape(&sessionize(&events, at(3000), &config))
+        };
+        assert_eq!(run(699), [(0, 3000, SpanKind::Focus, 599)]);
+        assert_eq!(
+            run(701),
+            [
+                (0, 100, SpanKind::Focus, 0),
+                (100, 701, SpanKind::Afk, 0),
+                (701, 3000, SpanKind::Focus, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_live_agent_stretches_the_threshold_to_away_secs() {
+        let config = Config::default();
+        let live = LiveContext {
+            session_writes: vec![40_000],
+            calls: Vec::new(),
+        };
+        let run = |app: &str, back: i64| {
+            let events = vec![
+                focus(0, app, "✳ fix tests"),
+                afk(100, true),
+                afk(back, false),
+            ];
+            shape(&sessionize_with(&events, at(4000), &config, &live))
+        };
+        assert_eq!(run("Terminator", 1899), [(0, 4000, SpanKind::Focus, 1799)]);
+        assert_eq!(run("Terminator", 1901)[0], (0, 100, SpanKind::Focus, 0));
+        // A browser has no agent: the write does not count.
+        assert_eq!(run("firefox", 800)[0], (0, 100, SpanKind::Focus, 0));
+        // A call or a meeting window is live on its own.
+        let call = LiveContext {
+            session_writes: Vec::new(),
+            calls: vec![(50_000, None)],
+        };
+        let events = vec![focus(0, "firefox", "docs"), afk(100, true), afk(800, false)];
+        let spans = sessionize_with(&events, at(1000), &config, &call);
+        assert_eq!(shape(&spans), [(0, 1000, SpanKind::Focus, 700)]);
+        let events = vec![focus(0, "zoom", "Meeting"), afk(100, true), afk(800, false)];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(shape(&spans), [(0, 1000, SpanKind::Focus, 700)]);
+    }
+
+    #[test]
+    fn the_screen_may_change_while_quiet() {
+        let config = Config::default();
+        // A title change mid-stretch cuts as usual; quiet lands on each side.
+        let events = vec![
+            focus(0, "Terminator", "cargo test"),
+            afk(100, true),
+            ev(200, "title", "Terminator", "42 passed, 0 failed", None),
+            afk(400, false),
+        ];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(
+            shape(&spans),
+            [
+                (0, 200, SpanKind::Focus, 100),
+                (200, 1000, SpanKind::Focus, 200)
+            ]
+        );
+        assert_eq!(spans[1].title, "42 passed, 0 failed");
+        // Past the threshold the cut rolls back: the span ends where input
+        // stopped and the user resumes in what was focused last.
+        let events = vec![
+            focus(0, "Terminator", "cargo test"),
+            afk(100, true),
+            ev(200, "title", "Terminator", "42 passed, 0 failed", None),
+            afk(800, false),
+        ];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(
+            shape(&spans),
+            [
+                (0, 100, SpanKind::Focus, 0),
+                (100, 800, SpanKind::Afk, 0),
+                (800, 1000, SpanKind::Focus, 0),
+            ]
+        );
+        assert_eq!(spans[2].title, "42 passed, 0 failed");
+    }
+
+    #[test]
+    fn a_lock_closes_at_once() {
+        let config = Config::default();
+        let events = vec![
+            focus(0, "firefox", "docs"),
+            afk(100, true),
+            lock(200, true),
+            lock(500, false),
+        ];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(
+            shape(&spans),
+            [
+                (0, 200, SpanKind::Focus, 100),
+                (200, 500, SpanKind::Afk, 0),
+                (500, 1000, SpanKind::Focus, 0),
+            ]
+        );
+        // Locked without any idle first: the same hard edge.
+        let events = vec![focus(0, "firefox", "docs"), lock(200, true)];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(
+            shape(&spans),
+            [(0, 200, SpanKind::Focus, 0), (200, 1000, SpanKind::Afk, 0)]
+        );
+    }
+
+    #[test]
+    fn the_stream_end_settles_a_pending_stretch() {
+        let config = Config::default();
+        let events = vec![focus(0, "firefox", "docs"), afk(100, true)];
+        let spans = sessionize(&events, at(400), &config);
+        assert_eq!(shape(&spans), [(0, 400, SpanKind::Focus, 300)]);
+        let spans = sessionize(&events, at(800), &config);
+        assert_eq!(
+            shape(&spans),
+            [(0, 100, SpanKind::Focus, 0), (100, 800, SpanKind::Afk, 0)]
+        );
+    }
+
+    #[test]
+    fn zero_thresholds_keep_the_old_rule() {
+        let config = Config {
+            quiet_secs: 0,
+            away_secs: 0,
+            ..Config::default()
+        };
+        let events = vec![focus(0, "firefox", "docs"), afk(100, true), afk(160, false)];
+        let spans = sessionize(&events, at(1000), &config);
+        assert_eq!(
+            shape(&spans),
+            [
+                (0, 100, SpanKind::Focus, 0),
+                (100, 160, SpanKind::Afk, 0),
+                (160, 1000, SpanKind::Focus, 0),
+            ]
+        );
+    }
 }
 
 // m27 chunk 5 pre-pass rules: a ticket key on screen places by
@@ -263,6 +486,7 @@ fn digest_keys_seen_section() {
         title: title.into(),
         kind: SpanKind::Focus,
         url: None,
+        quiet_ms: 0,
     };
     let spans = vec![
         span(0, 9, "chrome", "[ACME-11382] SMS rules - Jira"),
@@ -302,6 +526,7 @@ fn batch_closes_at_afk_split_after_min_minutes() {
         title: "t".into(),
         kind,
         url: None,
+        quiet_ms: 0,
     };
     let config = Config {
         batch_minutes: 30,
@@ -445,6 +670,7 @@ fn correction_changes_next_digest() {
                 title: s.title.clone(),
                 kind: s.kind,
                 url: s.url.clone(),
+                quiet_ms: s.quiet_ms,
             })
             .collect()
     };
@@ -455,6 +681,7 @@ fn correction_changes_next_digest() {
         title: "Sculpting Donut Tutorial".into(),
         kind: SpanKind::Focus,
         url: None,
+        quiet_ms: 0,
     }];
     for (prior, label, new_label, new_project) in [
         (

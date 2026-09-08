@@ -8,10 +8,10 @@ use rusqlite::{Connection, params};
 use rusqlite_migration::{M, Migrations};
 
 use crate::profile;
-use crate::sessionizer::{BatchDraft, SpanDraft, SpanKind};
+use crate::sessionizer::{BatchDraft, LiveContext, SpanDraft, SpanKind};
 use crate::types::{
     ActivityEvent, ActivityKind, CaptureEvent, Correction, Dedupe, Event, FocusEvent, NewInterval,
-    OpenTask, Task, TaskSlot, ms_to_ts, ts_to_ms,
+    OpenTask, PresenceMinute, Task, TaskSlot, ms_to_ts, ts_to_ms,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -50,6 +50,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/022_embeddings.sql")),
         M::up(include_str!("../migrations/023_ai_job_usage.sql")),
         M::up(include_str!("../migrations/024_daemon_runs.sql")),
+        M::up(include_str!("../migrations/025_presence.sql")),
     ])
 });
 
@@ -96,8 +97,50 @@ pub fn insert_event(conn: &Connection, event: &CaptureEvent) -> Result<(), Stora
             )?;
             Ok(())
         }
+        CaptureEvent::Lock { locked, ts } => {
+            conn.execute(
+                "INSERT INTO events (ts, kind, app, idle) VALUES (?1, 'lock', '', ?2)",
+                params![ts_to_ms(*ts), *locked as i64],
+            )?;
+            Ok(())
+        }
+        CaptureEvent::Presence(m) => {
+            conn.execute(
+                "INSERT INTO presence (minute_ts, keys, buttons, motion, scroll)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(minute_ts) DO UPDATE SET
+                   keys = keys + excluded.keys,
+                   buttons = buttons + excluded.buttons,
+                   motion = motion + excluded.motion,
+                   scroll = scroll + excluded.scroll",
+                params![m.minute_ts, m.keys, m.buttons, m.motion, m.scroll],
+            )?;
+            Ok(())
+        }
         CaptureEvent::Activity(e) => insert_activity_event(conn, e),
     }
+}
+
+/// Presence minutes with `minute_ts` in `[lo, hi)`, ascending.
+pub fn presence_minutes(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<PresenceMinute>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT minute_ts, keys, buttons, motion, scroll FROM presence
+         WHERE minute_ts >= ?1 AND minute_ts < ?2 ORDER BY minute_ts",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok(PresenceMinute {
+            minute_ts: r.get(0)?,
+            keys: r.get(1)?,
+            buttons: r.get(2)?,
+            motion: r.get(3)?,
+            scroll: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Stores one observation per the kind's [`Dedupe`] rule: a checkout
@@ -579,8 +622,8 @@ pub fn replace_tail(
     }
     for (span, batch_id) in spans.iter().zip(batch_ids) {
         tx.execute(
-            "INSERT INTO spans (start_ts, end_ts, app, title, kind, url, batch_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO spans (start_ts, end_ts, app, title, kind, url, batch_id, quiet_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 ts_to_ms(span.start),
                 ts_to_ms(span.end),
@@ -588,7 +631,8 @@ pub fn replace_tail(
                 span.title,
                 span.kind.as_str(),
                 span.url,
-                batch_id
+                batch_id,
+                span.quiet_ms
             ],
         )?;
     }
@@ -766,7 +810,7 @@ pub fn anchored_spans(
 ) -> Result<Vec<profile::AnchoredSpan>, StorageError> {
     use crate::extract::{Anchor, AnchorKind};
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value, e.vec
+        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value, e.vec, s.quiet_ms
          FROM spans s LEFT JOIN span_anchors a ON a.span_id = s.id
                       LEFT JOIN span_embeddings e ON e.span_id = s.id
          WHERE s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
@@ -782,11 +826,12 @@ pub fn anchored_spans(
             r.get::<_, Option<String>>(5)?,
             r.get::<_, Option<String>>(6)?,
             r.get::<_, Option<Vec<u8>>>(7)?,
+            r.get::<_, i64>(8)?,
         ))
     })?;
     let mut out: Vec<profile::AnchoredSpan> = Vec::new();
     for row in rows {
-        let (id, start_ts, end_ts, app, title, kind, value, vec) = row?;
+        let (id, start_ts, end_ts, app, title, kind, value, vec, quiet_ms) = row?;
         if out.last().is_none_or(|s| s.id != id) {
             out.push(profile::AnchoredSpan {
                 id,
@@ -796,6 +841,8 @@ pub fn anchored_spans(
                 title,
                 anchors: Vec::new(),
                 vec: vec.as_deref().map(blob_to_vec),
+                quiet_ms,
+                wrote: false,
             });
         }
         if let (Some(kind), Some(value)) = (kind, value)
@@ -807,7 +854,69 @@ pub fn anchored_spans(
                 .push(Anchor { kind: k, value });
         }
     }
+    // Whether the attached session wrote its transcript while the span was
+    // open (m32 chunk 1: `supervise` vs `agent`). Sessions overlapping the
+    // range, keyed by ext_id; rows without write times never count.
+    if out
+        .iter()
+        .any(|s| s.anchors.iter().any(|a| a.kind == AnchorKind::Session))
+    {
+        let mut writes: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        for e in sessions_overlapping(conn, lo, hi)? {
+            if let Some(id) = e.ext_id.clone() {
+                writes.insert(id, crate::extract::session_writes(&e));
+            }
+        }
+        for s in &mut out {
+            s.wrote = s.anchors.iter().any(|a| {
+                a.kind == AnchorKind::Session
+                    && writes
+                        .get(&a.value)
+                        .is_some_and(|w| w.iter().any(|&t| t >= s.start_ts && t <= s.end_ts))
+            });
+        }
+    }
     Ok(out)
+}
+
+/// AI session rows overlapping `[lo, hi)` (an open row runs to now).
+fn sessions_overlapping(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLS} FROM activity_events
+         WHERE kind = 'ai_session' AND ts < ?2 AND (end_ts IS NULL OR end_ts >= ?1)
+         ORDER BY ts, id"
+    ))?;
+    let rows = stmt.query_map([lo, hi], activity_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// What was live on screen from `from_ms` on, for the sessionizer's quiet /
+/// away decision (m32 chunk 1): AI session write times and call rows
+/// overlapping the tail. Bounded by `from_ms` so a long history costs
+/// nothing per refresh.
+pub fn live_context(conn: &Connection, from_ms: i64) -> Result<LiveContext, StorageError> {
+    let mut live = LiveContext::default();
+    for e in sessions_overlapping(conn, from_ms, i64::MAX)? {
+        live.session_writes.extend(
+            crate::extract::session_writes(&e)
+                .into_iter()
+                .filter(|&w| w >= from_ms),
+        );
+    }
+    let mut stmt = conn.prepare(
+        "SELECT ts, end_ts FROM activity_events
+         WHERE kind = 'call' AND (end_ts IS NULL OR end_ts >= ?1) ORDER BY ts",
+    )?;
+    let rows = stmt.query_map([from_ms], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+    })?;
+    live.calls = rows.collect::<Result<Vec<_>, _>>()?;
+    Ok(live)
 }
 
 /// Rebuild `task_evidence` from scratch: `DELETE` then re-derive every row
@@ -1496,7 +1605,7 @@ pub fn pending_fetch_context_job(conn: &Connection, task_id: i64) -> Result<bool
 
 pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
+        "SELECT start_ts, end_ts, app, title, kind, url, quiet_ms FROM spans
          WHERE batch_id = ?1 ORDER BY start_ts, id",
     )?;
     let rows = stmt.query_map([id], |r| {
@@ -1507,6 +1616,7 @@ pub fn batch_spans(conn: &Connection, id: i64) -> Result<Vec<SpanDraft>, Storage
             title: r.get(3)?,
             kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
             url: r.get(5)?,
+            quiet_ms: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -4490,7 +4600,7 @@ pub fn evidence_in_range(
 
 pub fn spans_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SpanDraft>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
+        "SELECT start_ts, end_ts, app, title, kind, url, quiet_ms FROM spans
          WHERE end_ts > ?1 AND start_ts < ?2 ORDER BY start_ts, id",
     )?;
     let rows = stmt.query_map([lo, hi], |r| {
@@ -4501,6 +4611,7 @@ pub fn spans_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SpanDra
             title: r.get(3)?,
             kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
             url: r.get(5)?,
+            quiet_ms: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -4532,7 +4643,7 @@ pub fn search_spans(
         return Ok(Vec::new());
     }
     let mut stmt = conn.prepare(
-        "SELECT start_ts, end_ts, app, title, kind, url FROM spans
+        "SELECT start_ts, end_ts, app, title, kind, url, quiet_ms FROM spans
          WHERE id IN (SELECT rowid FROM spans_fts WHERE spans_fts MATCH ?1
                       ORDER BY rank LIMIT ?2)
          ORDER BY start_ts, id",
@@ -4545,6 +4656,7 @@ pub fn search_spans(
             title: r.get(3)?,
             kind: SpanKind::parse(&r.get::<_, String>(4)?).unwrap_or(SpanKind::Focus),
             url: r.get(5)?,
+            quiet_ms: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -5635,6 +5747,75 @@ mod tests {
 
     // `anchored_spans` sorts by start_ts/id, folds each span's anchors off
     // one joined query, and never picks up the afk span.
+    // m32 chunk 1: a span carries its folded quiet time, and `wrote` says
+    // whether its session wrote the transcript while it was open.
+    #[test]
+    fn anchored_spans_carry_quiet_and_session_writes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO spans (id, start_ts, end_ts, app, title, kind, quiet_ms) VALUES
+                 (1, 0, 10000, 'Terminator', '✳ a', 'focus', 6000),
+                 (2, 10000, 20000, 'Terminator', '✳ b', 'focus', 0);
+             INSERT INTO span_anchors (span_id, kind, value) VALUES
+                 (1, 'session', 'sess-1'),
+                 (2, 'session', 'sess-2');",
+        )
+        .unwrap();
+        use crate::types::{ActivityEvent, ActivityKind, ms_to_ts};
+        let session = |id: &str, writes: &[i64]| ActivityEvent {
+            ts: ms_to_ts(0),
+            end_ts: Some(ms_to_ts(30_000)),
+            repo: "chronicle".into(),
+            branch: String::new(),
+            kind: ActivityKind::AiSession,
+            ext_id: Some(id.into()),
+            summary: None,
+            detail: Some(
+                serde_json::json!({ "prompts": [], "paths": [], "writes": writes }).to_string(),
+            ),
+        };
+        super::insert_activity_event(&conn, &session("sess-1", &[5_000])).unwrap();
+        super::insert_activity_event(&conn, &session("sess-2", &[25_000])).unwrap();
+
+        let spans = super::anchored_spans(&conn, 0, 30_000).unwrap();
+        assert_eq!(spans[0].quiet_ms, 6000);
+        assert!(spans[0].wrote, "a write inside the span");
+        assert!(!spans[1].wrote, "the only write came after the span");
+    }
+
+    // m32 chunk 1: presence minutes add up on conflict and read back in order.
+    #[test]
+    fn presence_minutes_upsert_and_read() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        use crate::types::{CaptureEvent, PresenceMinute};
+        let minute = |minute_ts: i64, keys: u32| {
+            CaptureEvent::Presence(PresenceMinute {
+                minute_ts,
+                keys,
+                buttons: 1,
+                motion: 10,
+                scroll: 0,
+            })
+        };
+        super::insert_event(&conn, &minute(120_000, 3)).unwrap();
+        super::insert_event(&conn, &minute(60_000, 7)).unwrap();
+        super::insert_event(&conn, &minute(120_000, 2)).unwrap();
+        let rows = super::presence_minutes(&conn, 0, 180_000).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|m| (m.minute_ts, m.keys, m.buttons, m.motion))
+                .collect::<Vec<_>>(),
+            [(60_000, 7, 1, 10), (120_000, 5, 2, 20)]
+        );
+        assert!(
+            super::presence_minutes(&conn, 180_000, i64::MAX)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn anchored_spans_sorted_and_excludes_afk() {
         let mut conn = Connection::open_in_memory().unwrap();

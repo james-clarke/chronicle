@@ -318,6 +318,7 @@ mod tests {
             tz: jiff::tz::TimeZone::UTC,
             gaps: Vec::new(),
             underived_ms: 0,
+            by_kind: Vec::new(),
         }
     }
 

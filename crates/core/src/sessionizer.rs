@@ -56,6 +56,9 @@ pub struct SpanDraft {
     pub kind: SpanKind,
     /// Last page URL seen while this browser span was open (M6).
     pub url: Option<String>,
+    /// Idle time folded into this span (m32 chunk 1): stretches shorter
+    /// than `quiet_secs` / `away_secs` that did not close it.
+    pub quiet_ms: i64,
 }
 
 impl SpanDraft {
@@ -73,10 +76,80 @@ pub struct BatchDraft {
     pub spans: Range<usize>,
 }
 
+/// What was live on screen while the user's hands were off (m32 chunk 1):
+/// an agent writing to the focused tool, a call, a meeting window. Decides
+/// whether an idle stretch gets `away_secs` or `quiet_secs` before it
+/// closes the span. Session writes attach by time only — the per-window
+/// repo matching of [`crate::extract::from_activity`] is not repeated here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LiveContext {
+    /// Transcript write times (ms) of every AI session near the stream.
+    pub session_writes: Vec<i64>,
+    /// Call rows as `(start, end)` ms; `None` = still open.
+    pub calls: Vec<(i64, Option<i64>)>,
+}
+
+/// A session write this recently before the idle start counts as live.
+const LIVE_WRITE_MS: i64 = 5 * 60_000;
+
+impl LiveContext {
+    /// Whether the span in `app` had a live context when input stopped at
+    /// `t0`: a meeting window, a call overlapping `t0`, or a tool window an
+    /// agent wrote to within the last five minutes.
+    pub fn live_at(&self, t0: i64, app: &str) -> bool {
+        use crate::extract::Family;
+        let fam = crate::extract::family(app);
+        if fam == Family::Meeting {
+            return true;
+        }
+        if self
+            .calls
+            .iter()
+            .any(|(s, e)| *s <= t0 && e.is_none_or(|e| e >= t0))
+        {
+            return true;
+        }
+        matches!(fam, Family::Terminal | Family::Editor)
+            && self
+                .session_writes
+                .iter()
+                .any(|w| *w <= t0 && t0 - *w <= LIVE_WRITE_MS)
+    }
+}
+
 pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> Vec<SpanDraft> {
+    sessionize_with(events, stream_end, config, &LiveContext::default())
+}
+
+/// An idle stretch that has not settled yet (m32 chunk 1): input stopped at
+/// `t0` with a span open. Focus changes keep cutting spans meanwhile (the
+/// screen may change while the user reads); `cursor` is where the quiet
+/// time was last attributed. If the stretch turns out longer than its
+/// threshold, everything since `t0` rolls back to the snapshot and the span
+/// closes there.
+struct Quiet {
+    t0: Timestamp,
+    cursor: Timestamp,
+    /// The app on screen when input stopped: decides the threshold.
+    app: String,
+    snap_len: usize,
+    snap_open: Option<SpanDraft>,
+}
+
+/// [`sessionize`] with what was live on screen: idle shorter than
+/// `quiet_secs` (no live context) or `away_secs` (live context) folds into
+/// the open span as quiet time; longer idle closes it where input stopped,
+/// as does a lock at once.
+pub fn sessionize_with(
+    events: &[Event],
+    stream_end: Timestamp,
+    config: &Config,
+    live: &LiveContext,
+) -> Vec<SpanDraft> {
     let mut spans: Vec<SpanDraft> = Vec::new();
     let mut open: Option<SpanDraft> = None;
     let mut afk_since: Option<Timestamp> = None;
+    let mut quiet: Option<Quiet> = None;
     let mut last_focus: Option<(String, String)> = None;
 
     let close = |mut span: SpanDraft, at: Timestamp, spans: &mut Vec<SpanDraft>| {
@@ -84,6 +157,47 @@ pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> V
         if span.duration_ms() > 0 {
             spans.push(span);
         }
+    };
+    // A focus change while quiet is pending: the quiet so far belongs to
+    // the span being cut.
+    let cut = |mut span: SpanDraft,
+               at: Timestamp,
+               quiet: &mut Option<Quiet>,
+               spans: &mut Vec<SpanDraft>| {
+        if let Some(q) = quiet.as_mut() {
+            span.quiet_ms += at.as_millisecond() - q.cursor.as_millisecond();
+            q.cursor = at;
+        }
+        close(span, at, spans);
+    };
+    let quiet_ms = i64::from(config.quiet_secs) * 1000;
+    let away_ms = i64::from(config.away_secs) * 1000;
+    // Input came back (or the stream ended) at `t1`: the stretch folds into
+    // whatever is open, or rolls back and closes at `t0`; returns the AFK
+    // start when it closed.
+    let settle = |q: Quiet,
+                  t1: Timestamp,
+                  open: &mut Option<SpanDraft>,
+                  spans: &mut Vec<SpanDraft>|
+     -> Option<Timestamp> {
+        let ran = t1.as_millisecond() - q.t0.as_millisecond();
+        let threshold = if live.live_at(q.t0.as_millisecond(), &q.app) {
+            away_ms
+        } else {
+            quiet_ms
+        };
+        if ran < threshold {
+            if let Some(span) = open.as_mut() {
+                span.quiet_ms += t1.as_millisecond() - q.cursor.as_millisecond();
+            }
+            return None;
+        }
+        spans.truncate(q.snap_len);
+        if let Some(span) = q.snap_open {
+            close(span, q.t0, spans);
+        }
+        *open = None;
+        Some(q.t0)
     };
 
     for ev in events {
@@ -107,7 +221,7 @@ pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> V
                 });
                 if !same_activity {
                     if let Some(span) = open.take() {
-                        close(span, ev.ts, &mut spans);
+                        cut(span, ev.ts, &mut quiet, &mut spans);
                     }
                     open = Some(focus_span(ev.ts, ev.app.clone(), ev.title.clone()));
                 }
@@ -129,7 +243,8 @@ pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> V
                         span.url.is_none() || span.url.as_deref().map(domain) == Some(domain(url));
                     if !same_site {
                         let app = span.app.clone();
-                        close(open.take().expect("span checked above"), ev.ts, &mut spans);
+                        let span = open.take().expect("span checked above");
+                        cut(span, ev.ts, &mut quiet, &mut spans);
                         open = Some(focus_span(ev.ts, app, String::new()));
                     }
                     let span = open.as_mut().expect("span open in both branches");
@@ -140,15 +255,43 @@ pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> V
                     }
                 }
             }
-            "afk" => match ev.idle {
+            // afk: ts is backdated to when input stopped. With a span open
+            // the stretch is quiet until it settles; with none it is AFK.
+            // lock: a hard edge at ts — a pending stretch settles first,
+            // then whatever is open closes at the lock.
+            "afk" | "lock" => match ev.idle {
                 Some(true) => {
-                    // ts is backdated to when input stopped, so close there.
-                    if let Some(span) = open.take() {
-                        close(span, ev.ts, &mut spans);
+                    if afk_since.is_some() {
+                        continue;
                     }
-                    afk_since.get_or_insert(ev.ts);
+                    if ev.kind == "lock" {
+                        if let Some(q) = quiet.take()
+                            && let Some(afk_start) = settle(q, ev.ts, &mut open, &mut spans)
+                        {
+                            afk_since = Some(afk_start);
+                        }
+                        if let Some(span) = open.take() {
+                            close(span, ev.ts, &mut spans);
+                        }
+                        afk_since.get_or_insert(ev.ts);
+                    } else if quiet.is_some() {
+                        continue;
+                    } else if let Some(span) = open.as_ref() {
+                        quiet = Some(Quiet {
+                            t0: ev.ts,
+                            cursor: ev.ts,
+                            app: span.app.clone(),
+                            snap_len: spans.len(),
+                            snap_open: open.clone(),
+                        });
+                    } else {
+                        afk_since = Some(ev.ts);
+                    }
                 }
                 Some(false) => {
+                    if let Some(q) = quiet.take() {
+                        afk_since = settle(q, ev.ts, &mut open, &mut spans);
+                    }
                     if let Some(afk_start) = afk_since.take() {
                         close(afk_span(afk_start), ev.ts, &mut spans);
                         // The user resumed in whatever was focused last.
@@ -161,6 +304,9 @@ pub fn sessionize(events: &[Event], stream_end: Timestamp, config: &Config) -> V
             },
             _ => {}
         }
+    }
+    if let Some(q) = quiet.take() {
+        afk_since = settle(q, stream_end, &mut open, &mut spans);
     }
     if let Some(span) = open.take() {
         close(span, stream_end, &mut spans);
@@ -179,6 +325,7 @@ fn focus_span(start: Timestamp, app: String, title: String) -> SpanDraft {
         title,
         kind: SpanKind::Focus,
         url: None,
+        quiet_ms: 0,
     }
 }
 
@@ -190,6 +337,7 @@ fn afk_span(start: Timestamp) -> SpanDraft {
         title: String::new(),
         kind: SpanKind::Afk,
         url: None,
+        quiet_ms: 0,
     }
 }
 
@@ -225,6 +373,7 @@ fn collapse_short(spans: Vec<SpanDraft>) -> Vec<SpanDraft> {
                 title: String::new(),
                 kind: SpanKind::ContextSwitching,
                 url: None,
+                quiet_ms: 0,
                 ..span
             }),
         }
@@ -280,7 +429,8 @@ pub fn refresh(conn: &mut Connection, config: &Config, now: Timestamp) -> Result
     if events.is_empty() {
         return Ok(());
     }
-    let spans = sessionize(&events, now, config);
+    let live = storage::live_context(conn, t0)?;
+    let spans = sessionize_with(&events, now, config, &live);
     let batches = assign_batches(&spans, config);
     storage::replace_tail(conn, t0, &spans, &batches)?;
     // Anchors follow the tail: recomputed on every refresh until the batch

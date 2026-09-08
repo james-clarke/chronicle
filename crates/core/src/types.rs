@@ -141,7 +141,28 @@ pub enum CaptureEvent {
     TitleChanged(FocusEvent),
     Url(UrlEvent),
     Activity(ActivityEvent),
-    Afk { idle: bool, ts: Timestamp },
+    Afk {
+        idle: bool,
+        ts: Timestamp,
+    },
+    /// Screen lock edge, or capture itself gone (focus provider exit): the
+    /// sessionizer closes at once, never folds it as quiet (m32 chunk 1).
+    Lock {
+        locked: bool,
+        ts: Timestamp,
+    },
+    Presence(PresenceMinute),
+}
+
+/// One minute of input counts (m32 chunk 1); never what was typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PresenceMinute {
+    /// Minute-aligned ms since the epoch.
+    pub minute_ts: i64,
+    pub keys: u32,
+    pub buttons: u32,
+    pub motion: u32,
+    pub scroll: u32,
 }
 
 /// A stored `events` row; also the fixture JSONL line format.

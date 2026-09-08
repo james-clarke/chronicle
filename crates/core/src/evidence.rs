@@ -151,6 +151,7 @@ mod tests {
             title: title.into(),
             kind: SpanKind::Focus,
             url: url.map(str::to_owned),
+            quiet_ms: 0,
         }
     }
 

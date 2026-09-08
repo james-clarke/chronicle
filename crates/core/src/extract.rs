@@ -476,7 +476,9 @@ pub fn from_activity(
                 }
                 push_scope(&mut out, &e.repo, "", ticket_re);
             }
-            ActivityKind::Meeting => {
+            // A call is a meeting too (m32 chunk 1): its `call:<start>` id
+            // makes the span `meet` for the segmenter.
+            ActivityKind::Meeting | ActivityKind::Call => {
                 if let Some(id) = &e.ext_id {
                     out.push(Anchor::new(AnchorKind::Event, id.clone()));
                 }
@@ -586,6 +588,12 @@ fn nearest_writer<F: Fn(&ActivityEvent) -> bool>(
     } else {
         None
     }
+}
+
+/// Transcript write times (ms) of an AI session row; empty for rows captured
+/// before the collector recorded them.
+pub fn session_writes(e: &ActivityEvent) -> Vec<i64> {
+    detail_i64s(e.detail.as_deref(), "writes")
 }
 
 fn detail_i64s(detail: Option<&str>, field: &str) -> Vec<i64> {
@@ -1696,6 +1704,26 @@ mod tests {
         let own = vec![Anchor::new(AnchorKind::Place, "chronicle")];
         let a = from_activity("Terminator", 50 * m, 55 * m, &own, &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+    }
+
+    // m32 chunk 1: a call row is an event anchor like a calendar entry.
+    #[test]
+    fn calls_attach_as_events() {
+        let r = re();
+        let m = 60_000;
+        let events = vec![ev(
+            ActivityKind::Call,
+            30 * m,
+            45 * m,
+            "",
+            "",
+            "call:1800000",
+            None,
+        )];
+        let a = from_activity("Firefox", 32 * m, 40 * m, &[], &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Event), ["call:1800000"]);
+        let a = from_activity("Firefox", 50 * m, 55 * m, &[], &events, &r);
+        assert!(kinds(&a, AnchorKind::Event).is_empty());
     }
 
     #[test]

@@ -151,6 +151,41 @@ pub struct RangeReport {
     pub gaps: Vec<(i64, i64)>,
     /// Captured span time no done batch covers yet; `build` leaves it 0.
     pub underived_ms: i64,
+    /// Milliseconds per kind of work over every task, biggest first (m32
+    /// chunk 1); only the intervals that carry a kind count.
+    pub by_kind: Vec<(String, i64)>,
+}
+
+/// Kinds where the hands are off: watching an agent, reading, in a call.
+const HANDS_OFF: [&str; 3] = ["supervise", "read", "meet"];
+
+/// "hands-on 3h10m · hands-off 4h20m (supervise 2h00m · read 1h20m)": the
+/// range's split by kind (m32 chunk 1). `break` counts in neither; the
+/// hands-off detail lists its kinds biggest first. Empty when nothing
+/// carries a kind.
+pub fn hands_split(by_kind: &[(String, i64)]) -> String {
+    let mut on = 0;
+    let mut off = 0;
+    let mut detail = Vec::new();
+    for (kind, ms) in by_kind {
+        if kind == "break" {
+            continue;
+        }
+        if HANDS_OFF.contains(&kind.as_str()) {
+            off += ms;
+            detail.push(format!("{kind} {}", fmt_dur(*ms)));
+        } else {
+            on += ms;
+        }
+    }
+    if on + off == 0 {
+        return String::new();
+    }
+    let mut out = format!("hands-on {} \u{b7} hands-off {}", fmt_dur(on), fmt_dur(off));
+    if !detail.is_empty() {
+        out.push_str(&format!(" ({})", detail.join(" \u{b7} ")));
+    }
+    out
 }
 
 /// Stretches of `[lo, hi)` no ledger row covers, at least `AFK_SPLIT_MINS`
@@ -247,9 +282,17 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
             }
         }
     }
+    let mut by_kind: Vec<(String, i64)> = Vec::new();
     for r in &mut rows {
         r.by_kind.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
+        for (kind, ms) in &r.by_kind {
+            match by_kind.iter_mut().find(|(k, _)| k == kind) {
+                Some(e) => e.1 += ms,
+                None => by_kind.push((kind.clone(), *ms)),
+            }
+        }
     }
+    by_kind.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
     rows.sort_by_key(|r| std::cmp::Reverse(r.total_ms));
     let (lo, hi) = (bounds[0], bounds[days.len()]);
     Ok(RangeReport {
@@ -260,6 +303,7 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
         tz: tz.clone(),
         gaps: Vec::new(),
         underived_ms: 0,
+        by_kind,
     })
 }
 
@@ -321,6 +365,10 @@ pub fn to_md(r: &RangeReport) -> String {
         let _ = writeln!(out, "- {}: {}", p.project, fmt_dur(p.total_ms));
     }
     let _ = writeln!(out, "- total: {}", fmt_dur(r.grand_total_ms));
+    let split = hands_split(&r.by_kind);
+    if !split.is_empty() {
+        let _ = writeln!(out, "- {split}");
+    }
     if !r.gaps.is_empty() {
         let gaps: Vec<String> = r.gaps.iter().map(|g| fmt_gap(*g, &r.tz)).collect();
         let _ = writeln!(out, "- not captured: {}", gaps.join("; "));
@@ -381,6 +429,33 @@ mod tests {
         (0..7)
             .map(|i| monday.checked_add(jiff::Span::new().days(i)).unwrap())
             .collect()
+    }
+
+    // m32 chunk 1: the range's hands-on / hands-off split by kind.
+    #[test]
+    fn hands_split_groups_kinds() {
+        let by_kind = |v: &[(&str, i64)]| -> Vec<(String, i64)> {
+            v.iter()
+                .map(|(k, m)| ((*k).to_string(), m * 60_000))
+                .collect()
+        };
+        assert_eq!(
+            hands_split(&by_kind(&[
+                ("agent", 130),
+                ("supervise", 120),
+                ("meet", 80),
+                ("author", 60),
+                ("read", 60),
+                ("break", 15),
+            ])),
+            "hands-on 3h10m \u{b7} hands-off 4h20m (supervise 2h00m \u{b7} meet 1h20m \u{b7} read 1h00m)"
+        );
+        assert_eq!(
+            hands_split(&by_kind(&[("author", 45)])),
+            "hands-on 45m00s \u{b7} hands-off 0s"
+        );
+        assert_eq!(hands_split(&by_kind(&[("break", 15)])), "");
+        assert_eq!(hands_split(&[]), "");
     }
 
     #[test]

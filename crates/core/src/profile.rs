@@ -154,6 +154,11 @@ pub struct AnchoredSpan {
     pub anchors: Vec<Anchor>,
     /// The title's embedding (m30 chunk 6), when the soft tier has a model.
     pub vec: Option<Vec<f32>>,
+    /// Idle time folded into the span (m32 chunk 1).
+    pub quiet_ms: i64,
+    /// The attached AI session wrote its transcript while the span was open
+    /// (m32 chunk 1): quiet time was watching an agent, not reading.
+    pub wrote: bool,
 }
 
 /// Minute-weighted mean of `parts`, L2-normalised; `None` with nothing to
@@ -916,6 +921,8 @@ mod tests {
                 })
                 .collect(),
             vec: None,
+            quiet_ms: 0,
+            wrote: false,
         }
     }
 

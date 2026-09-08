@@ -20,8 +20,19 @@ pub struct Config {
     /// A batch may also close at an AFK gap of 5 minutes or more once it
     /// holds this many minutes of activity, so windows end at natural breaks.
     pub batch_min_minutes: u32,
-    /// Close spans when idle at least this long.
+    /// The AFK poller reports idle after this long without input; the
+    /// sessionizer treats the stretch as quiet (span stays open) until it
+    /// reaches `quiet_secs` / `away_secs`.
     pub afk_close_secs: u32,
+    /// Idle at least this long with nothing live on screen (no agent writing
+    /// to the focused tool, no call, no meeting window) closes the span at
+    /// the idle start (m32 chunk 1). 0 = close on any idle, the m31 rule.
+    pub quiet_secs: u32,
+    /// Idle at least this long with a live context closes the span.
+    pub away_secs: u32,
+    /// Count keys / buttons / motion / scroll per minute into `presence`
+    /// (counts only, never what was typed). Off = no row is written.
+    pub capture_presence: bool,
     /// Derivation may start when idle at least this long.
     pub derive_idle_secs: u32,
     /// Live tier (m27): while active, the resident worker labels the current
@@ -129,6 +140,9 @@ impl Default for Config {
             batch_minutes: 30,
             batch_min_minutes: 10,
             afk_close_secs: 120,
+            quiet_secs: 600,
+            away_secs: 1800,
+            capture_presence: true,
             derive_idle_secs: 300,
             live_secs: 300,
             worker_idle_secs: 1200,

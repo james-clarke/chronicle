@@ -393,9 +393,10 @@ pub struct Placement {
 }
 
 /// The kinds of work a segment can be, general across roles.
-pub const KINDS: [&str; 9] = [
+pub const KINDS: [&str; 10] = [
     "author",
     "agent",
+    "supervise",
     "review",
     "communicate",
     "meet",
@@ -406,11 +407,13 @@ pub const KINDS: [&str; 9] = [
 ];
 
 /// One span's kind from its app family and anchors: an editor, design or
-/// office window is `author`; a terminal with an agent session `agent`,
-/// without one `author`; a change page or a git GUI `review`; a tracker
-/// page (item, no change) `plan`; a calendar entry `meet`, as is a meeting
-/// app; chat and mail `communicate`; a document or site with nothing more
-/// `read`; a distraction `break`.
+/// office window is `author`; a terminal with an agent session `agent`, or
+/// `supervise` when the span was mostly quiet while the session wrote
+/// (m32 chunk 1: hands off, watching the agent), without one `author`; a
+/// change page or a git GUI `review`; a tracker page (item, no change)
+/// `plan`; a calendar entry or a call `meet`, as is a meeting app; chat and
+/// mail `communicate`; a document or site with nothing more `read`; a
+/// distraction `break`.
 fn span_kind(span: &AnchoredSpan, distractions: &[Regex]) -> &'static str {
     if crate::evidence::is_distraction(&span.app, &span.title, distractions) {
         return "break";
@@ -421,7 +424,13 @@ fn span_kind(span: &AnchoredSpan, distractions: &[Regex]) -> &'static str {
     }
     match crate::extract::family(&span.app) {
         Family::Editor | Family::Document => "author",
-        Family::Terminal if has(AnchorKind::Session) => "agent",
+        Family::Terminal if has(AnchorKind::Session) => {
+            if span.wrote && span.quiet_ms * 2 >= span.end_ts - span.start_ts {
+                "supervise"
+            } else {
+                "agent"
+            }
+        }
         Family::Terminal => "author",
         Family::Vcs => "review",
         Family::Chat | Family::Mail => "communicate",
@@ -869,6 +878,8 @@ mod tests {
                 })
                 .collect(),
             vec: None,
+            quiet_ms: 0,
+            wrote: false,
         }
     }
 
@@ -1158,6 +1169,33 @@ mod tests {
         assert_eq!(kind_of(&[code(4, 0, 5, "m30")], 0, 5 * M, &d), "author");
         assert_eq!(kind_of(&[chat(5, 0, 5)], 0, 5 * M, &d), "communicate");
         assert_eq!(kind_of(&[notion(6, 0, 5)], 0, 5 * M, &d), "read");
+        // m32 chunk 1: mostly quiet while the session wrote is supervising;
+        // the same span with the user typing, or a session that never
+        // wrote, stays `agent`. A call is a meeting.
+        let mut watch = span(
+            7,
+            0,
+            10,
+            "Terminator",
+            "✳ fix tests",
+            &[(AnchorKind::Session, "s1")],
+        );
+        watch.quiet_ms = 5 * M;
+        watch.wrote = true;
+        assert_eq!(
+            kind_of(std::slice::from_ref(&watch), 0, 10 * M, &d),
+            "supervise"
+        );
+        watch.quiet_ms = 4 * M;
+        assert_eq!(
+            kind_of(std::slice::from_ref(&watch), 0, 10 * M, &d),
+            "agent"
+        );
+        watch.quiet_ms = 10 * M;
+        watch.wrote = false;
+        assert_eq!(kind_of(&[watch], 0, 10 * M, &d), "agent");
+        let call = span(8, 0, 5, "Firefox", "Meet", &[(AnchorKind::Event, "call:1")]);
+        assert_eq!(kind_of(&[call], 0, 5 * M, &d), "meet");
     }
 
     #[test]

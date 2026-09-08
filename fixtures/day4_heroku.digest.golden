@@ -1,14 +1,14 @@
 # Activity 2026-08-27 13:46–14:22 (UTC)
-active 29m53s · afk 6m04s · 66 switches
+active 35m58s · afk 0s · 66 switches
 
 ## Apps by time
-- Google-chrome: 13m48s
-- Terminator: 11m43s
+- Google-chrome: 19m53s
+- Terminator: 11m44s
 - chronicle: 1m50s
 - Slack: 22s
 
 ## Sites by time
-- northwind-memberships.acmeapi.example/control_panel: 4m47s
+- northwind-memberships.acmeapi.example/control_panel: 7m55s
 - staging-mailer.acmeapi.example/control_panel: 4m21s
 - acme.atlassian.net/browse: 1m07s
 - acme.atlassian.net/jira: 55s
@@ -17,7 +17,7 @@ active 29m53s · afk 6m04s · 66 switches
 cwd portfolio 19s
 
 ## Documents
-M7 human-verified progress 8m18s, Contoso Control Panel 6m04s, northwind-memberships | Contoso Dashboard 5m41s, Campaign SMS sending failure 1m35s, For you - Assigned to me 55s
+northwind-memberships | Contoso Dashboard 11m46s, M7 human-verified progress 8m18s, Contoso Control Panel 6m04s, Campaign SMS sending failure 1m35s, For you - Assigned to me 55s
 
 ## People
 core-dev 22s
@@ -37,11 +37,11 @@ core-dev 22s
 - 17–18m Google-chrome: Contoso Control Panel + Google-chrome: northwind-memberships | Contoso Dashboard
 - 18–20m Google-chrome: Contoso Control Panel
 - 20–21m Google-chrome: northwind-memberships | Contoso Dashboard + Google-chrome: Contoso Control Panel
-- 21–24m afk
-- 24–25m Terminator: ✳ M7 human-verified progress + Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
+- 21–24m Google-chrome: northwind-memberships | Contoso Dashboard
+- 24–25m Terminator: ✳ M7 human-verified progress + Google-chrome: northwind-memberships | Contoso Dashboard
 - 25–26m Terminator: ✳ M7 human-verified progress
 - 26–27m Terminator: sam@workstation:~/dev/portfolio
-- 27–31m afk
+- 27–31m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
 - 31–32m Google-chrome: For you - Assigned to me - Jira + Terminator: ✳ Campaign SMS sending failure
 - 32–33m Google-chrome: For you - Assigned to me - Jira
 - 33–34m Google-chrome: Jira
