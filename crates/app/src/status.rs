@@ -408,6 +408,11 @@ pub(crate) fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
                 t.strftime("%H:%M:%S"),
                 idle.unwrap_or(0) == 1
             ),
+            "lock" => println!(
+                "{}  [lock] locked={}",
+                t.strftime("%H:%M:%S"),
+                idle.unwrap_or(0) == 1
+            ),
             "url" => println!(
                 "{}  [url] {app}: {title} <{}>",
                 t.strftime("%H:%M:%S"),

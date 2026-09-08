@@ -32,8 +32,9 @@ pub(crate) fn spawn_capture(
                 tracing::error!("focus provider exited: {e}");
                 // Nothing watches focus any more: the open span closes here
                 // instead of growing until the next restart (m32 chunk 0).
+                // A hard edge like a lock — idle would only mark it quiet.
                 let ts = Timestamp::now();
-                let _ = etx.send(CaptureEvent::Afk { idle: true, ts });
+                let _ = etx.send(CaptureEvent::Lock { locked: true, ts });
                 let _ = fctrl.send(CtrlMsg::CaptureLost {
                     reason: "provider exit",
                     ts,
@@ -48,6 +49,7 @@ pub(crate) fn spawn_capture(
     std::thread::Builder::new()
         .name("afk".into())
         .spawn(move || afk_loop(afk, gtx, threshold_ms))?;
+    spawn_presence_capture(config, tx.clone())?;
 
     spawn_git_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
@@ -85,8 +87,8 @@ pub(crate) fn spawn_lock_capture(
                 }
                 locked = now_locked;
                 let ts = Timestamp::now();
-                let _ = tx.send(CaptureEvent::Afk {
-                    idle: now_locked,
+                let _ = tx.send(CaptureEvent::Lock {
+                    locked: now_locked,
                     ts,
                 });
                 let _ = ctrl.send(if now_locked {
@@ -97,6 +99,39 @@ pub(crate) fn spawn_lock_capture(
             });
             if let Err(e) = result {
                 tracing::error!("lock signal exited: {e}");
+            }
+        })?;
+    Ok(())
+}
+
+/// XI2 raw-event counts per minute (m32 chunk 1): keys, buttons, motion,
+/// scroll — never which. Off by config, or when the server lacks XInput 2;
+/// never load-bearing.
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_presence_capture(
+    config: &chronicle_core::config::Config,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::PresenceProvider;
+    use chronicle_capture::presence::X11PresenceProvider;
+
+    if !config.capture_presence {
+        return Ok(());
+    }
+    let provider = match X11PresenceProvider::new() {
+        Ok(provider) => provider,
+        Err(e) => {
+            tracing::warn!("presence counts unavailable: {e}");
+            return Ok(());
+        }
+    };
+    std::thread::Builder::new()
+        .name("presence".into())
+        .spawn(move || {
+            let result =
+                provider.run(&mut |minute| tx.send(CaptureEvent::Presence(minute)).is_ok());
+            if let Err(e) = result {
+                tracing::error!("presence provider exited: {e}");
             }
         })?;
     Ok(())
@@ -494,7 +529,10 @@ impl Filters {
         let (app, title, url) = match event {
             CaptureEvent::Focus(e) | CaptureEvent::TitleChanged(e) => (&e.app, &e.title, None),
             CaptureEvent::Url(e) => (&e.app, &e.title, Some(&e.url)),
-            CaptureEvent::Activity(_) | CaptureEvent::Afk { .. } => return false,
+            CaptureEvent::Activity(_)
+            | CaptureEvent::Afk { .. }
+            | CaptureEvent::Lock { .. }
+            | CaptureEvent::Presence(_) => return false,
         };
         self.apps.iter().any(|r| r.is_match(app))
             || self

@@ -226,6 +226,8 @@ fn fixture_anchored_spans(
             title: s.title.clone(),
             anchors: chronicle_core::extract::extract(&s.app, &s.title, s.url.as_deref(), re),
             vec: None,
+            quiet_ms: s.quiet_ms,
+            wrote: false,
         })
         .collect();
     out.sort_by_key(|s| s.start_ts);
@@ -429,6 +431,8 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 title: s.title.clone(),
                 anchors: extract::extract(&s.app, &s.title, s.url.as_deref(), &re),
                 vec: None,
+                quiet_ms: s.quiet_ms,
+                wrote: false,
             })
             .collect();
         aspans.sort_by_key(|s| s.start_ts);
@@ -666,6 +670,66 @@ pub(crate) fn embed_bench(data_dir: &Path, model: &Path) -> anyhow::Result<()> {
         "gate (p95 < 20 ms): {}",
         if stats.p95_ms < 20.0 { "PASS" } else { "FAIL" }
     );
+    Ok(())
+}
+
+/// `chronicle bench --gaps` (m32 chunk 1 gate): re-sessionize the last
+/// `since_days` of events twice — with the configured `quiet_secs` /
+/// `away_secs` and with both at 0 (the m31 rule: any idle closes the span)
+/// — and print each run's daytime (08–19 local) AFK gap histogram plus the
+/// idle time folded into spans as quiet.
+pub(crate) fn gaps(data_dir: &Path, since_days: u64) -> anyhow::Result<()> {
+    use chronicle_core::sessionizer::{SpanKind, sessionize_with};
+    use chronicle_core::storage;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let now = Timestamp::now();
+    let since_ms = now.as_millisecond() - since_days as i64 * 86_400_000;
+    let events = storage::load_events_from(&conn, since_ms)?;
+    let live = storage::live_context(&conn, since_ms)?;
+    let tz = TimeZone::system();
+    let legacy = Config {
+        quiet_secs: 0,
+        away_secs: 0,
+        ..config.clone()
+    };
+    println!(
+        "{} events in the last {since_days} d; {} session writes, {} calls in context",
+        events.len(),
+        live.session_writes.len(),
+        live.calls.len()
+    );
+    for (name, cfg) in [("m31 rule", &legacy), ("configured", &config)] {
+        let spans = sessionize_with(&events, now, cfg, &live);
+        // (count, total ms) for 2–5, 5–15 and 15+ minute gaps.
+        let mut buckets = [(0usize, 0i64); 3];
+        for s in spans.iter().filter(|s| s.kind == SpanKind::Afk) {
+            let hour = s.start.to_zoned(tz.clone()).hour();
+            if !(8..19).contains(&hour) {
+                continue;
+            }
+            let mins = s.duration_ms() / 60_000;
+            let bucket = match mins {
+                ..2 => continue,
+                2..5 => 0,
+                5..15 => 1,
+                _ => 2,
+            };
+            buckets[bucket].0 += 1;
+            buckets[bucket].1 += s.duration_ms();
+        }
+        let quiet: i64 = spans.iter().map(|s| s.quiet_ms).sum();
+        println!(
+            "{name} (quiet_secs={} away_secs={}): {} spans",
+            cfg.quiet_secs,
+            cfg.away_secs,
+            spans.len()
+        );
+        for (label, (n, ms)) in ["2–5 min", "5–15 min", "15+ min"].iter().zip(buckets) {
+            println!("  daytime gaps {label}: {n} ({} min)", ms / 60_000);
+        }
+        println!("  idle folded into spans as quiet: {} min", quiet / 60_000);
+    }
     Ok(())
 }
 

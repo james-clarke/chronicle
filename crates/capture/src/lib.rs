@@ -11,13 +11,15 @@ pub mod github;
 pub mod lock;
 #[cfg(target_os = "linux")]
 pub mod mic;
+#[cfg(target_os = "linux")]
+pub mod presence;
 pub mod shell;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
 use std::time::Duration;
 
-use chronicle_core::types::{ActivityEvent, CaptureEvent};
+use chronicle_core::types::{ActivityEvent, CaptureEvent, PresenceMinute};
 use crossbeam_channel::Sender;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -32,6 +34,14 @@ pub trait FocusProvider: Send {
 /// included.
 pub trait LockSignal: Send {
     fn run(self, on_change: &mut dyn FnMut(bool)) -> Result<(), BoxError>;
+}
+
+/// Input counts per minute (m32 chunk 1): how many keys, buttons, motion
+/// and scroll events, never which. Blocking, runs on its own thread;
+/// `on_minute` fires once per minute that had any input and returns false
+/// to stop the loop.
+pub trait PresenceProvider: Send {
+    fn run(self, on_minute: &mut dyn FnMut(PresenceMinute) -> bool) -> Result<(), BoxError>;
 }
 
 /// Polled (≤ 1/30 s).

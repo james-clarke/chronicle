@@ -14,6 +14,9 @@ use super::{TimelineApp, theme};
 pub(super) struct SettingsPanel {
     batch_minutes: u32,
     afk_close_secs: u32,
+    quiet_secs: u32,
+    away_secs: u32,
+    capture_presence: bool,
     derive_idle_secs: u32,
     /// `derive_mode == "segmenter"` (m30 chunk 3).
     segmenter: bool,
@@ -146,6 +149,9 @@ impl SettingsPanel {
         Ok(Self {
             batch_minutes: config.batch_minutes,
             afk_close_secs: config.afk_close_secs,
+            quiet_secs: config.quiet_secs,
+            away_secs: config.away_secs,
+            capture_presence: config.capture_presence,
             derive_idle_secs: config.derive_idle_secs,
             segmenter: config.derive_mode == "segmenter",
             retention_days: config.retention_days,
@@ -185,6 +191,9 @@ impl SettingsPanel {
         let mut config = self.base.clone();
         config.batch_minutes = self.batch_minutes;
         config.afk_close_secs = self.afk_close_secs;
+        config.quiet_secs = self.quiet_secs;
+        config.away_secs = self.away_secs;
+        config.capture_presence = self.capture_presence;
         config.derive_idle_secs = self.derive_idle_secs;
         config.derive_mode = if self.segmenter { "segmenter" } else { "model" }.to_owned();
         config.retention_days = self.retention_days;
@@ -590,6 +599,22 @@ impl TimelineApp {
                                             .range(30..=3600),
                                     );
                                     ui.weak("secs");
+                                    ui.end_row();
+                                    ui.label("quiet");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.quiet_secs).range(0..=7200),
+                                    );
+                                    ui.weak("secs idle, nothing live, closes the span");
+                                    ui.end_row();
+                                    ui.label("away");
+                                    ui.add(
+                                        egui::DragValue::new(&mut panel.away_secs).range(0..=14400),
+                                    );
+                                    ui.weak("secs idle with an agent, call or meeting");
+                                    ui.end_row();
+                                    ui.label("presence counts");
+                                    ui.checkbox(&mut panel.capture_presence, "");
+                                    ui.weak("keys, buttons, motion per minute; never which");
                                     ui.end_row();
                                 });
                             ui.label("excluded apps (one regex per line, never stored)");

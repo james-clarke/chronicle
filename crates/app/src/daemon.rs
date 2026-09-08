@@ -433,7 +433,9 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 if filters.excluded(&event) {
                     continue;
                 }
-                if let CaptureEvent::Afk { idle, ts } = &event {
+                if let CaptureEvent::Afk { idle, ts } | CaptureEvent::Lock { locked: idle, ts } =
+                    &event
+                {
                     if *idle {
                         idle_since.get_or_insert(ts.as_millisecond());
                     } else {

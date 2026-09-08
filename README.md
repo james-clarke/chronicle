@@ -31,6 +31,7 @@ Everything below is the current plan, not hard rules.
 | Focus events | `_NET_ACTIVE_WINDOW` + per-window `PropertyChangeMask` | `NSWorkspace.didActivateApplicationNotification` + AXObserver | `SetWinEventHook` (FOREGROUND + NAMECHANGE) |
 | Titles | `_NET_WM_NAME` → `WM_NAME`; app = `WM_CLASS` | AX `kAXTitle` | `GetWindowTextW`; app = `QueryFullProcessImageNameW` |
 | AFK | XScreenSaver `QueryInfo` | `CGEventSourceSecondsSinceLastEventType` | `GetLastInputInfo` |
+| Presence counts | XI2 raw events, counted per minute | `CGEventSourceCounterForEventType` | `GetLastInputInfo` + low-level hook |
 | Screen lock | logind D-Bus `LockedHint` | `com.apple.screenIsLocked` notification | WTS session notifications |
 | Tray | **none** | yes | yes |
 | Open UI | app icon / `chronicle toggle` | tray click | tray click |
@@ -41,6 +42,7 @@ Everything below is the current plan, not hard rules.
 Platform notes:
 - **Linux launch UX:** daemon holds a unix socket. Any second invocation (`chronicle` or `chronicle toggle`) sends toggle and exits; daemon spawns the UI child, or forwards a raise if it's already alive. No tray.
 - **Linux autostart (m11):** `systemd --user` unit (`packaging/chronicle.service`) is the sole Linux autostart mechanism — a supervised lifecycle (SIGTERM on `stop`, `Restart=on-failure`) is what makes the clean-shutdown path exercisable; a bare XDG `.desktop` entry has no stop contract. `WantedBy=graphical-session.target`, not `default.target`, since capture needs `DISPLAY`.
+- **Presence (m32):** the `presence` table holds per-minute counts only — how many keys, buttons, motion and scroll events — never which keys; `capture_presence = false` turns it off. Idle shorter than `quiet_secs` (10 min; `away_secs` 30 min with an agent writing, a call or a meeting on screen) stays inside the span as quiet time, so reading and watching an agent are not cut as absence.
 - **X11:** windows die racily, all property reads must tolerate `BadWindow`/`BadDrawable` as non-fatal. Subscribe `PropertyChangeMask` on each new active window (catches tab-title changes), unsubscribe previous. Debounce title changes 1 s.
 - **macOS:** AX permission is a hard gate. Detect via `AXIsProcessTrustedWithOptions`, onboarding screen with deep link to System Settings, degrade to app-only tracking until granted. Message clearly: titles via AX, **no screen recording**. Daemon owns the main-thread run loop (required for NSWorkspace + AXObserver anyway) and hosts the tray; tray-icon must be created on the main thread after the event loop starts (`StartCause::Init`). UI stays a child process.
 - **Windows:** dedicated capture thread with `GetMessage` pump, `WINEVENT_OUTOFCONTEXT`; tray shares the daemon's message pump. UI stays a child process.

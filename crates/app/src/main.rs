@@ -226,6 +226,10 @@ enum Cmd {
         /// worst tenth of placements. Uses --since.
         #[arg(long)]
         calibrate: bool,
+        /// Re-sessionize the last --since days with and without the m32
+        /// quiet rule and print the daytime AFK gap histogram (chunk 1 gate).
+        #[arg(long)]
+        gaps: bool,
         /// Time an embedding GGUF over recent titles (m30 chunk 6 gate:
         /// p95 under 20 ms per title on this CPU).
         #[arg(long)]
@@ -297,6 +301,7 @@ fn main() -> anyhow::Result<()> {
             probes,
             segment,
             calibrate,
+            gaps,
             embed,
             backend,
         } => {
@@ -304,6 +309,8 @@ fn main() -> anyhow::Result<()> {
                 bench::embed_bench(&data_dir, &path)
             } else if calibrate {
                 bench::calibrate(&data_dir, since)
+            } else if gaps {
+                bench::gaps(&data_dir, since)
             } else if replay {
                 let set = chronicle_core::replay::ProbeSet::parse(&probes)
                     .ok_or_else(|| anyhow::anyhow!("--probes must be all, direct or source"))?;

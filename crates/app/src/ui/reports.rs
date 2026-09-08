@@ -79,6 +79,11 @@ impl TimelineApp {
                             ui.label(theme::num(fmt_dur(r.grand_total_ms)));
                         }
                     });
+                    // m32 chunk 1: segmenter mode only (kinds come from it).
+                    let split = chronicle_core::report::hands_split(&r.by_kind);
+                    if !split.is_empty() {
+                        ui.weak(split);
+                    }
                     if r.tasks.is_empty() {
                         ui.add_space(theme::SECTION_GAP);
                         theme::empty_state(
