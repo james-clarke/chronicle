@@ -740,3 +740,84 @@ A session with writes but no prompts and no focus in the window drops
 out (0 weight). The naming job for a task the split creates sees the
 whole range's evidence, not only its sessions'. The 84 px lane label
 truncates long session titles (same as task lanes).
+
+## Shipped (2026-09-08, chunk 4)
+
+Two commits on `main` (core; app and capture), 266 tests (8 new), clippy
+unchanged (the five pre-existing warnings are in files this chunk did not
+touch). No migration.
+
+- **A ref from the task's own place** (`anchor::anchor_tasks`, new
+  `projects` argument): a task with a declared project takes branch
+  time, checkouts, commits and PR rows from that repo alone (`a/b`
+  names two); a task with no project constrains nothing, and a prepass
+  run has none. `derive` reads each placed task's project from `tasks`.
+  The wrong refs on tasks 98 (ACME-11381), 109 (ACME-11382) and 111
+  (ACME-11385), all chronicle tasks named by agent commits in contoso and
+  mailer, were cleared by hand on the live DB.
+- **PR rows are strong only when the person was on them**: `gh search
+  prs` carries no head branch, so the rule reads the PR's title key
+  instead — a checkout or commit on a branch carrying that key in the
+  PR's repo, or a cwd / shell row in that repo, within 24 h of the PR's
+  update (`PR_NEARBY_MS`). A weak PR row neither gates a branch majority
+  nor names a task on its own. `derive` now passes cwd and shell rows
+  along with vcs and PR; the prepass adds `storage::place_rows_in_range`.
+- **Listener map** (`capture::ports::PortMapProvider`, its own thread,
+  60 s): LISTEN rows of `/proc/net/tcp{,6}` → socket inode → owning pid
+  via `/proc/*/fd` → that pid's cwd → `place_from_path`. Each listener is
+  an upserted `Cwd` row keyed `port:<port>:<place>` with `{"path","port"}`
+  in detail; one whose cwd names no place (sshd, cups, a server started
+  from `~`) is dropped. On this machine today: fabrikam-web, chronicle and
+  mailer dev servers, all on ephemeral ports.
+- **`localhost:<port>` is a place through the map**: `parse_url` accepts
+  `localhost`, `127.0.0.1`, `0.0.0.0` and `[::1]` and keeps their port;
+  `browser` emits `Domain localhost:<port>` (the page title stays the
+  document); `from_activity` turns it into `Place <repo>` from the port
+  row alive while the span was open, and the repo's checkout then names
+  the branch. Live backfill: 53 spans now carry `localhost:<port>`
+  domains (8000, 8001, 8002, 8004, 54323); they only resolve to places
+  going forward, once port rows exist.
+- **A minor document cannot name a segment** (`profile::NAMING_SHARE`
+  = 0.25): `Segment::describe` skips a `Doc` key under a quarter of the
+  segment's focus, so the segmenter's placeholder labels come from the
+  majority cluster; the `name_task` job (`ai_job::naming_spans`) drops
+  focus spans whose only anchors are documents or sites under a quarter
+  of the range before building the digest, keeping anchorless spans and
+  never dropping the last focus span.
+- **Unsure placements feed no profile** (`IntervalRow.pending`): a
+  `segment` row with `confident = 0` and no closed `verdict_log`
+  outcome is left out of `build_evidence` and of the centroid /
+  recency intervals until it is kept, corrected or passively accepted
+  (a day later, `passive_accept`). `replay_rows` computes it with a
+  `NOT EXISTS` on `verdict_log`.
+- **A task with no evidence has no profile**: `build_profiles` no longer
+  adds zero profiles for live tasks, so a bare label with no key, project
+  or kept time is not scoreable and cannot win on the recency bonus.
+- Live backfill after install: `backfill-anchors` (3899 spans),
+  `backfill-evidence` (417 rows), daemon restarted healthy.
+
+Gate, `bench --replay --scorer` on a sandbox copy of the live DB (the
+plan's 45/132 was a 09-08 morning probe set; the window has moved since,
+so before/after on today's set):
+
+| probes | before | chunk 4 |
+|---|---|---|
+| `all --since 7` | 32/85 | 30/85 |
+| `all --since 14` | 59/208 | 49/208 |
+| `direct --since 14` | 8/36 | 8/36 |
+
+Every lost `all` probe is a merge into task 60 "user experience review
+and tweaks" that used to pass *by label* because the new-task
+placeholder carried the doc anchor `m14-ui-restructure-review`, whose
+"review" token matched the wanted label; the 25 % rule drops that doc
+from the placeholder, so those passes were coincidences and the direct
+set is flat. `fabrikam-web` appears in the chunk 4 log only on probes that
+want it (c84); it wins no chronicle terminal.
+
+Open: `gh search prs` has no head branch, so PR strength keys on the
+title's ticket rather than the branch; a PR whose title carries no key
+is never strong (it never anchored anyway). The listener map reads only
+processes the daemon's user can inspect. Historical `localhost` spans
+have no port rows to resolve against. The `name_task` filter matches
+drafts to anchored spans by `(start, end)`; a draft the sessionizer
+re-cut since the anchors were stored keeps its place.
