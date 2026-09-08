@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use chronicle_core::config::Config;
+
+use crate::daemon::CtrlMsg;
 use chronicle_core::types::CaptureEvent;
 use crossbeam_channel::Sender;
 use jiff::{Timestamp, ToSpan};
@@ -14,19 +16,31 @@ pub(crate) fn spawn_capture(
     config: &Config,
     data_dir: &Path,
     tx: Sender<CaptureEvent>,
+    ctrl: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
     use chronicle_capture::FocusProvider;
     use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
 
     let focus = X11FocusProvider::new().map_err(|e| anyhow::anyhow!("X11 focus provider: {e}"))?;
     let ftx = tx.clone();
+    let fctrl = ctrl.clone();
     std::thread::Builder::new()
         .name("focus".into())
         .spawn(move || {
+            let etx = ftx.clone();
             if let Err(e) = focus.run(ftx) {
                 tracing::error!("focus provider exited: {e}");
+                // Nothing watches focus any more: the open span closes here
+                // instead of growing until the next restart (m32 chunk 0).
+                let ts = Timestamp::now();
+                let _ = etx.send(CaptureEvent::Afk { idle: true, ts });
+                let _ = fctrl.send(CtrlMsg::CaptureLost {
+                    reason: "provider exit",
+                    ts,
+                });
             }
         })?;
+    spawn_lock_capture(tx.clone(), ctrl)?;
 
     let afk = X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
     let threshold_ms = u64::from(config.afk_close_secs) * 1000;
@@ -41,6 +55,51 @@ pub(crate) fn spawn_capture(
     spawn_shell_capture(config, tx.clone())?;
     spawn_mic_capture(config, tx.clone())?;
     spawn_gcal_capture(config, data_dir, tx)
+}
+
+/// logind lock edges (m32 chunk 0): a lock is AFK from that moment and ends
+/// the capture ledger row; an unlock resumes both. Optional, never
+/// load-bearing.
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_lock_capture(
+    tx: Sender<CaptureEvent>,
+    ctrl: Sender<CtrlMsg>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::LockSignal;
+    use chronicle_capture::lock::LogindLock;
+
+    let lock = match LogindLock::new() {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::warn!("lock signal unavailable: {e}");
+            return Ok(());
+        }
+    };
+    std::thread::Builder::new()
+        .name("lock".into())
+        .spawn(move || {
+            let mut locked = false;
+            let result = lock.run(&mut |now_locked| {
+                if now_locked == locked {
+                    return;
+                }
+                locked = now_locked;
+                let ts = Timestamp::now();
+                let _ = tx.send(CaptureEvent::Afk {
+                    idle: now_locked,
+                    ts,
+                });
+                let _ = ctrl.send(if now_locked {
+                    CtrlMsg::CaptureLost { reason: "lock", ts }
+                } else {
+                    CtrlMsg::CaptureBack(ts)
+                });
+            });
+            if let Err(e) = result {
+                tracing::error!("lock signal exited: {e}");
+            }
+        })?;
+    Ok(())
 }
 
 /// Spawn a named thread running `provider.run(tx)`; a run failure is logged,
@@ -324,6 +383,7 @@ pub(crate) fn spawn_capture(
     _config: &Config,
     _data_dir: &Path,
     _tx: Sender<CaptureEvent>,
+    _ctrl: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
     bail!("capture on this platform lands in M9/M10")
 }
@@ -351,8 +411,27 @@ pub(crate) fn afk_loop(
             false
         }
     };
+    let mut last_poll = Timestamp::now();
     loop {
         std::thread::sleep(AFK_POLL);
+        let now = Timestamp::now();
+        // sleep() counts monotonic time, which stands still through a
+        // suspend, and the first input after resume resets X's idle counter
+        // before this poll sees it: a wall-clock jump is the only trace, so
+        // the AFK starts at the last poll (m32 chunk 0).
+        if slept_through(last_poll, now, threshold_ms) && !was_idle {
+            was_idle = true;
+            if tx
+                .send(CaptureEvent::Afk {
+                    idle: true,
+                    ts: last_poll,
+                })
+                .is_err()
+            {
+                return;
+            }
+        }
+        last_poll = now;
         let ms = match afk.idle_ms() {
             Ok(ms) => ms,
             Err(e) => {
@@ -369,6 +448,14 @@ pub(crate) fn afk_loop(
             return;
         }
     }
+}
+
+/// More wall-clock time passed between two polls than the poll interval plus
+/// the idle threshold: the machine slept, and any idle stretch it would have
+/// reported is gone.
+pub(crate) fn slept_through(last_poll: Timestamp, now: Timestamp, threshold_ms: u64) -> bool {
+    now.as_millisecond() - last_poll.as_millisecond()
+        > AFK_POLL.as_millis() as i64 + threshold_ms as i64
 }
 
 /// Idle transitions are backdated to when input actually stopped.
@@ -414,5 +501,22 @@ impl Filters {
                 .titles
                 .iter()
                 .any(|r| r.is_match(title) || url.is_some_and(|u| r.is_match(u)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // m32 chunk 0: a poll that lands more than the interval plus the idle
+    // threshold late on the wall clock is a suspend; a slow poll is not.
+    #[test]
+    fn slept_through_needs_a_wall_clock_jump() {
+        let t0 = Timestamp::UNIX_EPOCH;
+        let late = |secs: i64| t0 + secs.seconds();
+        assert!(!slept_through(t0, late(30), 120_000));
+        assert!(!slept_through(t0, late(150), 120_000));
+        assert!(slept_through(t0, late(151), 120_000));
+        assert!(slept_through(t0, late(15 * 3600), 120_000));
     }
 }

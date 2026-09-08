@@ -13,6 +13,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 ksni = "0.3"
+# Same executor selection as ksni so the two share one zbus build.
+zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }

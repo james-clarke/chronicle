@@ -57,6 +57,14 @@ pub(crate) enum CtrlMsg {
     Toggle,
     DeriveNow,
     Consolidate,
+    /// Capture went blind (focus provider exit, screen lock): the ledger row
+    /// ends at `ts` with `reason` (m32 chunk 0).
+    CaptureLost {
+        reason: &'static str,
+        ts: Timestamp,
+    },
+    /// Capture resumed (unlock): a new ledger row opens at `ts`.
+    CaptureBack(Timestamp),
     /// One-shot reply channel; the listener writes the JSON back to the client.
     Status(Sender<String>),
     /// Only in-process senders (signal thread, tray "Quit") — not part of the
@@ -344,7 +352,8 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     let mut conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
     // Daemon downtime must not read as focus time: mark a gap as AFK-from-the-
     // last-event; the AFK poller's initial state announcement closes it.
-    if let Some(last_ms) = chronicle_core::storage::latest_event_ts(&conn)?
+    let last_ms = chronicle_core::storage::latest_event_ts(&conn)?;
+    if let Some(last_ms) = last_ms
         && Timestamp::now().as_millisecond() - last_ms > GAP_MARKER_SECS * 1000
     {
         let ts = chronicle_core::types::ms_to_ts(last_ms + 1);
@@ -353,13 +362,24 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     // A `running` batch with no live worker (unclean daemon exit) burns its
     // attempt and falls back to `failed` so the retry cap still holds.
     chronicle_core::storage::reset_stale_running(&conn)?;
+    // Capture ledger (m32 chunk 0): a row the last run never closed ends at
+    // its last event as a crash; spans that outlived their events get cut.
+    chronicle_core::storage::close_crashed_runs(&conn, last_ms)?;
+    let cut = chronicle_core::storage::clamp_quiet_spans(&mut conn, config.afk_close_secs)?;
+    if cut > 0 {
+        tracing::info!(n = cut, "cut spans that outlived their last event");
+    }
+    let mut run_id = Some(chronicle_core::storage::open_run(
+        &conn,
+        Timestamp::now().as_millisecond(),
+    )?);
     let started = Instant::now();
     let (tx, rx) = crossbeam_channel::unbounded();
     let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
     spawn_signal_handler(ctrl_tx.clone())?;
     spawn_tray(ctrl_tx.clone())?;
+    spawn_capture(&config, data_dir, tx.clone(), ctrl_tx.clone())?;
     spawn_ctrl_listener(listener, ctrl_tx)?;
-    spawn_capture(&config, data_dir, tx.clone())?;
     // Port taken (a real aw-server?) must not kill capture: log, warn in UI.
     let api_key = wakapi_api_key(&conn)?;
     // The key exists either way so Settings can show it; the switch decides
@@ -393,6 +413,12 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     let mut checkpointed_idle: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
     let mut last_prepass = Instant::now();
+    // A tick more than the interval plus the idle threshold late on the wall
+    // clock is a suspend: the ledger row ends there (the AFK poller marks
+    // the idle stretch on its own).
+    let mut last_tick = Timestamp::now();
+    let sleep_gap_ms =
+        SESSIONIZE_EVERY.as_millis() as i64 + i64::from(config.afk_close_secs) * 1000;
     let exit_reason = 'daemon: loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
         // Cloned per iteration so the select borrow does not pin the scheduler.
@@ -436,12 +462,38 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                     Ok(CtrlMsg::Status(reply)) => {
                         let _ = reply.send(status_json(&scheduler, idle_since, &mut ui_child, started));
                     }
+                    Ok(CtrlMsg::CaptureLost { reason, ts }) => {
+                        if let Some(id) = run_id.take()
+                            && let Err(e) = chronicle_core::storage::close_run(&conn, id, ts.as_millisecond(), reason)
+                        {
+                            tracing::error!("ledger close failed: {e}");
+                        }
+                    }
+                    Ok(CtrlMsg::CaptureBack(ts)) => {
+                        if run_id.is_none() {
+                            run_id = chronicle_core::storage::open_run(&conn, ts.as_millisecond())
+                                .map_err(|e| tracing::error!("ledger open failed: {e}"))
+                                .ok();
+                        }
+                    }
                     Ok(CtrlMsg::Shutdown) => break 'daemon ExitReason::Signal,
                     Err(_) => {}
                 }
             }
             default(timeout) => {
                 let now = Timestamp::now();
+                if now.as_millisecond() - last_tick.as_millisecond() > sleep_gap_ms
+                    && let Some(id) = run_id.take()
+                {
+                    tracing::info!(since = %last_tick, "wall clock jumped: machine slept");
+                    if let Err(e) = chronicle_core::storage::close_run(&conn, id, last_tick.as_millisecond(), "sleep") {
+                        tracing::error!("ledger close failed: {e}");
+                    }
+                    run_id = chronicle_core::storage::open_run(&conn, now.as_millisecond())
+                        .map_err(|e| tracing::error!("ledger open failed: {e}"))
+                        .ok();
+                }
+                last_tick = now;
                 if let Err(e) = chronicle_core::sessionizer::refresh(&mut conn, &config, now) {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
@@ -492,6 +544,26 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
         }
     };
     tracing::info!("shutting down");
+    let now = Timestamp::now();
+    let reason = match exit_reason {
+        ExitReason::Signal => "shutdown",
+        ExitReason::CaptureDied => "provider exit",
+    };
+    if let Some(id) = run_id
+        && let Err(e) = chronicle_core::storage::close_run(&conn, id, now.as_millisecond(), reason)
+    {
+        tracing::error!("ledger close failed: {e}");
+    }
+    // The open span ends with capture, not at the next start's refresh.
+    if let Err(e) = chronicle_core::storage::insert_event(
+        &conn,
+        &CaptureEvent::Afk {
+            idle: true,
+            ts: now,
+        },
+    ) {
+        tracing::error!("shutdown afk marker failed: {e}");
+    }
     // Child drop leaks the OS process — kills must be explicit.
     scheduler.shutdown(&conn);
     if let Some(mut child) = ui_child.take() {

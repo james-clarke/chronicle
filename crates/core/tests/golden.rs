@@ -2417,3 +2417,32 @@ fn proposals_cluster_name_accept_and_dismiss() {
     let open = proposals::open_proposals(&conn, 0, 7_000_000).unwrap();
     assert!(open.is_empty(), "{open:?}");
 }
+
+// m32 chunk 0: the focus provider's exit (a dead X connection) emits one
+// `afk idle=true`; six hours of stream after it must not stretch the open
+// span — it ends at that marker, the rest is AFK.
+#[test]
+fn dead_x_ends_span_at_provider_exit() {
+    let config = Config::default();
+    let events = load_fixture("dead_x.jsonl");
+    let stream_end: Timestamp = "2026-09-02T02:51:15Z".parse().unwrap();
+    let spans = sessionize(&events, stream_end, &config);
+    let exit: Timestamp = "2026-09-01T20:51:15Z".parse().unwrap();
+    let grace = jiff::Span::new().seconds(i64::from(config.afk_close_secs));
+    for span in spans.iter().filter(|s| s.kind != SpanKind::Afk) {
+        let last_event = events
+            .iter()
+            .filter(|e| e.ts >= span.start && e.ts <= span.end)
+            .map(|e| e.ts)
+            .max()
+            .unwrap();
+        assert!(
+            span.end <= last_event + grace,
+            "{span:?} outlives {last_event}"
+        );
+        assert!(span.end <= exit, "{span:?} outlives the provider");
+    }
+    let afk = spans.last().unwrap();
+    assert_eq!(afk.kind, SpanKind::Afk);
+    assert_eq!((afk.start, afk.end), (exit, stream_end));
+}

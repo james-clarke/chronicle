@@ -8,6 +8,8 @@ pub mod gcal;
 pub mod git;
 pub mod github;
 #[cfg(target_os = "linux")]
+pub mod lock;
+#[cfg(target_os = "linux")]
 pub mod mic;
 pub mod shell;
 #[cfg(target_os = "linux")]
@@ -23,6 +25,13 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// Blocking event loop, runs on its own thread.
 pub trait FocusProvider: Send {
     fn run(self, tx: Sender<CaptureEvent>) -> Result<(), BoxError>;
+}
+
+/// Screen lock edges (m32 chunk 0). Blocking, runs on its own thread;
+/// `on_change(locked)` fires on the initial state and every edge, repeats
+/// included.
+pub trait LockSignal: Send {
+    fn run(self, on_change: &mut dyn FnMut(bool)) -> Result<(), BoxError>;
 }
 
 /// Polled (≤ 1/30 s).
