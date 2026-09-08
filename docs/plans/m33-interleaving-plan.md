@@ -295,3 +295,75 @@ not re-placed by an install. A placeless span carrying a ticket still
 feeds whatever task wins the stretch. The mailer/chronicle stretches
 cluster as one new task labelled `mailer@staging · chronicle@main`
 because the cut rule still needs a contiguous foreign run — that is B.
+
+## Shipped (2026-09-08, chunk B) — behind a switch, off by default
+
+One commit on `main` (core), 278 tests (1 new), clippy unchanged, no
+migration. `segment_switch_mode = "contiguous" | "accumulated"` in
+`config.toml`, default **contiguous**: the live daemon cuts and places
+exactly as chunk C left it (row-for-row identical on the three gate
+windows). The gate below is why it is off.
+
+- **Strands** (`Seg.strands`, accumulated mode only): a foreign run that
+  folds back into the open segment, and a short excursion
+  `fold_excursions` absorbs, also become strands by what they share (an
+  anchor in common or a leading word; the run keeps one piece per span
+  so a run that mixed two repos parts again). The segment's cuts do not
+  change — the contiguous run, the strong-anchor swap, the AFK gap and
+  the excursion fold all stay — only what a segment turns into once it
+  closes.
+- **Unravel** (`Seg::unravel`): every strand with `segment_switch_min`
+  minutes in all becomes its own `Seg` over the segment's range with
+  `share` = its focus minutes over the segment's; the incumbent keeps
+  the rest (distractions, bare spans, strands under the bar) or, when
+  itself under the bar, folds into the largest strand. `Seg.ids` names
+  each row's spans.
+- **`decide`** scores a strand on its own spans, gives it the kind of
+  those spans, never folds it into a sandwiching task (it cleared its
+  own bar), and adds the shares of same-range rows that land on one
+  target; whole rows merge as before. `split_concurrent` leaves a strand
+  alone (`Placement.strand`) and scales the incumbent's session shares
+  by its own share, so a range still sums to 1.
+
+Gate, sandbox copy of the live DB, `bench --window`, accumulated versus
+contiguous (chunk C), placed minutes by project, with the on-screen
+minutes per `place` anchor for the window as the yardstick:
+
+| window | on screen (place) | contiguous | accumulated |
+|---|---|---|---|
+| 09-08 10:30–12:49 `--live` (139 min; 57 placeless) | fabrikam-web 27, contoso 23, chronicle 15.5, mailer 13 | fabrikam-web 47, contoso 32, chronicle 23, mailer 18 | **identical** |
+| 09-03 15:00–16:44 (104 min; 50 placeless) | contoso 23, chronicle 15.5, mailer 9 | mailer 57 (54.6 %), chronicle 40 (38.9 %) | mailer 59 (56.8 %), chronicle 32 (**31.1 %**) |
+| 09-02 09:00–18:00 (540 min; 266 placeless) | chronicle 124, agent-backend 58, mailer 57 | chronicle 228, ACAI 215 | chronicle 232, ACAI 204 (within 2 points) |
+
+- The plan's 09-08 target (chronicle, contoso and fabrikam-web each ≥ 20 %)
+  was written when the whole window sat on task 120; chronicle is 11.5 %
+  of the window on screen, so 20 % is not a target the cut can reach
+  without inventing time. Chunk C plus the existing strong-swap cut and
+  excursion fold already give each repo its on-screen minutes plus a
+  share of the placeless ones; accumulated mode finds no strand over
+  the bar there — the interleaved bits are under three minutes per
+  segment (the chronicle bits inside 10:48–10:54 total 73 s).
+- 09-03 fails the M32 chunk 3 gate (chronicle ≥ 35 %) by four points,
+  not through the strands themselves: the 15:19–15:36 segment unravels
+  (a 22 % `chronicle@main · ACME-11382` strand, unplaced under
+  `new_task_min`), so its incumbent is no longer a whole row and no
+  longer merges with 15:00–15:19, which stays a `plan` row at 100 % on
+  task 85 instead of joining an `agent` row the session split gave 30 %
+  chronicle. Which of the two is right for a Jira-reading stretch with
+  chronicle sessions writing behind it is a judgement the gate cannot
+  make; it was calibrated on the merged behaviour.
+- 09-02 moves within two points; the one visible change is the same
+  kind of unravelled agent stretch (15:27–16:10, a 14 % agent-backend
+  strand).
+
+Decision: shipped behind the switch, default off. Flip `segment_switch_mode
+= "accumulated"` to try it live; `bench --window … --live` prints the
+strands as rows under 100 % sharing a range. Chunk A (per-thread model)
+stays on the shelf: on these windows the report's remaining error is the
+placeless time (41–51 % of each window: browser tabs, the Chronicle
+window, terminals without a cwd), not the cut.
+
+Open: a strand under `new_task_min` that the scorer calls new is dropped
+(unplaced) rather than folded, so a range's rows can sum to less than 1;
+labels of a segment with strands still come from all its keys (the
+excursion fold keeps merging them, for cut parity).
