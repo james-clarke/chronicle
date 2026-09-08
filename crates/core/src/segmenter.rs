@@ -73,6 +73,12 @@ pub struct SegParams {
     /// A cluster of "new" stretches needs this many focus minutes before
     /// a task is created for it; less stays unassigned.
     pub new_task_min: f64,
+    /// Count foreign minutes per strand across the whole segment, not
+    /// only in one unbroken run (m33 chunk B, `segment_switch_mode =
+    /// accumulated`): a strand reaching `switch_min` in all becomes its
+    /// own row over the segment's range. Off by default: the cut rule
+    /// alone, as before.
+    pub accumulate: bool,
 }
 
 impl SegParams {
@@ -80,6 +86,7 @@ impl SegParams {
         SegParams {
             switch_min: f64::from(c.segment_switch_min.max(1)),
             new_task_min: f64::from(c.segment_new_task_min),
+            accumulate: c.segment_switch_mode != "contiguous",
         }
     }
 }
@@ -89,6 +96,7 @@ impl Default for SegParams {
         SegParams {
             switch_min: 3.0,
             new_task_min: 10.0,
+            accumulate: false,
         }
     }
 }
@@ -121,6 +129,20 @@ pub struct Seg {
     pub minutes: f64,
     /// `false` for the last segment, still growing at the window's end.
     pub closed: bool,
+    /// The spans counted on this segment, by id: what its evidence is
+    /// built from when it shares its range (m33 chunk B).
+    pub ids: Vec<i64>,
+    /// This segment's share of its range: 1 for a whole segment, less for
+    /// a strand or the incumbent it was unravelled from; the rows over
+    /// one range sum to 1.
+    pub share: f64,
+    /// A strand unravelled from a segment (m33 chunk B), as opposed to
+    /// the incumbent that kept the rest of the range.
+    pub strand: bool,
+    /// Foreign work that folded back in, by what it shares (m33 chunk B):
+    /// each strand's own keys, ties, minutes and spans. Unravelled into
+    /// rows of their own once the segment closes.
+    strands: Vec<Seg>,
 }
 
 impl Seg {
@@ -132,10 +154,14 @@ impl Seg {
             ties: HashMap::new(),
             minutes: 0.0,
             closed: true,
+            ids: Vec::new(),
+            share: 1.0,
+            strand: false,
+            strands: Vec::new(),
         }
     }
 
-    fn add(&mut self, sig: &Signature, minutes: f64, end: i64) {
+    fn add(&mut self, id: i64, sig: &Signature, minutes: f64, end: i64) {
         for k in &sig.keys {
             *self.keys.entry(k.clone()).or_insert(0.0) += minutes;
         }
@@ -144,6 +170,15 @@ impl Seg {
         }
         self.minutes += minutes;
         self.hi = self.hi.max(end);
+        self.ids.push(id);
+    }
+
+    /// Time only, not what it is about: a distraction, a bare span, or a
+    /// foreign span that may yet fold back.
+    fn stretch(&mut self, id: i64, minutes: f64, end: i64) {
+        self.minutes += minutes;
+        self.hi = self.hi.max(end);
+        self.ids.push(id);
     }
 
     fn absorb(&mut self, other: &Seg) {
@@ -156,6 +191,84 @@ impl Seg {
         self.minutes += other.minutes;
         self.lo = self.lo.min(other.lo);
         self.hi = self.hi.max(other.hi);
+        self.ids.extend(other.ids.iter().copied());
+        self.strands.extend(other.strands.iter().cloned());
+    }
+
+    /// A foreign run that folded back (m33 chunk B): its spans were
+    /// counted on the segment as time; what each is about goes to the
+    /// strand it shares an anchor or a leading word with, else a strand
+    /// of its own. The run carries its spans one by one in `strands`, so
+    /// a run that mixed two repos parts again here.
+    fn fold_run(&mut self, run: Seg) {
+        for piece in run.strands {
+            let hit = self
+                .strands
+                .iter_mut()
+                .find(|st| st.akin(&piece) || piece.keys.keys().any(|k| st.keys.contains_key(k)));
+            match hit {
+                Some(st) => st.absorb(&piece),
+                None => self.strands.push(piece),
+            }
+        }
+    }
+
+    /// The segment as rows over its range (m33 chunk B): every strand
+    /// that reached `switch_min` becomes one, with its share of the time,
+    /// and the incumbent keeps the rest — unless the incumbent itself is
+    /// under `switch_min`, when the largest strand takes it. A segment
+    /// with no strand over the bar stays whole, its strands' minutes still
+    /// counted on it.
+    fn unravel(mut self, p: &SegParams) -> Vec<Seg> {
+        let strands = std::mem::take(&mut self.strands);
+        if !p.accumulate || strands.is_empty() {
+            return vec![self];
+        }
+        // Strands from absorbed segments may be about the same thing.
+        let mut merged: Vec<Seg> = Vec::new();
+        for st in strands {
+            match merged.iter_mut().find(|m| m.akin(&st)) {
+                Some(m) => m.absorb(&st),
+                None => merged.push(st),
+            }
+        }
+        let mut rows: Vec<Seg> = merged
+            .into_iter()
+            .filter(|st| st.minutes >= p.switch_min)
+            .collect();
+        if rows.is_empty() {
+            return vec![self];
+        }
+        rows.sort_by(|a, b| {
+            b.minutes
+                .partial_cmp(&a.minutes)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let total = self.minutes;
+        let taken: f64 = rows.iter().map(|r| r.minutes).sum();
+        let (lo, hi, closed) = (self.lo, self.hi, self.closed);
+        let mut incumbent = self;
+        incumbent.minutes = (incumbent.minutes - taken).max(0.0);
+        let strand_ids: BTreeSet<i64> = rows.iter().flat_map(|r| r.ids.iter().copied()).collect();
+        incumbent.ids.retain(|id| !strand_ids.contains(id));
+        if incumbent.minutes < p.switch_min {
+            rows[0].absorb(&incumbent);
+        } else {
+            rows.insert(0, incumbent);
+        }
+        for r in &mut rows {
+            r.lo = lo;
+            r.hi = hi;
+            r.closed = closed;
+            r.strand = true;
+            r.share = if total > 0.0 {
+                (r.minutes / total).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+        }
+        rows[0].strand = false;
+        rows
     }
 
     /// Whether a span continues this segment: a shared anchor, or a shared
@@ -264,24 +377,26 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
         if let Some(c) = cur.as_mut()
             && s.start_ts - c.hi >= AFK_GAP_MS
         {
+            if let Some(r) = run.take()
+                && p.accumulate
+            {
+                c.fold_run(r);
+            }
             out.push(cur.take().expect("checked"));
-            run = None;
         }
         let Some(c) = cur.as_mut() else {
             let mut c = Seg::empty(s.start_ts);
             if distraction {
-                c.minutes += dur;
-                c.hi = s.end_ts;
+                c.stretch(s.id, dur, s.end_ts);
             } else {
-                c.add(&sig, dur, s.end_ts);
+                c.add(s.id, &sig, dur, s.end_ts);
             }
             cur = Some(c);
             continue;
         };
 
         if distraction || sig.is_empty() {
-            c.minutes += dur;
-            c.hi = c.hi.max(s.end_ts);
+            c.stretch(s.id, dur, s.end_ts);
             continue;
         }
         // A strong anchor swapped for another of its kind is a switch even
@@ -296,43 +411,65 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
             .iter()
             .any(|k| strong_kind(k).is_some() && c.keys.contains_key(k));
         if shares_strong || (!swaps_strong && c.shares(&sig)) {
-            c.add(&sig, dur, s.end_ts);
-            run = None;
+            c.add(s.id, &sig, dur, s.end_ts);
+            // The excursion folded back: its time stays on the segment;
+            // what it was about becomes a strand (accumulated mode).
+            if let Some(r) = run.take()
+                && p.accumulate
+            {
+                c.fold_run(r);
+            }
             continue;
         }
         if swaps_strong && c.minutes >= p.switch_min && run.is_none() {
             let mut next = Seg::empty(s.start_ts);
-            next.add(&sig, dur, s.end_ts);
+            next.add(s.id, &sig, dur, s.end_ts);
             let mut done = std::mem::replace(c, next);
             done.hi = done.hi.min(s.start_ts);
             out.push(done);
             continue;
         }
-        // Foreign to the segment: the run grows until it earns a cut.
+        // Foreign to the segment: the run grows until it earns a cut. It
+        // keeps each span apart too, for the strands it may fold into.
         let r = run.get_or_insert_with(|| Seg::empty(s.start_ts));
-        r.add(&sig, dur, s.end_ts);
+        r.add(s.id, &sig, dur, s.end_ts);
+        if p.accumulate {
+            let mut piece = Seg::empty(s.start_ts);
+            piece.add(s.id, &sig, dur, s.end_ts);
+            r.strands.push(piece);
+        }
         if r.minutes >= p.switch_min {
             let start = r.lo;
-            let next = run.take().expect("just inserted");
+            let mut next = run.take().expect("just inserted");
+            next.strands.clear();
             let mut done = std::mem::replace(c, next);
             done.hi = done.hi.min(start);
             // The run's own minutes were counted on the open segment while
             // it could still fold back; they belong to the new one now.
             done.minutes = (done.minutes - (c.minutes - dur)).max(0.0);
+            let run_ids: BTreeSet<i64> = c.ids.iter().copied().collect();
+            done.ids.retain(|id| !run_ids.contains(id));
             out.push(done);
         } else {
             // Tentatively part of the open segment (time only, not what it
             // is about), in case it folds back.
-            c.minutes += dur;
-            c.hi = c.hi.max(s.end_ts);
+            c.stretch(s.id, dur, s.end_ts);
         }
     }
     if let Some(mut c) = cur.take() {
+        if let Some(r) = run.take()
+            && p.accumulate
+        {
+            c.fold_run(r);
+        }
         c.closed = false;
         out.push(c);
     }
     out.retain(|s| s.hi > s.lo);
     fold_excursions(out, p)
+        .into_iter()
+        .flat_map(|s| s.unravel(p))
+        .collect()
 }
 
 /// A short segment between two about the same thing joins them.
@@ -348,6 +485,17 @@ fn fold_excursions(segs: Vec<Seg>, p: &SegParams) -> Vec<Seg> {
             if prev.akin(next) && next.lo - prev.hi < AFK_GAP_MS {
                 let mut merged = out.pop().expect("non-empty");
                 merged.absorb(s);
+                if p.accumulate {
+                    // What the excursion was about is also a strand, so a
+                    // repo that keeps cutting in and folding back adds up
+                    // to a row of its own; the cut itself is unchanged.
+                    let mut piece = s.clone();
+                    piece.strands.clear();
+                    merged.fold_run(Seg {
+                        strands: vec![piece],
+                        ..Seg::empty(s.lo)
+                    });
+                }
                 merged.absorb(next);
                 merged.closed = next.closed;
                 out.push(merged);
@@ -394,6 +542,10 @@ pub struct Placement {
     /// segment, less when concurrent AI sessions split it (m32 chunk 3);
     /// the rows over one range sum to 1.
     pub share: f64,
+    /// A strand the segmenter unravelled (m33 chunk B): one repo's own
+    /// spans, not split again by the sessions live around it; the
+    /// incumbent it left is split as any whole row, its shares scaled.
+    pub strand: bool,
 }
 
 /// The kinds of work a segment can be, general across roles.
@@ -478,7 +630,13 @@ fn label_of(labels: &HashMap<i64, String>, id: i64) -> String {
 
 /// One segment's verdict as a placement on an existing task, or `None`
 /// when the scorer calls it new (clustering decides those).
-fn place_existing(seg: &Segment, v: &Verdict, labels: &HashMap<i64, String>) -> Option<Placement> {
+fn place_existing(
+    seg: &Segment,
+    share: f64,
+    strand: bool,
+    v: &Verdict,
+    labels: &HashMap<i64, String>,
+) -> Option<Placement> {
     let id = v.best?;
     let reason = if v.confident {
         let d = seg.describe(2);
@@ -509,7 +667,8 @@ fn place_existing(seg: &Segment, v: &Verdict, labels: &HashMap<i64, String>) -> 
         margin: v.margin,
         runner_up: v.runner_up().flatten(),
         kind: String::new(),
-        share: 1.0,
+        share,
+        strand,
     })
 }
 
@@ -590,7 +749,18 @@ pub fn decide(
         if seg.hi <= seg.lo {
             continue;
         }
-        let evidence = Segment::from_spans_skipping(spans, seg.lo, seg.hi, distractions);
+        // A row sharing its range (m33 chunk B) is scored on its own
+        // spans, not everything in the range.
+        let evidence = if seg.share < 1.0 {
+            let own: Vec<AnchoredSpan> = spans
+                .iter()
+                .filter(|s| seg.ids.contains(&s.id))
+                .cloned()
+                .collect();
+            Segment::from_spans_skipping(&own, seg.lo, seg.hi, distractions)
+        } else {
+            Segment::from_spans_skipping(spans, seg.lo, seg.hi, distractions)
+        };
         if evidence.keys.is_empty() {
             continue;
         }
@@ -601,7 +771,7 @@ pub fn decide(
     // 2. Place on existing tasks.
     let mut placed: Vec<Option<Placement>> = scored
         .iter()
-        .map(|(_, ev, v)| place_existing(ev, v, labels))
+        .map(|(seg, ev, v)| place_existing(ev, seg.share, seg.strand, v, labels))
         .collect();
     // 3. Cluster what is new by what it shares; a cluster with enough
     //    minutes is one new task, however scattered its stretches.
@@ -666,14 +836,17 @@ pub fn decide(
                 margin: v.margin,
                 runner_up: v.ranked.first().map(|c| c.task_id),
                 kind: String::new(),
-                share: 1.0,
+                share: seg.share,
+                strand: seg.strand,
             });
         }
     }
     // 3b. A short new stretch still unplaced, sandwiched by one task, goes
-    //     to that task as an excursion (unsure).
+    //     to that task as an excursion (unsure). A strand cleared its own
+    //     bar to stand apart; it does not fold into a neighbour.
     for i in 0..scored.len() {
-        if placed[i].is_some() || scored[i].0.minutes >= sp.new_task_min {
+        if placed[i].is_some() || scored[i].0.minutes >= sp.new_task_min || scored[i].0.share < 1.0
+        {
             continue;
         }
         let (Some(prev), Some(next)) = (
@@ -703,25 +876,56 @@ pub fn decide(
             runner_up: None,
             kind: String::new(),
             share: 1.0,
+            strand: false,
         });
     }
-    // 4. Contiguous rows on one target become one.
+    // A row sharing its range has the kind of its own spans.
+    for (i, p) in placed.iter_mut().enumerate() {
+        if let Some(p) = p
+            && p.share < 1.0
+        {
+            let own: Vec<AnchoredSpan> = spans
+                .iter()
+                .filter(|s| scored[i].0.ids.contains(&s.id))
+                .cloned()
+                .collect();
+            p.kind = kind_of(&own, p.lo, p.hi, distractions).to_owned();
+        }
+    }
+    // 4. Contiguous whole rows on one target become one; rows sharing one
+    //    range on one target add their shares.
     let mut out: Vec<Placement> = Vec::new();
     for p in placed.into_iter().flatten() {
         if let Some(last) = out.last_mut()
             && last.target == p.target
-            && p.lo - last.hi < AFK_GAP_MS
         {
-            last.hi = last.hi.max(p.hi);
-            last.confident = last.confident && p.confident;
-            last.confidence = last.confidence.min(p.confidence);
-            last.margin = last.margin.min(p.margin);
-            continue;
+            let same_range = last.lo == p.lo && last.hi == p.hi;
+            let whole = last.share >= 1.0 && p.share >= 1.0;
+            if same_range && !whole {
+                if p.share > last.share {
+                    last.kind = p.kind.clone();
+                    last.reason = p.reason.clone();
+                }
+                last.share = (last.share + p.share).min(1.0);
+                last.confident = last.confident && p.confident;
+                last.confidence = last.confidence.min(p.confidence);
+                last.margin = last.margin.min(p.margin);
+                continue;
+            }
+            if whole && p.lo - last.hi < AFK_GAP_MS {
+                last.hi = last.hi.max(p.hi);
+                last.confident = last.confident && p.confident;
+                last.confidence = last.confidence.min(p.confidence);
+                last.margin = last.margin.min(p.margin);
+                continue;
+            }
         }
         out.push(p);
     }
     for p in &mut out {
-        p.kind = kind_of(spans, p.lo, p.hi, distractions).to_owned();
+        if p.share >= 1.0 {
+            p.kind = kind_of(spans, p.lo, p.hi, distractions).to_owned();
+        }
     }
     out
 }
@@ -774,7 +978,9 @@ pub fn split_concurrent(
     // the cluster id.
     let mut opened: Vec<(String, String)> = Vec::new();
     for p in placements {
-        if sessions.len() < 2 || !matches!(p.kind.as_str(), "agent" | "supervise") {
+        // A row the segmenter already unravelled by strand (m33 chunk B)
+        // is one repo's work; the sessions of the others are not its.
+        if sessions.len() < 2 || p.strand || !matches!(p.kind.as_str(), "agent" | "supervise") {
             out.push(p);
             continue;
         }
@@ -897,7 +1103,7 @@ pub fn split_concurrent(
             out.push(Placement {
                 target,
                 kind: kind.to_owned(),
-                share: w / total,
+                share: p.share * w / total,
                 reason,
                 ..p.clone()
             });
@@ -1383,6 +1589,109 @@ mod tests {
         assert!(!segs[0].keys.contains_key(&roadmap));
     }
 
+    /// Interleaved foreign work never runs three minutes unbroken, but
+    /// adds up (m33 chunk B): the strand that clears the bar becomes its
+    /// own row over the range with its share, the one under it stays with
+    /// the incumbent, and the contiguous rule alone keeps it all whole.
+    #[test]
+    fn interleaved_foreign_work_unravels_into_strands() {
+        let contoso = |id: i64, lo: i64, hi: i64| {
+            span(
+                id,
+                lo,
+                hi,
+                "Code",
+                "tasks.py - contoso",
+                &[(AnchorKind::Place, "contoso"), (AnchorKind::Item, "ACME-1")],
+            )
+        };
+        let fabrikam = |id: i64, lo: i64, hi: i64| {
+            span(
+                id,
+                lo,
+                hi,
+                "Firefox",
+                "fabrikam-web - localhost",
+                &[(AnchorKind::Place, "fabrikam-web")],
+            )
+        };
+        // chronicle 12 min, contoso 4 × 1 min, fabrikam-web 2 × 1 min.
+        let spans = vec![
+            code(1, 0, 3, "m33"),
+            contoso(2, 3, 4),
+            code(3, 4, 7, "m33"),
+            fabrikam(4, 7, 8),
+            contoso(5, 8, 9),
+            code(6, 9, 12, "m33"),
+            contoso(7, 12, 13),
+            fabrikam(8, 13, 14),
+            code(9, 14, 17, "m33"),
+            contoso(10, 17, 18),
+        ];
+        let accumulated = SegParams {
+            accumulate: true,
+            ..SegParams::default()
+        };
+        let segs = segment(&spans, &[], &accumulated);
+        assert_eq!(ranges(&segs), [(0, 18), (0, 18)], "{segs:?}");
+        let inc = &segs[0];
+        let strand = &segs[1];
+        let nyc = Key::Anchor(AnchorKind::Place, "contoso".into());
+        assert!(
+            inc.keys
+                .contains_key(&Key::Anchor(AnchorKind::Branch, "m33".into()))
+        );
+        assert!(!inc.keys.contains_key(&nyc));
+        assert!(strand.keys.contains_key(&nyc));
+        assert_eq!(strand.ids, [2, 5, 7, 10]);
+        assert!((strand.minutes - 4.0).abs() < 1e-9);
+        assert!((strand.share - 4.0 / 18.0).abs() < 1e-9, "{}", strand.share);
+        // The incumbent keeps the fabrikam-web minutes (under the bar) as time.
+        assert!((inc.minutes - 14.0).abs() < 1e-9, "{}", inc.minutes);
+        assert!((inc.share + strand.share - 1.0).abs() < 1e-9);
+        assert!(inc.ids.contains(&4) && inc.ids.contains(&8));
+        let segs = segment(&spans, &[], &SegParams::default());
+        assert_eq!(ranges(&segs), [(0, 18)]);
+        assert_eq!(segs[0].share, 1.0);
+        // Scored: the strand is its own row with its own evidence; the
+        // incumbent lands on the m33 task without the contoso anchors.
+        let mut minutes = HashMap::new();
+        minutes.insert(Key::Anchor(AnchorKind::Branch, "m33".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 30.0);
+        let profiles = vec![Profile {
+            task_id: 7,
+            minutes,
+            declared: Default::default(),
+            last_ts: Some(0),
+            vec: None,
+        }];
+        let out = decide(
+            &spans,
+            0,
+            18 * M,
+            &profiles,
+            &HashMap::from([(7, "m33 work".to_owned())]),
+            &HashMap::from([(7, Some("chronicle".to_owned()))]),
+            &[],
+            &Params::default(),
+            &SegParams {
+                new_task_min: 4.0,
+                ..accumulated
+            },
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(7));
+        assert!((out[0].share - 14.0 / 18.0).abs() < 1e-9);
+        assert_eq!(out[0].kind, "author");
+        assert!(
+            matches!(&out[1].target, Target::New { project: Some(p), .. } if p == "contoso"),
+            "{:?}",
+            out[1].target
+        );
+        assert!((out[1].share - 4.0 / 18.0).abs() < 1e-9);
+        assert_eq!((out[1].lo, out[1].hi), (0, 18 * M));
+    }
+
     #[test]
     fn a_swapped_strong_anchor_cuts_at_once() {
         let spans = vec![
@@ -1803,6 +2112,7 @@ mod tests {
             runner_up: None,
             kind: kind.into(),
             share: 1.0,
+            strand: false,
         }
     }
 
