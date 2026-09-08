@@ -17,6 +17,7 @@ pub mod proposals;
 pub mod replay;
 pub mod report;
 pub mod segmenter;
+pub mod self_score;
 pub mod sessionizer;
 pub mod storage;
 pub mod timeref;

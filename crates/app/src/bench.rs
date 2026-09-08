@@ -1610,6 +1610,40 @@ pub(crate) fn backfill_sessions(data_dir: &Path, since: Option<&str>) -> anyhow:
 /// `chronicle backfill-notes`: one pass of the notes reader over every
 /// `git_repos` entry, rows upserted by their `(kind, ext_id)` like the
 /// daemon's own (m32 chunk 5).
+/// `chronicle self-score` (m32 chunk 6): recompute the last seven days now
+/// and print them, one row per day plus the fold `chronicle status` shows.
+pub(crate) fn self_score(data_dir: &Path) -> anyhow::Result<()> {
+    use chronicle_core::self_score::{self, Summary, fmt_ms, pct};
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let rows = self_score::refresh(&conn, Timestamp::now(), &TimeZone::system())?;
+    println!(
+        "day         coverage  active  uncaptured  underived  minted  merged  placements  ejects  renames  verdicts  wrong  confident  conf-wrong"
+    );
+    for r in &rows {
+        println!(
+            "{}  {:>8}  {:>6}  {:>10}  {:>9}  {:>6}  {:>6}  {:>10}  {:>6}  {:>7}  {:>8}  {:>5}  {:>9}  {:>10}",
+            r.day,
+            pct(r.placed_ms.min(r.active_ms), r.active_ms),
+            fmt_ms(r.active_ms),
+            fmt_ms(r.uncaptured_ms),
+            fmt_ms(r.underived_ms),
+            r.minted,
+            r.merged,
+            r.placements,
+            r.ejects,
+            r.renames,
+            r.verdicts,
+            r.wrong,
+            r.confident,
+            r.confident_wrong
+        );
+    }
+    for line in Summary::of(&rows).lines() {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 pub(crate) fn backfill_notes(data_dir: &Path) -> anyhow::Result<()> {
     use chronicle_capture::notes::NotesProvider;
     use chronicle_core::{config::expand_home, storage};

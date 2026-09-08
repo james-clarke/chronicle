@@ -120,6 +120,8 @@ pub(crate) struct DbStatus {
     /// Today's ledger gaps and captured-but-underived time (m32 chunk 0).
     pub(crate) not_captured_today_ms: i64,
     pub(crate) underived_today_ms: i64,
+    /// The daemon's daily self-score rows, oldest first (m32 chunk 6).
+    pub(crate) self_score: Vec<chronicle_core::storage::SelfScore>,
 }
 
 pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
@@ -133,6 +135,7 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         pending_batches,
         not_captured_today_ms,
         underived_today_ms,
+        self_score,
     } = db;
     let mut out = String::new();
     match liveness {
@@ -202,6 +205,19 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
             fmt_secs((*underived_today_ms / 1000) as u64)
         ));
     }
+    if !self_score.is_empty() {
+        let s = chronicle_core::self_score::Summary::of(self_score);
+        let when = local(s.computed_ts)
+            .map(|t| t.strftime("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "  self-score, {} days to {} (computed {when}):\n",
+            s.days, s.last_day
+        ));
+        for line in s.lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+    }
     out.push_str(&format!(
         "  model: {}\n",
         model_file.as_deref().unwrap_or("not downloaded")
@@ -259,6 +275,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
         pending_batches: chronicle_core::storage::pending_batch_count(&conn)?,
         not_captured_today_ms,
         underived_today_ms: chronicle_core::storage::underived_ms(&conn, today_ms, now_ms)?,
+        self_score: chronicle_core::storage::self_scores(&conn, chronicle_core::self_score::DAYS)?,
     };
 
     if json {
@@ -280,6 +297,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             "pending_batches": db.pending_batches,
             "not_captured_today_ms": db.not_captured_today_ms,
             "underived_today_ms": db.underived_today_ms,
+            "self_score": db.self_score,
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {

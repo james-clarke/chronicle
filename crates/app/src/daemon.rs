@@ -537,6 +537,11 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                         tracing::error!("segmenter daily housekeeping failed: {e}");
                     }
                 }
+                match chronicle_core::self_score::daily(&conn, now, &TimeZone::system()) {
+                    Ok(true) => tracing::info!("self-score refreshed"),
+                    Ok(false) => {}
+                    Err(e) => tracing::error!("self-score failed: {e}"),
+                }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
                 maybe_enqueue_standup(&conn, now);

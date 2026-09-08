@@ -52,6 +52,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/024_daemon_runs.sql")),
         M::up(include_str!("../migrations/025_presence.sql")),
         M::up(include_str!("../migrations/026_interval_share.sql")),
+        M::up(include_str!("../migrations/027_self_score.sql")),
     ])
 });
 
@@ -3689,6 +3690,167 @@ pub fn verdict_outcomes(
     Ok(rows)
 }
 
+/// One local day of the derivation's self-score (m32 chunk 6): what capture
+/// saw, what derivation placed, and what the user undid. Counts and
+/// milliseconds only; the rates are the reader's (`self_score::Summary`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SelfScore {
+    pub day: String,
+    pub computed_ts: i64,
+    pub active_ms: i64,
+    pub uncaptured_ms: i64,
+    pub underived_ms: i64,
+    pub placed_ms: i64,
+    pub minted: i64,
+    pub merged: i64,
+    pub placements: i64,
+    pub ejects: i64,
+    pub renames: i64,
+    pub verdicts: i64,
+    pub wrong: i64,
+    pub confident: i64,
+    pub confident_wrong: i64,
+}
+
+/// The DB's side of a self-score row for `[lo, hi)`: everything but the
+/// day, the stamp and the ledger gaps (those need the zone and the clock,
+/// `self_score::score_day` adds them).
+pub fn self_score_counts(conn: &Connection, lo: i64, hi: i64) -> Result<SelfScore, StorageError> {
+    let active_ms: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)), 0) FROM spans
+         WHERE kind != 'afk' AND end_ts > ?1 AND start_ts < ?2",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
+    let placed: f64 = conn.query_row(
+        "SELECT COALESCE(SUM((MIN(end_ts, ?2) - MAX(start_ts, ?1)) * share), 0) FROM intervals
+         WHERE end_ts > ?1 AND start_ts < ?2",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
+    // A derived task born in the window: still in `tasks`, or gone with a
+    // merge that kept its id and birth on the correction (a merge of a task
+    // that survived, having corrections of its own, is in both; the UNION
+    // counts it once).
+    let minted: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (
+             SELECT id FROM tasks WHERE source='derived' AND created_ts >= ?1 AND created_ts < ?2
+             UNION
+             SELECT src_task_id FROM corrections
+             WHERE kind='merge' AND src_created_ts >= ?1 AND src_created_ts < ?2)",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
+    let merged: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT src_task_id) FROM corrections
+         WHERE kind='merge' AND src_created_ts >= ?1 AND src_created_ts < ?2
+           AND ts - src_created_ts < 86400000",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
+    let placements: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM intervals
+         WHERE source != 'user' AND created_ts >= ?1 AND created_ts < ?2",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
+    let count_kind = |kind: &str| -> Result<i64, rusqlite::Error> {
+        conn.query_row(
+            "SELECT COUNT(*) FROM corrections WHERE kind=?3 AND ts >= ?1 AND ts < ?2",
+            params![lo, hi, kind],
+            |r| r.get(0),
+        )
+    };
+    let (verdicts, wrong, confident, confident_wrong): (i64, i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(outcome = 'wrong'), 0),
+                COALESCE(SUM(confident != 0), 0),
+                COALESCE(SUM(confident != 0 AND outcome = 'wrong'), 0)
+         FROM verdict_log WHERE ts >= ?1 AND ts < ?2 AND outcome IS NOT NULL",
+        [lo, hi],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    Ok(SelfScore {
+        active_ms,
+        underived_ms: underived_ms(conn, lo, hi)?,
+        placed_ms: placed.round() as i64,
+        minted,
+        merged,
+        placements,
+        ejects: count_kind("eject")?,
+        renames: count_kind("rename")?,
+        verdicts,
+        wrong,
+        confident,
+        confident_wrong,
+        ..SelfScore::default()
+    })
+}
+
+pub fn upsert_self_score(conn: &Connection, s: &SelfScore) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO self_score (day, computed_ts, active_ms, uncaptured_ms, underived_ms, placed_ms,
+             minted, merged, placements, ejects, renames, verdicts, wrong, confident, confident_wrong)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(day) DO UPDATE SET computed_ts=excluded.computed_ts,
+             active_ms=excluded.active_ms, uncaptured_ms=excluded.uncaptured_ms,
+             underived_ms=excluded.underived_ms, placed_ms=excluded.placed_ms,
+             minted=excluded.minted, merged=excluded.merged, placements=excluded.placements,
+             ejects=excluded.ejects, renames=excluded.renames, verdicts=excluded.verdicts,
+             wrong=excluded.wrong, confident=excluded.confident,
+             confident_wrong=excluded.confident_wrong",
+        params![
+            s.day,
+            s.computed_ts,
+            s.active_ms,
+            s.uncaptured_ms,
+            s.underived_ms,
+            s.placed_ms,
+            s.minted,
+            s.merged,
+            s.placements,
+            s.ejects,
+            s.renames,
+            s.verdicts,
+            s.wrong,
+            s.confident,
+            s.confident_wrong
+        ],
+    )?;
+    Ok(())
+}
+
+/// The newest `n` self-score rows, oldest first.
+pub fn self_scores(conn: &Connection, n: usize) -> Result<Vec<SelfScore>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT day, computed_ts, active_ms, uncaptured_ms, underived_ms, placed_ms,
+                minted, merged, placements, ejects, renames, verdicts, wrong, confident, confident_wrong
+         FROM (SELECT * FROM self_score ORDER BY day DESC LIMIT ?1) ORDER BY day",
+    )?;
+    let rows = stmt
+        .query_map([n as i64], |r| {
+            Ok(SelfScore {
+                day: r.get(0)?,
+                computed_ts: r.get(1)?,
+                active_ms: r.get(2)?,
+                uncaptured_ms: r.get(3)?,
+                underived_ms: r.get(4)?,
+                placed_ms: r.get(5)?,
+                minted: r.get(6)?,
+                merged: r.get(7)?,
+                placements: r.get(8)?,
+                ejects: r.get(9)?,
+                renames: r.get(10)?,
+                verdicts: r.get(11)?,
+                wrong: r.get(12)?,
+                confident: r.get(13)?,
+                confident_wrong: r.get(14)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 /// Rebuild the `task_evidence` rows of `task_ids` only, from the full
 /// history as of `now_ts` (m30 chunk 3: the live accrual after a segment
 /// write or a correction). Returns the rows written.
@@ -4467,11 +4629,19 @@ pub fn merge_task(
     };
     let (old_label, old_project) = ident(from_task)?;
     let (new_label, new_project) = ident(to_task)?;
+    // The source's birth, kept on the correction because the row itself may
+    // go with the merge (self-score: minted, then merged within a day). A
+    // user task was never minted, so it carries no birth.
+    let src_created_ts: Option<i64> = tx.query_row(
+        "SELECT CASE WHEN source='derived' THEN created_ts END FROM tasks WHERE id=?1",
+        [from_task],
+        |r| r.get(0),
+    )?;
     // Snapshot before the intervals move — afterwards the source has none.
     let ctx = task_span_ctx(&tx, from_task)?;
     tx.execute(
-        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'merge')",
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, src_task_id, src_created_ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'merge', ?8, ?9)",
         params![
             ts_to_ms(ts),
             to_task,
@@ -4479,7 +4649,9 @@ pub fn merge_task(
             new_label,
             old_project,
             new_project,
-            ctx
+            ctx,
+            from_task,
+            src_created_ts
         ],
     )?;
     tx.execute(

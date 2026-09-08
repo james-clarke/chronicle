@@ -66,6 +66,8 @@ pub(super) struct PipelineInfo {
     /// `(start_ts, end_ts, label, reason)` in the tail.
     pub placements: Vec<(i64, i64, String, String)>,
     pub last_batch: Option<i64>,
+    /// The daemon's daily self-score rows, oldest first (m32 chunk 6).
+    pub scores: Vec<chronicle_core::storage::SelfScore>,
 }
 
 impl PipelineInfo {
@@ -113,7 +115,73 @@ impl PipelineInfo {
                 .ok()
                 .flatten()
                 .and_then(|v| v.parse().ok()),
+            scores: storage::self_scores(conn, chronicle_core::self_score::DAYS)
+                .unwrap_or_default(),
         }
+    }
+}
+
+/// Settings › Derivation › Self-score (m32 chunk 6): one row per day as the
+/// daemon scored it, then the week folded into the lines `chronicle status`
+/// prints. Rates are computed here; the rows hold counts.
+fn self_score_card(ui: &mut egui::Ui, rows: &[chronicle_core::storage::SelfScore]) {
+    use chronicle_core::self_score::{Summary, fmt_ms, pct};
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Self-score")
+            .strong()
+            .color(theme::palette::TEXT),
+    );
+    ui.weak("per day: placed share of active time, missing (not captured / not derived), tasks minted and merged within a day, ejects over placements, wrong over closed verdicts (the confident pair after); scored once a day");
+    if rows.is_empty() {
+        ui.weak("no rows yet (the daemon scores the week on its first tick of the day)");
+        return;
+    }
+    // Inside its own horizontal scroll so a wide week cannot widen the
+    // sections below it (an over-wide row widens every sibling's column).
+    egui::ScrollArea::horizontal()
+        .id_salt("settings_self_score_scroll")
+        .show(ui, |ui| {
+            egui::Grid::new("settings_self_score")
+                .num_columns(6)
+                .spacing([8.0, 4.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    for head in [
+                        "day",
+                        "placed",
+                        "missing",
+                        "minted/merged",
+                        "ejects/placed",
+                        "wrong/closed",
+                    ] {
+                        ui.weak(head);
+                    }
+                    ui.end_row();
+                    for r in rows {
+                        ui.label(&r.day[5..]);
+                        ui.label(theme::num(format!(
+                            "{} of {}",
+                            pct(r.placed_ms.min(r.active_ms), r.active_ms),
+                            fmt_ms(r.active_ms)
+                        )));
+                        ui.label(theme::num(format!(
+                            "{}/{}",
+                            fmt_ms(r.uncaptured_ms),
+                            fmt_ms(r.underived_ms)
+                        )));
+                        ui.label(theme::num(format!("{}/{}", r.minted, r.merged)));
+                        ui.label(theme::num(format!("{}/{}", r.ejects, r.placements)));
+                        ui.label(theme::num(format!(
+                            "{}/{} ({}/{})",
+                            r.wrong, r.verdicts, r.confident_wrong, r.confident
+                        )));
+                        ui.end_row();
+                    }
+                });
+        });
+    for line in Summary::of(rows).lines() {
+        ui.weak(line);
     }
 }
 
@@ -667,6 +735,9 @@ impl TimelineApp {
                                     ui.end_row();
                                 });
                             pipeline_card(ui, pipeline, &tz, panel, conn, &data_dir);
+                            if let Some(info) = pipeline {
+                                self_score_card(ui, &info.scores);
+                            }
 
                             section(ui, "Standup & journal", false, jump);
                             egui::Grid::new("settings_journal")

@@ -111,6 +111,10 @@ enum Cmd {
     /// on start.
     #[command(hide = true)]
     BackfillNotes,
+    /// Internal: recompute the last seven days' self-score rows now (the
+    /// daemon does it once a day) and print them (m32 chunk 6).
+    #[command(hide = true)]
+    SelfScore,
     /// Internal: recompute span anchors (m30) for spans since a local day.
     #[command(hide = true)]
     BackfillAnchors {
@@ -368,6 +372,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
         Cmd::BackfillSessions { since } => bench::backfill_sessions(&data_dir, since.as_deref()),
         Cmd::BackfillNotes => bench::backfill_notes(&data_dir),
+        Cmd::SelfScore => bench::self_score(&data_dir),
         Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
         Cmd::BackfillEmbeddings => bench::backfill_embeddings(&data_dir),
         Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),
