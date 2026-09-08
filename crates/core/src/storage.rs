@@ -49,6 +49,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/021_interval_kind.sql")),
         M::up(include_str!("../migrations/022_embeddings.sql")),
         M::up(include_str!("../migrations/023_ai_job_usage.sql")),
+        M::up(include_str!("../migrations/024_daemon_runs.sql")),
     ])
 });
 
@@ -1019,6 +1020,135 @@ pub fn reset_stale_running(conn: &Connection) -> Result<usize, StorageError> {
         [],
     )?;
     Ok(n + m)
+}
+
+// ------------------------------------------------------------ capture ledger
+
+/// One stretch of capture (m32 chunk 0): `end_ts` is NULL while the daemon
+/// runs; `reason` says why it ended (`shutdown`, `provider exit`, `lock`,
+/// `sleep`, `crash`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DaemonRun {
+    pub id: i64,
+    pub start_ts: i64,
+    pub end_ts: Option<i64>,
+    pub reason: Option<String>,
+}
+
+pub fn open_run(conn: &Connection, start_ms: i64) -> Result<i64, StorageError> {
+    conn.execute("INSERT INTO daemon_runs (start_ts) VALUES (?1)", [start_ms])?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn close_run(
+    conn: &Connection,
+    id: i64,
+    end_ms: i64,
+    reason: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE daemon_runs SET end_ts = MAX(start_ts, ?2), reason = ?3 WHERE id = ?1",
+        params![id, end_ms, reason],
+    )?;
+    Ok(())
+}
+
+/// Rows a crash left open close at the last event (never before their own
+/// start) with reason `crash`. Runs at daemon start, before the new row.
+pub fn close_crashed_runs(
+    conn: &Connection,
+    last_event_ms: Option<i64>,
+) -> Result<usize, StorageError> {
+    Ok(conn.execute(
+        "UPDATE daemon_runs SET end_ts = MAX(start_ts, COALESCE(?1, start_ts)), reason = 'crash'
+         WHERE end_ts IS NULL",
+        [last_event_ms],
+    )?)
+}
+
+/// Ledger rows touching `[lo, hi)`, oldest first, plus the ledger's first
+/// start: nothing before that is a gap, it is simply unrecorded.
+pub fn runs_for_report(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<(Option<i64>, Vec<DaemonRun>), StorageError> {
+    let first: Option<i64> =
+        conn.query_row("SELECT MIN(start_ts) FROM daemon_runs", [], |r| r.get(0))?;
+    let mut stmt = conn.prepare(
+        "SELECT id, start_ts, end_ts, reason FROM daemon_runs
+         WHERE start_ts < ?2 AND (end_ts IS NULL OR end_ts > ?1)
+         ORDER BY start_ts",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok(DaemonRun {
+            id: r.get(0)?,
+            start_ts: r.get(1)?,
+            end_ts: r.get(2)?,
+            reason: r.get(3)?,
+        })
+    })?;
+    Ok((first, rows.collect::<Result<Vec<_>, _>>()?))
+}
+
+/// Non-AFK span time inside `[lo, hi)` that no `done` batch covers yet: the
+/// unbatched tail plus batches still pending or failed.
+pub fn underived_ms(conn: &Connection, lo: i64, hi: i64) -> Result<i64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(MIN(s.end_ts, ?2) - MAX(s.start_ts, ?1)), 0)
+         FROM spans s LEFT JOIN batches b ON b.id = s.batch_id
+         WHERE s.kind != 'afk' AND s.end_ts > ?1 AND s.start_ts < ?2
+           AND (s.batch_id IS NULL OR b.status != 'done')",
+        [lo, hi],
+        |r| r.get(0),
+    )?)
+}
+
+/// A focus span whose stream of focus/title/afk events stops for this long
+/// before its end was not watched: the AFK poller emits idle within
+/// `afk_close_secs` of the last input, so an hour without any event while a
+/// span stays open is a suspend the poller slept through (the m32 chunk 0
+/// measurement on the live DB: real quiet stretches top out under 50
+/// minutes, the three above an hour were nights).
+pub const QUIET_CLAMP_SECS: i64 = 3600;
+
+/// Startup clamp: every non-AFK span with a quiet stretch over
+/// [`QUIET_CLAMP_SECS`] is cut at its last event plus `afk_close_secs`.
+/// Idempotent; batched spans included (their batch keeps its bounds).
+pub fn clamp_quiet_spans(
+    conn: &mut Connection,
+    afk_close_secs: u32,
+) -> Result<usize, StorageError> {
+    let grace = i64::from(afk_close_secs) * 1000;
+    let quiet = QUIET_CLAMP_SECS * 1000;
+    let tx = conn.transaction()?;
+    let cuts: Vec<(i64, i64)> = {
+        let mut stmt = tx.prepare(
+            "SELECT s.id, s.end_ts, COALESCE((SELECT MAX(e.ts) FROM events e
+                 WHERE e.ts >= s.start_ts AND e.ts < s.end_ts
+                   AND e.kind IN ('focus', 'title', 'afk')), s.start_ts)
+             FROM spans s WHERE s.kind != 'afk' AND s.end_ts - s.start_ts > ?1",
+        )?;
+        let rows = stmt.query_map([quiet], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.filter_map(|r| r.ok())
+            .filter(|(_, end, last)| end - last > quiet)
+            .map(|(id, _, last)| (id, last + grace))
+            .collect()
+    };
+    for (id, cut) in &cuts {
+        tx.execute(
+            "UPDATE spans SET end_ts = ?2 WHERE id = ?1",
+            params![id, cut],
+        )?;
+    }
+    tx.commit()?;
+    Ok(cuts.len())
 }
 
 const ELIGIBLE: &str = "status IN ('pending','failed') AND attempts < 2";
@@ -5589,5 +5719,102 @@ mod tests {
             .query_row("SELECT count(*) FROM task_evidence", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total as usize, n2);
+    }
+
+    // m32 chunk 0: a span with over an hour of no focus/title/afk event is
+    // cut at its last event plus afk_close_secs; shorter quiet stretches and
+    // AFK spans stay. Idempotent.
+    #[test]
+    fn clamp_quiet_spans_cuts_unwatched_stretches() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let m = 60_000i64;
+        for (ts, kind) in [(0, "focus"), (10 * m, "title"), (200 * m, "focus")] {
+            conn.execute(
+                "INSERT INTO events (ts, kind, app, title) VALUES (?1, ?2, 'Terminator', 't')",
+                rusqlite::params![ts, kind],
+            )
+            .unwrap();
+        }
+        for (id, lo, hi, kind) in [
+            (1, 0, 90 * m, "focus"),        // quiet 80 min: cut to 10 min + 2 min
+            (2, 100 * m, 150 * m, "focus"), // quiet 50 min: kept
+            (3, 150 * m, 400 * m, "afk"),   // never touched
+            (4, 200 * m, 900 * m, "context-switching"), // quiet 700 min: cut
+        ] {
+            conn.execute(
+                "INSERT INTO spans (id, start_ts, end_ts, app, title, kind) VALUES (?1, ?2, ?3, '', '', ?4)",
+                rusqlite::params![id, lo, hi, kind],
+            )
+            .unwrap();
+        }
+        assert_eq!(super::clamp_quiet_spans(&mut conn, 120).unwrap(), 2);
+        assert_eq!(super::clamp_quiet_spans(&mut conn, 120).unwrap(), 0);
+        let ends: Vec<i64> = conn
+            .prepare("SELECT end_ts FROM spans ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ends, vec![12 * m, 150 * m, 400 * m, 202 * m]);
+    }
+
+    // m32 chunk 0: the ledger. A crash leaves end_ts NULL; the next start
+    // closes it at the last event, never before the row's own start.
+    #[test]
+    fn ledger_rows_and_crash_close() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let a = super::open_run(&conn, 100).unwrap();
+        super::close_run(&conn, a, 900, "shutdown").unwrap();
+        let b = super::open_run(&conn, 1000).unwrap();
+        let c = super::open_run(&conn, 5000).unwrap();
+        assert_eq!(super::close_crashed_runs(&conn, Some(3000)).unwrap(), 2);
+        let (_, runs) = super::runs_for_report(&conn, 0, 10_000).unwrap();
+        let ends: Vec<(i64, Option<i64>, Option<String>)> = runs
+            .iter()
+            .map(|r| (r.id, r.end_ts, r.reason.clone()))
+            .collect();
+        assert_eq!(
+            ends,
+            vec![
+                (a, Some(900), Some("shutdown".into())),
+                (b, Some(3000), Some("crash".into())),
+                (c, Some(5000), Some("crash".into())),
+            ]
+        );
+        // Range filter: rows ending before `lo` drop out; the first start is
+        // reported regardless.
+        let (first, later) = super::runs_for_report(&conn, 950, 10_000).unwrap();
+        assert_eq!(first, Some(100));
+        assert_eq!(later.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b, c]);
+    }
+
+    // m32 chunk 0: captured time is "not yet derived" until a done batch
+    // covers it; AFK never counts and the range clips.
+    #[test]
+    fn underived_ms_counts_spans_outside_done_batches() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (1, 0, 100, 'done'), (2, 100, 200, 'pending')",
+            [],
+        )
+        .unwrap();
+        for (lo, hi, kind, batch) in [
+            (0, 100, "focus", Some(1)),
+            (100, 150, "focus", Some(2)),
+            (150, 200, "afk", Some(2)),
+            (200, 300, "focus", None),
+        ] {
+            conn.execute(
+                "INSERT INTO spans (start_ts, end_ts, app, title, kind, batch_id) VALUES (?1, ?2, '', '', ?3, ?4)",
+                rusqlite::params![lo, hi, kind, batch],
+            )
+            .unwrap();
+        }
+        assert_eq!(super::underived_ms(&conn, 0, 300).unwrap(), 150);
+        assert_eq!(super::underived_ms(&conn, 0, 250).unwrap(), 100);
     }
 }
