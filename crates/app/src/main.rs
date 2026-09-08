@@ -96,6 +96,16 @@ enum Cmd {
     /// Embed every focus span that has no vector yet with the configured
     /// `embed_model` (m30 chunk 6), then rebuild the task centroids.
     BackfillEmbeddings,
+    /// Internal: re-read AI session transcripts modified since a local day
+    /// and replace their rows (m32 chunk 2: prompt minutes and titles for
+    /// rows captured before the collector kept them). Run
+    /// `backfill-anchors` after it.
+    #[command(hide = true)]
+    BackfillSessions {
+        /// Transcripts modified on or after this local day; default: everything.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: Option<String>,
+    },
     /// Internal: recompute span anchors (m30) for spans since a local day.
     #[command(hide = true)]
     BackfillAnchors {
@@ -342,6 +352,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::AiJob { id } => ai_job_worker(&data_dir, id),
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
+        Cmd::BackfillSessions { since } => bench::backfill_sessions(&data_dir, since.as_deref()),
         Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
         Cmd::BackfillEmbeddings => bench::backfill_embeddings(&data_dir),
         Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),

@@ -1378,13 +1378,9 @@ pub(crate) fn backfill_coalesce(data_dir: &Path, since: &str, dry_run: bool) -> 
     Ok(())
 }
 
-/// `chronicle backfill-anchors`: recompute anchors for every focus span
-/// since `since` (a local day) or all of them.
-pub(crate) fn backfill_anchors(data_dir: &Path, since: Option<&str>) -> anyhow::Result<()> {
-    use chronicle_core::storage;
-    let config = Config::load(&data_dir.join("config.toml"))?;
-    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
-    let lo = match since {
+/// `since` as a local day's start in UTC ms; `None` is the epoch.
+fn since_ms(since: Option<&str>) -> anyhow::Result<i64> {
+    Ok(match since {
         Some(day) => {
             let day: civil::Date = day.parse().with_context(|| format!("bad date {day:?}"))?;
             day.to_zoned(TimeZone::system())?
@@ -1392,7 +1388,43 @@ pub(crate) fn backfill_anchors(data_dir: &Path, since: Option<&str>) -> anyhow::
                 .as_millisecond()
         }
         None => 0,
-    };
+    })
+}
+
+/// `chronicle backfill-sessions`: re-read every transcript under
+/// `ai_session_dirs` modified since `since` (a local day) and replace its
+/// `ai_session` rows (m32 chunk 2). The running daemon re-upserts the
+/// sessions it still tracks by the same ids, so the two agree.
+pub(crate) fn backfill_sessions(data_dir: &Path, since: Option<&str>) -> anyhow::Result<()> {
+    use chronicle_capture::ai_sessions::replay_transcripts;
+    use chronicle_core::{config::expand_home, storage};
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let dirs: Vec<PathBuf> = config
+        .ai_session_dirs
+        .iter()
+        .map(|p| expand_home(p))
+        .collect();
+    let lo = since_ms(since)?;
+    let since = std::time::UNIX_EPOCH + std::time::Duration::from_millis(lo.max(0) as u64);
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let mut sessions = 0;
+    let mut rows = 0;
+    for (id, events) in replay_transcripts(&dirs, since) {
+        storage::replace_session(&mut conn, &id, &events)?;
+        sessions += 1;
+        rows += events.len();
+    }
+    println!("replaced {sessions} sessions ({rows} rows)");
+    Ok(())
+}
+
+/// `chronicle backfill-anchors`: recompute anchors for every focus span
+/// since `since` (a local day) or all of them.
+pub(crate) fn backfill_anchors(data_dir: &Path, since: Option<&str>) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let lo = since_ms(since)?;
     let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
     let n = storage::anchor_spans(&mut conn, lo, i64::MAX, &re)?;
     println!("anchored {n} spans");
