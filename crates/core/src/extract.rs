@@ -383,6 +383,7 @@ pub fn extract(app: &str, title: &str, url: Option<&str>, ticket_re: &Regex) -> 
 /// anything.
 pub fn from_activity(
     app: &str,
+    title: &str,
     start_ms: i64,
     end_ms: i64,
     own: &[Anchor],
@@ -411,41 +412,69 @@ pub fn from_activity(
             || e.repo.is_empty()
             || own_places.iter().any(|p| p.eq_ignore_ascii_case(&e.repo))
     };
-    // Concurrent sessions in one place: the span belongs to the one whose
-    // transcript was written to most recently before or during it. Rows
-    // captured before the collector recorded write times carry no
-    // `writes`, and for those every overlapping session still attaches.
+    // Concurrent sessions in one place (m32 chunk 2): the span belongs to
+    // the session that owned its title (the tool writes the conversation's
+    // name into the terminal title, and the title stays up after the
+    // transcript's last write, so a titled session need not overlap); else
+    // to the overlapping one a prompt was typed into most recently at or
+    // before the span's end; else to the one whose transcript was written
+    // to most recently before or during it. Rows captured before the
+    // collector recorded any of those carry nothing, and for those every
+    // overlapping session still attaches.
     let session_ok = |e: &ActivityEvent| {
         e.kind == ActivityKind::AiSession && overlaps(e) && hosts_tool && same_place(e)
     };
-    let chosen_session = nearest_writer(events, session_ok, end_ms);
-    // A bare terminal's place is where its shell was last seen, not every
-    // directory it visited while the span was open.
+    let want = clean_title(title);
+    let titled = |e: &ActivityEvent| {
+        !want.is_empty()
+            && detail_strings(e.detail.as_deref(), "titles")
+                .iter()
+                .any(|t| clean_title(t).eq_ignore_ascii_case(&want))
+    };
+    let title_ok = |e: &ActivityEvent| {
+        e.kind == ActivityKind::AiSession
+            && hosts_tool
+            && same_place(e)
+            && e.ts.as_millisecond() < end_ms
+            && titled(e)
+    };
+    let chosen_session = if events.iter().any(title_ok) {
+        nearest_prompter(events, title_ok, end_ms)
+            .or_else(|| nearest_writer(events, title_ok, end_ms))
+            .or_else(|| events.iter().position(title_ok))
+    } else {
+        nearest_prompter(events, session_ok, end_ms)
+            .or_else(|| nearest_writer(events, session_ok, end_ms))
+    };
+    // A bare terminal's place is where its shell is, not every directory
+    // it visited while the span was open: a cwd row still being refreshed
+    // at the span's end, the latest arrival among those. With none alive
+    // the span stays unattached rather than borrowing the place a shell
+    // left earlier (m32 chunk 2); a one-shot shell fold still counts.
     let shell_ok = |e: &ActivityEvent| {
         matches!(e.kind, ActivityKind::Shell | ActivityKind::Cwd)
             && overlaps(e)
             && fam == Family::Terminal
             && same_place(e)
     };
+    let alive = |e: &ActivityEvent| {
+        e.kind == ActivityKind::Shell || e.end_ts.unwrap_or(e.ts).as_millisecond() >= end_ms
+    };
     let chosen_shell = if own_places.is_empty() {
         events
             .iter()
             .enumerate()
-            .filter(|(_, e)| shell_ok(e))
-            .max_by_key(|(_, e)| {
-                // A row still being refreshed at the span's end is where
-                // the shell is; among those the latest arrival wins. With
-                // none alive, the place the shell left last.
-                let lo = e.ts.as_millisecond();
-                let hi = e.end_ts.unwrap_or(e.ts).as_millisecond();
-                let alive = hi >= end_ms;
-                (alive, if alive { lo } else { hi })
-            })
+            .filter(|(_, e)| shell_ok(e) && alive(e))
+            .max_by_key(|(_, e)| e.ts)
             .map(|(i, _)| i)
     } else {
         None
     };
-    for (i, e) in events.iter().enumerate().filter(|(_, e)| overlaps(e)) {
+    for (i, e) in events
+        .iter()
+        .enumerate()
+        .filter(|(i, e)| overlaps(e) || chosen_session == Some(*i))
+    {
         match e.kind {
             ActivityKind::AiSession if hosts_tool && same_place(e) => {
                 if chosen_session.is_some_and(|c| c != i) {
@@ -455,11 +484,8 @@ pub fn from_activity(
                     out.push(Anchor::new(AnchorKind::Session, id.clone()));
                 }
                 push_scope(&mut out, &e.repo, &e.branch, ticket_re);
-                for p in detail_strings(e.detail.as_deref(), "paths")
-                    .iter()
-                    .take(MAX_PATH_DOCS)
-                {
-                    if let Some(doc) = doc_value(basename(p)) {
+                for p in session_docs(e.detail.as_deref(), start_ms, end_ms) {
+                    if let Some(doc) = doc_value(basename(&p)) {
                         out.push(Anchor::new(AnchorKind::Doc, doc));
                     }
                 }
@@ -506,7 +532,7 @@ pub fn from_activity(
             .filter(|e| places.iter().any(|p| p.eq_ignore_ascii_case(&e.repo)))
             .max_by_key(|e| e.ts);
         if let Some(e) = latest {
-            push_scope(&mut out, "", &e.branch, ticket_re);
+            push_branch(&mut out, &e.repo, &e.branch, ticket_re);
         }
     }
     dedup(out)
@@ -521,6 +547,54 @@ pub fn merge(own: Vec<Anchor>, more: Vec<Anchor>) -> Vec<Anchor> {
 }
 
 const MAX_PATH_DOCS: usize = 8;
+/// How far before a span's start a session's file touches still name its
+/// documents: the tool edits, then the person looks at the terminal.
+const DOC_GRACE_MS: i64 = 15 * 60_000;
+
+/// The files a session touched around `[start_ms, end_ms]`, most recent
+/// first, at most `MAX_PATH_DOCS` (m32 chunk 2): touches at or before the
+/// span's end and within `DOC_GRACE_MS` of its start, or, with none that
+/// close, the files of the latest touch minute before it. A session that
+/// worked all day names the files it was on, not the first eight it
+/// opened. Rows without `touches` (captured before the collector kept
+/// them) fall back to the first paths.
+fn session_docs(detail: Option<&str>, start_ms: i64, end_ms: i64) -> Vec<String> {
+    let paths = detail_strings(detail, "paths");
+    let Some(detail) = detail else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
+        return Vec::new();
+    };
+    let Some(touches) = v.get("touches").and_then(|t| t.as_array()) else {
+        return paths.into_iter().take(MAX_PATH_DOCS).collect();
+    };
+    let mut touches: Vec<(i64, usize)> = touches
+        .iter()
+        .filter_map(|t| {
+            let t = t.as_array()?;
+            Some((t.first()?.as_i64()?, t.get(1)?.as_u64()? as usize))
+        })
+        .filter(|&(m, _)| m <= end_ms)
+        .collect();
+    touches.sort_by_key(|&(m, i)| (std::cmp::Reverse(m), i));
+    let Some(&(latest, _)) = touches.first() else {
+        return Vec::new();
+    };
+    let lo = (start_ms - DOC_GRACE_MS).min(latest);
+    let mut out: Vec<String> = Vec::new();
+    for (m, i) in touches {
+        if m < lo || out.len() >= MAX_PATH_DOCS {
+            break;
+        }
+        if let Some(p) = paths.get(i)
+            && !out.contains(p)
+        {
+            out.push(p.clone());
+        }
+    }
+    out
+}
 
 /// Product names agent tools show when the conversation has no title yet.
 const TOOL_NAMES: &[&str] = &[
@@ -542,13 +616,51 @@ fn push_scope(out: &mut Vec<Anchor>, repo: &str, branch: &str, ticket_re: &Regex
     if let Some(place) = place_value(repo) {
         out.push(Anchor::new(AnchorKind::Place, place));
     }
+    push_branch(out, repo, branch, ticket_re);
+}
+
+/// The branch anchor is repo-qualified (`chronicle@main`, m32 chunk 2):
+/// `main` in one repo is not `main` in another, and the profiler must not
+/// learn them as one value. The work-item key still comes from the bare
+/// branch name.
+fn push_branch(out: &mut Vec<Anchor>, repo: &str, branch: &str, ticket_re: &Regex) {
     let branch = branch.trim();
-    if !branch.is_empty() && branch != "HEAD" {
-        out.push(Anchor::new(AnchorKind::Branch, branch));
-        if let Some(key) = ticket_re.find(branch) {
-            out.push(Anchor::new(AnchorKind::Item, key.as_str()));
-        }
+    if branch.is_empty() || branch == "HEAD" {
+        return;
     }
+    let value = match place_value(repo) {
+        Some(place) => format!("{place}@{branch}"),
+        None => branch.to_owned(),
+    };
+    out.push(Anchor::new(AnchorKind::Branch, value));
+    if let Some(key) = ticket_re.find(branch) {
+        out.push(Anchor::new(AnchorKind::Item, key.as_str()));
+    }
+}
+
+/// Among the events `ok` admits, the index of the session a prompt was
+/// typed into most recently at or before `end_ms` (ties go to the
+/// later-ending session). `None` when no admitted event has one — rows
+/// captured before the collector kept prompt minutes, or sessions the
+/// person has not typed into yet — and the caller falls back to writes.
+fn nearest_prompter<F: Fn(&ActivityEvent) -> bool>(
+    events: &[ActivityEvent],
+    ok: F,
+    end_ms: i64,
+) -> Option<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| ok(e))
+        .filter_map(|(i, e)| {
+            let last = detail_i64s(e.detail.as_deref(), "prompt_minutes")
+                .into_iter()
+                .filter(|&p| p <= end_ms)
+                .max()?;
+            Some((i, (last, e.end_ts.unwrap_or(e.ts).as_millisecond())))
+        })
+        .max_by_key(|&(_, key)| key)
+        .map(|(i, _)| i)
 }
 
 /// Among the events `ok` admits, the index of the session whose latest
@@ -1671,21 +1783,21 @@ mod tests {
             ),
         ];
         // Terminal span with the AI session: session, place, branch, docs.
-        let a = from_activity("Terminator", 11 * m, 30 * m, &[], &events, &r);
+        let a = from_activity("Terminator", "", 11 * m, 30 * m, &[], &events, &r);
         assert!(has(&a, AnchorKind::Session, "sess-1"));
         assert!(has(&a, AnchorKind::Place, "chronicle"));
-        assert!(has(&a, AnchorKind::Branch, "m30"));
+        assert!(has(&a, AnchorKind::Branch, "chronicle@m30"));
         assert_eq!(kinds(&a, AnchorKind::Doc), ["extract.rs", "storage.rs"]);
         assert!(has(&a, AnchorKind::Place, "mailer")); // shell fold
         assert!(!a.iter().any(|x| x.kind == AnchorKind::Event));
         // Editor span with the edit fold: branch carries the item.
-        let a = from_activity("Code", 12 * m, 19 * m, &[], &events, &r);
-        assert!(has(&a, AnchorKind::Branch, "ACME-11382-sms"));
+        let a = from_activity("Code", "", 12 * m, 19 * m, &[], &events, &r);
+        assert!(has(&a, AnchorKind::Branch, "mailer@ACME-11382-sms"));
         assert!(has(&a, AnchorKind::Item, "ACME-11382"));
         assert!(has(&a, AnchorKind::Place, "mailer"));
         assert!(has(&a, AnchorKind::Session, "sess-1"));
         // A browser span overlapping the meeting gets the event and people, not the session.
-        let a = from_activity("Google-chrome", 31 * m, 35 * m, &[], &events, &r);
+        let a = from_activity("Google-chrome", "", 31 * m, 35 * m, &[], &events, &r);
         assert!(has(&a, AnchorKind::Event, "cal-9"));
         assert_eq!(
             kinds(&a, AnchorKind::People),
@@ -1694,16 +1806,16 @@ mod tests {
         assert!(!a.iter().any(|x| x.kind == AnchorKind::Session));
         // A terminal that names another place does not take the session.
         let own = vec![Anchor::new(AnchorKind::Place, "mailer")];
-        let a = from_activity("Terminator", 11 * m, 30 * m, &own, &events, &r);
+        let a = from_activity("Terminator", "", 11 * m, 30 * m, &own, &events, &r);
         assert!(!has(&a, AnchorKind::Session, "sess-1"));
         assert!(has(&a, AnchorKind::Place, "mailer"));
         // Chronicle's own window hosts no tool session.
-        let a = from_activity("chronicle", 11 * m, 30 * m, &[], &events, &r);
+        let a = from_activity("chronicle", "", 11 * m, 30 * m, &[], &events, &r);
         assert!(!a.iter().any(|x| x.kind == AnchorKind::Session));
         // A span that names a place gets that repo's latest checkout as its branch.
         let own = vec![Anchor::new(AnchorKind::Place, "chronicle")];
-        let a = from_activity("Terminator", 50 * m, 55 * m, &own, &events, &r);
-        assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+        let a = from_activity("Terminator", "", 50 * m, 55 * m, &own, &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["chronicle@m30"]);
     }
 
     // m32 chunk 1: a call row is an event anchor like a calendar entry.
@@ -1720,9 +1832,9 @@ mod tests {
             "call:1800000",
             None,
         )];
-        let a = from_activity("Firefox", 32 * m, 40 * m, &[], &events, &r);
+        let a = from_activity("Firefox", "", 32 * m, 40 * m, &[], &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Event), ["call:1800000"]);
-        let a = from_activity("Firefox", 50 * m, 55 * m, &[], &events, &r);
+        let a = from_activity("Firefox", "", 50 * m, 55 * m, &[], &events, &r);
         assert!(kinds(&a, AnchorKind::Event).is_empty());
     }
 
@@ -1755,16 +1867,16 @@ mod tests {
             ),
         ];
         // sess-a wrote at 12, inside [10, 15): it wins over sess-b's 8.
-        let a = from_activity("Terminator", 10 * m, 15 * m, &[], &events, &r);
+        let a = from_activity("Terminator", "", 10 * m, 15 * m, &[], &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
-        assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["chronicle@m30"]);
         // Nothing written in [20, 24): the most recent write before it (sess-a at 12
         // vs sess-b at 8) still picks sess-a; at [26, 30) sess-b's 25 is nearest.
-        let a = from_activity("Terminator", 20 * m, 24 * m, &[], &events, &r);
+        let a = from_activity("Terminator", "", 20 * m, 24 * m, &[], &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
-        let a = from_activity("Terminator", 26 * m, 30 * m, &[], &events, &r);
+        let a = from_activity("Terminator", "", 26 * m, 30 * m, &[], &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Session), ["sess-b"]);
-        assert_eq!(kinds(&a, AnchorKind::Branch), ["m31"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["chronicle@m31"]);
         // Rows without write times (captured before m30 chunk 2.5) all attach.
         let legacy = vec![
             ev(
@@ -1786,7 +1898,7 @@ mod tests {
                 None,
             ),
         ];
-        let a = from_activity("Terminator", 10 * m, 15 * m, &[], &legacy, &r);
+        let a = from_activity("Terminator", "", 10 * m, 15 * m, &[], &legacy, &r);
         assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a", "sess-b"]);
     }
 
@@ -1825,9 +1937,9 @@ mod tests {
             ),
         ];
         // Both rows overlap [10, 20); the shell was last seen in mailer.
-        let a = from_activity("Terminator", 10 * m, 20 * m, &[], &events, &r);
+        let a = from_activity("Terminator", "", 10 * m, 20 * m, &[], &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Place), ["mailer"]);
-        assert_eq!(kinds(&a, AnchorKind::Branch), ["ACME-1-x"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["mailer@ACME-1-x"]);
         // A short visit to mailer that ended before the span did leaves the
         // span in chronicle, where the shell still is.
         let visit = vec![
@@ -1850,13 +1962,194 @@ mod tests {
                 None,
             ),
         ];
-        let a = from_activity("Terminator", 10 * m, 20 * m, &[], &visit, &r);
+        let a = from_activity("Terminator", "", 10 * m, 20 * m, &[], &visit, &r);
         assert_eq!(kinds(&a, AnchorKind::Place), ["chronicle"]);
         // A terminal naming its own place keeps it; other places' rows add nothing.
         let own = vec![Anchor::new(AnchorKind::Place, "chronicle")];
-        let a = from_activity("Terminator", 10 * m, 20 * m, &own, &events, &r);
+        let a = from_activity("Terminator", "", 10 * m, 20 * m, &own, &events, &r);
         assert_eq!(kinds(&a, AnchorKind::Place), ["chronicle"]);
-        assert_eq!(kinds(&a, AnchorKind::Branch), ["m30"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["chronicle@m30"]);
+    }
+
+    // m32 chunk 2: the title the tool wrote names the session; a typed
+    // prompt beats a transcript write; a bare terminal with no live cwd
+    // row stays unattached.
+    #[test]
+    fn sessions_attach_by_title_then_prompt() {
+        let r = re();
+        let m = 60_000;
+        let detail = |writes: &[i64], prompts: &[i64], titles: &[&str]| {
+            serde_json::json!({
+                "prompts": [], "paths": [],
+                "writes": writes.iter().map(|t| t * m).collect::<Vec<_>>(),
+                "prompt_minutes": prompts.iter().map(|t| t * m).collect::<Vec<_>>(),
+                "titles": titles,
+            })
+            .to_string()
+        };
+        let events = vec![
+            ev(
+                ActivityKind::AiSession,
+                0,
+                60 * m,
+                "chronicle",
+                "m32",
+                "sess-a",
+                Some(&detail(&[0, 5, 12, 40], &[0, 11], &["Attention plan"])),
+            ),
+            ev(
+                ActivityKind::AiSession,
+                0,
+                60 * m,
+                "chronicle",
+                "m32",
+                "sess-b",
+                Some(&detail(
+                    &[1, 8, 14, 25],
+                    &[1, 13],
+                    &["Site refresh", "Hero loop"],
+                )),
+            ),
+        ];
+        // The title wins over both prompt and write recency (sess-b typed
+        // at 13 and wrote at 14, inside the span).
+        let a = from_activity(
+            "Terminator",
+            "✳ Attention plan",
+            10 * m,
+            15 * m,
+            &[],
+            &events,
+            &r,
+        );
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
+        assert_eq!(kinds(&a, AnchorKind::Branch), ["chronicle@m32"]);
+        // Any title the session carried, glyph and case aside.
+        let a = from_activity(
+            "Terminator",
+            "◐ hero loop",
+            10 * m,
+            15 * m,
+            &[],
+            &events,
+            &r,
+        );
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-b"]);
+        // The title stays on screen after the transcript's last write: a
+        // titled session that ended before the span still owns it, even
+        // against a session that overlaps.
+        let mut later = events.clone();
+        later.push(ev(
+            ActivityKind::AiSession,
+            65 * m,
+            90 * m,
+            "chronicle",
+            "m32",
+            "sess-c",
+            Some(&detail(&[65, 72], &[65, 71], &["Site refresh"])),
+        ));
+        let a = from_activity(
+            "Terminator",
+            "✳ Attention plan",
+            70 * m,
+            75 * m,
+            &[],
+            &later,
+            &r,
+        );
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
+        let a = from_activity(
+            "Terminator",
+            "✳ Claude Code",
+            70 * m,
+            75 * m,
+            &[],
+            &later,
+            &r,
+        );
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-c"]);
+        // No title match: the nearest prompt at or before the end (sess-b at
+        // 13) wins. Over [12, 12.5) the write rule would pick sess-a's 12
+        // too, so compare prompts: sess-a's 11 beats sess-b's 1.
+        let a = from_activity(
+            "Terminator",
+            "✳ Claude Code",
+            10 * m,
+            15 * m,
+            &[],
+            &events,
+            &r,
+        );
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-b"]);
+        let a = from_activity(
+            "Terminator",
+            "✳ Claude Code",
+            12 * m,
+            12 * m + m / 2,
+            &[],
+            &events,
+            &r,
+        );
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
+        // A span before any prompt falls back to writes (sess-b wrote at 1).
+        let a = from_activity("Terminator", "", 0, 1, &[], &events, &r);
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-a"]);
+        let early = vec![ev(
+            ActivityKind::AiSession,
+            0,
+            60 * m,
+            "chronicle",
+            "m32",
+            "sess-c",
+            Some(&detail(&[0, 3], &[9], &[])),
+        )];
+        let a = from_activity("Terminator", "", 2 * m, 4 * m, &[], &early, &r);
+        assert_eq!(kinds(&a, AnchorKind::Session), ["sess-c"]);
+
+        // A bare terminal whose cwd rows all ended before the span did
+        // names no place; a shell fold (one-shot) still does.
+        let gone = vec![ev(
+            ActivityKind::Cwd,
+            0,
+            5 * m,
+            "mailer",
+            "",
+            "cwd:1:mailer",
+            None,
+        )];
+        let a = from_activity("Terminator", "", 4 * m, 20 * m, &[], &gone, &r);
+        assert!(kinds(&a, AnchorKind::Place).is_empty(), "{a:?}");
+        let fold = vec![ev(
+            ActivityKind::Shell,
+            6 * m,
+            6 * m,
+            "mailer",
+            "",
+            "sh#1",
+            None,
+        )];
+        let a = from_activity("Terminator", "", 4 * m, 20 * m, &[], &fold, &r);
+        assert_eq!(kinds(&a, AnchorKind::Place), ["mailer"]);
+    }
+
+    #[test]
+    fn session_docs_follow_the_touches() {
+        let m = 60_000;
+        let detail = serde_json::json!({
+            "prompts": [], "paths": ["a.rs", "b.rs", "c.rs", "d.rs"], "writes": [],
+            "touches": [[0, 0], [m, 1], [30 * m, 2], [31 * m, 2], [50 * m, 3]],
+        })
+        .to_string();
+        // Inside the grace window before the span: c.rs, not the morning's
+        // a.rs/b.rs; nothing after the span's end.
+        assert_eq!(session_docs(Some(&detail), 40 * m, 45 * m), ["c.rs"]);
+        // A span long after the last touch takes the latest touch minute.
+        assert_eq!(session_docs(Some(&detail), 200 * m, 205 * m), ["d.rs"]);
+        // Nothing touched yet: no docs. Legacy rows: the first paths.
+        assert!(session_docs(Some(&detail), -10 * m, -5 * m).is_empty());
+        let legacy = r#"{"prompts":[],"paths":["a.rs","b.rs"]}"#;
+        assert_eq!(session_docs(Some(legacy), 0, m), ["a.rs", "b.rs"]);
+        assert!(session_docs(None, 0, m).is_empty());
     }
 
     #[test]

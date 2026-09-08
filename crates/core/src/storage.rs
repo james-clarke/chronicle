@@ -687,7 +687,7 @@ pub fn anchor_spans(
         )?;
         for (id, start, end, app, title, url) in &spans {
             let own = extract::extract(app, title, url.as_deref(), ticket_re);
-            let more = extract::from_activity(app, *start, *end, &own, &events, ticket_re);
+            let more = extract::from_activity(app, title, *start, *end, &own, &events, ticket_re);
             let all: Vec<Anchor> = extract::merge(own, more);
             del.execute([id])?;
             if all.is_empty() {
@@ -878,6 +878,28 @@ pub fn anchored_spans(
         }
     }
     Ok(out)
+}
+
+/// Replace one AI session's rows (`<id>` and `<id>#N`) with `events`, as
+/// re-read from its transcript by `chronicle backfill-sessions` (m32 chunk
+/// 2): a full read segments the same way the collector does, so the rows
+/// land under the same ids with `prompt_minutes` and `titles` filled in.
+pub fn replace_session(
+    conn: &mut Connection,
+    session_id: &str,
+    events: &[ActivityEvent],
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM activity_events WHERE kind = 'ai_session'
+         AND (ext_id = ?1 OR ext_id LIKE ?1 || '#%')",
+        params![session_id],
+    )?;
+    for e in events {
+        insert_activity_event(&tx, e)?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// AI session rows overlapping `[lo, hi)` (an open row runs to now).

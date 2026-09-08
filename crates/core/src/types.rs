@@ -38,7 +38,9 @@ pub struct ActivityEvent {
     /// Commit subject, first prompt, PR title, calling app.
     pub summary: Option<String>,
     /// Per-kind JSON the anchors read (m30): `{"path","language"}` for
-    /// edits, `{"prompts":[..],"paths":[..]}` for AI sessions,
+    /// edits, `{"prompts","paths","writes","prompt_minutes","titles"}`
+    /// for AI sessions (the minute lists are UTC ms; `titles` are the
+    /// names the tool showed in the terminal title, m32 chunk 2),
     /// `{"attendees":[..]}` for meetings. `None` for kinds without one.
     pub detail: Option<String>,
 }

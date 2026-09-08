@@ -636,7 +636,7 @@ fn anchor_evidence(
             continue;
         }
         let own = extract::extract(&s.app, &s.title, s.url.as_deref(), re);
-        let more = extract::from_activity(&s.app, a, b, &own, vcs, re);
+        let more = extract::from_activity(&s.app, &s.title, a, b, &own, vcs, re);
         for anchor in extract::merge(own, more) {
             match anchor.kind {
                 AnchorKind::Doc => *docs.entry(anchor.value).or_default() += b - a,
