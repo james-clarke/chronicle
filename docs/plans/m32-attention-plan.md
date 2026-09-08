@@ -668,3 +668,75 @@ The 240-touch cap covers about four hours of edits; older spans in a
 long session get the latest touch minute before them. Chunk 3 can read
 `touches` and `prompt_minutes` per minute for the supervision split.
 
+
+## Shipped (2026-09-08, chunk 3)
+
+Two commits on `main` (core, app), 258 tests (6 new), clippy clean.
+Migration 026 `intervals.share REAL NOT NULL DEFAULT 1.0`.
+
+- **Split after the verdict** (`segmenter::split_concurrent`): the
+  segmenter still cuts and scores whole segments; a placement of kind
+  `agent` or `supervise` with two or more AI sessions writing within 2
+  min of its edges becomes one row per task over the same range, `share`
+  by the prompts typed into each task's sessions in that window (their
+  focus minutes when no session kept prompts). Rows over one range sum
+  to 1; every other placement passes through at 1.0. `storage::
+  live_sessions` feeds it (`writes`, `prompt_minutes`, title and the
+  row's own scope anchors per session row; a `<id>#N` row is its own
+  session, and two rows of one conversation land on one task, so the
+  grouping folds them).
+- **A session's task**: what its own spans in the range score to, or,
+  for a session that wrote without being on screen, its scope (session,
+  repo, branch, item) spread over the range. Deviation from the plan's
+  "their tasks": with the profiles as of the 09-03 window, task 85
+  "start dev on ACME-11382" [mailer] already held chronicle=107 min
+  and chronicle@main=104, so every session, chronicle ones included,
+  scored to it and nothing split. The **place rule** fixes that without
+  waiting for chunk 4: a session whose repo is not its verdict task's
+  project, and whose ticket that task does not hold, is foreign to it and
+  goes to the best-ranked task in its own repo, else becomes a new task
+  there (one per repo across the window, given `segment_new_task_min`
+  of shared time; a sliver folds back into the segment's target). A task
+  that holds the session's ticket keeps it whatever the repo (ACME-11382
+  spans contoso and mailer). A task with no project constrains nothing.
+- **Kind per row** is its own sessions' spans' (`supervise` for one never
+  on screen); reason reads "3 of 9 concurrent sessions, 12 of 38 prompts".
+- **Totals** multiply by `share`: `Task.share` + `Task::weigh` for the
+  report (tasks, projects, kinds, grand total), the UI groups and today's
+  open-task minutes, the checkpoint aggregate, `SegmentRow` (re-score
+  snapshots deserialize old ones at 1.0; the undo re-inserts it). `chronicle
+  status --day` prints a row's share when under 100 %.
+- **Agents lane** (`timeline::agent_lanes`, under the chart in every
+  band mode): one bar per AI session on the day (`storage::agent_lanes`:
+  start to end or last write), the stretches its terminal was on screen
+  in full accent, each prompt a tick; hover for title, repo, prompts and
+  on-screen time. At most six sessions, the day's longest.
+- **`chronicle bench --window START..END`**: places a window the way
+  `reconcile` would, dry, against profiles built as of the window's start
+  the replay's way (`profile::build_profiles` at `lo`), prints every row
+  with its share and kind, the sessions the split saw with where each
+  one's own evidence lands, and the window's wall time by project and by
+  task.
+
+Gate, `bench --window 2026-09-03T15:00..2026-09-03T16:44` on a sandbox
+copy of the live DB, profiles as of 15:00 (4 tasks with evidence):
+
+| build | chronicle | contoso + mailer | rows |
+|---|---|---|---|
+| chunk 2 (whole segments) | 0 % | 93.7 % | 2, both task 85 |
+| chunk 3, scorer alone | 0 % | 93.7 % | 2 (every session → 85) |
+| **chunk 3 + place rule** | **39.9 %** | **53.7 %** | 4: 85 at 68 % / 39 %, task 104 "optimize and clean up" [chronicle] at 32 % / 61 % |
+
+Both halves met (≥ 35 %, ≤ 60 %); 97 of 104 min placed, the rest an AFK
+gap. The chronicle share landed on an existing chronicle task (104, 10
+declared minutes) rather than a new one, because the place rule takes the
+best-ranked task in the repo first. Weekly sums: `report::build` test
+`shared_rows_sum_to_wall_time` (two rows 0.6 / 0.4 over 104 min report
+104 min by task, project and kind).
+
+Open: the split reads today's `titles`/`prompt_minutes`; sessions
+captured before chunk 2 have no prompts and fall back to focus shares.
+A session with writes but no prompts and no focus in the window drops
+out (0 weight). The naming job for a task the split creates sees the
+whole range's evidence, not only its sessions'. The 84 px lane label
+truncates long session titles (same as task lanes).
