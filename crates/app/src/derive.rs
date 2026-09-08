@@ -613,14 +613,40 @@ pub(crate) fn derive_batch(
             Ok(re) => {
                 let prior = storage::branch_state_before(conn, batch.start_ts)?;
                 // Git kinds plus PR markers (title carries the key): a
-                // session's `gitBranch` is not vcs activity.
+                // session's `gitBranch` is not vcs activity. Cwd and shell
+                // rows say which PR rows are strong (m32 chunk 4).
                 let vcs: Vec<_> = activity
                     .iter()
-                    .filter(|e| e.kind.is_vcs() || e.kind.is_pr())
+                    .filter(|e| {
+                        e.kind.is_vcs()
+                            || e.kind.is_pr()
+                            || matches!(
+                                e.kind,
+                                chronicle_core::types::ActivityKind::Cwd
+                                    | chronicle_core::types::ActivityKind::Shell
+                            )
+                    })
                     .cloned()
                     .collect();
+                // A ref comes from the task's own place: each placed task's
+                // declared project, when it has one.
+                let mut projects: std::collections::HashMap<i64, String> =
+                    std::collections::HashMap::new();
+                for (task_id, _, _) in &stored {
+                    if projects.contains_key(task_id) {
+                        continue;
+                    }
+                    let project: Option<String> = conn
+                        .query_row("SELECT project FROM tasks WHERE id=?1", [task_id], |r| {
+                            r.get(0)
+                        })
+                        .unwrap_or(None);
+                    if let Some(p) = project.filter(|p| !p.trim().is_empty()) {
+                        projects.insert(*task_id, p);
+                    }
+                }
                 for (task_id, key) in
-                    chronicle_core::anchor::anchor_tasks(&stored, &prior, &vcs, &re)
+                    chronicle_core::anchor::anchor_tasks(&stored, &prior, &vcs, &re, &projects)
                 {
                     // One open task per key: while another holds it the work
                     // belongs there, and a second anchor is what let a

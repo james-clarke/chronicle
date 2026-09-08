@@ -53,6 +53,13 @@ pub(crate) fn spawn_capture(
 
     spawn_git_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
+    // Listener map (m32 chunk 4): which repo each local dev server is.
+    spawn_provider_thread(
+        "ports",
+        "port map provider",
+        chronicle_capture::ports::PortMapProvider::default(),
+        tx.clone(),
+    )?;
     spawn_github_capture(config, tx.clone())?;
     spawn_shell_capture(config, tx.clone())?;
     spawn_mic_capture(config, tx.clone())?;

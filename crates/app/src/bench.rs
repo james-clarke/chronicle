@@ -518,6 +518,7 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 start_ts: ms_range.0,
                 end_ts: ms_range.1,
                 origin_task_id: Some(task_id),
+                pending: false,
             });
             seen_groups.insert(*gi);
         }

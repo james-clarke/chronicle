@@ -6,6 +6,7 @@ use crate::status::{fmt_secs, init_logging};
 use anyhow::{Context, bail};
 use chronicle_core::config::Config;
 use chronicle_core::models_config::ModelsConfig;
+use chronicle_core::sessionizer::SpanDraft;
 use chronicle_core::types::SuggestedTask;
 use chronicle_derive::cloud::{self, CloudError};
 use chronicle_derive::describe::Describer;
@@ -299,6 +300,76 @@ impl std::fmt::Display for SkipJob {
 
 impl std::error::Error for SkipJob {}
 
+/// The spans that may name a new task (m32 chunk 4): every span with
+/// identifying evidence (an item, change, branch, session, event or place),
+/// every span with no anchors at all, and a document or site span only
+/// when its document or site holds [`profile::NAMING_SHARE`] of the
+/// range's focus. The page glanced at for two minutes of an hour must not
+/// name the hour. Nothing is dropped when that would leave no focus span.
+fn naming_spans(
+    spans: Vec<SpanDraft>,
+    anchored: &[chronicle_core::profile::AnchoredSpan],
+    lo: i64,
+    hi: i64,
+) -> Vec<SpanDraft> {
+    use chronicle_core::extract::AnchorKind;
+    use chronicle_core::profile::NAMING_SHARE;
+    let overlap =
+        |s: &chronicle_core::profile::AnchoredSpan| (s.end_ts.min(hi) - s.start_ts.max(lo)).max(0);
+    let total: i64 = anchored.iter().map(overlap).sum();
+    if total <= 0 {
+        return spans;
+    }
+    let mut minor: std::collections::HashMap<(AnchorKind, &str), i64> =
+        std::collections::HashMap::new();
+    for s in anchored {
+        for a in &s.anchors {
+            if matches!(a.kind, AnchorKind::Doc | AnchorKind::Domain) {
+                *minor.entry((a.kind, a.value.as_str())).or_default() += overlap(s);
+            }
+        }
+    }
+    let floor = (total as f64 * NAMING_SHARE) as i64;
+    let dropped: std::collections::HashSet<(i64, i64)> = anchored
+        .iter()
+        .filter(|s| {
+            let identifying = s.anchors.iter().any(|a| {
+                !matches!(
+                    a.kind,
+                    AnchorKind::Doc | AnchorKind::Domain | AnchorKind::People
+                )
+            });
+            let named = s
+                .anchors
+                .iter()
+                .filter(|a| matches!(a.kind, AnchorKind::Doc | AnchorKind::Domain))
+                .map(|a| minor.get(&(a.kind, a.value.as_str())).copied().unwrap_or(0))
+                .max();
+            !identifying && named.is_some_and(|m| m < floor)
+        })
+        .map(|s| (s.start_ts, s.end_ts))
+        .collect();
+    if dropped.is_empty() {
+        return spans;
+    }
+    let kept: Vec<SpanDraft> = spans
+        .iter()
+        .filter(|s| {
+            s.kind != chronicle_core::sessionizer::SpanKind::Focus
+                || !dropped.contains(&(s.start.as_millisecond(), s.end.as_millisecond()))
+        })
+        .cloned()
+        .collect();
+    if kept
+        .iter()
+        .any(|s| s.kind == chronicle_core::sessionizer::SpanKind::Focus)
+    {
+        kept
+    } else {
+        spans
+    }
+}
+
 pub(crate) fn task_label_project(
     conn: &rusqlite::Connection,
     task_id: i64,
@@ -395,7 +466,12 @@ pub(crate) fn run_ai_job(
             let lo = payload["lo"].as_i64().context("payload lacks lo")?;
             let hi = payload["hi"].as_i64().context("payload lacks hi")?;
             let placeholder = payload["placeholder"].as_str().unwrap_or("").to_owned();
-            let spans = storage::spans_in_range(conn, lo, hi)?;
+            let spans = naming_spans(
+                storage::spans_in_range(conn, lo, hi)?,
+                &storage::anchored_spans(conn, lo, hi)?,
+                lo,
+                hi,
+            );
             if spans
                 .iter()
                 .all(|s| s.kind != chronicle_core::sessionizer::SpanKind::Focus)
@@ -712,4 +788,91 @@ pub(crate) fn civil_days(
         d = d.checked_add(jiff::Span::new().days(1))?;
     }
     Ok(days)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chronicle_core::extract::{Anchor, AnchorKind};
+    use chronicle_core::profile::AnchoredSpan;
+    use chronicle_core::sessionizer::SpanKind;
+    use chronicle_core::types::ms_to_ts;
+
+    const MIN: i64 = 60_000;
+
+    fn draft(lo: i64, hi: i64, title: &str) -> SpanDraft {
+        SpanDraft {
+            start: ms_to_ts(lo),
+            end: ms_to_ts(hi),
+            app: "code".into(),
+            title: title.into(),
+            kind: SpanKind::Focus,
+            url: None,
+            quiet_ms: 0,
+        }
+    }
+
+    fn anchored(
+        id: i64,
+        lo: i64,
+        hi: i64,
+        title: &str,
+        anchors: &[(AnchorKind, &str)],
+    ) -> AnchoredSpan {
+        AnchoredSpan {
+            id,
+            start_ts: lo,
+            end_ts: hi,
+            app: "code".into(),
+            title: title.into(),
+            anchors: anchors
+                .iter()
+                .map(|(k, v)| Anchor {
+                    kind: *k,
+                    value: (*v).to_owned(),
+                })
+                .collect(),
+            vec: None,
+            quiet_ms: 0,
+            wrote: false,
+        }
+    }
+
+    #[test]
+    fn a_minor_page_does_not_name_the_task() {
+        let drafts = vec![
+            draft(0, 50 * MIN, "billing.rs - app"),
+            draft(50 * MIN, 55 * MIN, "Q4 pricing - Notion"),
+            draft(55 * MIN, 60 * MIN, "scratch"),
+        ];
+        let spans = vec![
+            anchored(
+                1,
+                0,
+                50 * MIN,
+                "billing.rs - app",
+                &[(AnchorKind::Place, "app")],
+            ),
+            anchored(
+                2,
+                50 * MIN,
+                55 * MIN,
+                "Q4 pricing - Notion",
+                &[(AnchorKind::Doc, "Q4 pricing")],
+            ),
+            anchored(3, 55 * MIN, 60 * MIN, "scratch", &[]),
+        ];
+        // The five-minute page goes; the place span and the anchorless
+        // span stay.
+        let kept = naming_spans(drafts.clone(), &spans, 0, 60 * MIN);
+        let titles: Vec<&str> = kept.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["billing.rs - app", "scratch"]);
+        // Over its own twenty minutes the page holds a quarter and stays.
+        let kept = naming_spans(drafts.clone(), &spans, 40 * MIN, 60 * MIN);
+        assert_eq!(kept.len(), 3);
+        // Dropping everything drops nothing.
+        let only = vec![draft(50 * MIN, 55 * MIN, "Q4 pricing - Notion")];
+        let kept = naming_spans(only.clone(), &spans, 0, 60 * MIN);
+        assert_eq!(kept, only);
+    }
 }
