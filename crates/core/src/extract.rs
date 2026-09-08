@@ -517,6 +517,25 @@ pub fn from_activity(
             _ => {}
         }
     }
+    // A dev server's port names its repo (m32 chunk 4): for each
+    // `localhost:<port>` the span's URL named, the listener-map row
+    // (`Cwd` with `port` in detail) alive while the span was open, the
+    // latest refreshed first.
+    for port in own
+        .iter()
+        .filter(|a| a.kind == AnchorKind::Domain)
+        .filter_map(|a| a.value.strip_prefix("localhost:"))
+        .filter_map(|p| p.parse::<i64>().ok())
+    {
+        let listener = events
+            .iter()
+            .filter(|e| e.kind == ActivityKind::Cwd && overlaps(e))
+            .filter(|e| detail_i64(e.detail.as_deref(), "port") == Some(port))
+            .max_by_key(|e| e.end_ts.unwrap_or(e.ts));
+        if let Some(place) = listener.and_then(|e| place_value(&e.repo)) {
+            out.push(Anchor::new(AnchorKind::Place, place));
+        }
+    }
     // The branch checked out in a place the span names, as of the span's
     // end: the latest checkout/commit marker per repo.
     let places: Vec<&str> = own
@@ -752,6 +771,13 @@ fn detail_i64s(detail: Option<&str>, field: &str) -> Vec<i64> {
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|n| n.as_i64()).collect())
         .unwrap_or_default()
+}
+
+fn detail_i64(detail: Option<&str>, field: &str) -> Option<i64> {
+    serde_json::from_str::<serde_json::Value>(detail?)
+        .ok()?
+        .get(field)?
+        .as_i64()
 }
 
 fn detail_strings(detail: Option<&str>, field: &str) -> Vec<String> {
@@ -1207,8 +1233,23 @@ fn browser(title: &str, url: Option<&str>, out: &mut Vec<Anchor>) {
         }
         return;
     };
-    out.push(Anchor::new(AnchorKind::Domain, url.domain.clone()));
     let host = url.host.as_str();
+    // A dev server is its port (m32 chunk 4): `localhost:8001` is one
+    // repo's, `localhost:3000` another's, and `from_activity` turns the
+    // port into that repo's place through the listener map. The page
+    // title stays the document.
+    if host == "localhost" {
+        let domain = match url.port {
+            Some(p) => format!("localhost:{p}"),
+            None => "localhost".to_owned(),
+        };
+        out.push(Anchor::new(AnchorKind::Domain, domain));
+        if let Some(doc) = doc_value(strip_site_suffix(body, host)) {
+            out.push(Anchor::new(AnchorKind::Doc, doc));
+        }
+        return;
+    }
+    out.push(Anchor::new(AnchorKind::Domain, url.domain.clone()));
     let segs = &url.segs;
     let seg = |i: usize| segs.get(i).map(String::as_str).unwrap_or("");
     let site_doc = |out: &mut Vec<Anchor>| {
@@ -1381,23 +1422,31 @@ struct Url {
     host: String,
     domain: String,
     segs: Vec<String>,
+    /// Explicit port, kept for the loopback hosts only (m32 chunk 4): a
+    /// dev server is `localhost:<port>`, and the port names the repo.
+    port: Option<u16>,
 }
+
+/// Hosts a dev server listens on. `[::1]` arrives bracketed.
+const LOCAL_HOSTS: &[&str] = &["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"];
 
 fn parse_url(u: &str) -> Option<Url> {
     let rest = u.split_once("://").map(|(_, r)| r).unwrap_or(u);
     let (hostport, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let host = hostport
-        .rsplit('@')
-        .next()
-        .unwrap_or(hostport)
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .trim_start_matches("www.")
-        .to_ascii_lowercase();
-    if host.is_empty() || !host.contains('.') {
+    let hostport = hostport.rsplit('@').next().unwrap_or(hostport);
+    // `[::1]:3000` keeps its brackets; everything else splits at the colon.
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            (h, p.parse::<u16>().ok())
+        }
+        _ => (hostport, None),
+    };
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let local = LOCAL_HOSTS.contains(&host.as_str());
+    if host.is_empty() || (!host.contains('.') && !local) {
         return None;
     }
+    let host = if local { "localhost".to_owned() } else { host };
     let path = path.split(['?', '#']).next().unwrap_or("");
     let segs = path
         .split('/')
@@ -1408,6 +1457,7 @@ fn parse_url(u: &str) -> Option<Url> {
         domain: registrable(&host),
         host,
         segs,
+        port: port.filter(|_| local),
     })
 }
 
@@ -2212,5 +2262,81 @@ mod tests {
         let u = parse_url("https://user@github.com:443/a/b?x=1#f").unwrap();
         assert_eq!(u.host, "github.com");
         assert_eq!(u.segs, ["a", "b"]);
+        assert_eq!(u.port, None);
+        let u = parse_url("http://127.0.0.1:8001/control_panel/").unwrap();
+        assert_eq!(u.host, "localhost");
+        assert_eq!(u.port, Some(8001));
+        assert_eq!(parse_url("http://[::1]:3000/").unwrap().port, Some(3000));
+        assert_eq!(parse_url("http://localhost/x").unwrap().port, None);
+    }
+
+    #[test]
+    fn localhost_port_names_the_repo_through_the_listener_map() {
+        // The URL keeps the port as a domain; the span's own anchors never
+        // name a place, and the page title is still the document.
+        let own = extract(
+            "Google-chrome",
+            "Program clubs - Google Chrome",
+            Some("http://localhost:8001/control_panel/programs/"),
+            &re(),
+        );
+        assert_eq!(kinds(&own, AnchorKind::Domain), ["localhost:8001"]);
+        assert_eq!(kinds(&own, AnchorKind::Doc), ["Program clubs"]);
+        assert!(kinds(&own, AnchorKind::Place).is_empty());
+        // Two listeners: 8001 is contoso's (refreshed through the span),
+        // 3000 is another repo's. Only the URL's port resolves, and the
+        // repo's checkout then names the branch.
+        let events = [
+            ev(
+                ActivityKind::Cwd,
+                0,
+                100_000,
+                "contoso",
+                "",
+                "port:8001:contoso",
+                Some(r#"{"path":"/home/j/dev/contoso","port":8001}"#),
+            ),
+            ev(
+                ActivityKind::Cwd,
+                0,
+                100_000,
+                "fabrikam-web",
+                "",
+                "port:3000:fabrikam-web",
+                Some(r#"{"path":"/home/j/dev/fabrikam-web","port":3000}"#),
+            ),
+            ev(
+                ActivityKind::Checkout,
+                1_000,
+                1_000,
+                "contoso",
+                "ACME-1-x",
+                "",
+                None,
+            ),
+        ];
+        let more = from_activity(
+            "Google-chrome",
+            "Program clubs - Google Chrome",
+            10_000,
+            20_000,
+            &own,
+            &events,
+            &re(),
+        );
+        assert_eq!(kinds(&more, AnchorKind::Place), ["contoso"]);
+        assert_eq!(kinds(&more, AnchorKind::Branch), ["contoso@ACME-1-x"]);
+        // A listener that stopped refreshing before the span names nothing.
+        let dead = [ev(
+            ActivityKind::Cwd,
+            0,
+            5_000,
+            "contoso",
+            "",
+            "port:8001:contoso",
+            Some(r#"{"path":"/home/j/dev/contoso","port":8001}"#),
+        )];
+        let more = from_activity("Google-chrome", "x", 10_000, 20_000, &own, &dead, &re());
+        assert!(kinds(&more, AnchorKind::Place).is_empty());
     }
 }

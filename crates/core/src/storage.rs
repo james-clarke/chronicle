@@ -258,6 +258,22 @@ pub fn vcs_in_range(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Shell and cwd rows inside `[lo, hi)` (m32 chunk 4): where the person's
+/// shells sat, the presence that makes a PR row strong.
+pub fn place_rows_in_range(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<ActivityEvent>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLS} FROM activity_events
+         WHERE kind IN ('cwd','shell') AND ts < ?2 AND COALESCE(end_ts, ts) >= ?1
+         ORDER BY ts, id"
+    ))?;
+    let rows = stmt.query_map([lo, hi], activity_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Latest checkout per repo strictly before `lo` — the branch state a window
 /// opens under, for repos with no checkout inside it.
 pub fn branch_state_before(conn: &Connection, lo: i64) -> Result<Vec<ActivityEvent>, StorageError> {
@@ -507,7 +523,11 @@ pub fn replay_rows(conn: &Connection, since_ms: i64) -> Result<ReplayRows, Stora
         .collect::<Result<_, _>>()?;
     let intervals = conn
         .prepare(
-            "SELECT id, task_id, batch_id, start_ts, end_ts, origin_task_id FROM intervals ORDER BY start_ts, id",
+            "SELECT i.id, i.task_id, i.batch_id, i.start_ts, i.end_ts, i.origin_task_id,
+                    COALESCE(i.confident = 0 AND NOT EXISTS (
+                        SELECT 1 FROM verdict_log v
+                        WHERE v.interval_id = i.id AND v.outcome IS NOT NULL), 0)
+             FROM intervals i ORDER BY i.start_ts, i.id",
         )?
         .query_map([], |r| {
             Ok(replay::IntervalRow {
@@ -517,6 +537,7 @@ pub fn replay_rows(conn: &Connection, since_ms: i64) -> Result<ReplayRows, Stora
                 start_ts: r.get(3)?,
                 end_ts: r.get(4)?,
                 origin_task_id: r.get(5)?,
+                pending: r.get::<_, i64>(6)? != 0,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -3317,6 +3338,7 @@ pub fn live_profiles(
                 start_ts: end_ts,
                 end_ts,
                 origin_task_id: None,
+                pending: false,
             })
         })?
         .collect::<Result<_, _>>()?;

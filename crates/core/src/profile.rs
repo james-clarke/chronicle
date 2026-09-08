@@ -409,7 +409,13 @@ pub fn build_evidence(
         0.5f64.powf(age_days / p.half_life_days)
     };
 
-    for iv in intervals.iter().filter(|iv| iv.end_ts <= before_ts) {
+    // An unsure placement feeds nothing until kept, corrected or passively
+    // accepted (m32 chunk 4): a guess must not teach the profile that
+    // then confirms the guess.
+    for iv in intervals
+        .iter()
+        .filter(|iv| iv.end_ts <= before_ts && !iv.pending)
+    {
         if !live.contains_key(&iv.task_id) {
             continue;
         }
@@ -575,29 +581,13 @@ pub fn build_profiles(
     );
     let before: Vec<IntervalRow> = intervals
         .iter()
-        .filter(|iv| iv.end_ts <= before_ts)
+        .filter(|iv| iv.end_ts <= before_ts && !iv.pending)
         .cloned()
         .collect();
+    // A task with no declared or kept evidence has no profile (m32 chunk
+    // 4): it is not scoreable until the person gives it a key, a project
+    // or a stretch of time, so a bare label cannot win on recency alone.
     let mut profiles = Profile::from_rows(&rows, &before);
-    // Live tasks with no evidence still compete (at zero) and carry recency.
-    for t in tasks
-        .iter()
-        .filter(|t| t.created_ts < before_ts && t.closed_ts.is_none_or(|c| c > before_ts))
-    {
-        if profiles.iter().all(|p| p.task_id != t.id) {
-            let last_ts = before
-                .iter()
-                .filter(|iv| iv.task_id == t.id)
-                .map(|iv| iv.end_ts)
-                .max();
-            profiles.push(Profile {
-                task_id: t.id,
-                minutes: HashMap::new(),
-                last_ts,
-                vec: None,
-            });
-        }
-    }
     // Centroids from the embedded spans under each task's intervals.
     for pr in &mut profiles {
         let parts: Vec<(&[f32], f64)> = before
@@ -619,6 +609,10 @@ pub fn build_profiles(
     profiles.sort_by_key(|p| p.task_id);
     profiles
 }
+
+/// The share of a segment's focus a document or site needs before it may
+/// name the segment (m32 chunk 4).
+pub const NAMING_SHARE: f64 = 0.25;
 
 /// The evidence of one stretch of focus: minutes per key.
 #[derive(Debug, Clone, PartialEq)]
@@ -679,14 +673,18 @@ impl Segment {
     }
 
     /// Strongest anchors by time, for naming a new cluster: up to `n`
-    /// strong/medium values, strongest then longest first.
+    /// strong/medium values, strongest then longest first. A document
+    /// under [`NAMING_SHARE`] of the segment cannot name it (m32 chunk
+    /// 4): the page glanced at for two minutes of an hour is not the work.
     pub fn describe(&self, n: usize) -> String {
+        let floor = self.minutes * NAMING_SHARE;
         let mut v: Vec<(&Key, f64)> = self
             .keys
             .iter()
             .filter(
                 |(k, _)| matches!(k, Key::Anchor(kind, _) if kind.strength() >= Strength::Medium),
             )
+            .filter(|(k, m)| !matches!(k, Key::Anchor(AnchorKind::Doc, _)) || **m >= floor)
             .map(|(k, m)| (k, *m))
             .collect();
         v.sort_by(|a, b| {
@@ -897,6 +895,7 @@ mod tests {
             start_ts: lo,
             end_ts: hi,
             origin_task_id: Some(task_id),
+            pending: false,
         }
     }
 
@@ -1113,7 +1112,9 @@ mod tests {
     fn closed_tasks_do_not_compete() {
         let mut t = task(1, "old", 0);
         t.closed_ts = Some(30 * MIN);
-        let tasks = vec![t, task(2, "new", 0)];
+        let mut n = task(2, "new", 0);
+        n.project = Some("shop".into());
+        let tasks = vec![t, n];
         let spans = vec![span(1, 0, 10 * MIN, "x", &[(AnchorKind::Doc, "x")])];
         let ivs = vec![iv(1, 1, 0, 10 * MIN)];
         let p = Params::default();
@@ -1122,6 +1123,63 @@ mod tests {
             profiles.iter().map(|p| p.task_id).collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    #[test]
+    fn a_task_with_no_evidence_has_no_profile() {
+        // A bare label with no key, project or kept time is not scoreable
+        // (m32 chunk 4): it cannot win a segment on recency alone.
+        let tasks = vec![task(1, "misc", 0)];
+        let p = Params::default();
+        let profiles = build_profiles(&tasks, &[], &[], &[], &re(), 60 * MIN, &p);
+        assert!(profiles.is_empty(), "{profiles:?}");
+    }
+
+    #[test]
+    fn pending_rows_feed_no_profile() {
+        // An unsure placement nobody kept yet is not evidence; once kept,
+        // corrected or passively accepted it is.
+        let tasks = vec![task(1, "billing", 0)];
+        let spans = vec![span(1, 0, 10 * MIN, "x", &[(AnchorKind::Place, "shop")])];
+        let mut row = iv(1, 1, 0, 10 * MIN);
+        row.pending = true;
+        let p = Params::default();
+        let profiles = build_profiles(&tasks, &[row.clone()], &spans, &[], &re(), 60 * MIN, &p);
+        assert!(profiles.is_empty(), "{profiles:?}");
+        row.pending = false;
+        let profiles = build_profiles(&tasks, &[row], &spans, &[], &re(), 60 * MIN, &p);
+        assert_eq!(profiles.len(), 1);
+        assert!(
+            profiles[0]
+                .minutes
+                .contains_key(&Key::Anchor(AnchorKind::Place, "shop".into()))
+        );
+    }
+
+    #[test]
+    fn a_minor_document_cannot_name_a_segment() {
+        let spans = vec![
+            span(
+                1,
+                0,
+                50 * MIN,
+                "billing.rs - app",
+                &[(AnchorKind::Place, "app")],
+            ),
+            span(
+                2,
+                50 * MIN,
+                60 * MIN,
+                "Q4 pricing page - Notion",
+                &[(AnchorKind::Doc, "Q4 pricing page")],
+            ),
+        ];
+        // Ten minutes of sixty: the page is under a quarter and stays out.
+        let seg = Segment::from_spans(&spans, 0, 60 * MIN);
+        assert_eq!(seg.describe(3), "app");
+        // Ten of twenty: it names the stretch alongside the place.
+        let seg = Segment::from_spans(&spans, 40 * MIN, 60 * MIN);
+        assert_eq!(seg.describe(3), "Q4 pricing page · app");
     }
 
     #[test]

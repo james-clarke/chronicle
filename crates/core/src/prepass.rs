@@ -90,7 +90,11 @@ pub fn run(
                 .enumerate()
                 .map(|(i, r)| (i as i64, r.start_ts, r.end_ts))
                 .collect();
-            anchor_tasks(&intervals, &prior, &vcs, re)
+            // Cwd and shell rows make a PR row strong (m32 chunk 4); a run
+            // has no project, so nothing constrains its repo.
+            let mut evidence = vcs.clone();
+            evidence.extend(storage::place_rows_in_range(&tx, lo, hi).unwrap_or_default());
+            anchor_tasks(&intervals, &prior, &evidence, re, &HashMap::new())
                 .into_iter()
                 .collect()
         })

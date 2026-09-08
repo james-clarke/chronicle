@@ -35,6 +35,9 @@ pub struct IntervalRow {
     /// The task the row was first placed under (m30 chunk 2.5); `None`
     /// for rows older than migration 018.
     pub origin_task_id: Option<i64>,
+    /// An unsure placement nobody has kept or corrected yet and passive
+    /// acceptance has not closed (m32 chunk 4): it feeds no profile.
+    pub pending: bool,
 }
 
 /// Which corrections become probes.
@@ -604,6 +607,7 @@ mod tests {
             start_ts: lo,
             end_ts: hi,
             origin_task_id: Some(task_id),
+            pending: false,
         }
     }
     fn corr(
