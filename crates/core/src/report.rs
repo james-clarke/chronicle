@@ -28,7 +28,7 @@ pub struct ProjectTotal {
 /// Interval duration clamped to `[lo, hi)` — the fetch query returns rows
 /// that merely overlap the range, and long intervals cross its edges.
 fn clamped_ms(t: &Task, lo: i64, hi: i64) -> i64 {
-    (t.end_ts.as_millisecond().min(hi) - t.start_ts.as_millisecond().max(lo)).max(0)
+    t.weigh((t.end_ts.as_millisecond().min(hi) - t.start_ts.as_millisecond().max(lo)).max(0))
 }
 
 /// Per-project totals over `[lo, hi)`, biggest first. `None` projects group
@@ -257,6 +257,7 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
             if ms <= 0 {
                 continue;
             }
+            let ms = t.weigh(ms);
             let row = match rows.iter_mut().find(|r| r.task_id == t.id) {
                 Some(r) => r,
                 None => {
@@ -402,11 +403,40 @@ mod tests {
             external_ref: None,
             description: None,
             kind: None,
+            share: 1.0,
         }
     }
 
     fn at(date: Date, h: i8, m: i8) -> jiff::Zoned {
         date.at(h, m, 0, 0).to_zoned(TimeZone::UTC).unwrap()
+    }
+
+    /// Two rows over one range with shares that sum to 1 report as the
+    /// range once, split by task and by project (m32 chunk 3).
+    #[test]
+    fn shared_rows_sum_to_wall_time() {
+        let d: Date = "2026-09-03".parse().unwrap();
+        let mut a = task(1, Some("mailer"), at(d, 15, 0), 104);
+        a.share = 0.6;
+        a.kind = Some("agent".into());
+        let mut b = task(2, Some("chronicle"), at(d, 15, 0), 104);
+        b.share = 0.4;
+        b.kind = Some("supervise".into());
+        let r = build(&[a, b], vec![d], &TimeZone::UTC).unwrap();
+        assert_eq!(r.grand_total_ms, 104 * 60_000);
+        assert_eq!(r.tasks[0].total_ms, 62 * 60_000 + 24_000);
+        assert_eq!(r.tasks[1].total_ms, 41 * 60_000 + 36_000);
+        assert_eq!(
+            r.projects[0].total_ms + r.projects[1].total_ms,
+            104 * 60_000
+        );
+        assert_eq!(
+            r.by_kind,
+            vec![
+                ("agent".into(), 62 * 60_000 + 24_000),
+                ("supervise".into(), 41 * 60_000 + 36_000)
+            ]
+        );
     }
 
     #[test]

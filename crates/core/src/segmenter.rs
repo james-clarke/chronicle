@@ -16,7 +16,7 @@ use regex::Regex;
 use rusqlite::Connection;
 
 use crate::config::Config;
-use crate::extract::{AnchorKind, Family, Strength};
+use crate::extract::{Anchor, AnchorKind, Family, Strength};
 use crate::profile::{self, AnchoredSpan, Key, Params, Profile, Segment, Verdict};
 use crate::storage::{self, StorageError};
 use crate::types::ts_to_ms;
@@ -390,6 +390,10 @@ pub struct Placement {
     pub runner_up: Option<i64>,
     /// The kind of work: see [`kind_of`].
     pub kind: String,
+    /// The fraction of `[lo, hi)` that is this target's: 1 for a whole
+    /// segment, less when concurrent AI sessions split it (m32 chunk 3);
+    /// the rows over one range sum to 1.
+    pub share: f64,
 }
 
 /// The kinds of work a segment can be, general across roles.
@@ -505,6 +509,7 @@ fn place_existing(seg: &Segment, v: &Verdict, labels: &HashMap<i64, String>) -> 
         margin: v.margin,
         runner_up: v.runner_up().flatten(),
         kind: String::new(),
+        share: 1.0,
     })
 }
 
@@ -607,6 +612,7 @@ pub fn decide(
                 margin: v.margin,
                 runner_up: v.ranked.first().map(|c| c.task_id),
                 kind: String::new(),
+                share: 1.0,
             });
         }
     }
@@ -642,6 +648,7 @@ pub fn decide(
             margin: 0.0,
             runner_up: None,
             kind: String::new(),
+            share: 1.0,
         });
     }
     // 4. Contiguous rows on one target become one.
@@ -663,6 +670,320 @@ pub fn decide(
         p.kind = kind_of(spans, p.lo, p.hi, distractions).to_owned();
     }
     out
+}
+
+/// An AI session live around the window (m32 chunk 3): its transcript
+/// write and prompt minutes, and the anchors its own row carries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveSession {
+    pub id: String,
+    /// Its terminal title, else its first prompt.
+    pub title: Option<String>,
+    pub writes: Vec<i64>,
+    pub prompts: Vec<i64>,
+    pub anchors: Vec<Anchor>,
+}
+
+/// A session that wrote within this of a segment's edges was live in it.
+pub const CONCURRENT_MS: i64 = 2 * 60_000;
+/// Cluster ids for the tasks the split creates, past any of [`decide`]'s.
+const SPLIT_CLUSTER_BASE: usize = 1 << 20;
+
+/// Concurrency = supervision (m32 chunk 3): an `agent` or `supervise`
+/// placement with two or more sessions writing within [`CONCURRENT_MS`]
+/// of it becomes one row per task, each over the whole range with a
+/// `share` by the prompts typed into that task's sessions (their focus
+/// time when no prompt was kept). A session's task is what its own spans
+/// in the range score to — or, with none on screen, its own scope (repo,
+/// branch, item). A session in a repo that is not its verdict's project
+/// (and whose item that task does not hold) is foreign to it: it goes to
+/// the best-ranked task in its own repo, else becomes a new task there
+/// (one per repo across the window, given `new_task_min` of shared time;
+/// less stays with the segment's target), because a catch-all that once
+/// absorbed a repo must not keep every session from it. A session the
+/// scorer calls new with no repo stays with the segment's target. The
+/// row's kind is its own sessions' (`supervise` for one never on screen).
+/// Every other placement passes through whole.
+#[allow(clippy::too_many_arguments)]
+pub fn split_concurrent(
+    placements: Vec<Placement>,
+    spans: &[AnchoredSpan],
+    sessions: &[LiveSession],
+    profiles: &[Profile],
+    projects: &HashMap<i64, Option<String>>,
+    params: &Params,
+    sp: &SegParams,
+    distractions: &[Regex],
+) -> Vec<Placement> {
+    let mut out = Vec::with_capacity(placements.len());
+    // Repos the split has opened a new task for, with its label, in order:
+    // the cluster id.
+    let mut opened: Vec<(String, String)> = Vec::new();
+    for p in placements {
+        if sessions.len() < 2 || !matches!(p.kind.as_str(), "agent" | "supervise") {
+            out.push(p);
+            continue;
+        }
+        let (lo, hi) = (p.lo - CONCURRENT_MS, p.hi + CONCURRENT_MS);
+        let within = |t: &i64| (lo..=hi).contains(t);
+        let live: Vec<&LiveSession> = sessions
+            .iter()
+            .filter(|s| s.writes.iter().any(within))
+            .collect();
+        if live.len() < 2 {
+            out.push(p);
+            continue;
+        }
+        let owned: Vec<Vec<AnchoredSpan>> = live
+            .iter()
+            .map(|s| {
+                spans
+                    .iter()
+                    .filter(|sp| sp.end_ts > p.lo && sp.start_ts < p.hi)
+                    .filter(|sp| {
+                        sp.anchors
+                            .iter()
+                            .any(|a| a.kind == AnchorKind::Session && a.value == s.id)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .collect();
+        let mut weights: Vec<f64> = live
+            .iter()
+            .map(|s| s.prompts.iter().filter(|t| within(t)).count() as f64)
+            .collect();
+        let by_prompts = weights.iter().sum::<f64>() > 0.0;
+        if !by_prompts {
+            weights = owned
+                .iter()
+                .map(|ss| {
+                    ss.iter()
+                        .map(|sp| sp.end_ts.min(p.hi) - sp.start_ts.max(p.lo))
+                        .sum::<i64>() as f64
+                })
+                .collect();
+        }
+        let total: f64 = weights.iter().sum();
+        if total <= 0.0 {
+            out.push(p);
+            continue;
+        }
+        // (target, weight, sessions, their spans)
+        let mut groups: Vec<(Target, f64, usize, Vec<AnchoredSpan>)> = Vec::new();
+        for (i, s) in live.iter().enumerate() {
+            if weights[i] <= 0.0 {
+                continue;
+            }
+            let verdict = session_verdict(s, &owned[i], p.lo, p.hi, profiles, params, distractions);
+            let target = session_target(
+                s,
+                &owned[i],
+                verdict.as_ref(),
+                &p.target,
+                profiles,
+                projects,
+                &mut opened,
+            );
+            match groups.iter_mut().find(|g| g.0 == target) {
+                Some(g) => {
+                    g.1 += weights[i];
+                    g.2 += 1;
+                    g.3.extend(owned[i].iter().cloned());
+                }
+                None => groups.push((target, weights[i], 1, owned[i].clone())),
+            }
+        }
+        // A repo's new task needs its share of the range to be worth one;
+        // a sliver stays with the segment's target.
+        let minutes = (p.hi - p.lo) as f64 / 60_000.0;
+        let mut slivers: Vec<(f64, usize, Vec<AnchoredSpan>)> = Vec::new();
+        groups.retain_mut(|g| {
+            let sliver = matches!(g.0, Target::New { .. })
+                && g.0 != p.target
+                && g.1 / total * minutes < sp.new_task_min;
+            if sliver {
+                slivers.push((g.1, g.2, std::mem::take(&mut g.3)));
+            }
+            !sliver
+        });
+        for (w, n, ss) in slivers {
+            match groups.iter_mut().find(|g| g.0 == p.target) {
+                Some(g) => {
+                    g.1 += w;
+                    g.2 += n;
+                    g.3.extend(ss);
+                }
+                None => groups.push((p.target.clone(), w, n, ss)),
+            }
+        }
+        if groups.len() < 2 {
+            out.push(p);
+            continue;
+        }
+        // The segment's own target first, then by weight.
+        groups.sort_by(|a, b| {
+            (b.0 == p.target)
+                .cmp(&(a.0 == p.target))
+                .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        for (target, w, n, mut ss) in groups {
+            ss.sort_by_key(|s| (s.start_ts, s.id));
+            let kind = if ss.is_empty() {
+                "supervise"
+            } else {
+                kind_of(&ss, p.lo, p.hi, distractions)
+            };
+            let basis = if by_prompts {
+                format!("{w} of {total} prompts")
+            } else {
+                format!("{:.0}% of focus", w / total * 100.0)
+            };
+            let reason = format!("{n} of {} concurrent sessions, {basis}", live.len());
+            out.push(Placement {
+                target,
+                kind: kind.to_owned(),
+                share: w / total,
+                reason,
+                ..p.clone()
+            });
+        }
+    }
+    out
+}
+
+/// Where one live session goes given its verdict: its best task when that
+/// task is in the session's repo, has no project, or holds the session's
+/// item; else any task holding the item (a ticket spanning repos is one
+/// task); else the best-ranked task in the session's repo; else a new
+/// task in that repo, one per repo over the window; with no repo at all,
+/// the segment's own target.
+fn session_target(
+    s: &LiveSession,
+    owned: &[AnchoredSpan],
+    verdict: Option<&Verdict>,
+    fallback: &Target,
+    profiles: &[Profile],
+    projects: &HashMap<i64, Option<String>>,
+    opened: &mut Vec<(String, String)>,
+) -> Target {
+    let anchor = |kind: AnchorKind| -> Vec<&str> {
+        s.anchors
+            .iter()
+            .chain(owned.iter().flat_map(|sp| sp.anchors.iter()))
+            .filter(|a| a.kind == kind)
+            .map(|a| a.value.as_str())
+            .collect()
+    };
+    let place = anchor(AnchorKind::Place).first().copied();
+    let items = anchor(AnchorKind::Item);
+    let consistent = |t: i64| -> bool {
+        let Some(place) = place else {
+            return true;
+        };
+        match projects.get(&t) {
+            None | Some(None) => true,
+            Some(Some(project)) if project.eq_ignore_ascii_case(place) => true,
+            Some(Some(_)) => profiles.iter().any(|pr| {
+                pr.task_id == t
+                    && items.iter().any(|i| {
+                        pr.minutes
+                            .contains_key(&Key::Anchor(AnchorKind::Item, (*i).to_owned()))
+                    })
+            }),
+        }
+    };
+    if let Some(t) = verdict.and_then(|v| v.best)
+        && consistent(t)
+    {
+        return Target::Existing(t);
+    }
+    // A task that holds the session's ticket owns it whatever the repo.
+    let holds = |pr: &Profile| {
+        items.iter().any(|i| {
+            pr.minutes
+                .contains_key(&Key::Anchor(AnchorKind::Item, (*i).to_owned()))
+        })
+    };
+    if let Some(v) = verdict
+        && let Some(c) = v.ranked.iter().find(|c| {
+            profiles
+                .iter()
+                .any(|pr| pr.task_id == c.task_id && holds(pr))
+        })
+    {
+        return Target::Existing(c.task_id);
+    }
+    if let Some(pr) = profiles.iter().find(|pr| holds(pr)) {
+        return Target::Existing(pr.task_id);
+    }
+    let Some(place) = place else {
+        return fallback.clone();
+    };
+    if let Some(v) = verdict
+        && let Some(c) = v.ranked.iter().find(|c| {
+            c.score > 0.0
+                && projects.get(&c.task_id).is_some_and(|pr| {
+                    pr.as_deref()
+                        .is_some_and(|pr| pr.eq_ignore_ascii_case(place))
+                })
+        })
+    {
+        return Target::Existing(c.task_id);
+    }
+    let cluster = match opened.iter().position(|(o, _)| o == place) {
+        Some(i) => i,
+        None => {
+            let label = s
+                .title
+                .as_deref()
+                .map(crate::evidence::strip_glyphs)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map_or_else(|| format!("{place} session"), str::to_owned);
+            opened.push((place.to_owned(), label));
+            opened.len() - 1
+        }
+    };
+    Target::New {
+        label: opened[cluster].1.clone(),
+        project: Some(place.to_owned()),
+        cluster: SPLIT_CLUSTER_BASE + cluster,
+    }
+}
+
+/// The scorer's verdict on one live session's evidence over `[lo, hi)`:
+/// its spans on screen, else its own scope anchors spread over the range.
+/// `None` when it has no evidence at all.
+pub fn session_verdict(
+    s: &LiveSession,
+    owned: &[AnchoredSpan],
+    lo: i64,
+    hi: i64,
+    profiles: &[Profile],
+    params: &Params,
+    distractions: &[Regex],
+) -> Option<Verdict> {
+    let evidence = if owned.is_empty() {
+        let minutes = (hi - lo) as f64 / 60_000.0;
+        Segment {
+            start_ts: lo,
+            end_ts: hi,
+            minutes,
+            keys: s
+                .anchors
+                .iter()
+                .map(|a| (Key::Anchor(a.kind, a.value.clone()), minutes))
+                .collect(),
+            vec: None,
+        }
+    } else {
+        Segment::from_spans_skipping(owned, lo, hi, distractions)
+    };
+    if evidence.keys.is_empty() {
+        return None;
+    }
+    Some(profile::score(&evidence, profiles, params))
 }
 
 /// The live tick: cut and score `[end of the newest derived batch, now)`,
@@ -750,9 +1071,10 @@ pub fn rescore_day(
     let owner_before = |lo: i64, hi: i64| -> Option<i64> {
         before
             .iter()
-            .map(|r| (r.task_id, r.end_ts.min(hi) - r.start_ts.max(lo)))
-            .filter(|(_, ov)| *ov > 0)
-            .max_by_key(|(_, ov)| *ov)
+            .map(|r| (r.task_id, r.end_ts.min(hi) - r.start_ts.max(lo), r.share))
+            .filter(|(_, ov, _)| *ov > 0)
+            .map(|(t, ov, share)| (t, ov as f64 * share))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(t, _)| t)
     };
     let moved = after
@@ -804,6 +1126,40 @@ pub fn reconcile(
     Ok(placed.len())
 }
 
+/// What [`reconcile`] would write for `[lo, hi)` against `profiles`,
+/// without writing it (`chronicle bench --window`, which builds them as of
+/// the window's start the way the replay does).
+pub fn place_dry(
+    conn: &Connection,
+    config: &Config,
+    lo: i64,
+    hi: i64,
+    profiles: &[Profile],
+    labels: &HashMap<i64, String>,
+    projects: &HashMap<i64, Option<String>>,
+    distractions: &[Regex],
+) -> Result<Vec<Placement>, StorageError> {
+    let ticket_re = ticket_re(config);
+    let params = params(config);
+    let sp = SegParams::from_config(config);
+    let spans = storage::anchored_spans(conn, lo, hi)?;
+    if spans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placements = decide(&spans, lo, hi, profiles, labels, distractions, &params, &sp);
+    let sessions = storage::live_sessions(conn, lo, hi, &ticket_re)?;
+    Ok(split_concurrent(
+        placements,
+        &spans,
+        &sessions,
+        profiles,
+        projects,
+        &params,
+        &sp,
+        distractions,
+    ))
+}
+
 fn place_window(
     conn: &mut Connection,
     config: &Config,
@@ -831,6 +1187,18 @@ fn place_window(
         distractions,
         &params,
         &sp,
+    );
+    let sessions = storage::live_sessions(conn, lo, hi, &ticket_re)?;
+    let projects = storage::task_projects(conn)?;
+    let placements = split_concurrent(
+        placements,
+        &spans,
+        &sessions,
+        &profiles,
+        &projects,
+        &params,
+        &sp,
+        distractions,
     );
     let (touched, new_tasks) = storage::store_segments(conn, lo, hi, batch_id, &placements)?;
     if !touched.is_empty() {
@@ -1223,5 +1591,348 @@ mod tests {
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!((out[0].lo, out[0].hi), (0, 40 * M));
         assert!(!out[0].confident, "the folded stretch makes the row unsure");
+    }
+
+    /// Task 7 is chronicle work on `m30`, task 9 is contoso work on
+    /// ACME-1; both profiles carry their place and branch.
+    fn two_profiles() -> Vec<Profile> {
+        let mut a = HashMap::new();
+        a.insert(Key::Anchor(AnchorKind::Branch, "m30".into()), 30.0);
+        a.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 30.0);
+        let mut b = HashMap::new();
+        b.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 30.0);
+        b.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 30.0);
+        vec![
+            Profile {
+                task_id: 7,
+                minutes: a,
+                last_ts: Some(0),
+                vec: None,
+            },
+            Profile {
+                task_id: 9,
+                minutes: b,
+                last_ts: Some(0),
+                vec: None,
+            },
+        ]
+    }
+
+    fn agent_span(id: i64, lo: i64, hi: i64, session: &str, place: &str) -> AnchoredSpan {
+        let mut s = span(
+            id,
+            lo,
+            hi,
+            "Terminator",
+            "✳ work",
+            &[(AnchorKind::Session, session), (AnchorKind::Place, place)],
+        );
+        s.wrote = true;
+        s
+    }
+
+    fn live(
+        id: &str,
+        writes: &[i64],
+        prompts: &[i64],
+        anchors: &[(AnchorKind, &str)],
+    ) -> LiveSession {
+        LiveSession {
+            id: id.into(),
+            title: None,
+            writes: writes.iter().map(|m| m * M).collect(),
+            prompts: prompts.iter().map(|m| m * M).collect(),
+            anchors: anchors
+                .iter()
+                .map(|(k, v)| Anchor {
+                    kind: *k,
+                    value: (*v).to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    fn whole(lo: i64, hi: i64, task: i64, kind: &str) -> Placement {
+        Placement {
+            lo: lo * M,
+            hi: hi * M,
+            target: Target::Existing(task),
+            confidence: 0.8,
+            confident: true,
+            reason: "evidence".into(),
+            margin: 0.3,
+            runner_up: None,
+            kind: kind.into(),
+            share: 1.0,
+        }
+    }
+
+    #[test]
+    fn concurrent_sessions_split_a_segment_by_prompts() {
+        let profiles = two_profiles();
+        let spans = vec![
+            agent_span(1, 0, 30, "s1", "chronicle"),
+            agent_span(2, 30, 40, "s2", "contoso"),
+        ];
+        let sessions = vec![
+            live("s1", &[5, 15, 25], &[1, 10, 20], &[]),
+            live("s2", &[32, 38], &[31], &[]),
+        ];
+        let out = split_concurrent(
+            vec![whole(0, 40, 7, "agent")],
+            &spans,
+            &sessions,
+            &profiles,
+            &HashMap::new(),
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(7));
+        assert_eq!(out[0].share, 0.75);
+        assert_eq!(out[1].target, Target::Existing(9));
+        assert_eq!(out[1].share, 0.25);
+        assert!(out.iter().all(|p| (p.lo, p.hi) == (0, 40 * M)));
+        assert!(out.iter().all(|p| p.kind == "agent"), "{out:?}");
+        assert!(
+            out[1].reason.contains("1 of 4 prompts"),
+            "{}",
+            out[1].reason
+        );
+    }
+
+    #[test]
+    fn a_session_never_on_screen_is_supervised_from_its_own_scope() {
+        let profiles = two_profiles();
+        let spans = vec![agent_span(1, 0, 40, "s1", "chronicle")];
+        let sessions = vec![
+            live("s1", &[5, 25], &[1], &[]),
+            live(
+                "s2",
+                &[10, 30],
+                &[2],
+                &[
+                    (AnchorKind::Session, "s2"),
+                    (AnchorKind::Place, "contoso"),
+                    (AnchorKind::Item, "ACME-1"),
+                ],
+            ),
+        ];
+        let out = split_concurrent(
+            vec![whole(0, 40, 7, "agent")],
+            &spans,
+            &sessions,
+            &profiles,
+            &HashMap::new(),
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(
+            (out[1].target.clone(), out[1].kind.as_str()),
+            (Target::Existing(9), "supervise")
+        );
+        assert_eq!(out[0].share + out[1].share, 1.0);
+    }
+
+    #[test]
+    fn focus_shares_stand_in_when_no_prompt_was_kept() {
+        let profiles = two_profiles();
+        let spans = vec![
+            agent_span(1, 0, 10, "s1", "chronicle"),
+            agent_span(2, 10, 40, "s2", "contoso"),
+        ];
+        let sessions = vec![live("s1", &[5], &[], &[]), live("s2", &[20], &[], &[])];
+        let out = split_concurrent(
+            vec![whole(0, 40, 7, "supervise")],
+            &spans,
+            &sessions,
+            &profiles,
+            &HashMap::new(),
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].share, 0.25);
+        assert_eq!(out[1].share, 0.75);
+        assert!(out[0].reason.contains("25% of focus"), "{}", out[0].reason);
+    }
+
+    #[test]
+    fn segments_with_one_live_session_or_no_agent_work_pass_whole() {
+        let profiles = two_profiles();
+        let spans = vec![
+            agent_span(1, 0, 30, "s1", "chronicle"),
+            agent_span(2, 30, 40, "s2", "contoso"),
+        ];
+        // s2 last wrote long before the segment.
+        let far = vec![
+            live("s1", &[5, 25], &[1], &[]),
+            live("s2", &[-10], &[-11], &[]),
+        ];
+        let out = split_concurrent(
+            vec![whole(0, 40, 7, "agent")],
+            &spans,
+            &far,
+            &profiles,
+            &HashMap::new(),
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].share, 1.0);
+        // Both live, but the segment is not agent work.
+        let both = vec![
+            live("s1", &[5, 25], &[1], &[]),
+            live("s2", &[35], &[31], &[]),
+        ];
+        let out = split_concurrent(
+            vec![whole(0, 40, 7, "author")],
+            &spans,
+            &both,
+            &profiles,
+            &HashMap::new(),
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 1);
+        // Both live and both scoring to one task: one whole row.
+        let same = vec![
+            agent_span(1, 0, 30, "s1", "chronicle"),
+            agent_span(2, 30, 40, "s2", "chronicle"),
+        ];
+        let out = split_concurrent(
+            vec![whole(0, 40, 7, "agent")],
+            &same,
+            &both,
+            &profiles,
+            &HashMap::new(),
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].share, 1.0);
+    }
+
+    /// A catch-all that absorbed a repo does not keep that repo's sessions:
+    /// they go to the best task in their own repo, else a new one there
+    /// (one per repo across the window); a ticket the task holds keeps a
+    /// session from another repo; a sliver of a repo folds back.
+    #[test]
+    fn a_session_foreign_to_its_verdicts_project_goes_to_its_own_repo() {
+        // Task 85 is a mailer task that has learned chronicle too.
+        let mut a = HashMap::new();
+        a.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 60.0);
+        a.insert(Key::Anchor(AnchorKind::Place, "mailer".into()), 60.0);
+        a.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
+        a.insert(
+            Key::Anchor(AnchorKind::Branch, "chronicle@main".into()),
+            60.0,
+        );
+        let profiles = vec![Profile {
+            task_id: 85,
+            minutes: a,
+            last_ts: Some(0),
+            vec: None,
+        }];
+        let projects = HashMap::from([(85, Some("mailer".to_owned()))]);
+        let spans = vec![
+            agent_span(1, 0, 30, "s1", "chronicle"),
+            agent_span(2, 30, 40, "s2", "contoso"),
+            agent_span(3, 40, 80, "s3", "chronicle"),
+        ];
+        let mut nyc = live("s2", &[32, 38, 42], &[31, 35, 41], &[]);
+        nyc.anchors.push(Anchor {
+            kind: AnchorKind::Item,
+            value: "ACME-1".into(),
+        });
+        let mut s1 = live("s1", &[5, 15, 25], &[1, 10], &[]);
+        s1.title = Some("✳ fix the segmenter".into());
+        let sessions = vec![s1, nyc, live("s3", &[45, 70], &[41, 60], &[])];
+        let out = split_concurrent(
+            vec![whole(0, 40, 85, "agent"), whole(40, 80, 85, "agent")],
+            &spans,
+            &sessions,
+            &profiles,
+            &projects,
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 4, "{out:?}");
+        // contoso session: task 85 holds its ticket, so it stays.
+        assert_eq!(out[0].target, Target::Existing(85));
+        assert_eq!(out[0].share, 0.6);
+        let Target::New {
+            label,
+            project,
+            cluster,
+        } = &out[1].target
+        else {
+            panic!("{out:?}")
+        };
+        assert_eq!(
+            (label.as_str(), project.as_deref()),
+            ("fix the segmenter", Some("chronicle"))
+        );
+        assert_eq!(out[1].share, 0.4);
+        // The second segment's chronicle session joins the same new task.
+        assert_eq!(out[2].target, Target::Existing(85));
+        assert_eq!(
+            out[3].target,
+            Target::New {
+                label: label.clone(),
+                project: project.clone(),
+                cluster: *cluster
+            }
+        );
+        assert!((out[3].share - 2.0 / 3.0).abs() < 1e-9, "{out:?}");
+        // A sliver of a repo (2 of 20 prompts over 40 min = 4 min) folds back.
+        let sliver = vec![
+            live(
+                "s1",
+                &[5, 15, 25],
+                &[
+                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                ],
+                &[],
+            ),
+            {
+                let mut s = live("s2", &[32, 38], &[31, 35], &[]);
+                s.anchors.push(Anchor {
+                    kind: AnchorKind::Item,
+                    value: "ACME-1".into(),
+                });
+                s
+            },
+        ];
+        let flipped = HashMap::from([(85, Some("chronicle".to_owned()))]);
+        let mut a = HashMap::new();
+        a.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
+        a.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 60.0);
+        let profiles = vec![Profile {
+            task_id: 85,
+            minutes: a,
+            last_ts: Some(0),
+            vec: None,
+        }];
+        let out = split_concurrent(
+            vec![whole(0, 40, 85, "agent")],
+            &spans[..2],
+            &sliver,
+            &profiles,
+            &flipped,
+            &Params::default(),
+            &SegParams::default(),
+            &[],
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].share, 1.0);
     }
 }

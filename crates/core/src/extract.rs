@@ -708,6 +708,39 @@ pub fn session_writes(e: &ActivityEvent) -> Vec<i64> {
     detail_i64s(e.detail.as_deref(), "writes")
 }
 
+/// Minutes (ms) a prompt was typed into an AI session row; empty for rows
+/// captured before the collector kept them (m32 chunk 2).
+pub fn session_prompts(e: &ActivityEvent) -> Vec<i64> {
+    detail_i64s(e.detail.as_deref(), "prompt_minutes")
+}
+
+/// What an AI session row is called on screen: its latest terminal title,
+/// else its first prompt (`summary`), glyphs and whitespace runs gone.
+pub fn session_title(e: &ActivityEvent) -> Option<String> {
+    detail_strings(e.detail.as_deref(), "titles")
+        .last()
+        .map(|t| clean_title(t))
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            e.summary
+                .as_deref()
+                .map(clean_title)
+                .filter(|t| !t.is_empty())
+        })
+}
+
+/// The anchors an AI session row carries on its own: its session key and
+/// its repo, branch and work item (m32 chunk 3: what a session that wrote
+/// without ever being on screen is evidence of).
+pub fn session_scope(e: &ActivityEvent, ticket_re: &Regex) -> Vec<Anchor> {
+    let mut out = Vec::new();
+    if let Some(id) = &e.ext_id {
+        out.push(Anchor::new(AnchorKind::Session, id.clone()));
+    }
+    push_scope(&mut out, &e.repo, &e.branch, ticket_re);
+    dedup(out)
+}
+
 fn detail_i64s(detail: Option<&str>, field: &str) -> Vec<i64> {
     let Some(detail) = detail else {
         return Vec::new();

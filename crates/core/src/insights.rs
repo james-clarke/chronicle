@@ -252,6 +252,7 @@ mod tests {
             external_ref: None,
             description: None,
             kind: None,
+            share: 1.0,
         }
     }
 

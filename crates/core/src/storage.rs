@@ -51,6 +51,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/023_ai_job_usage.sql")),
         M::up(include_str!("../migrations/024_daemon_runs.sql")),
         M::up(include_str!("../migrations/025_presence.sql")),
+        M::up(include_str!("../migrations/026_interval_share.sql")),
     ])
 });
 
@@ -915,6 +916,112 @@ fn sessions_overlapping(
     ))?;
     let rows = stmt.query_map([lo, hi], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Every task's project, for the concurrency split's place rule (m32
+/// chunk 3).
+pub fn task_projects(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, Option<String>>, StorageError> {
+    Ok(conn
+        .prepare("SELECT id, project FROM tasks")?
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
+/// The AI sessions live around `[lo, hi)` for the segmenter's concurrency
+/// split (m32 chunk 3): one entry per session row overlapping the window
+/// padded by [`crate::segmenter::CONCURRENT_MS`], with its write and prompt
+/// minutes and its own scope anchors. Rows without an id never count.
+pub fn live_sessions(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+    ticket_re: &regex::Regex,
+) -> Result<Vec<crate::segmenter::LiveSession>, StorageError> {
+    use crate::segmenter::{CONCURRENT_MS, LiveSession};
+    let mut out = Vec::new();
+    for e in sessions_overlapping(conn, lo - CONCURRENT_MS, hi + CONCURRENT_MS)? {
+        let Some(id) = e.ext_id.clone() else {
+            continue;
+        };
+        out.push(LiveSession {
+            id,
+            title: crate::extract::session_title(&e),
+            writes: crate::extract::session_writes(&e),
+            prompts: crate::extract::session_prompts(&e),
+            anchors: crate::extract::session_scope(&e, ticket_re),
+        });
+    }
+    Ok(out)
+}
+
+/// One AI session on the timeline's agents lane (m32 chunk 3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentLane {
+    pub id: String,
+    pub title: String,
+    pub repo: String,
+    /// The row's first and last moment: its start, and its end or last
+    /// transcript write.
+    pub lo: i64,
+    pub hi: i64,
+    pub writes: Vec<i64>,
+    pub prompts: Vec<i64>,
+    /// Focus spans attached to the session, `[lo, hi)`, by start.
+    pub focus: Vec<(i64, i64)>,
+}
+
+/// The AI sessions overlapping `[lo, hi)` with their prompt minutes and the
+/// focus spans attached to them, oldest first.
+pub fn agent_lanes(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<AgentLane>, StorageError> {
+    let mut focus: std::collections::HashMap<String, Vec<(i64, i64)>> =
+        std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT a.value, s.start_ts, s.end_ts FROM spans s
+         JOIN span_anchors a ON a.span_id = s.id AND a.kind = 'session'
+         WHERE s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
+         ORDER BY s.start_ts, s.id",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, s, e) = row?;
+        focus.entry(id).or_default().push((s, e));
+    }
+    let mut out = Vec::new();
+    for e in sessions_overlapping(conn, lo, hi)? {
+        let Some(id) = e.ext_id.clone() else {
+            continue;
+        };
+        let writes = crate::extract::session_writes(&e);
+        let start = e.ts.as_millisecond();
+        let end = e
+            .end_ts
+            .map(|t| t.as_millisecond())
+            .or_else(|| writes.iter().copied().max())
+            .unwrap_or(start)
+            .max(start);
+        out.push(AgentLane {
+            title: crate::extract::session_title(&e)
+                .unwrap_or_else(|| id.chars().take(8).collect()),
+            repo: e.repo.clone(),
+            lo: start,
+            hi: end,
+            prompts: crate::extract::session_prompts(&e),
+            focus: focus.remove(&id).unwrap_or_default(),
+            writes,
+            id,
+        });
+    }
+    Ok(out)
 }
 
 /// What was live on screen from `from_ms` on, for the sessionizer's quiet /
@@ -3099,9 +3206,9 @@ pub fn store_segments(
         for (s, e) in subtract_ranges(p.lo, p.hi, &user_rows) {
             tx.execute(
                 "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source,
-                                        reason, origin_task_id, confident, kind)
+                                        reason, origin_task_id, confident, kind, share)
                  VALUES (?1, COALESCE(?2, (SELECT id FROM batches WHERE start_ts <= ?3 AND end_ts > ?3)),
-                         ?3, ?4, ?5, 'segment', ?6, ?1, ?7, ?8)",
+                         ?3, ?4, ?5, 'segment', ?6, ?1, ?7, ?8, ?9)",
                 params![
                     task_id,
                     batch_id,
@@ -3110,7 +3217,8 @@ pub fn store_segments(
                     p.confidence,
                     p.reason,
                     p.confident as i64,
-                    p.kind
+                    p.kind,
+                    p.share
                 ],
             )?;
             // Reconciled rows are stable (the live tick rewrites only the
@@ -3370,13 +3478,20 @@ pub struct SegmentRow {
     pub confident: Option<bool>,
     pub reason: Option<String>,
     pub kind: Option<String>,
+    /// Snapshots from before m32 chunk 3 carry none: a whole row.
+    #[serde(default = "one")]
+    pub share: f64,
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 /// The `segment` rows starting in `[lo, hi)`, by start.
 pub fn segment_rows(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SegmentRow>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, batch_id, start_ts, end_ts, confidence, confident, reason, kind FROM intervals
-         WHERE source='segment' AND start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts",
+        "SELECT task_id, batch_id, start_ts, end_ts, confidence, confident, reason, kind, share FROM intervals
+         WHERE source='segment' AND start_ts >= ?1 AND start_ts < ?2 ORDER BY start_ts, id",
     )?;
     let rows = stmt
         .query_map([lo, hi], |r| {
@@ -3389,6 +3504,7 @@ pub fn segment_rows(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<SegmentRo
                 confident: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
                 reason: r.get(6)?,
                 kind: r.get(7)?,
+                share: r.get(8)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -3473,8 +3589,8 @@ pub fn rescore_undo(
     let mut n = 0;
     for r in &before {
         n += tx.execute(
-            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id, confident, kind)
-             SELECT ?1, ?2, ?3, ?4, ?5, 'segment', ?6, ?1, ?7, ?8 WHERE EXISTS (SELECT 1 FROM tasks WHERE id=?1)",
+            "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id, confident, kind, share)
+             SELECT ?1, ?2, ?3, ?4, ?5, 'segment', ?6, ?1, ?7, ?8, ?9 WHERE EXISTS (SELECT 1 FROM tasks WHERE id=?1)",
             params![
                 r.task_id,
                 r.batch_id,
@@ -3483,7 +3599,8 @@ pub fn rescore_undo(
                 r.confidence,
                 r.reason,
                 r.confident.map(i64::from),
-                r.kind
+                r.kind,
+                r.share
             ],
         )?;
     }
@@ -4567,11 +4684,12 @@ fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         description: r.get(8)?,
         external_ref: r.get(9)?,
         kind: r.get(10)?,
+        share: r.get(11)?,
     })
 }
 
 const TASK_COLS: &str = "t.id, i.id, t.label, t.project, i.start_ts, i.end_ts, i.confidence, \
-     t.source='user', t.description, t.external_ref, i.kind";
+     t.source='user', t.description, t.external_ref, i.kind, i.share";
 
 pub fn tasks_in_range(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Task>, StorageError> {
     let mut stmt = conn.prepare(&format!(

@@ -211,6 +211,21 @@ pub struct Task {
     pub external_ref: Option<String>,
     /// The kind of work the interval was (m30 chunk 5; `segment` rows only).
     pub kind: Option<String>,
+    /// The fraction of the interval's wall time that is this task's (m32
+    /// chunk 3): under 1 when concurrent AI sessions split a segment.
+    pub share: f64,
+}
+
+impl Task {
+    /// `ms` of this interval weighted by its share, for totals that must
+    /// still sum to captured time when a segment is split.
+    pub fn weigh(&self, ms: i64) -> i64 {
+        if self.share >= 1.0 {
+            ms
+        } else {
+            (ms as f64 * self.share).round() as i64
+        }
+    }
 }
 
 /// A past user correction surfaced into the digest as few-shot guidance.
