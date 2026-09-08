@@ -821,3 +821,81 @@ processes the daemon's user can inspect. Historical `localhost` spans
 have no port rows to resolve against. The `name_task` filter matches
 drafts to anchored spans by `(start, end)`; a draft the sessionizer
 re-cut since the anchors were stored keeps its place.
+
+## Shipped (2026-09-08, chunk 5)
+
+Narrative from ground truth, on `main`. No migration; `activity_events`
+takes the new kind as a string.
+
+- **`note` activity kind** (`ActivityKind::Note`, upsert on `(kind,
+  ext_id)`): `capture::notes::NotesProvider` reads every `git_repos`
+  entry's `.remember/today-*.md` (`.done.md` too) every 60 s, re-parsing a
+  file only when its size or mtime moves; the first poll reads them all,
+  so a fresh daemon backfills every note it can see. A `## HH:MM | branch`
+  or `## HH:MM–HH:MM | branch` head is one row: `ts` (and `end_ts` for a
+  range) in the local zone from the file's date, `branch`, `ext_id`
+  `note:<repo>:<date>T<HH:MM>`, summary the body on one line (300 chars),
+  detail `{"body","file"}` (body 2000 chars). `now.md` (the buffer) is not
+  read. `chronicle backfill-notes` (hidden) is one pass of the same reader
+  for a DB the daemon has not started on yet. Timeline rows render it with
+  the note-pencil glyph; the digest's activity line as `note <repo>@<branch>
+  "…"`.
+- **Sessions keep their last reply** (`ai_sessions`): the newest assistant
+  text block, clipped to 300 chars, lands in the row's detail as
+  `last_assistant` on every upsert. Rows captured before this have none
+  until `backfill-sessions` re-reads their transcripts.
+- **`digest::ground_truth`**: the rows that cannot be wrong, one line
+  each ending in a source tag — `commit <repo>@<branch> "subject" [commit
+  <7 chars>]`, `session … [session HH:MM]` with up to four `prompt:` lines
+  and a `reply:` line, `note … [note HH:MM]`, `PR authored/reviewed …
+  [pr <number>]`, `meeting … [meeting HH:MM]`. Checkouts, shells, cwd
+  probes, edits and calls say where and how long, never what, and are left
+  out; an interrupt marker or pasted-image placeholder is not a prompt; a
+  session asked nothing that lasted under a minute (a resumed transcript's
+  stub) is nothing. `ground_truth_within(max_chars)` keeps commits first,
+  then notes, PRs, meetings, sessions, until the budget is spent, and
+  emits what it kept by time — the local model's window is small and the
+  tokenizer cuts the tail, so the digest chooses what goes.
+- **Descriptions** (`task_description`): window titles first, then the
+  task's ground truth over its intervals (1600 chars); a task with neither
+  is skipped (`SkipJob`), never failed. The prompt names ground truth as
+  the stronger signal.
+- **Journal**: the batch's ground truth (1600 chars) replaces the
+  activity-line list; a batch with truth but no window titles still gets
+  an entry; only a batch with neither bails. The prompt's `{git}` slot is
+  now `{truth}`.
+- **Standup**: per task, the last three journal entries (clipped to 220
+  chars at a sentence or word end) tagged `[journal HH:MM]`, the checkpoint
+  tagged `[checkpoint]`, then the task's ground truth for the day; a task
+  with truth but no journal entries gets a block too. The whole digest is
+  budgeted (`STANDUP_DIGEST_CHARS` = 2600 tokens' worth, shared per task,
+  600 chars minimum) so the last task of a busy day is not the one the
+  tokenizer cuts, and the local describer gives the standup 512 output
+  tokens (`MAX_GEN_STANDUP`) instead of 256. The prompt asks for a block
+  per task with one bullet per thing done (≤ 20 words) ending in the
+  source tag copied exactly, and `Next:` from the checkpoint;
+  `prompts::keep_sourced` then drops every bullet without a `[…]` tag and
+  every block left with none, and the job fails rather than store a draft
+  with no sourced claim. The digest and, when lines were dropped, the raw
+  draft log at debug (`RUST_LOG=chronicle=debug`).
+
+Gate — standup for a replayed day on a sandbox copy of the live DB
+(`backfill-notes` first, `ai-job` on the local 4B):
+
+| day | blocks | bullets | unsourced dropped |
+|---|---|---|---|
+| 2026-09-04 (journals + truth) | 3 tasks, `Next:` from the checkpoint | 7, every one `[journal HH:MM]` or `[checkpoint]` | 0 |
+| 2026-09-08 (no journals; truth only) | 1 task | 13, every one `[commit …]` or `[session …]` | 1 (the 14th, cut by the output cap mid-tag) |
+
+Before the budget the 09-04 digest was 18 K chars: the 4B saw one task,
+copied its journal entries whole and ran out of output mid-bullet; after,
+6.8 K chars and three blocks.
+
+Open: the 09-08 draft carries none of the day's 24 chronicle commits —
+they sit under task 120 (`fabrikam-web`), whose repo filter in
+`activity_by_task` keeps only fabrikam-web rows, so the day's chronicle work
+has no task to be true under (the placement problem, M33). A day with many
+commits under one task yields one bullet per commit and the output cap cuts
+the last; a cloud route has no such cap. Sessions captured before today
+have no `last_assistant` until `backfill-sessions`. The Connections panel
+has no row for notes (on whenever `git_repos` is set, no switch).
