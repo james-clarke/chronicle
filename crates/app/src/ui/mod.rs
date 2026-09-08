@@ -552,6 +552,9 @@ struct TimelineApp {
     declare_conflict: Option<DeclareConflict>,
     spans: Vec<SpanRow>,
     groups: Vec<TaskGroup>,
+    /// The shown day's AI sessions for the timeline's agents lane (m32
+    /// chunk 3), oldest first.
+    agents: Vec<chronicle_core::storage::AgentLane>,
     /// The shown day's activity overlapping no task (m22): calls between
     /// tasks, PRs reviewed in a gap. Oldest first.
     unplaced: Vec<ActivityRow>,
@@ -786,6 +789,7 @@ impl TimelineApp {
             declare_conflict: None,
             spans: Vec::new(),
             groups: Vec::new(),
+            agents: Vec::new(),
             unplaced: Vec::new(),
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
@@ -957,16 +961,29 @@ impl TimelineApp {
         match self.load_spans().and_then(|spans| {
             self.load_intent()?;
             let groups = self.load_groups()?;
+            let agents = self.load_agents()?;
             let unplaced = self.load_unplaced()?;
             let open = self.load_open(&groups)?;
             let closed = self.load_closed()?;
             let feed = self.load_feed()?;
             let proposals = self.load_proposals()?;
-            Ok((spans, groups, unplaced, open, closed, feed, proposals))
+            Ok((
+                spans, groups, agents, unplaced, open, closed, feed, proposals,
+            ))
         }) {
-            Ok((spans, groups, unplaced, open, closed, (feed, unassigned_ms), proposals)) => {
+            Ok((
+                spans,
+                groups,
+                agents,
+                unplaced,
+                open,
+                closed,
+                (feed, unassigned_ms),
+                proposals,
+            )) => {
                 self.spans = spans;
                 self.groups = groups;
+                self.agents = agents;
                 self.unplaced = unplaced;
                 self.open_tasks = open;
                 self.closed_tasks = closed;
@@ -1279,6 +1296,13 @@ impl TimelineApp {
         Ok(chronicle_core::report::build(&tasks, days, &self.tz)?)
     }
 
+    /// The day's AI sessions for the agents lane.
+    fn load_agents(&mut self) -> anyhow::Result<Vec<chronicle_core::storage::AgentLane>> {
+        let (lo, hi) = self.day_range_ms()?;
+        let conn = self.conn.as_ref().expect("connection opened by load_spans");
+        Ok(chronicle_core::storage::agent_lanes(conn, lo, hi)?)
+    }
+
     /// Day's intervals grouped under their task identity, in order of each
     /// task's first interval.
     fn load_groups(&mut self) -> anyhow::Result<Vec<TaskGroup>> {
@@ -1320,11 +1344,12 @@ impl TimelineApp {
                     groups.last_mut().expect("just pushed")
                 }
             };
-            group.total_ms += end_ms - start_ms;
+            let ms = t.weigh(end_ms - start_ms);
+            group.total_ms += ms;
             if let Some(kind) = &t.kind {
                 match group.by_kind.iter_mut().find(|(k, _)| k == kind) {
-                    Some(e) => e.1 += end_ms - start_ms,
-                    None => group.by_kind.push((kind.clone(), end_ms - start_ms)),
+                    Some(e) => e.1 += ms,
+                    None => group.by_kind.push((kind.clone(), ms)),
                 }
                 group.by_kind.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
             }
@@ -1491,7 +1516,7 @@ impl TimelineApp {
             );
             if e > s {
                 let cell = today_ms.entry(t.id).or_insert((0, e));
-                cell.0 += e - s;
+                cell.0 += t.weigh(e - s);
                 cell.1 = cell.1.max(e);
             }
         }

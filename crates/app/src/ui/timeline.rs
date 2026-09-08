@@ -5,6 +5,8 @@ use chronicle_mcp::ActionCall;
 use eframe::egui;
 use jiff::{ToSpan, Zoned};
 
+use chronicle_core::storage::AgentLane;
+
 use super::{
     Action, EditState, SessionRow, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, fmt_dur, theme,
 };
@@ -130,6 +132,7 @@ impl TimelineApp {
                 return;
             }
             let groups = &self.groups;
+            let agents = &self.agents;
             let spans = &self.spans;
             let edit = &mut self.edit;
             let merge_pick = &mut self.merge_pick;
@@ -169,7 +172,7 @@ impl TimelineApp {
                     today_header(ui, groups, spans);
                     if let (Some((lo, hi)), Some(day_start)) = (day_range, &day_start) {
                         activity_chart(
-                            ui, content_w, groups, &band_vis, lo, hi, day_start, band_mode,
+                            ui, content_w, groups, agents, &band_vis, lo, hi, day_start, band_mode,
                         );
                     }
                     ui.add_space(4.0);
@@ -488,6 +491,7 @@ fn activity_chart(
     ui: &mut egui::Ui,
     width: f32,
     groups: &[TaskGroup],
+    agents: &[AgentLane],
     vis: &[usize],
     lo: i64,
     hi: i64,
@@ -507,6 +511,7 @@ fn activity_chart(
         BandMode::Lanes => activity_lanes(ui, width, chart_h, groups, &chart),
         BandMode::Hours => activity_hours(ui, width, chart_h, groups, &chart, day_start),
     };
+    agent_lanes(ui, width, axis, &chart, agents);
     hour_labels(ui, width, axis, &chart, lo, day_start);
     switch_caption(ui, groups, &chart, day_start);
 }
@@ -769,6 +774,122 @@ fn activity_hours(
 }
 
 /// Hour tick labels under a chart's time axis, thinned to at most ~6.
+/// At most this many sessions on the agents lane; the day's longest win.
+const MAX_AGENT_LANES: usize = 6;
+
+/// The agents lane (m32 chunk 3), under the chart in every mode: one bar
+/// per AI session live on the day, the stretches its terminal was on
+/// screen brighter, each prompt typed into it a tick. Nothing when no
+/// session touches the chart.
+fn agent_lanes(
+    ui: &mut egui::Ui,
+    width: f32,
+    (offset, axis_w): (f32, f32),
+    chart: &DayChart,
+    agents: &[AgentLane],
+) {
+    let mut rows: Vec<&AgentLane> = agents
+        .iter()
+        .filter(|a| a.hi > chart.lo && a.lo < chart.hi)
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    if rows.len() > MAX_AGENT_LANES {
+        rows.sort_by_key(|a| std::cmp::Reverse(a.hi.min(chart.hi) - a.lo.max(chart.lo)));
+        rows.truncate(MAX_AGENT_LANES);
+        rows.sort_by_key(|a| (a.lo, a.hi));
+    }
+    ui.add_space(LANE_GAP * 2.0);
+    let n = rows.len();
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(width, lanes_height(n)), egui::Sense::hover());
+    let axis = (rect.left() + offset, axis_w);
+    let lane_top = |l: usize| rect.top() + l as f32 * (LANE_H + LANE_GAP);
+    let hovered = resp
+        .hover_pos()
+        .map(|p| (((p.y - rect.top()).max(0.0) / (LANE_H + LANE_GAP)) as usize).min(n - 1));
+    let painter = ui.painter();
+    let font = theme::caption().resolve(ui.style());
+    let bar = theme::palette::ACCENT.gamma_multiply(0.35);
+    let focus = theme::palette::ACCENT;
+    let tick = egui::Stroke::new(1.0, theme::palette::TEXT);
+    for (l, a) in rows.iter().enumerate() {
+        let lane =
+            egui::Rect::from_min_size(egui::pos2(axis.0, lane_top(l)), egui::vec2(axis.1, LANE_H));
+        painter.rect_filled(lane, egui::CornerRadius::same(3), theme::palette::SURFACE);
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            a.title.clone(),
+            font.clone(),
+            theme::palette::TEXT_DIM,
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(LANE_LABEL_W - 8.0);
+        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
+        let y = lane.center().y - galley.size().y / 2.0;
+        painter.galley(egui::pos2(rect.left(), y), galley, theme::palette::TEXT_DIM);
+        let x0 = chart.x_at(axis, a.lo.max(chart.lo));
+        let x1 = chart.x_at(axis, a.hi.min(chart.hi)).max(x0 + 2.0);
+        let block =
+            egui::Rect::from_min_max(egui::pos2(x0, lane.top()), egui::pos2(x1, lane.bottom()));
+        let color = if hovered == Some(l) {
+            bar.gamma_multiply(1.4)
+        } else {
+            bar
+        };
+        painter.rect_filled(block, egui::CornerRadius::same(3), color);
+        for &(s, e) in a
+            .focus
+            .iter()
+            .filter(|(s, e)| *e > chart.lo && *s < chart.hi)
+        {
+            let fx0 = chart.x_at(axis, s.max(chart.lo));
+            let fx1 = chart.x_at(axis, e.min(chart.hi)).max(fx0 + 2.0);
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(fx0, lane.top()),
+                    egui::pos2(fx1, lane.bottom()),
+                ),
+                egui::CornerRadius::same(3),
+                focus,
+            );
+        }
+        for &t in a
+            .prompts
+            .iter()
+            .filter(|t| (chart.lo..chart.hi).contains(t))
+        {
+            painter.vline(chart.x_at(axis, t), lane.y_range(), tick);
+        }
+    }
+    if let Some(l) = hovered {
+        let a = rows[l];
+        let on_screen: i64 = a
+            .focus
+            .iter()
+            .map(|&(s, e)| e.min(chart.hi) - s.max(chart.lo))
+            .filter(|ms| *ms > 0)
+            .sum();
+        let prompts = a
+            .prompts
+            .iter()
+            .filter(|t| (chart.lo..chart.hi).contains(t))
+            .count();
+        resp.on_hover_ui_at_pointer(|ui| {
+            ui.set_max_width(260.0);
+            ui.label(&a.title);
+            if !a.repo.is_empty() {
+                ui.weak(&a.repo);
+            }
+            ui.weak(format!(
+                "{} \u{b7} {prompts} prompt{} \u{b7} on screen {}",
+                fmt_dur(a.hi.min(chart.hi) - a.lo.max(chart.lo)),
+                if prompts == 1 { "" } else { "s" },
+                fmt_dur(on_screen)
+            ));
+        });
+    }
+}
+
 fn hour_labels(
     ui: &mut egui::Ui,
     width: f32,

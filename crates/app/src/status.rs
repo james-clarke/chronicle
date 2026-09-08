@@ -451,7 +451,7 @@ pub(crate) fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
     }
 
     let mut stmt = conn.prepare(
-        "SELECT i.start_ts, i.end_ts, t.id, t.label, t.project, i.confidence, t.source
+        "SELECT i.start_ts, i.end_ts, t.id, t.label, t.project, i.confidence, t.source, i.share
          FROM intervals i JOIN tasks t ON t.id = i.task_id
          WHERE i.start_ts >= ?1 AND i.start_ts < ?2 ORDER BY i.start_ts, i.id",
     )?;
@@ -462,10 +462,16 @@ pub(crate) fn dump(data_dir: &Path, day: Option<&str>) -> anyhow::Result<()> {
         let (label, project): (String, Option<String>) = (row.get(3)?, row.get(4)?);
         let confidence: f64 = row.get(5)?;
         let source: String = row.get(6)?;
+        let share: f64 = row.get(7)?;
         let project = project.map(|p| format!(" [{p}]")).unwrap_or_default();
         let declared = if source == "user" { " (declared)" } else { "" };
+        let share = if share < 1.0 {
+            format!(" {:.0}%", share * 100.0)
+        } else {
+            String::new()
+        };
         println!(
-            "{} – {}  [task #{task_id}] {label}{project}{declared} ({confidence:.2})",
+            "{} – {}  [task #{task_id}] {label}{project}{declared}{share} ({confidence:.2})",
             local(start)?.strftime("%H:%M:%S"),
             local(end)?.strftime("%H:%M:%S"),
         );

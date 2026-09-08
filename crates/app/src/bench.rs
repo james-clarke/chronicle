@@ -678,6 +678,194 @@ pub(crate) fn embed_bench(data_dir: &Path, model: &Path) -> anyhow::Result<()> {
 /// `away_secs` and with both at 0 (the m31 rule: any idle closes the span)
 /// — and print each run's daytime (08–19 local) AFK gap histogram plus the
 /// idle time folded into spans as quiet.
+/// `bench --window START..END` (m32 chunk 3 gate): the window placed the
+/// way `segmenter::reconcile` would place it now, unwritten. Each row with
+/// its share and kind, then the window's wall time by project and by task
+/// (shares applied), and the check that the shares add up to it.
+pub(crate) fn window(data_dir: &Path, spec: &str) -> anyhow::Result<()> {
+    use chronicle_core::segmenter::{self, Target};
+    use chronicle_core::storage;
+    use std::collections::HashMap;
+
+    let (a, b) = spec.split_once("..").context(
+        "--window wants START..END, local times like 2026-09-03T15:00..2026-09-03T16:44",
+    )?;
+    let tz = TimeZone::system();
+    let parse = |s: &str| -> anyhow::Result<i64> {
+        let dt: civil::DateTime = s.parse().with_context(|| format!("bad time {s:?}"))?;
+        Ok(dt.to_zoned(tz.clone())?.timestamp().as_millisecond())
+    };
+    let (lo, hi) = (parse(a)?, parse(b)?);
+    if hi <= lo {
+        bail!("--window end is not after its start");
+    }
+    let hm = |ms: i64| {
+        chronicle_core::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .strftime("%H:%M")
+            .to_string()
+    };
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+    let re = regex::Regex::new(&config.ticket_regex).context("ticket_regex")?;
+    let params = segmenter::params(&config);
+    // Profiles as of the window's start, the replay's way: tasks and
+    // evidence that existed then, not what was learned since.
+    let rows = storage::replay_rows(&conn, 0)?;
+    let all_spans = storage::anchored_spans(&conn, 0, lo)?;
+    let profiles = chronicle_core::profile::build_profiles(
+        &rows.tasks,
+        &rows.intervals,
+        &all_spans,
+        &rows.corrections,
+        &re,
+        lo,
+        &params,
+    );
+    let labels: HashMap<i64, String> = rows.tasks.iter().map(|t| (t.id, t.label.clone())).collect();
+    let projects: HashMap<i64, Option<String>> = rows
+        .tasks
+        .iter()
+        .map(|t| (t.id, t.project.clone()))
+        .collect();
+    let placements = segmenter::place_dry(
+        &conn,
+        &config,
+        lo,
+        hi,
+        &profiles,
+        &labels,
+        &projects,
+        &distractions,
+    )?;
+    let mut tasks: HashMap<i64, (String, Option<String>)> = HashMap::new();
+    let mut stmt = conn.prepare("SELECT id, label, project FROM tasks")?;
+    for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+        let (id, label, project): (i64, String, Option<String>) = row?;
+        tasks.insert(id, (label, project));
+    }
+    println!(
+        "profiles as of {}: {} tasks with evidence",
+        hm(lo),
+        profiles.len()
+    );
+    for pr in &profiles {
+        let mut keys: Vec<(&chronicle_core::profile::Key, f64)> =
+            pr.minutes.iter().map(|(k, m)| (k, *m)).collect();
+        keys.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        println!(
+            "  [{}] {}: {}",
+            pr.task_id,
+            tasks.get(&pr.task_id).map_or("?", |(l, _)| l.as_str()),
+            keys.iter()
+                .take(6)
+                .map(|(k, m)| format!("{}={:.0}", k.value(), m))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    let mut by_project: Vec<(String, f64)> = Vec::new();
+    let mut by_task: Vec<(String, f64)> = Vec::new();
+    let mut placed = 0.0;
+    let bump = |v: &mut Vec<(String, f64)>, key: String, ms: f64| match v
+        .iter_mut()
+        .find(|(k, _)| *k == key)
+    {
+        Some(e) => e.1 += ms,
+        None => v.push((key, ms)),
+    };
+    println!(
+        "{}–{} placed as reconcile would ({} rows):",
+        hm(lo),
+        hm(hi),
+        placements.len()
+    );
+    for p in &placements {
+        let (label, project) = match &p.target {
+            Target::Existing(id) => tasks
+                .get(id)
+                .map(|(l, pr)| (format!("{l} [{id}]"), pr.clone()))
+                .unwrap_or_else(|| (format!("task {id}"), None)),
+            Target::New { label, project, .. } => (format!("new: {label}"), project.clone()),
+        };
+        let ms = (p.hi.min(hi) - p.lo.max(lo)).max(0) as f64 * p.share;
+        placed += ms;
+        bump(
+            &mut by_project,
+            project.clone().unwrap_or_else(|| "untagged".into()),
+            ms,
+        );
+        bump(&mut by_task, label.clone(), ms);
+        println!(
+            "  {}–{}  {:>4.0}%  {:<10} {label}{}  ({}{})",
+            hm(p.lo),
+            hm(p.hi),
+            p.share * 100.0,
+            p.kind,
+            project.map(|pr| format!(" [{pr}]")).unwrap_or_default(),
+            p.reason,
+            if p.confident { "" } else { ", unsure" }
+        );
+    }
+    // The sessions the split saw, and where each one's own evidence lands.
+    let spans = storage::anchored_spans(&conn, lo, hi)?;
+    let sessions = storage::live_sessions(&conn, lo, hi, &re)?;
+    println!("sessions live around the window ({}):", sessions.len());
+    for s in &sessions {
+        let owned: Vec<_> = spans
+            .iter()
+            .filter(|sp| {
+                sp.anchors.iter().any(|a| {
+                    a.kind == chronicle_core::extract::AnchorKind::Session && a.value == s.id
+                })
+            })
+            .cloned()
+            .collect();
+        let focus: i64 = owned
+            .iter()
+            .map(|sp| sp.end_ts.min(hi) - sp.start_ts.max(lo))
+            .sum();
+        let task = segmenter::session_verdict(s, &owned, lo, hi, &profiles, &params, &distractions)
+            .and_then(|v| v.best);
+        println!(
+            "  {:<12} writes {:>3}  prompts {:>3}  on screen {:>3} min  scope {}  -> {}",
+            s.id.chars().take(12).collect::<String>(),
+            s.writes.iter().filter(|t| (lo..=hi).contains(t)).count(),
+            s.prompts.iter().filter(|t| (lo..=hi).contains(t)).count(),
+            focus / 60_000,
+            s.anchors
+                .iter()
+                .filter(|a| a.kind != chronicle_core::extract::AnchorKind::Session)
+                .map(|a| a.value.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            task.map_or("new".to_owned(), |id| tasks
+                .get(&id)
+                .map_or(format!("task {id}"), |(l, _)| format!("{l} [{id}]")))
+        );
+    }
+    let wall = (hi - lo) as f64;
+    for (name, v) in [("project", &mut by_project), ("task", &mut by_task)] {
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        println!("by {name}:");
+        for (k, ms) in v.iter() {
+            println!(
+                "  {:>5.1}%  {:>4.0} min  {k}",
+                ms / wall * 100.0,
+                ms / 60_000.0
+            );
+        }
+    }
+    println!(
+        "placed {:.0} of {:.0} min ({:.1}% of the window)",
+        placed / 60_000.0,
+        wall / 60_000.0,
+        placed / wall * 100.0
+    );
+    Ok(())
+}
+
 pub(crate) fn gaps(data_dir: &Path, since_days: u64) -> anyhow::Result<()> {
     use chronicle_core::sessionizer::{SpanKind, sessionize_with};
     use chronicle_core::storage;

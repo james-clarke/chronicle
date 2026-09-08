@@ -240,6 +240,12 @@ enum Cmd {
         /// quiet rule and print the daytime AFK gap histogram (chunk 1 gate).
         #[arg(long)]
         gaps: bool,
+        /// Place one window the way the segmenter's reconcile would, without
+        /// writing it, and print each row with its share plus the window's
+        /// split by project (m32 chunk 3 gate). Local times:
+        /// `2026-09-03T15:00..2026-09-03T16:44`.
+        #[arg(long)]
+        window: Option<String>,
         /// Time an embedding GGUF over recent titles (m30 chunk 6 gate:
         /// p95 under 20 ms per title on this CPU).
         #[arg(long)]
@@ -312,11 +318,14 @@ fn main() -> anyhow::Result<()> {
             segment,
             calibrate,
             gaps,
+            window,
             embed,
             backend,
         } => {
             if let Some(path) = embed {
                 bench::embed_bench(&data_dir, &path)
+            } else if let Some(spec) = window {
+                bench::window(&data_dir, &spec)
             } else if calibrate {
                 bench::calibrate(&data_dir, since)
             } else if gaps {

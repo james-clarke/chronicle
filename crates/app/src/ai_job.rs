@@ -629,7 +629,7 @@ pub(crate) fn standup_activity_fallback(
     let mut order: Vec<i64> = Vec::new();
     let mut aggs: std::collections::HashMap<i64, Agg> = std::collections::HashMap::new();
     for t in storage::tasks_in_range(conn, lo, hi)? {
-        let dur = t.end_ts.as_millisecond().min(hi) - t.start_ts.as_millisecond().max(lo);
+        let dur = t.weigh(t.end_ts.as_millisecond().min(hi) - t.start_ts.as_millisecond().max(lo));
         let agg = aggs.entry(t.id).or_insert_with(|| {
             order.push(t.id);
             Agg {
