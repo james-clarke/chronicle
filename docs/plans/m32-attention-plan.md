@@ -1,7 +1,7 @@
 # m32 — Attention, not input
 
-Status: **chunk 0 shipped 2026-09-08** (main, see "Shipped" at the end);
-chunks 1–6 are the plan as drafted 2026-09-08, awaiting approval. Written
+Status: **chunks 0, 1 and 2 shipped 2026-09-08** (main, see "Shipped" at
+the end); chunks 3–6 are the plan as drafted 2026-09-08, awaiting approval. Written
 from a review of last week's live data (2026-08-31 → 09-04) and the chunk
 2.5 gate re-run. Hand this file to a fresh context and start at "Handoff".
 
@@ -580,3 +580,91 @@ those effectively split at 10/30 min. The unbatched tail lives longer
 the pre-existing `span_embeddings` orphaning (no FK) cover more spans per
 tick; watch `embed_new_spans` volume. Chunk 3 can read `presence` for
 per-minute hands-on inside a span; chunk 1 derives nothing from it.
+
+## Shipped (2026-09-08, chunk 2)
+
+Two commits on `main` (74557e7 core, 89dbaea app/capture), 252 tests (4
+new), clippy clean. No migration: everything new lives in the
+`ai_session` row's `detail` JSON.
+
+- **Titles, not summaries** (`89dbaea`): the plan said to parse `summary`
+  records; the transcripts on this box have none. The terminal title
+  comes from `{"type":"ai-title","aiTitle":…,"sessionId":…}` records
+  (no timestamp, no cwd), written every turn or so from about line 23 of
+  the transcript, so the head scan usually sees the first one and the
+  tail sees renames. The collector keeps them per segment as `titles`
+  (distinct, oldest first, up to 8, a segment opened after a gap starts
+  with the latest); a title before the first line waits for it.
+- **Prompt minutes** (`89dbaea`): `prompt_minutes`, same shape and cap as
+  `writes`, for `user` records that are not tool results and not
+  `isMeta` (skill files, local command output); slash commands and task
+  notifications count as typing. 11 of 14 recent sessions carry titles,
+  and 2 of 3 non-tool-result user records in a transcript are typed.
+- **Touch log** (`89dbaea`): `touches` as `[[minute, path index], …]`,
+  one per file and minute, newest 240 kept. Without it every session
+  named its first eight files to every span it touched, and a full-read
+  backfill turned that into a doc flood (1831 → 6943 doc anchors over
+  the week, 8/19 → 6/19 on the gate). `extract::session_docs` now takes
+  the files touched at or before the span's end and within 15 min of its
+  start, else the latest touch minute; legacy rows fall back to the first
+  paths. 4467 doc anchors after.
+- **Attachment order** (`74557e7`): `from_activity` takes the span title.
+  A session whose `titles` contain the cleaned title owns the span
+  (deviation: overlap is not required — the title stays on screen after
+  the transcript's last write, and 14 of 55 titled spans in the 09-03
+  window had their session end minutes earlier); else the overlapping
+  session with the nearest `prompt_minutes` at or before the span's end;
+  else the nearest write as before; rows with none of those all attach.
+  Multi-session spans over the week: 380 → 0.
+- **Repo-qualified branch** (`74557e7`): `push_branch` writes
+  `chronicle@main` for every branch anchor with a known repo (sessions,
+  edits and the trailing checkout, which now passes its repo) — not only
+  the session's, so the same branch is one key everywhere. The work-item
+  key is still taken from the bare branch. Ablation on the gate: neutral.
+- **Bare terminal** (`74557e7`): a terminal that names no place takes its
+  place only from a cwd row still alive at the span's end (or a one-shot
+  shell fold); with none it stays unattached instead of borrowing the
+  place a shell left earlier.
+- **Backfill** (`89dbaea`): `chronicle backfill-sessions --since DAY`
+  re-reads every transcript modified since the day in full
+  (`ai_sessions::replay_transcripts`, no head/tail skip) and
+  `storage::replace_session` swaps the session's rows (`<id>`, `<id>#N`)
+  in one transaction; the daemon re-upserts the sessions it still tracks
+  under the same ids. Run `backfill-anchors` after it. On the week's
+  copy: 111 sessions, 113 → 138 rows (full reads find the pauses the
+  bridge skipped).
+
+Gate, sandbox copies of the live DB, `bench --replay --scorer --since 7
+--probes direct`, anchors re-run since 09-01 on each:
+
+| build | sessions | strict | lenient |
+|---|---|---|---|
+| installed chunk 1 | as captured | 8/19 | 11/19 |
+| chunk 2 code, rows as captured | as captured | 8/19 | 11/19 |
+| chunk 2, sessions backfilled, first-paths docs | backfilled | 6/19 | 9/19 |
+| chunk 2, sessions backfilled, no session docs | backfilled | 8/19 | 11/19 |
+| **chunk 2 shipped** (touch docs, titles) | backfilled | **8/19** | 11/19 |
+
+Flat at 8 (the plan's 10 is not met; 7 was the morning's number before
+chunk 1). One probe each way against the baseline: c58 (21–22 min, task
+73 over 60) passes, c75 (an eject from "start dev on ACME-11382") fails
+— the window's terminal spans now carry that session's branch and item
+and the scorer places them back in it with margin 0.11 (the baseline's
+0.00 was a coin flip). Second half of the gate: every titled terminal
+span in the 09-03 15:00–16:44 window (55) attaches the session whose
+title it shows; before, 41 right, 14 wrong (the session had ended).
+
+Installed 14:02 the same day (unit stopped, `cargo install --locked`,
+restarted healthy, release RSS 29 MB at start). Live backfills right
+after: `backfill-sessions --since 2026-09-01` replaced 111 sessions (138
+rows: 110 with titles, 87 with touches, 135 with prompt minutes),
+`backfill-anchors --since 2026-09-01` anchored 2699 spans,
+`backfill-evidence` rebuilt 355 rows. The session running this chunk
+shows `titles: ["Grab next task"]` within a minute of the restart.
+
+Open: `MAX_PATHS` (40) still bounds which files a touch can name — a
+session past 40 distinct files records touches only for the first 40.
+The 240-touch cap covers about four hours of edits; older spans in a
+long session get the latest touch minute before them. Chunk 3 can read
+`touches` and `prompt_minutes` per minute for the supervision split.
+
