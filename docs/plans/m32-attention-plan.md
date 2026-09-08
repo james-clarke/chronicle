@@ -899,3 +899,72 @@ commits under one task yields one bullet per commit and the output cap cuts
 the last; a cloud route has no such cap. Sessions captured before today
 have no `last_assistant` until `backfill-sessions`. The Connections panel
 has no row for notes (on whenever `git_repos` is set, no switch).
+
+## Shipped (2026-09-08, chunk 6)
+
+Self-score, on `main`, 275 tests, clippy clean. Migration 027:
+`self_score` table (one row per local day) and `corrections.src_task_id`
+/ `src_created_ts`. Installed 17:53 (unit stopped, `cargo install
+--locked`, restarted healthy; live DB at 27; the first tick refreshed the
+week and `chronicle status` prints the block).
+
+- **`self_score::refresh`** scores today and the six days before it as of
+  now (today's row ends at the clock, so its gaps and underived time are
+  real) and upserts the rows; **`self_score::daily`** runs it from the
+  daemon tick once a day in every derive mode (stamp `self_score_ts` in
+  `meta`), so a correction that lands tomorrow still counts against the
+  day it judges. `storage::self_score_counts` is the DB side, the ledger
+  gaps come from `report::capture_gaps`. Hidden `chronicle self-score`
+  recomputes and prints the rows now.
+- **The row** holds counts and milliseconds, never a rate: `active_ms`
+  (non-AFK span time), `uncaptured_ms` (ledger gaps), `underived_ms` (no
+  `done` batch), `placed_ms` (interval time × share), `minted` (derived
+  tasks born that day), `merged` (of those, folded into another task within
+  24 h), `placements` (non-user intervals written that day, by
+  `created_ts`), `ejects` and `renames` (corrections by `ts`), `verdicts`
+  (closed, by the verdict's `ts`), `wrong`, `confident`, `confident_wrong`.
+  `self_score::Summary` folds the rows and renders the rates: coverage is
+  placed over active capped at 100 % (a segment runs across the quiet
+  folded into its spans, so placed can exceed active by a tenth).
+- **Merge keeps its source** (`merge_task`): the source's id and, for a
+  derived source, its `created_ts` ride the `merge` correction, because
+  the source row goes with the merge when nothing else references it and
+  "minted, then merged within a day" needs the birth. `minted` is the
+  UNION of derived `tasks` born that day and merge sources born that day,
+  so a source that survived (corrections of its own) counts once. The 30
+  merges before 027 carry no source: `merged` is 0 for every day before
+  today and fills from here on. Consolidation merges (`consolidate_apply`)
+  move intervals themselves and are not counted.
+- **`chronicle status`** prints a `self-score, 7 days to <day> (computed
+  <when>)` block with four lines (coverage / not captured / not derived;
+  minted and merged; ejects of placements and renames; verdicts, wrong and
+  confident-wrong), also in `--json` as `self_score` rows. **Settings ›
+  Derivation** gets a Self-score card under the Pipeline card: one row per
+  day (placed share of active, not captured / not derived, minted /
+  merged, ejects / placements, wrong / closed with the confident pair) in
+  its own horizontal scroll area (a seven-column grid widened every
+  section below it in the 520 px form; six fit), and the same four lines
+  folded. Verified on the sandbox copy at 900 px wide.
+
+Gate — `chronicle self-score` on a sandbox copy of the live DB against
+`bench --calibrate --since 7`, same binary, same minute:
+
+| | self-score (7 day rows) | `bench --calibrate --since 7` |
+|---|---|---|
+| closed verdicts | 7 | 7 |
+| wrong | 4 | 4 corrected |
+
+Per day the verdict columns equal a direct `GROUP BY date(ts)` over
+`verdict_log` (09-04: 5 closed, 2 wrong, 3 confident, 2 confident-wrong;
+09-08: 2, 2, 1, 1). The week: 32h14m active, coverage 100 %, 25m not
+derived (today's tail), 11 minted, 66 placements, 4 ejects (09-03 and
+09-04, two each), 0 renames, confident-wrong 3 of 4. `uncaptured` is 0 on
+every day: the ledger starts 09-08 12:18 and nothing before it is a gap.
+
+Open: the two windows agree today because no verdict sits between
+midnight seven days ago and now minus seven days; the rows are civil days
+and the bench is a rolling week, so they can differ by that edge. Ejects
+and renames count by the day the correction was made, not the day of the
+interval it judged (an eject stores no block range). A reused task id (a
+deleted source's id given to a later task the same day) would fold two
+births into one in the UNION.
