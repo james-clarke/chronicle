@@ -52,6 +52,7 @@ pub(crate) fn spawn_capture(
     spawn_presence_capture(config, tx.clone())?;
 
     spawn_git_capture(config, tx.clone())?;
+    spawn_notes_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
     // Listener map (m32 chunk 4): which repo each local dev server is.
     spawn_provider_thread(
@@ -197,6 +198,24 @@ pub(crate) fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> an
         return Ok(());
     }
     spawn_provider_thread("git", "git provider", git, tx)
+}
+
+/// Notes reader (m32 chunk 5): every `git_repos` entry's
+/// `.remember/today-*.md`; optional, never load-bearing — same contract
+/// as git.
+pub(crate) fn spawn_notes_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::notes::NotesProvider;
+
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let notes = NotesProvider::new(&repos);
+    if notes.is_empty() {
+        return Ok(());
+    }
+    spawn_provider_thread("notes", "notes provider", notes, tx)
 }
 
 /// AI session watcher: optional, never load-bearing — same contract as git.

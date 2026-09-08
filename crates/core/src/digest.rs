@@ -592,7 +592,11 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
             }
             line
         }
-        ActivityKind::Meeting | ActivityKind::Edit | ActivityKind::Shell | ActivityKind::Cwd => {
+        ActivityKind::Meeting
+        | ActivityKind::Edit
+        | ActivityKind::Shell
+        | ActivityKind::Cwd
+        | ActivityKind::Note => {
             let mut line = format!("- {hm} {}", v.kind.as_str());
             if !v.repo.is_empty() {
                 let _ = write!(line, " {}", v.repo);
@@ -610,6 +614,169 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
         }
     }
 }
+
+/// Ground truth for a narrative (m32 chunk 5): the rows that cannot be
+/// wrong about what happened — commit subjects, AI sessions with their
+/// prompts and last reply, notes, PR events and meetings — one line each,
+/// ending in the source tag a claim built on it must carry (`[commit
+/// 35c60ec]`, `[session 13:06]`, `[note 13:06]`, `[pr 42]`, `[meeting
+/// 09:00]`). Checkouts, shells, cwd probes, edits and calls say where and
+/// how long, never what, and are left out. Rows come out in the order
+/// given.
+pub fn ground_truth(events: &[ActivityEvent], tz: &TimeZone) -> String {
+    events
+        .iter()
+        .filter_map(|v| truth_block(v, tz))
+        .map(|b| b.text)
+        .collect()
+}
+
+/// [`ground_truth`] under a character budget: commits first, then notes,
+/// PRs, meetings and sessions, each in the order given, until the budget
+/// is spent; what is kept comes out by time. A local model's window is
+/// small and the tail of a long prompt is what gets cut, so the digest
+/// chooses what goes rather than the tokenizer.
+pub fn ground_truth_within(events: &[ActivityEvent], tz: &TimeZone, max_chars: usize) -> String {
+    let mut blocks: Vec<(usize, TruthBlock)> = events
+        .iter()
+        .filter_map(|v| truth_block(v, tz))
+        .enumerate()
+        .collect();
+    blocks.sort_by_key(|(i, b)| (b.priority, *i));
+    let mut kept: Vec<(usize, TruthBlock)> = Vec::new();
+    let mut used = 0;
+    for (i, b) in blocks {
+        let n = b.text.chars().count();
+        if used + n > max_chars {
+            continue;
+        }
+        used += n;
+        kept.push((i, b));
+    }
+    kept.sort_by_key(|(i, b)| (b.ts, *i));
+    kept.into_iter().map(|(_, b)| b.text).collect()
+}
+
+struct TruthBlock {
+    /// Lower first under a budget: what a commit says beats what a
+    /// session was asked.
+    priority: u8,
+    ts: i64,
+    text: String,
+}
+
+fn truth_block(v: &ActivityEvent, tz: &TimeZone) -> Option<TruthBlock> {
+    let hm = v.ts.to_zoned(tz.clone()).strftime("%H:%M");
+    let dur_ms = v.end_ts.map(|e| e.as_millisecond() - v.ts.as_millisecond());
+    let dur = dur_ms.map(fmt_dur).unwrap_or_default();
+    let at = |s: &mut String| {
+        let _ = write!(s, " {}", v.repo);
+        if !v.branch.is_empty() {
+            let _ = write!(s, "@{}", v.branch);
+        }
+    };
+    let mut out = String::new();
+    let priority = match v.kind {
+        ActivityKind::Commit => {
+            let subject = v.summary.as_deref()?;
+            let short: String = v.ext_id.as_deref().unwrap_or("").chars().take(7).collect();
+            let mut line = format!("- {hm} commit");
+            at(&mut line);
+            let _ = writeln!(out, "{line} \"{}\" [commit {short}]", clip(subject, 160));
+            0
+        }
+        ActivityKind::Note => {
+            let body = v.summary.as_deref()?;
+            let mut line = format!("- {hm} note");
+            at(&mut line);
+            let _ = writeln!(out, "{line} \"{}\" [note {hm}]", clip(body, 300));
+            1
+        }
+        ActivityKind::PrAuthored | ActivityKind::PrReviewed => {
+            let what = if v.kind == ActivityKind::PrAuthored {
+                "PR authored"
+            } else {
+                "PR reviewed"
+            };
+            let number = v
+                .ext_id
+                .as_deref()
+                .and_then(|id| id.rsplit('/').next())
+                .unwrap_or("");
+            let mut line = format!("- {hm} {what} {}", v.repo);
+            if let Some(s) = v.summary.as_deref() {
+                let _ = write!(line, " {}", clip(s, 160));
+            }
+            let _ = writeln!(out, "{line} [pr {number}]");
+            2
+        }
+        ActivityKind::Meeting => {
+            let title = v.summary.as_deref()?;
+            let mut line = format!("- {hm} meeting");
+            if !dur.is_empty() {
+                let _ = write!(line, " {dur}");
+            }
+            let _ = writeln!(out, "{line} \"{}\" [meeting {hm}]", clip(title, 160));
+            3
+        }
+        ActivityKind::AiSession => {
+            let detail: Option<serde_json::Value> = v
+                .detail
+                .as_deref()
+                .and_then(|d| serde_json::from_str(d).ok());
+            let prompts: Vec<&str> = detail
+                .as_ref()
+                .and_then(|d| d.get("prompts")?.as_array())
+                .map(|a| a.iter().filter_map(|p| p.as_str()).collect())
+                .unwrap_or_default();
+            let prompts: Vec<&str> = if prompts.is_empty() {
+                v.summary.as_deref().into_iter().collect()
+            } else {
+                prompts
+            };
+            // Interrupt markers and pasted-image placeholders are not
+            // what was asked.
+            let prompts: Vec<&str> = prompts
+                .into_iter()
+                .filter(|p| !p.trim_start().starts_with('['))
+                .collect();
+            let reply = detail
+                .as_ref()
+                .and_then(|d| d.get("last_assistant")?.as_str());
+            // A session that was asked nothing and lasted under a minute
+            // (a resumed transcript's stub) says nothing.
+            if prompts.is_empty() && reply.is_none() && dur_ms.unwrap_or(0) < 60_000 {
+                return None;
+            }
+            let mut line = format!("- {hm} session");
+            at(&mut line);
+            if !dur.is_empty() {
+                let _ = write!(line, " {dur}");
+            }
+            let _ = writeln!(out, "{line} [session {hm}]");
+            for p in prompts.iter().take(TRUTH_PROMPTS) {
+                let _ = writeln!(out, "    prompt: \"{}\"", clip(p, 160));
+            }
+            if let Some(reply) = reply {
+                let _ = writeln!(out, "    reply: \"{}\"", clip(reply, 240));
+            }
+            4
+        }
+        ActivityKind::Checkout
+        | ActivityKind::Call
+        | ActivityKind::Edit
+        | ActivityKind::Shell
+        | ActivityKind::Cwd => return None,
+    };
+    Some(TruthBlock {
+        priority,
+        ts: v.ts.as_millisecond(),
+        text: out,
+    })
+}
+
+/// Prompts quoted per session in [`ground_truth`].
+const TRUTH_PROMPTS: usize = 4;
 
 /// Focus time per document and per person named by the spans' anchors in
 /// `[lo, hi)`, most first; ties by name so the order is stable.
@@ -672,5 +839,116 @@ pub(crate) fn fmt_dur(ms: i64) -> String {
         format!("{m}m{sec:02}s")
     } else {
         format!("{sec}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ms_to_ts;
+
+    fn ev(kind: ActivityKind, ts_ms: i64, ext_id: &str, summary: Option<&str>) -> ActivityEvent {
+        ActivityEvent {
+            ts: ms_to_ts(ts_ms),
+            end_ts: None,
+            repo: "app".into(),
+            branch: "main".into(),
+            kind,
+            ext_id: Some(ext_id.into()),
+            summary: summary.map(str::to_owned),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn ground_truth_quotes_sources_and_tags_them() {
+        let tz = TimeZone::UTC;
+        let h = 3_600_000;
+        let mut session = ev(
+            ActivityKind::AiSession,
+            13 * h + 6 * 60_000,
+            "s1",
+            Some("first prompt"),
+        );
+        session.end_ts = Some(ms_to_ts(13 * h + 31 * 60_000));
+        session.detail = Some(
+            r#"{"prompts":["fix the test","now the docs"],"last_assistant":"Done: 3 tests pass."}"#
+                .into(),
+        );
+        let events = [
+            ev(
+                ActivityKind::Commit,
+                14 * h,
+                "35c60ecabcdef",
+                Some("feat(core): anchor hygiene"),
+            ),
+            session,
+            ev(
+                ActivityKind::Note,
+                15 * h,
+                "note:app:d",
+                Some("plan drafted"),
+            ),
+            ev(
+                ActivityKind::PrAuthored,
+                16 * h,
+                "https://github.com/o/app/pull/42",
+                Some("PR #42 hygiene"),
+            ),
+            ev(ActivityKind::Checkout, 17 * h, "", None),
+            ev(ActivityKind::Shell, 18 * h, "sh", Some("cargo")),
+            ev(ActivityKind::Commit, 19 * h, "deadbeef", None),
+        ];
+        let got = ground_truth(&events, &tz);
+        assert_eq!(
+            got,
+            "- 14:00 commit app@main \"feat(core): anchor hygiene\" [commit 35c60ec]\n\
+             - 13:06 session app@main 25m00s [session 13:06]\n\
+             \x20   prompt: \"fix the test\"\n\
+             \x20   prompt: \"now the docs\"\n\
+             \x20   reply: \"Done: 3 tests pass.\"\n\
+             - 15:00 note app@main \"plan drafted\" [note 15:00]\n\
+             - 16:00 PR authored app PR #42 hygiene [pr 42]\n"
+        );
+        // A session with no detail falls back to its first prompt.
+        let bare = ev(ActivityKind::AiSession, 13 * h, "s2", Some("first prompt"));
+        let got = ground_truth(std::slice::from_ref(&bare), &tz);
+        assert!(got.contains("prompt: \"first prompt\""), "{got}");
+        assert!(!got.contains("reply:"), "{got}");
+        // An interrupt marker is not a prompt, and a stub session with
+        // nothing asked is nothing.
+        let stub = ev(
+            ActivityKind::AiSession,
+            13 * h,
+            "s3",
+            Some("[Request interrupted by user]"),
+        );
+        assert_eq!(ground_truth(&[stub], &tz), "");
+    }
+
+    #[test]
+    fn a_budget_keeps_commits_over_sessions_and_restores_time_order() {
+        let tz = TimeZone::UTC;
+        let h = 3_600_000;
+        let mut session = ev(ActivityKind::AiSession, 9 * h, "s1", Some("fix the test"));
+        session.end_ts = Some(ms_to_ts(10 * h));
+        let events = [
+            session,
+            ev(ActivityKind::Note, 11 * h, "n", Some("wrote the plan")),
+            ev(ActivityKind::Commit, 12 * h, "abc1234", Some("feat: plan")),
+        ];
+        let full = ground_truth(&events, &tz);
+        assert_eq!(ground_truth_within(&events, &tz, 10_000), full);
+        let commit_line = "- 12:00 commit app@main \"feat: plan\" [commit abc1234]\n";
+        let note_line = "- 11:00 note app@main \"wrote the plan\" [note 11:00]\n";
+        let budget = commit_line.len() + note_line.len();
+        assert_eq!(
+            ground_truth_within(&events, &tz, budget),
+            format!("{note_line}{commit_line}")
+        );
+        assert_eq!(
+            ground_truth_within(&events, &tz, commit_line.len()),
+            commit_line
+        );
     }
 }

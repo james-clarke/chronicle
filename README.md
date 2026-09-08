@@ -124,6 +124,13 @@ api_key = <the key from Connections>
 ```
 
 
+**Notes** (on whenever `git_repos` is set): each repo's
+`.remember/today-*.md` is read every 60 s and each `## HH:MM | branch`
+entry becomes a `note` row (time, branch, body clipped to 2000 chars). A
+file is re-read only when it changes; the first poll reads them all. Notes
+are ground truth for descriptions, journals and the standup — a claim there
+carries the commit, session, note or journal line it came from.
+
 **Shell history (atuin)** (`shell_history = true`, or the Local sources
 switch): `~/.local/share/atuin/history.db` is read every 60 s, read-only, and
 commands fold per repo (cwd matched against `git_repos`, 10-minute gap) into

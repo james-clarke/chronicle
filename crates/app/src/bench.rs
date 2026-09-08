@@ -1607,6 +1607,24 @@ pub(crate) fn backfill_sessions(data_dir: &Path, since: Option<&str>) -> anyhow:
     Ok(())
 }
 
+/// `chronicle backfill-notes`: one pass of the notes reader over every
+/// `git_repos` entry, rows upserted by their `(kind, ext_id)` like the
+/// daemon's own (m32 chunk 5).
+pub(crate) fn backfill_notes(data_dir: &Path) -> anyhow::Result<()> {
+    use chronicle_capture::notes::NotesProvider;
+    use chronicle_core::{config::expand_home, storage};
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let repos: Vec<PathBuf> = config.git_repos.iter().map(|p| expand_home(p)).collect();
+    let conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let mut n = 0;
+    for e in NotesProvider::new(&repos).poll() {
+        storage::insert_activity_event(&conn, &e)?;
+        n += 1;
+    }
+    println!("upserted {n} notes");
+    Ok(())
+}
+
 /// `chronicle backfill-anchors`: recompute anchors for every focus span
 /// since `since` (a local day) or all of them.
 pub(crate) fn backfill_anchors(data_dir: &Path, since: Option<&str>) -> anyhow::Result<()> {

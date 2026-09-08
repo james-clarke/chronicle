@@ -22,6 +22,9 @@ use crate::text::JobKind;
 const N_CTX: u32 = 4096;
 /// Descriptions and narratives are a few sentences; suggestions one JSON object.
 const MAX_GEN: usize = 256;
+/// A standup is a block per task, each bullet with its source tag (m32
+/// chunk 5): twice the room, taken from the prompt side.
+const MAX_GEN_STANDUP: usize = 512;
 
 pub struct Describer {
     backend: LlamaBackend,
@@ -70,7 +73,10 @@ impl Describer {
     /// pre-rendered digest of a day's journal entries and checkpoints.
     pub fn standup(&self, digest: &str) -> anyhow::Result<String> {
         let prompt = prompts::render_standup(digest);
-        non_empty(self.generate(&prompt, None)?, "standup draft")
+        non_empty(
+            self.generate_with(&prompt, None, MAX_GEN_STANDUP)?,
+            "standup draft",
+        )
     }
 
     /// Grammar-constrained checkpoint: (state, next_steps) from the task's
@@ -97,7 +103,11 @@ impl Describer {
     /// The [`crate::text::TextBackend`] shape over the local model: the job
     /// picks its grammar; the caller has already rendered the prompt.
     pub fn complete(&self, job: JobKind, prompt: &str) -> anyhow::Result<String> {
-        self.generate(prompt, Self::grammar_for(job))
+        let max_gen = match job {
+            JobKind::Standup => MAX_GEN_STANDUP,
+            _ => MAX_GEN,
+        };
+        self.generate_with(prompt, Self::grammar_for(job), max_gen)
     }
 
     /// GBNF for a JSON job on the local engine; prose jobs run free.
@@ -114,6 +124,15 @@ impl Describer {
     /// forecloses think blocks); without one the ThinkFilter strips Qwen3's
     /// empty `<think>` preamble.
     fn generate(&self, content: &str, grammar: Option<&str>) -> anyhow::Result<String> {
+        self.generate_with(content, grammar, MAX_GEN)
+    }
+
+    fn generate_with(
+        &self,
+        content: &str,
+        grammar: Option<&str>,
+        max_gen: usize,
+    ) -> anyhow::Result<String> {
         let threads = backend::threads();
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(N_CTX))
@@ -122,7 +141,7 @@ impl Describer {
             .with_n_threads_batch(threads);
         let mut ctx = self.model.new_context(&self.backend, ctx_params)?;
 
-        let limit = N_CTX as usize - MAX_GEN - 64;
+        let limit = N_CTX as usize - max_gen - 64;
         let tokens = crate::fit_prompt(content, limit, |c| self.tokenize(c))?;
 
         let mut batch = LlamaBatch::new(N_BATCH as usize, 1);
@@ -139,7 +158,7 @@ impl Describer {
         let mut filter = ThinkFilter::default();
         let mut out = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        for pos in (start_pos..).take(MAX_GEN) {
+        for pos in (start_pos..).take(max_gen) {
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             if self.model.is_eog_token(token) {
                 break;

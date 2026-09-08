@@ -11,6 +11,7 @@ pub mod github;
 pub mod lock;
 #[cfg(target_os = "linux")]
 pub mod mic;
+pub mod notes;
 pub mod ports;
 #[cfg(target_os = "linux")]
 pub mod presence;

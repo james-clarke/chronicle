@@ -52,15 +52,29 @@ pub fn render_journal(
     label: &str,
     project: Option<&str>,
     context: &str,
-    git: &str,
+    truth: &str,
     evidence: &str,
 ) -> String {
     JOURNAL_PROMPT
         .replace("{label}", label)
         .replace("{project_line}", &project_line(project))
         .replace("{context_section}", &context_section(context))
-        .replace("{git}", if git.trim().is_empty() { "(none)" } else { git })
-        .replace("{evidence}", evidence)
+        .replace(
+            "{truth}",
+            if truth.trim().is_empty() {
+                "(none)"
+            } else {
+                truth
+            },
+        )
+        .replace(
+            "{evidence}",
+            if evidence.trim().is_empty() {
+                "(none)"
+            } else {
+                evidence
+            },
+        )
 }
 
 pub fn render_narrative(digest: &str) -> String {
@@ -106,6 +120,32 @@ pub fn parse_suggest(out: &str) -> anyhow::Result<SuggestedTask> {
         .with_context(|| format!("model output is not valid suggestion JSON: {out}"))
 }
 
+/// A standup claim must name its source (m32 chunk 5): every bullet and
+/// every line after a block's first ends in a `[...]` tag, or it goes. A
+/// block's first line (the task's label) stays while a claim under it
+/// stays; a first line that carries a tag is itself a claim. `None` when
+/// nothing sourced survives.
+pub fn keep_sourced(text: &str) -> Option<String> {
+    let sourced = |l: &str| {
+        let l = l.trim_end();
+        l.ends_with(']') && l.contains('[')
+    };
+    let mut out: Vec<String> = Vec::new();
+    for block in text.split("\n\n") {
+        let lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+        let Some((first, rest)) = lines.split_first() else {
+            continue;
+        };
+        let kept: Vec<&str> = rest.iter().copied().filter(|l| sourced(l)).collect();
+        if sourced(first) || !kept.is_empty() {
+            let mut b = vec![first.trim_end()];
+            b.extend(kept);
+            out.push(b.join("\n"));
+        }
+    }
+    (!out.is_empty()).then(|| out.join("\n\n"))
+}
+
 /// A prose completion that must not be empty.
 pub fn non_empty(out: String, what: &str) -> anyhow::Result<String> {
     if out.trim().is_empty() {
@@ -141,10 +181,24 @@ mod tests {
         let p = render_journal("Fix login", Some("web"), "", "", "ev");
         assert!(p.contains("Fix login [web]"));
         assert!(!p.contains("Ticket context"));
-        assert!(p.contains("(none)"));
-        let p = render_journal("Fix login", None, " ctx ", "g1", "ev");
+        assert!(p.contains("Ground truth this session:\n(none)\n"));
+        let p = render_journal("Fix login", None, " ctx ", "g1", "");
         assert!(p.contains("Ticket context:\nctx\n"));
         assert!(p.contains("g1"));
+        assert!(p.contains("Screen evidence this session:\n(none)\n"));
+    }
+
+    #[test]
+    fn unsourced_claims_are_dropped() {
+        let text = "Fix login\n- Fixed the redirect [commit abc1234]\n- Also tidied things up\n- Next: ship it [checkpoint]\n\nDocs\n- Wrote a lot\n\nPlanned X, spent most of the day on Y. [plan]\n";
+        assert_eq!(
+            keep_sourced(text).as_deref(),
+            Some(
+                "Fix login\n- Fixed the redirect [commit abc1234]\n- Next: ship it [checkpoint]\n\nPlanned X, spent most of the day on Y. [plan]"
+            )
+        );
+        assert_eq!(keep_sourced("Docs\n- Wrote a lot\n"), None);
+        assert_eq!(keep_sourced(""), None);
     }
 
     /// Structured outputs accept only a subset of JSON Schema: every object

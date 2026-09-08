@@ -63,6 +63,10 @@ pub enum ActivityKind {
     /// process tree on focus (m30): one row per `(terminal pid, place)`,
     /// `ts` first seen, `end_ts` last seen. Anchors only; never rendered.
     Cwd,
+    /// One entry of a repo's `.remember/today-*.md` (m32 chunk 5): what the
+    /// person or their tool wrote down at that time, the branch it was on.
+    /// Ground truth for narratives; never focus time.
+    Note,
 }
 
 /// How a repeated observation of the same `ext_id` is stored.
@@ -80,7 +84,7 @@ pub enum Dedupe {
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 10] = [
+    pub const ALL: [ActivityKind; 11] = [
         ActivityKind::Checkout,
         ActivityKind::Commit,
         ActivityKind::AiSession,
@@ -91,6 +95,7 @@ impl ActivityKind {
         ActivityKind::Edit,
         ActivityKind::Shell,
         ActivityKind::Cwd,
+        ActivityKind::Note,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -105,6 +110,7 @@ impl ActivityKind {
             ActivityKind::Edit => "edit",
             ActivityKind::Shell => "shell",
             ActivityKind::Cwd => "cwd",
+            ActivityKind::Note => "note",
         }
     }
 
@@ -131,7 +137,8 @@ impl ActivityKind {
             | ActivityKind::Meeting
             | ActivityKind::Edit
             | ActivityKind::Shell
-            | ActivityKind::Cwd => Dedupe::Upsert,
+            | ActivityKind::Cwd
+            | ActivityKind::Note => Dedupe::Upsert,
             ActivityKind::PrAuthored | ActivityKind::PrReviewed => Dedupe::Ignore,
         }
     }

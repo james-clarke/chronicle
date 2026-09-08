@@ -221,10 +221,10 @@ impl Engine {
         label: &str,
         project: Option<&str>,
         context: &str,
-        git: &str,
+        truth: &str,
         evidence: &str,
     ) -> anyhow::Result<String> {
-        let prompt = prompts::render_journal(label, project, context, git, evidence);
+        let prompt = prompts::render_journal(label, project, context, truth, evidence);
         non_empty(self.complete(JobKind::Journal, &prompt)?, "journal entry")
     }
 
@@ -370,6 +370,41 @@ fn naming_spans(
     }
 }
 
+/// The ground truth under every interval of a task (m32 chunk 5): commit
+/// subjects, sessions, notes, PRs and meetings, rendered with source tags.
+fn task_truth(conn: &rusqlite::Connection, task_id: i64, tz: &TimeZone) -> anyhow::Result<String> {
+    let (lo, hi): (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT MIN(start_ts), MAX(end_ts) FROM intervals WHERE task_id=?1",
+        [task_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (Some(lo), Some(hi)) = (lo, hi) else {
+        return Ok(String::new());
+    };
+    let rows = chronicle_core::storage::activity_for_task_in_range(conn, task_id, lo, hi)?;
+    Ok(chronicle_core::digest::ground_truth_within(
+        &rows,
+        tz,
+        TRUTH_CHARS,
+    ))
+}
+
+/// Ground truth in a description or journal prompt, in chars: the local
+/// window has room for the window titles (2000 chars) and this.
+const TRUTH_CHARS: usize = 1600;
+
+/// The standup digest as a whole, in chars (m32 chunk 5): the local
+/// model's 4096-token window minus the template, a 512-token reply and
+/// headroom, at the digest's 8/3 chars per token. Shared out per task so
+/// the last task of a busy day is not the one the tokenizer cuts.
+const STANDUP_DIGEST_CHARS: usize = chronicle_core::digest::max_chars(2600);
+/// No task's share of the standup digest goes under this.
+const STANDUP_TASK_MIN_CHARS: usize = 600;
+/// Journal entries per task in the standup digest, and their length: the
+/// model copies them, so they are what the reply's length follows.
+const STANDUP_ENTRIES: usize = 3;
+const STANDUP_ENTRY_CHARS: usize = 220;
+
 pub(crate) fn task_label_project(
     conn: &rusqlite::Connection,
     task_id: i64,
@@ -418,10 +453,18 @@ pub(crate) fn run_ai_job(
                 .as_i64()
                 .context("payload lacks task_id")?;
             let (label, project) = task_label_project(conn, task_id)?;
-            let evidence = storage::task_evidence_text(conn, task_id)?;
-            if evidence.trim().is_empty() {
-                bail!("no span evidence for task {task_id}");
-            }
+            // Window titles first, then what cannot be wrong; a task with
+            // neither is skipped, never failed (m32 chunk 5).
+            let spans = storage::task_evidence_text(conn, task_id)?;
+            let truth = task_truth(conn, task_id, &TimeZone::system())?;
+            let evidence = match (spans.trim().is_empty(), truth.trim().is_empty()) {
+                (true, true) => {
+                    return Err(SkipJob(format!("no evidence for task {task_id}")).into());
+                }
+                (false, true) => spans,
+                (true, false) => format!("(no window titles)\nGround truth:\n{truth}"),
+                (false, false) => format!("{spans}Ground truth:\n{truth}"),
+            };
             let desc = engine.describe_task(&label, project.as_deref(), &evidence)?;
             storage::set_task_description(conn, task_id, Some(&desc))?;
             Ok(desc)
@@ -518,8 +561,16 @@ pub(crate) fn run_ai_job(
                 ))
                 .into());
             };
-            if evidence.trim().is_empty() {
-                bail!("no span evidence for task {task_id} in batch {batch_id}");
+            let tz = TimeZone::system();
+            // The batch's ground truth (m32 chunk 5) can carry an entry on
+            // its own; only a batch with neither it nor window titles bails.
+            let truth = chronicle_core::digest::ground_truth_within(
+                &storage::activity_for_task_in_range(conn, task_id, lo, hi)?,
+                &tz,
+                TRUTH_CHARS,
+            );
+            if evidence.trim().is_empty() && truth.trim().is_empty() {
+                bail!("no evidence for task {task_id} in batch {batch_id}");
             }
             let (label, project) = task_label_project(conn, task_id)?;
             // Head of the ticket context only: the prompt budget belongs to
@@ -527,18 +578,8 @@ pub(crate) fn run_ai_job(
             let context: String = storage::task_context(conn, task_id)?
                 .map(|(_, c)| c.chars().take(1200).collect())
                 .unwrap_or_default();
-            let tz = TimeZone::system();
-            let mut git = String::new();
-            for v in storage::activity_for_task_in_range(conn, task_id, lo, hi)? {
-                use std::fmt::Write as _;
-                let _ = writeln!(
-                    git,
-                    "{}",
-                    chronicle_core::digest::activity_line(&v, &tz, 120)
-                );
-            }
             let entry =
-                engine.journal_entry(&label, project.as_deref(), &context, &git, &evidence)?;
+                engine.journal_entry(&label, project.as_deref(), &context, &truth, &evidence)?;
             storage::insert_journal_entry(
                 conn,
                 task_id,
@@ -617,7 +658,39 @@ pub(crate) fn run_ai_job(
                 .checked_add(jiff::Span::new().days(1))?
                 .timestamp()
                 .as_millisecond();
-            let rows = storage::standup_digest(conn, lo, hi)?;
+            let mut rows = storage::standup_digest(conn, lo, hi)?;
+            // Each task's ground truth for the day (m32 chunk 5); a task
+            // with truth but no journal still gets a block.
+            let mut truth: std::collections::HashMap<
+                i64,
+                Vec<chronicle_core::types::ActivityEvent>,
+            > = std::collections::HashMap::new();
+            for row in &rows {
+                let events = storage::activity_for_task_in_range(conn, row.task_id, lo, hi)?;
+                truth.insert(row.task_id, events);
+            }
+            let mut seen: std::collections::HashSet<i64> = truth.keys().copied().collect();
+            for t in storage::tasks_in_range(conn, lo, hi)? {
+                if !seen.insert(t.id) {
+                    continue;
+                }
+                let events = storage::activity_for_task_in_range(conn, t.id, lo, hi)?;
+                if chronicle_core::digest::ground_truth(&events, &tz)
+                    .trim()
+                    .is_empty()
+                {
+                    continue;
+                }
+                truth.insert(t.id, events);
+                rows.push(storage::StandupDigestRow {
+                    task_id: t.id,
+                    label: t.label,
+                    project: t.project,
+                    external_ref: t.external_ref,
+                    entries: Vec::new(),
+                    checkpoint: None,
+                });
+            }
             let text = if rows.is_empty() {
                 // Journals only exist once tasks run long enough to batch;
                 // fall back to a plain activity summary so day one still
@@ -631,7 +704,20 @@ pub(crate) fn run_ai_job(
                 fallback
             } else {
                 let plan = chronicle_core::intent::plan_body(conn, day)?;
-                engine.standup(&standup_digest_text(&rows, &tz, plan.as_deref()))?
+                let digest = standup_digest_text(&rows, &tz, plan.as_deref(), &truth);
+                tracing::debug!(job_id = job.id, "standup digest:\n{digest}");
+                let draft = engine.standup(&digest)?;
+                // A claim without a source is not a claim (m32 chunk 5).
+                let Some(text) = prompts::keep_sourced(&draft) else {
+                    bail!("standup draft for {day} carried no sourced claim: {draft}");
+                };
+                if text.lines().count() < draft.lines().filter(|l| !l.trim().is_empty()).count() {
+                    tracing::debug!(
+                        job_id = job.id,
+                        "standup draft before the source check:\n{draft}"
+                    );
+                }
+                text
             };
             storage::upsert_standup_draft(conn, day, Timestamp::now(), &text)?;
             Ok(text)
@@ -641,20 +727,25 @@ pub(crate) fn run_ai_job(
 }
 
 /// Render the standup digest rows for the prompt: the day's plan when one
-/// was set (m26), then per task the day's journal tail (last 5 entries keeps
-/// multi-task days inside the prompt budget) plus the fresh checkpoint if
-/// one exists.
+/// was set (m26), then per task the day's journal tail (last
+/// [`STANDUP_ENTRIES`], clipped) plus the fresh checkpoint if one exists,
+/// then as much of the task's ground truth as its share of
+/// [`STANDUP_DIGEST_CHARS`] holds (m32 chunk 5). Every line ends in the
+/// source tag a claim built on it must carry.
 pub(crate) fn standup_digest_text(
     rows: &[chronicle_core::storage::StandupDigestRow],
     tz: &TimeZone,
     plan: Option<&str>,
+    truth: &std::collections::HashMap<i64, Vec<chronicle_core::types::ActivityEvent>>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     if let Some(plan) = plan.map(str::trim).filter(|s| !s.is_empty()) {
         let _ = writeln!(out, "## Plan\n{plan}");
     }
+    let share = (STANDUP_DIGEST_CHARS / rows.len().max(1)).max(STANDUP_TASK_MIN_CHARS);
     for row in rows {
+        let from = out.chars().count();
         let project = row
             .project
             .as_deref()
@@ -666,20 +757,59 @@ pub(crate) fn standup_digest_text(
             .map(|r| format!(" ({r})"))
             .unwrap_or_default();
         let _ = writeln!(out, "Task: {}{project}{anchor}", row.label);
-        let skip = row.entries.len().saturating_sub(5);
+        let skip = row.entries.len().saturating_sub(STANDUP_ENTRIES);
         for e in &row.entries[skip..] {
             let hm = chronicle_core::types::ms_to_ts(e.start_ts)
                 .to_zoned(tz.clone())
                 .strftime("%H:%M");
-            let _ = writeln!(out, "- [{hm}] {}", e.entry);
+            let _ = writeln!(
+                out,
+                "- [{hm}] {} [journal {hm}]",
+                clip_prose(&e.entry, STANDUP_ENTRY_CHARS)
+            );
         }
         if let Some(c) = &row.checkpoint {
-            let _ = writeln!(out, "Checkpoint: {}", c.state);
-            let _ = writeln!(out, "Next steps: {}", c.next_steps);
+            let _ = writeln!(
+                out,
+                "Checkpoint: {} [checkpoint]",
+                clip_prose(&c.state, STANDUP_ENTRY_CHARS)
+            );
+            let _ = writeln!(
+                out,
+                "Next steps: {} [checkpoint]",
+                clip_prose(&c.next_steps, STANDUP_ENTRY_CHARS)
+            );
+        }
+        let left = share.saturating_sub(out.chars().count() - from);
+        if let Some(events) = truth.get(&row.task_id)
+            && left > 0
+        {
+            let g = chronicle_core::digest::ground_truth_within(events, tz, left);
+            if !g.trim().is_empty() {
+                let _ = write!(out, "Ground truth:\n{g}");
+            }
         }
         out.push('\n');
     }
     out
+}
+
+/// Prose cut to `max_chars` at its last sentence end past two fifths of
+/// the way, else at its last space: the model copies these lines, so a cut
+/// mid-word would be copied too.
+fn clip_prose(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_owned();
+    }
+    let head: String = s.chars().take(max_chars).collect();
+    let floor = head.len() * 2 / 5;
+    let at = head
+        .rfind(". ")
+        .map(|i| i + 1)
+        .filter(|&i| i >= floor)
+        .or_else(|| head.rfind(' '))
+        .unwrap_or(head.len());
+    head[..at].trim_end().to_owned()
 }
 
 /// Journal-free standup draft, stored verbatim (no LLM pass): per task, the
@@ -836,6 +966,18 @@ mod tests {
             quiet_ms: 0,
             wrote: false,
         }
+    }
+
+    #[test]
+    fn prose_is_cut_at_a_sentence_or_a_word() {
+        assert_eq!(clip_prose("short", 10), "short");
+        let two = "Merged the branch. Then ran the tests and the build again.";
+        assert_eq!(clip_prose(two, 40), "Merged the branch.");
+        let one = "Merged the branch and then ran every test in the workspace twice";
+        assert_eq!(clip_prose(one, 40), "Merged the branch and then ran every");
+        // A sentence end before the halfway mark is too short to keep.
+        let early = "Ok. Then a very long second sentence that keeps going on and on";
+        assert_eq!(clip_prose(early, 30), "Ok. Then a very long second");
     }
 
     #[test]

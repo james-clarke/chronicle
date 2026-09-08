@@ -32,6 +32,8 @@ const BOOT_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 const HEAD_LINES: usize = 200;
 const TAIL_BYTES: u64 = 64 * 1024;
 const PROMPT_CHARS: usize = 120;
+/// The session's last reply is kept this long.
+const ASSISTANT_CHARS: usize = 300;
 /// Prompts and touched paths kept per segment for the span anchors.
 const MAX_PROMPTS: usize = 12;
 const MAX_PATHS: usize = 40;
@@ -97,6 +99,9 @@ struct Segment {
     /// path and minute, the newest `MAX_WRITES` kept: which files the tool
     /// was on around a given moment.
     touches: Vec<(i64, usize)>,
+    /// The newest assistant text seen (clipped): how the session ended, for
+    /// narratives (m32 chunk 5).
+    last_assistant: Option<String>,
     /// `end` as of the last emitted event.
     sent: Option<Timestamp>,
 }
@@ -106,17 +111,18 @@ impl Segment {
         if self.prompts.is_empty() && self.paths.is_empty() && self.writes.is_empty() {
             return None;
         }
-        Some(
-            serde_json::json!({
-                "prompts": self.prompts,
-                "paths": self.paths,
-                "writes": self.writes,
-                "prompt_minutes": self.prompt_minutes,
-                "titles": self.titles,
-                "touches": self.touches,
-            })
-            .to_string(),
-        )
+        let mut v = serde_json::json!({
+            "prompts": self.prompts,
+            "paths": self.paths,
+            "writes": self.writes,
+            "prompt_minutes": self.prompt_minutes,
+            "titles": self.titles,
+            "touches": self.touches,
+        });
+        if let Some(a) = &self.last_assistant {
+            v["last_assistant"] = serde_json::Value::String(a.clone());
+        }
+        Some(v.to_string())
     }
 
     fn push_title(&mut self, title: &str) {
@@ -149,6 +155,8 @@ struct Line {
     branch: String,
     session_id: String,
     prompt: Option<String>,
+    /// An `assistant` record's last text block (clipped).
+    assistant: Option<String>,
     /// File paths in this line's tool calls, relative to `cwd`.
     paths: Vec<String>,
     /// A `user` record that is not a tool result: something was typed (or a
@@ -418,6 +426,7 @@ fn absorb(state: &mut FileState, rec: Rec) {
                 prompt_minutes: Vec::new(),
                 titles: state.title.iter().cloned().collect(),
                 touches: Vec::new(),
+                last_assistant: None,
                 sent: None,
             };
             seg.absorb_detail(line);
@@ -446,6 +455,9 @@ impl Segment {
             && self.prompts.last() != Some(p)
         {
             self.prompts.push(p.clone());
+        }
+        if line.assistant.is_some() {
+            self.last_assistant = line.assistant.clone();
         }
         for p in &line.paths {
             let idx = match self.paths.iter().position(|q| q == p) {
@@ -521,6 +533,9 @@ fn parse_line_value(v: &serde_json::Value, kind: &str) -> Option<Line> {
         .to_owned();
     let content = v.get("message").and_then(|m| m.get("content"));
     let prompt = (kind == "user").then(|| prompt_text(content?)).flatten();
+    let assistant = (kind == "assistant")
+        .then(|| assistant_text(content?))
+        .flatten();
     // Tool results come back as `user` records too; injected context
     // (`isMeta`: skill files, local command output) is not typing either.
     let typed = kind == "user"
@@ -540,6 +555,7 @@ fn parse_line_value(v: &serde_json::Value, kind: &str) -> Option<Line> {
         branch,
         session_id,
         prompt,
+        assistant,
         paths,
         typed,
     })
@@ -595,6 +611,32 @@ fn prompt_text(content: &serde_json::Value) -> Option<String> {
     }
     let mut it = text.chars();
     let head: String = it.by_ref().take(PROMPT_CHARS).collect();
+    Some(if it.next().is_some() {
+        head + "\u{2026}"
+    } else {
+        head
+    })
+}
+
+/// The last text block of an assistant record, clipped like a prompt: the
+/// reply the session ended on once the record is the newest.
+fn assistant_text(content: &serde_json::Value) -> Option<String> {
+    let text = match content {
+        serde_json::Value::String(s) => s.as_str(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .rev()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))?
+            .get("text")?
+            .as_str()?,
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut it = text.chars();
+    let head: String = it.by_ref().take(ASSISTANT_CHARS).collect();
     Some(if it.next().is_some() {
         head + "\u{2026}"
     } else {
@@ -794,7 +836,7 @@ mod tests {
         assert_eq!(
             e.detail.as_deref(),
             Some(
-                r#"{"paths":["src/lib.rs"],"prompt_minutes":[1788375600000],"prompts":["fix the flaky test"],"titles":[],"touches":[[1788375900000,0]],"writes":[1788375600000,1788375900000]}"#
+                r#"{"last_assistant":"ok","paths":["src/lib.rs"],"prompt_minutes":[1788375600000],"prompts":["fix the flaky test"],"titles":[],"touches":[[1788375900000,0]],"writes":[1788375600000,1788375900000]}"#
             )
         );
         assert!(p.scan(now).is_empty(), "nothing moved");

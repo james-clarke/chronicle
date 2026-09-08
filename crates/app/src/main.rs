@@ -106,6 +106,11 @@ enum Cmd {
         #[arg(long, value_name = "YYYY-MM-DD")]
         since: Option<String>,
     },
+    /// Internal: read every `git_repos` entry's `.remember/today-*.md` once
+    /// and upsert their `note` rows (m32 chunk 5); the daemon does the same
+    /// on start.
+    #[command(hide = true)]
+    BackfillNotes,
     /// Internal: recompute span anchors (m30) for spans since a local day.
     #[command(hide = true)]
     BackfillAnchors {
@@ -362,6 +367,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::BackfillDescriptions { limit } => backfill_descriptions(&data_dir, limit),
         Cmd::BackfillCoalesce { since, dry_run } => backfill_coalesce(&data_dir, &since, dry_run),
         Cmd::BackfillSessions { since } => bench::backfill_sessions(&data_dir, since.as_deref()),
+        Cmd::BackfillNotes => bench::backfill_notes(&data_dir),
         Cmd::BackfillAnchors { since } => bench::backfill_anchors(&data_dir, since.as_deref()),
         Cmd::BackfillEmbeddings => bench::backfill_embeddings(&data_dir),
         Cmd::Anchors { days, top } => bench::anchor_report(&data_dir, days, top),
@@ -651,14 +657,37 @@ mod tests {
             }],
             checkpoint: None,
         }];
-        let plain = standup_digest_text(&rows, &TimeZone::UTC, None);
+        let truth = std::collections::HashMap::from([(
+            1,
+            vec![chronicle_core::types::ActivityEvent {
+                ts: chronicle_core::types::ms_to_ts(14 * 3_600_000),
+                end_ts: None,
+                repo: "chronicle".into(),
+                branch: "main".into(),
+                kind: chronicle_core::types::ActivityKind::Commit,
+                ext_id: Some("abc1234def".into()),
+                summary: Some("feat: picker".into()),
+                detail: None,
+            }],
+        )]);
+        let plain = standup_digest_text(&rows, &TimeZone::UTC, None, &truth);
         assert!(!plain.contains("## Plan"), "{plain}");
+        // Every line a claim can build on ends in its source tag (m32
+        // chunk 5).
+        assert!(
+            plain.contains("wired the picker [journal 00:00]"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("Ground truth:\n- 14:00 commit chronicle@main"),
+            "{plain}"
+        );
         let plan = "- task: m26 chunk 5 [chronicle]\n";
-        let with = standup_digest_text(&rows, &TimeZone::UTC, Some(plan));
+        let with = standup_digest_text(&rows, &TimeZone::UTC, Some(plan), &truth);
         assert_eq!(with, format!("## Plan\n{plan}{plain}"));
         // "Skip today" stores an empty intent: the prompt is unchanged.
         assert_eq!(
-            standup_digest_text(&rows, &TimeZone::UTC, Some("  \n")),
+            standup_digest_text(&rows, &TimeZone::UTC, Some("  \n"), &truth),
             plain
         );
     }
