@@ -326,8 +326,21 @@ enum ProjectCmd {
 
 #[derive(Subcommand)]
 enum TaskCmd {
-    /// Open tasks: id, project, label.
-    List,
+    /// Open tasks by project: id, project, label. `--all` lists closed
+    /// ones too; `--project` keeps one project (its configured name or a
+    /// repo folder).
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Close a task (the UI's close): it stops taking time; reopen from
+    /// the task manager or `task list --all` if it was a slip.
+    Close {
+        /// Task id, from `task list` or the UI.
+        id: i64,
+    },
     /// Change a task's label, project or description. Label and project
     /// edits are kept as a correction the model reads first next time.
     Rename {
@@ -457,16 +470,74 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
     use chronicle_core::storage;
     let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
     match cmd {
-        TaskCmd::List => {
-            for t in storage::open_tasks(&conn, usize::MAX)? {
+        TaskCmd::List { project, all } => {
+            let config = chronicle_core::config::Config::load(&data_dir.join("config.toml"))?;
+            let matcher = chronicle_core::project::Matcher::from_config(&config);
+            let want = project.as_deref().map(|p| {
+                matcher
+                    .resolve(p)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| p.to_owned())
+            });
+            let mut rows: Vec<storage::ManagedTask> = storage::all_tasks(&conn)?
+                .into_iter()
+                .filter(|t| all || t.open)
+                .filter(|t| {
+                    want.as_deref()
+                        .is_none_or(|w| t.project.as_deref() == Some(w))
+                })
+                .collect();
+            // Project-major: configured order, then the names no rule
+            // knows, then no project; newest activity first inside each.
+            let rank = |p: Option<&str>| -> (usize, String) {
+                match p {
+                    Some(p) => (
+                        matcher
+                            .projects
+                            .iter()
+                            .position(|q| q.name == p)
+                            .unwrap_or(matcher.projects.len()),
+                        p.to_owned(),
+                    ),
+                    None => (usize::MAX, String::new()),
+                }
+            };
+            rows.sort_by_key(|t| rank(t.project.as_deref()));
+            let mut last: Option<Option<String>> = None;
+            for t in &rows {
+                if last.as_ref() != Some(&t.project) {
+                    println!("{}", t.project.as_deref().unwrap_or("(no project)"));
+                    last = Some(t.project.clone());
+                }
+                let mut marks: Vec<&str> = Vec::new();
+                if t.declared {
+                    marks.push("declared");
+                }
+                if t.current {
+                    marks.push("current");
+                }
+                if !t.open {
+                    marks.push("closed");
+                }
                 println!(
-                    "{:>5}  {:<16}  {}{}",
+                    "  {:>5}  {}{}",
                     t.id,
-                    t.project.as_deref().unwrap_or("-"),
                     t.label,
-                    if t.declared { "  (declared)" } else { "" }
+                    if marks.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", marks.join(", "))
+                    }
                 );
             }
+            Ok(())
+        }
+        TaskCmd::Close { id } => {
+            let Some((label, _, _)) = storage::task_identity(&conn, id)? else {
+                bail!("no task {id}");
+            };
+            storage::close_task(&conn, jiff::Timestamp::now(), id)?;
+            println!("task {id}: {label} closed");
             Ok(())
         }
         TaskCmd::Rename {

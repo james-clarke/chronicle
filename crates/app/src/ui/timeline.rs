@@ -516,25 +516,56 @@ fn activity_chart(
     switch_caption(ui, groups, &chart, day_start);
 }
 
-/// Lanes in first-appearance order: one per foreground task plus a shared
-/// one when any background scrap is on the chart.
+/// Lanes project-major (m35 chunk 4): projects in first-appearance order,
+/// each project's tasks in theirs, plus a shared lane when any background
+/// scrap is on the chart.
 fn lane_list(groups: &[TaskGroup], chart: &DayChart) -> Vec<Option<usize>> {
     let lane_key = |seg: &Segment| (!groups[seg.group].background).then_some(seg.group);
     let mut lanes: Vec<Option<usize>> = Vec::new();
+    let mut projects: Vec<Option<&str>> = Vec::new();
     for seg in &chart.segments {
         let key = lane_key(seg);
         if key.is_some() && !lanes.contains(&key) {
             lanes.push(key);
+            let p = groups[seg.group].project.as_deref();
+            if !projects.contains(&p) {
+                projects.push(p);
+            }
         }
     }
+    lanes.sort_by_key(|k| {
+        k.map(|g| {
+            projects
+                .iter()
+                .position(|p| *p == groups[g].project.as_deref())
+                .unwrap_or(usize::MAX)
+        })
+    });
     if chart.segments.iter().any(|s| lane_key(s).is_none()) {
         lanes.push(None);
     }
     lanes
 }
 
+/// The lanes chart opens with a project row when the day's foreground
+/// tasks span more than one project: its blocks wear the project hues.
+fn has_project_lane(groups: &[TaskGroup], chart: &DayChart) -> bool {
+    let mut seen: Vec<Option<&str>> = Vec::new();
+    for seg in &chart.segments {
+        let g = &groups[seg.group];
+        if g.background {
+            continue;
+        }
+        let p = g.project.as_deref();
+        if !seen.contains(&p) {
+            seen.push(p);
+        }
+    }
+    seen.len() > 1
+}
+
 fn lane_count(groups: &[TaskGroup], chart: &DayChart) -> usize {
-    lane_list(groups, chart).len().max(1)
+    (lane_list(groups, chart).len() + usize::from(has_project_lane(groups, chart))).max(1)
 }
 
 fn lanes_height(n: usize) -> f32 {
@@ -594,8 +625,11 @@ fn activity_lanes(
 ) -> (f32, f32) {
     let lane_key = |seg: &Segment| (!groups[seg.group].background).then_some(seg.group);
     let lanes = lane_list(groups, chart);
-    let lane_of = |seg: &Segment| lanes.iter().position(|&k| k == lane_key(seg)).unwrap_or(0);
-    let n = lanes.len();
+    // Lane 0 is the project row when there is one; task lanes follow.
+    let offset = usize::from(has_project_lane(groups, chart));
+    let lane_of =
+        |seg: &Segment| lanes.iter().position(|&k| k == lane_key(seg)).unwrap_or(0) + offset;
+    let n = lanes.len() + offset;
     let h = lanes_height(n);
     let (row, resp) = ui.allocate_exact_size(egui::vec2(width, chart_h), egui::Sense::hover());
     let rect = egui::Rect::from_center_size(row.center(), egui::vec2(width, h));
@@ -604,17 +638,22 @@ fn activity_lanes(
         (rect.width() - LANE_LABEL_W).max(1.0),
     );
     let lane_top = |l: usize| rect.top() + l as f32 * (LANE_H + LANE_GAP);
+    let hover_lane = resp
+        .hover_pos()
+        .map(|p| (((p.y - rect.top()).max(0.0) / (LANE_H + LANE_GAP)) as usize).min(n - 1));
     let hovered_seg = resp.hover_pos().and_then(|p| {
-        let l = (((p.y - rect.top()).max(0.0) / (LANE_H + LANE_GAP)) as usize).min(n - 1);
-        chart.seg_at(chart.ms_at(axis, p.x), |s| lane_of(s) == l)
+        let l = hover_lane.unwrap_or(0);
+        if offset == 1 && l == 0 {
+            // The project row: whichever task block is under the pointer
+            // names the project.
+            chart.seg_at(chart.ms_at(axis, p.x), |_| true)
+        } else {
+            chart.seg_at(chart.ms_at(axis, p.x), |s| lane_of(s) == l)
+        }
     });
     let painter = ui.painter();
     let font = theme::caption().resolve(ui.style());
-    for (l, key) in lanes.iter().enumerate() {
-        let lane =
-            egui::Rect::from_min_size(egui::pos2(axis.0, lane_top(l)), egui::vec2(axis.1, LANE_H));
-        painter.rect_filled(lane, egui::CornerRadius::same(3), theme::palette::SURFACE);
-        let label = key.map_or("background", |g| groups[g].label.as_str());
+    let lane_label = |l: usize, label: &str| {
         let mut job = egui::text::LayoutJob::simple_singleline(
             label.to_owned(),
             font.clone(),
@@ -622,8 +661,39 @@ fn activity_lanes(
         );
         job.wrap = egui::text::TextWrapping::truncate_at_width(LANE_LABEL_W - 8.0);
         let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
-        let y = lane.center().y - galley.size().y / 2.0;
+        let y = lane_top(l) + LANE_H / 2.0 - galley.size().y / 2.0;
         painter.galley(egui::pos2(rect.left(), y), galley, theme::palette::TEXT_DIM);
+    };
+    if offset == 1 {
+        let lane =
+            egui::Rect::from_min_size(egui::pos2(axis.0, lane_top(0)), egui::vec2(axis.1, LANE_H));
+        painter.rect_filled(lane, egui::CornerRadius::same(3), theme::palette::SURFACE);
+        lane_label(0, "projects");
+        for seg in &chart.segments {
+            let g = &groups[seg.group];
+            if g.background {
+                continue;
+            }
+            let x0 = chart.x_at(axis, seg.lo);
+            let x1 = chart.x_at(axis, seg.hi).max(x0 + 2.0);
+            let block = egui::Rect::from_min_max(
+                egui::pos2(x0, lane_top(0)),
+                egui::pos2(x1, lane_top(0) + LANE_H),
+            );
+            let color = match g.project.as_deref() {
+                Some(p) => theme::project_hue(p),
+                None => theme::palette::TEXT_DIM.gamma_multiply(0.5),
+            };
+            painter.rect_filled(block, egui::CornerRadius::same(3), color);
+        }
+    }
+    for (l, key) in lanes.iter().enumerate() {
+        let l = l + offset;
+        let lane =
+            egui::Rect::from_min_size(egui::pos2(axis.0, lane_top(l)), egui::vec2(axis.1, LANE_H));
+        painter.rect_filled(lane, egui::CornerRadius::same(3), theme::palette::SURFACE);
+        let label = key.map_or("background", |g| groups[g].label.as_str());
+        lane_label(l, label);
     }
     // Switch ticks under the blocks: task-identity transitions between
     // adjacent sessions, the same count the caption reports.

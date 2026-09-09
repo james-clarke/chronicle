@@ -480,7 +480,8 @@ fn project_group(
             let row_w = width - indent - LEGEND_PCT_COL - ui.spacing().item_spacing.x;
             let resp = ui
                 .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
-                    let mut row = theme::ListRow::new(&t.label)
+                    let label = chronicle_core::report::task_display_label(&t.label, &t.project);
+                    let mut row = theme::ListRow::new(label)
                         .dot(task_color(t))
                         .num(fmt_dur(t.total_ms));
                     let mix = chronicle_core::report::kind_mix(&t.by_kind);

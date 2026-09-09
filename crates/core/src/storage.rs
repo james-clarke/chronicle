@@ -56,6 +56,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/028_task_closed_by.sql")),
         M::up(include_str!("../migrations/029_spans_project.sql")),
         M::up(include_str!("../migrations/030_task_current.sql")),
+        M::up(include_str!("../migrations/031_self_score_project.sql")),
     ])
 });
 
@@ -4057,6 +4058,11 @@ pub struct SelfScore {
     pub wrong: i64,
     pub confident: i64,
     pub confident_wrong: i64,
+    /// Non-user placements whose task's project differs from the project
+    /// most of the focus spans under them carry (m35 chunk 4): must be 0.
+    pub cross_project: i64,
+    /// Focus time no project claims (m35 chunk 4): the number to drive down.
+    pub unfiled_ms: i64,
 }
 
 /// The DB's side of a self-score row for `[lo, hi)`: everything but the
@@ -4117,6 +4123,37 @@ pub fn self_score_counts(conn: &Connection, lo: i64, hi: i64) -> Result<SelfScor
         [lo, hi],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
+    // A placement is cross-project when the project that owns most of the
+    // focus time under it is not its task's; one with no filed span under
+    // it says nothing either way, and a split row (share under 1: a
+    // session of another project ran while this one was on screen) is
+    // off-screen by construction, so only whole rows are judged.
+    let cross_project: i64 = conn.query_row(
+        "WITH under AS (
+             SELECT i.id AS iid, s.project AS project,
+                    SUM(MIN(s.end_ts, i.end_ts) - MAX(s.start_ts, i.start_ts)) AS ms
+             FROM intervals i
+             JOIN spans s ON s.kind = 'focus' AND s.project IS NOT NULL
+                  AND s.end_ts > i.start_ts AND s.start_ts < i.end_ts
+             WHERE i.source != 'user' AND i.share >= 1
+               AND i.created_ts >= ?1 AND i.created_ts < ?2
+             GROUP BY i.id, s.project),
+         top AS (
+             SELECT iid, project FROM under u
+             WHERE ms = (SELECT MAX(ms) FROM under v WHERE v.iid = u.iid))
+         SELECT COUNT(DISTINCT top.iid) FROM top
+         JOIN intervals i ON i.id = top.iid
+         JOIN tasks t ON t.id = i.task_id
+         WHERE t.project IS NOT NULL AND top.project <> t.project",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
+    let unfiled_ms: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)), 0) FROM spans
+         WHERE kind = 'focus' AND project IS NULL AND end_ts > ?1 AND start_ts < ?2",
+        [lo, hi],
+        |r| r.get(0),
+    )?;
     Ok(SelfScore {
         active_ms,
         underived_ms: underived_ms(conn, lo, hi)?,
@@ -4130,6 +4167,8 @@ pub fn self_score_counts(conn: &Connection, lo: i64, hi: i64) -> Result<SelfScor
         wrong,
         confident,
         confident_wrong,
+        cross_project,
+        unfiled_ms,
         ..SelfScore::default()
     })
 }
@@ -4137,15 +4176,17 @@ pub fn self_score_counts(conn: &Connection, lo: i64, hi: i64) -> Result<SelfScor
 pub fn upsert_self_score(conn: &Connection, s: &SelfScore) -> Result<(), StorageError> {
     conn.execute(
         "INSERT INTO self_score (day, computed_ts, active_ms, uncaptured_ms, underived_ms, placed_ms,
-             minted, merged, placements, ejects, renames, verdicts, wrong, confident, confident_wrong)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             minted, merged, placements, ejects, renames, verdicts, wrong, confident, confident_wrong,
+             cross_project, unfiled_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(day) DO UPDATE SET computed_ts=excluded.computed_ts,
              active_ms=excluded.active_ms, uncaptured_ms=excluded.uncaptured_ms,
              underived_ms=excluded.underived_ms, placed_ms=excluded.placed_ms,
              minted=excluded.minted, merged=excluded.merged, placements=excluded.placements,
              ejects=excluded.ejects, renames=excluded.renames, verdicts=excluded.verdicts,
              wrong=excluded.wrong, confident=excluded.confident,
-             confident_wrong=excluded.confident_wrong",
+             confident_wrong=excluded.confident_wrong,
+             cross_project=excluded.cross_project, unfiled_ms=excluded.unfiled_ms",
         params![
             s.day,
             s.computed_ts,
@@ -4161,7 +4202,9 @@ pub fn upsert_self_score(conn: &Connection, s: &SelfScore) -> Result<(), Storage
             s.verdicts,
             s.wrong,
             s.confident,
-            s.confident_wrong
+            s.confident_wrong,
+            s.cross_project,
+            s.unfiled_ms
         ],
     )?;
     Ok(())
@@ -4171,7 +4214,8 @@ pub fn upsert_self_score(conn: &Connection, s: &SelfScore) -> Result<(), Storage
 pub fn self_scores(conn: &Connection, n: usize) -> Result<Vec<SelfScore>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT day, computed_ts, active_ms, uncaptured_ms, underived_ms, placed_ms,
-                minted, merged, placements, ejects, renames, verdicts, wrong, confident, confident_wrong
+                minted, merged, placements, ejects, renames, verdicts, wrong, confident, confident_wrong,
+                cross_project, unfiled_ms
          FROM (SELECT * FROM self_score ORDER BY day DESC LIMIT ?1) ORDER BY day",
     )?;
     let rows = stmt
@@ -4192,6 +4236,8 @@ pub fn self_scores(conn: &Connection, n: usize) -> Result<Vec<SelfScore>, Storag
                 wrong: r.get(12)?,
                 confident: r.get(13)?,
                 confident_wrong: r.get(14)?,
+                cross_project: r.get(15)?,
+                unfiled_ms: r.get(16)?,
             })
         })?
         .collect::<Result<_, _>>()?;

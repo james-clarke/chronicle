@@ -691,6 +691,21 @@ pub(crate) fn run_ai_job(
                     checkpoint: None,
                 });
             }
+            // Project-major (m35 chunk 4): the draft's blocks come out
+            // grouped as the DATA is ordered — configured projects first,
+            // then the rest by name, no project last.
+            let order: Vec<String> = config
+                .projects_effective()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            rows.sort_by_key(|r| match &r.project {
+                Some(p) => (
+                    order.iter().position(|o| o == p).unwrap_or(order.len()),
+                    p.clone(),
+                ),
+                None => (usize::MAX, String::new()),
+            });
             let text = if rows.is_empty() {
                 // Journals only exist once tasks run long enough to batch;
                 // fall back to a plain activity summary so day one still

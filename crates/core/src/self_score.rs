@@ -103,6 +103,8 @@ pub struct Summary {
     pub wrong: i64,
     pub confident: i64,
     pub confident_wrong: i64,
+    pub cross_project: i64,
+    pub unfiled_ms: i64,
 }
 
 impl Summary {
@@ -128,6 +130,8 @@ impl Summary {
             s.wrong += r.wrong;
             s.confident += r.confident;
             s.confident_wrong += r.confident_wrong;
+            s.cross_project += r.cross_project;
+            s.unfiled_ms += r.unfiled_ms;
         }
         s
     }
@@ -176,6 +180,13 @@ impl Summary {
             self.confident_wrong,
             self.confident,
             pct(self.confident_wrong, self.confident)
+        ));
+        out.push(format!(
+            "cross-project placements {}; unfiled {} of {} active ({})",
+            self.cross_project,
+            fmt_ms(self.unfiled_ms),
+            fmt_ms(self.active_ms),
+            pct(self.unfiled_ms, self.active_ms)
         ));
         out
     }

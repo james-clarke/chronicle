@@ -299,12 +299,23 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
         }
     }
     by_kind.sort_by_key(|(_, ms)| std::cmp::Reverse(*ms));
-    rows.sort_by_key(|r| std::cmp::Reverse(r.total_ms));
     let (lo, hi) = (bounds[0], bounds[days.len()]);
+    let projects = project_totals(tasks, lo, hi);
+    // Project-major (m35 chunk 4): the biggest project's tasks first,
+    // biggest task first inside it, so the rows read project → task.
+    rows.sort_by_key(|r| {
+        (
+            projects
+                .iter()
+                .position(|p| p.project == r.project)
+                .unwrap_or(usize::MAX),
+            std::cmp::Reverse(r.total_ms),
+        )
+    });
     Ok(RangeReport {
         days,
         tasks: rows,
-        projects: project_totals(tasks, lo, hi),
+        projects,
         grand_total_ms,
         tz: tz.clone(),
         gaps: Vec::new(),
@@ -355,22 +366,31 @@ pub fn to_md(r: &RangeReport) -> String {
         out.push_str("---|");
     }
     out.push_str("---|\n");
-    for t in &r.tasks {
-        let _ = write!(out, "| {} | {} |", t.project, t.label);
-        for ms in &t.by_day {
-            let cell = if *ms == 0 {
-                String::new()
-            } else {
-                fmt_dur(*ms)
-            };
-            let _ = write!(out, " {cell} |");
-        }
-        let _ = writeln!(out, " {} |", fmt_dur(t.total_ms));
-    }
-    out.push_str("\n## Totals by project\n");
+    let cell = |ms: i64| if ms == 0 { String::new() } else { fmt_dur(ms) };
+    // Project → task (m35 chunk 4): a subtotal row opens each project
+    // (its name, the day sums, its total), its tasks follow with the
+    // project column blank; the rows are already in that order.
     for p in &r.projects {
-        let _ = writeln!(out, "- {}: {}", p.project, fmt_dur(p.total_ms));
+        let _ = write!(out, "| {} | |", p.project);
+        for d in 0..r.days.len() {
+            let ms: i64 = r
+                .tasks
+                .iter()
+                .filter(|t| t.project == p.project)
+                .map(|t| t.by_day[d])
+                .sum();
+            let _ = write!(out, " {} |", cell(ms));
+        }
+        let _ = writeln!(out, " {} |", fmt_dur(p.total_ms));
+        for t in r.tasks.iter().filter(|t| t.project == p.project) {
+            let _ = write!(out, "| | {} |", task_display_label(&t.label, &t.project));
+            for ms in &t.by_day {
+                let _ = write!(out, " {} |", cell(*ms));
+            }
+            let _ = writeln!(out, " {} |", fmt_dur(t.total_ms));
+        }
     }
+    out.push_str("\n## Totals\n");
     let _ = writeln!(out, "- total: {}", fmt_dur(r.grand_total_ms));
     let split = hands_split(&r.by_kind);
     if !split.is_empty() {
@@ -391,6 +411,17 @@ pub fn to_md(r: &RangeReport) -> String {
         let _ = writeln!(out, "- {}", self_line(r.self_ms));
     }
     out
+}
+
+/// A task's label under its project heading: the general task's
+/// "<project>: other work" reads as "other work" there; every other label
+/// is itself.
+pub fn task_display_label<'a>(label: &'a str, project: &str) -> &'a str {
+    label
+        .strip_prefix(project)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .filter(|rest| *rest == "other work")
+        .unwrap_or(label)
 }
 
 /// "Chronicle, its own window: 2h10m (admin, inside the rows above)": the
@@ -570,12 +601,24 @@ mod tests {
             to_md(&r),
             "| project | task | 2026-08-24 | 2026-08-25 | total |\n\
              |---|---|---|---|---|\n\
-             | chronicle | task1 | 1h30m |  | 1h30m |\n\
-             | a,b \"c\" | task2 |  | 30m00s | 30m00s |\n\
-             \n## Totals by project\n\
-             - chronicle: 1h30m\n\
-             - a,b \"c\": 30m00s\n\
+             | chronicle | | 1h30m |  | 1h30m |\n\
+             | | task1 | 1h30m |  | 1h30m |\n\
+             | a,b \"c\" | |  | 30m00s | 30m00s |\n\
+             | | task2 |  | 30m00s | 30m00s |\n\
+             \n## Totals\n\
              - total: 2h00m\n"
+        );
+        assert_eq!(
+            task_display_label("chronicle: other work", "chronicle"),
+            "other work"
+        );
+        assert_eq!(
+            task_display_label("chronicle: other", "chronicle"),
+            "chronicle: other"
+        );
+        assert_eq!(
+            task_display_label("x: other work", "chronicle"),
+            "x: other work"
         );
     }
 

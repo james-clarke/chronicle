@@ -134,7 +134,7 @@ fn self_score_card(ui: &mut egui::Ui, rows: &[chronicle_core::storage::SelfScore
             .strong()
             .color(theme::palette::TEXT),
     );
-    ui.weak("per day: placed share of active time, missing (not captured / not derived), tasks minted and merged within a day, ejects over placements, wrong over closed verdicts (the confident pair after); scored once a day");
+    ui.weak("per day: placed share of active time, missing (not captured / not derived), tasks minted and merged within a day, ejects over placements, wrong over closed verdicts (the confident pair after), cross-project placements (must be 0) and unfiled focus time; scored once a day");
     if rows.is_empty() {
         ui.weak("no rows yet (the daemon scores the week on its first tick of the day)");
         return;
@@ -145,7 +145,7 @@ fn self_score_card(ui: &mut egui::Ui, rows: &[chronicle_core::storage::SelfScore
         .id_salt("settings_self_score_scroll")
         .show(ui, |ui| {
             egui::Grid::new("settings_self_score")
-                .num_columns(6)
+                .num_columns(7)
                 .spacing([8.0, 4.0])
                 .striped(true)
                 .show(ui, |ui| {
@@ -156,6 +156,7 @@ fn self_score_card(ui: &mut egui::Ui, rows: &[chronicle_core::storage::SelfScore
                         "minted/merged",
                         "ejects/placed",
                         "wrong/closed",
+                        "cross/unfiled",
                     ] {
                         ui.weak(head);
                     }
@@ -177,6 +178,11 @@ fn self_score_card(ui: &mut egui::Ui, rows: &[chronicle_core::storage::SelfScore
                         ui.label(theme::num(format!(
                             "{}/{} ({}/{})",
                             r.wrong, r.verdicts, r.confident_wrong, r.confident
+                        )));
+                        ui.label(theme::num(format!(
+                            "{}/{}",
+                            r.cross_project,
+                            fmt_ms(r.unfiled_ms)
                         )));
                         ui.end_row();
                     }

@@ -423,6 +423,49 @@ exists.
 - Not in this chunk: the timeline, reports and self-score by project
   (chunk 4), placeholder labels (chunk 5).
 
+## Shipped: chunk 4 (2026-09-09 afternoon)
+
+- Timeline: the lanes chart opens with a `projects` row when the day's
+  foreground tasks span more than one project — each block in its
+  project's hue (`theme::project_hue`; no project = dim) — and the task
+  lanes below it are project-major (projects in first-appearance order,
+  each project's tasks in theirs; `lane_list`, `has_project_lane` in
+  `crates/app/src/ui/timeline.rs`). Hovering the project row names the
+  task block under the pointer. The hours chart stacks in the same order.
+  Block colours were already the project hue with a per-task shade since
+  m20, so the band needed nothing.
+- Reports: `report::build` orders rows project-major (biggest project
+  first, biggest task first inside it); `to_md` prints a subtotal row per
+  project (name, day sums, total) with its tasks under it, then
+  `## Totals` (the "Totals by project" list is gone — it is the table
+  now). `report::task_display_label` shows the general task as
+  "other work" under its project heading, in the markdown and in the
+  Reports view (which already grouped by project since m13). The CSV keeps
+  its columns, only the row order changed.
+- Standup: the digest's task blocks are ordered by project (configured
+  order, then by name, no project last) so the draft comes out grouped;
+  the prompt and the Home parser are unchanged.
+- Self-score (migration 031, M36's planned migration becomes 032):
+  `cross_project` = the day's non-user whole-row placements (share 1)
+  whose task's project differs from the project owning most of the focus
+  time under them (a split row is off-screen by construction; a
+  placement with no filed span under it is not judged); `unfiled_ms` =
+  focus time with `spans.project` null. `chronicle status` prints
+  "cross-project placements N; unfiled X of Y active (Z%)"; Settings ›
+  Derivation's grid gains a cross/unfiled column. On the live copy:
+  09-08 36 of 63 placements and 09-09 28 of 54 were cross-project under
+  the old pipeline; of the 11 placements since chunk 2 installed (14:31)
+  the only two flagged were split rows, which the share filter now
+  excludes — so the number should read 0 from here.
+- CLI: `chronicle task list [--project P] [--all]` prints project-major
+  (configured order, then unknown names, then no project) with
+  declared / current / closed marks; `--project` resolves a repo folder
+  to its project. `chronicle task close <id>`.
+- Gate: `chronicle report --day 2026-09-08 --format md` on a sandbox copy
+  reads project → task → minutes, subtotals 5h36 + 2h41 + 51m + 41m +
+  22m + 20m = the day's 10h31m. Lanes screenshot at the standalone scale
+  shows the project row over six project-grouped task lanes.
+
 ## Open questions for James
 
 - One silo or four for contoso, mailer, admin-api and
