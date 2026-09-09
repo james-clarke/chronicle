@@ -12,6 +12,7 @@ mod onboarding;
 mod projects;
 mod reports;
 mod settings;
+mod tasks;
 mod theme;
 mod timeline;
 mod triage;
@@ -361,6 +362,30 @@ struct OpenRow {
     intent: bool,
     /// Nothing has moved it for `task_stuck_days` (`storage::stuck_tasks`).
     stuck: bool,
+    /// Marked current in its project (m35 chunk 1): the project's sink.
+    current: bool,
+}
+
+/// One Home project line (m35 chunk 3): the project, what is on screen
+/// now, today's minutes, its current task and the tasks under it.
+struct ProjectGroup {
+    /// `None` is the unfiled group (tasks with no project) at the bottom.
+    name: Option<String>,
+    /// Named in `[[projects]]`; an unconfigured name is one a task still
+    /// carries from before the config existed, or typed on declare.
+    configured: bool,
+    /// A focus span of the project ended inside the last two minutes.
+    live: bool,
+    /// Interval time inside today across its tasks and general task.
+    today_ms: i64,
+    /// Today's time on the project's general task ("not on a task").
+    general_ms: i64,
+    /// The current declared task (`tasks.current`).
+    current: Option<i64>,
+    /// Collectors that fed the project this week, in `SOURCE_ORDER`.
+    sources: Vec<&'static str>,
+    /// Indices into `open_tasks`, in that list's order.
+    tasks: Vec<usize>,
 }
 
 /// `s` cut to `max` chars with an ellipsis (chip text stays chip-sized).
@@ -387,6 +412,7 @@ impl OpenRow {
             next_step: None,
             intent: false,
             stuck: false,
+            current: false,
         }
     }
 }
@@ -418,6 +444,10 @@ enum Action {
         to_task: i64,
     },
     Reopen(i64),
+    /// Mark a declared task current in its project (m35 chunk 1's sink).
+    SetCurrent(i64),
+    /// Delete a derived task outright; its time goes back to unassigned.
+    DeleteDerived(i64),
     /// Queue an interactive declare-suggestion job.
     SuggestTask,
     /// Copy the ready suggestion into the declare inputs.
@@ -563,6 +593,20 @@ struct TimelineApp {
     unplaced: Vec<ActivityRow>,
     open_tasks: Vec<OpenRow>,
     closed_tasks: Vec<OpenRow>,
+    /// Home's project lines (m35 chunk 3), rebuilt with the reload.
+    project_groups: Vec<ProjectGroup>,
+    /// Projects collapsed on Home (meta `ui_projects_collapsed`, one name
+    /// per line; `""` is the unfiled group).
+    project_collapsed: HashSet<String>,
+    /// `project_collapsed` read from meta once.
+    collapsed_loaded: bool,
+    /// Next frame gives the declare label input focus ("+" on a project
+    /// line pre-filled the project).
+    declare_focus: bool,
+    /// Some = task manager takeover open (Home › Working on › manage).
+    tasks: Option<tasks::TaskManager>,
+    /// `CHRONICLE_UI_VIEW=tasks`: open the manager once tasks are loaded.
+    tasks_requested: bool,
     /// Reassignment targets (open tasks + today's groups, deduped): rebuilt
     /// with the reload, not per frame.
     merge_candidates: Vec<(i64, String)>,
@@ -796,6 +840,12 @@ impl TimelineApp {
             unplaced: Vec::new(),
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
+            project_groups: Vec::new(),
+            project_collapsed: HashSet::new(),
+            collapsed_loaded: false,
+            declare_focus: false,
+            tasks: None,
+            tasks_requested: false,
             merge_candidates: Vec::new(),
             feed: Vec::new(),
             progress: None,
@@ -990,6 +1040,7 @@ impl TimelineApp {
                 self.unplaced = unplaced;
                 self.open_tasks = open;
                 self.closed_tasks = closed;
+                self.load_project_groups();
                 self.set_feed(feed);
                 self.unassigned_ms = unassigned_ms;
                 self.proposals = proposals;
@@ -1032,6 +1083,12 @@ impl TimelineApp {
         });
         if std::mem::take(&mut self.triage_requested) {
             self.open_triage();
+        }
+        if std::mem::take(&mut self.tasks_requested) {
+            self.open_tasks_panel();
+        }
+        if let (Some(conn), Some(panel)) = (self.conn.as_ref(), self.tasks.as_mut()) {
+            panel.reload(conn, &self.tz);
         }
         self.mcp_actions =
             chronicle_mcp::McpConfig::load(&mcp_path(self.config.as_ref(), &self.data_dir))
@@ -1503,7 +1560,14 @@ impl TimelineApp {
 
     fn load_open(&mut self, groups: &[TaskGroup]) -> anyhow::Result<Vec<OpenRow>> {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
-        let open = chronicle_core::storage::open_tasks(conn, 8)?;
+        // Home groups by project now, so the derived cap is the list's
+        // bound, not the page's: a collapsed project costs one line.
+        let open = chronicle_core::storage::open_tasks(conn, 40)?;
+        let current: HashSet<i64> = chronicle_core::storage::open_declared(conn)?
+            .into_iter()
+            .filter(|t| t.current)
+            .map(|t| t.id)
+            .collect();
         // "Today" is the calendar day, not the shown day: the timeline's day
         // nav leaves `self.day` on a past day, and the groups follow it.
         let today = jiff::Timestamp::now().to_zoned(self.tz.clone()).date();
@@ -1553,6 +1617,7 @@ impl TimelineApp {
                 }
                 row.intent = intent_ids.contains(&row.task_id);
                 row.stuck = self.stuck.contains(&row.task_id);
+                row.current = current.contains(&row.task_id);
                 row.next_step = chronicle_core::storage::get_checkpoint(conn, row.task_id)
                     .ok()
                     .flatten()
@@ -1628,6 +1693,185 @@ impl TimelineApp {
         self.feed_ejected.retain(|s, _| starts.contains(s));
         self.feed = feed;
         self.feed_primed = true;
+    }
+
+    /// Home's project lines from the loaded open tasks (m35 chunk 3):
+    /// configured projects in config order, then names no rule knows,
+    /// then the unfiled group; each with today's minutes (tasks plus the
+    /// general task), the live flag, its current task and this week's
+    /// sources. A configured project with nothing at all still shows,
+    /// collapsed to its line.
+    fn load_project_groups(&mut self) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        if !self.collapsed_loaded {
+            self.collapsed_loaded = true;
+            self.project_collapsed =
+                chronicle_core::storage::get_meta(conn, "ui_projects_collapsed")
+                    .ok()
+                    .flatten()
+                    .map(|v| v.lines().map(str::to_owned).collect())
+                    .unwrap_or_default();
+        }
+        let matcher = self
+            .config
+            .as_ref()
+            .map(chronicle_core::project::Matcher::from_config)
+            .unwrap_or_default();
+        let now = jiff::Timestamp::now();
+        let now_ms = now.as_millisecond();
+        let today = now.to_zoned(self.tz.clone()).date();
+        let week_lo = chronicle_core::timeref::week_start(today)
+            .unwrap_or(today)
+            .to_zoned(self.tz.clone())
+            .map(|z| z.timestamp().as_millisecond())
+            .unwrap_or(now_ms);
+        let (day_lo, day_hi) = today
+            .to_zoned(self.tz.clone())
+            .ok()
+            .and_then(|s| {
+                let e = s.checked_add(1.day()).ok()?;
+                Some((
+                    s.timestamp().as_millisecond(),
+                    e.timestamp().as_millisecond(),
+                ))
+            })
+            .unwrap_or((now_ms, now_ms));
+        let live: HashSet<String> =
+            chronicle_core::storage::span_projects_since(conn, now_ms - LIVE_MS)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+        let screen: HashSet<String> = chronicle_core::storage::span_projects_since(conn, week_lo)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        // Sources per project: each repo's kinds land on the project the
+        // repo resolves to (its folder name is a place).
+        let mut sources: HashMap<String, HashSet<&'static str>> = HashMap::new();
+        for name in &screen {
+            sources.entry(name.clone()).or_default().insert("screen");
+        }
+        for (repo, kind) in chronicle_core::storage::activity_kinds_by_repo(conn, week_lo, now_ms)
+            .unwrap_or_default()
+        {
+            let Some(word) = source_word(kind) else {
+                continue;
+            };
+            if let Some(name) = matcher.resolve(&repo) {
+                sources.entry(name.to_owned()).or_default().insert(word);
+            }
+        }
+        // Today's minutes on each project's general task.
+        let general: HashMap<i64, String> = chronicle_core::storage::general_tasks(conn)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut general_ms: HashMap<String, i64> = HashMap::new();
+        if !general.is_empty()
+            && let Ok(rows) = chronicle_core::storage::tasks_in_range(conn, day_lo, day_hi)
+        {
+            for t in rows {
+                let Some(name) = general.get(&t.id) else {
+                    continue;
+                };
+                let (s, e) = (
+                    t.start_ts.as_millisecond().max(day_lo),
+                    t.end_ts.as_millisecond().min(day_hi),
+                );
+                if e > s {
+                    *general_ms.entry(name.clone()).or_default() += t.weigh(e - s);
+                }
+            }
+        }
+        let current: HashMap<String, i64> = chronicle_core::storage::open_declared(conn)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.current)
+            .filter_map(|t| t.project.map(|p| (p, t.id)))
+            .collect();
+        let mut order: Vec<(Option<String>, bool)> = matcher
+            .projects
+            .iter()
+            .map(|p| (Some(p.name.clone()), true))
+            .collect();
+        for t in &self.open_tasks {
+            let key = t.project.clone().filter(|p| !p.trim().is_empty());
+            if !order.iter().any(|(n, _)| *n == key) {
+                order.push((key, false));
+            }
+        }
+        // The unfiled group closes the list even when it is empty today.
+        if !order.iter().any(|(n, _)| n.is_none()) {
+            order.push((None, false));
+        }
+        order.sort_by_key(|(n, _)| n.is_none());
+        self.project_groups = order
+            .into_iter()
+            .map(|(name, configured)| {
+                let tasks: Vec<usize> = self
+                    .open_tasks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.project.clone().filter(|p| !p.trim().is_empty()) == name)
+                    .map(|(i, _)| i)
+                    .collect();
+                let g_ms = name
+                    .as_ref()
+                    .and_then(|n| general_ms.get(n))
+                    .copied()
+                    .unwrap_or(0);
+                let today_ms = tasks
+                    .iter()
+                    .map(|&i| self.open_tasks[i].today_ms)
+                    .sum::<i64>()
+                    + g_ms;
+                let mut srcs: Vec<&'static str> = name
+                    .as_ref()
+                    .and_then(|n| sources.get(n))
+                    .map(|s| s.iter().copied().collect())
+                    .unwrap_or_default();
+                srcs.sort_by_key(|w| SOURCE_ORDER.iter().position(|o| o == w));
+                ProjectGroup {
+                    live: name.as_ref().is_some_and(|n| live.contains(n)),
+                    current: name.as_ref().and_then(|n| current.get(n)).copied(),
+                    general_ms: g_ms,
+                    today_ms,
+                    sources: srcs,
+                    tasks,
+                    name,
+                    configured,
+                }
+            })
+            .collect();
+    }
+
+    /// Flip a project line's collapsed state and persist the set.
+    fn toggle_project_collapsed(&mut self, key: &str) {
+        if !self.project_collapsed.remove(key) {
+            self.project_collapsed.insert(key.to_owned());
+        }
+        if let Some(conn) = self.conn.as_ref() {
+            let mut names: Vec<&str> = self.project_collapsed.iter().map(String::as_str).collect();
+            names.sort_unstable();
+            let value = names.join("\n");
+            let _ = chronicle_core::storage::set_meta(
+                conn,
+                "ui_projects_collapsed",
+                (!value.is_empty()).then_some(value.as_str()),
+            );
+        }
+    }
+
+    /// Open the task manager takeover (m35 chunk 3).
+    pub(super) fn open_tasks_panel(&mut self) {
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let mut panel = tasks::TaskManager::default();
+        panel.reload(conn, &self.tz);
+        self.tasks = Some(panel);
     }
 
     fn load_closed(&mut self) -> anyhow::Result<Vec<OpenRow>> {
@@ -1845,6 +2089,12 @@ impl TimelineApp {
                 chronicle_core::storage::merge_task(conn, now, from_task, to_task)
             }
             Action::Reopen(task_id) => chronicle_core::storage::reopen_task(conn, task_id),
+            Action::SetCurrent(task_id) => {
+                chronicle_core::storage::set_current_task(conn, task_id).map(|_| ())
+            }
+            Action::DeleteDerived(task_id) => {
+                chronicle_core::storage::delete_derived_task(conn, task_id).map(|_| ())
+            }
             Action::SuggestTask => {
                 let result = chronicle_core::storage::enqueue_ai_job(
                     conn,
@@ -2056,6 +2306,12 @@ impl TimelineApp {
                 Err(e) => Err(e.to_string()),
             });
         }
+        if let Some(panel) = &mut self.tasks {
+            panel.dirty = true;
+            if let Err(e) = &result {
+                panel.status_line = Some(Err(e.to_string()));
+            }
+        }
         match result {
             Ok(()) => self.loaded_at = None,
             Err(e) => self.error = Some(e.to_string()),
@@ -2075,6 +2331,7 @@ impl TimelineApp {
                 Ok("settings") => self.toggle_settings(),
                 // Needs the task lists (pick candidates): opens after this load.
                 Ok("triage") => self.triage_requested = true,
+                Ok("tasks") => self.tasks_requested = true,
                 _ => {}
             }
         }
@@ -2331,6 +2588,10 @@ impl TimelineApp {
             self.triage_ui(ui);
             return;
         }
+        if self.tasks.is_some() {
+            self.tasks_ui(ui);
+            return;
+        }
 
         let top_frame = egui::Frame::new()
             .fill(theme::palette::SURFACE)
@@ -2563,6 +2824,31 @@ impl TimelineApp {
         // Only scheduled wake-up; no unconditional repaint.
         ui.ctx().request_repaint_after(WAKE_EVERY);
     }
+}
+
+/// A project whose focus span ended inside this horizon is "on screen now".
+const LIVE_MS: i64 = 2 * 60_000;
+
+/// Display order of the Home sources row.
+const SOURCE_ORDER: [&str; 9] = [
+    "screen", "git", "ai", "prs", "editor", "shell", "calls", "calendar", "notes",
+];
+
+/// The sources-row word for a collector's activity kind; `None` for kinds
+/// that are anchors only.
+fn source_word(kind: chronicle_core::types::ActivityKind) -> Option<&'static str> {
+    use chronicle_core::types::ActivityKind as K;
+    Some(match kind {
+        K::Checkout | K::Commit => "git",
+        K::AiSession => "ai",
+        K::PrAuthored | K::PrReviewed => "prs",
+        K::Edit => "editor",
+        K::Shell => "shell",
+        K::Call => "calls",
+        K::Meeting => "calendar",
+        K::Note => "notes",
+        K::Cwd => return None,
+    })
 }
 
 /// The one duration rule for every UI surface: `2h41m` from an hour up,

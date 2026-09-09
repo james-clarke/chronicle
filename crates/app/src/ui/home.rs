@@ -292,6 +292,9 @@ impl TimelineApp {
 
         let mut pending: Option<Action> = None;
         let mut open_triage = false;
+        let mut open_manager = false;
+        let mut toggle_collapse: Option<String> = None;
+        let mut declare_here = false;
         // Wide window: the feed gets its own column beside the cards and
         // task list (a side panel, added before the central page).
         let wide = theme::wide(ui.ctx());
@@ -367,8 +370,17 @@ impl TimelineApp {
                     let edit = &mut self.edit;
                     let suggestion = &self.suggestion;
                     let declare_conflict = &mut self.declare_conflict;
+                    let project_groups = &self.project_groups;
+                    let collapsed = &self.project_collapsed;
+                    let declare_focus = std::mem::take(&mut self.declare_focus);
 
                     theme::section_header_with(ui, "Working on", None, |ui| {
+                        if theme::ghost_button(ui, "manage")
+                            .on_hover_text("every task in one list: filter, rename, merge, close, delete")
+                            .clicked()
+                        {
+                            open_manager = true;
+                        }
                         if !can_suggest {
                             return;
                         }
@@ -389,6 +401,9 @@ impl TimelineApp {
                     });
                     ui.add_space(theme::SPACE_SM);
                     // Declare row: label input fills, project fixed, add pinned.
+                    if declare_focus {
+                        ui.memory_mut(|m| m.request_focus(declare_id()));
+                    }
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if theme::primary_button(ui, "add").clicked() {
@@ -404,15 +419,19 @@ impl TimelineApp {
                                 |ui| {
                                     // Retyping the label drops the "already
                                     // owns" notice: it is about what was typed.
-                                    if ui
-                                        .add(
-                                            egui::TextEdit::singleline(new_label)
-                                                .desired_width(ui.available_width())
-                                                .hint_text("declare a task\u{2026}"),
-                                        )
-                                        .changed()
-                                    {
+                                    let resp = ui.add(
+                                        egui::TextEdit::singleline(new_label)
+                                            .id(declare_id())
+                                            .desired_width(ui.available_width())
+                                            .hint_text("declare a task\u{2026}"),
+                                    );
+                                    if resp.changed() {
                                         *declare_conflict = None;
+                                    }
+                                    if resp.lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        pending = Some(Action::Declare);
                                     }
                                 },
                             );
@@ -433,74 +452,120 @@ impl TimelineApp {
                             }
                         });
                     }
-                    if open_tasks.is_empty() && q.is_empty() {
+                    if open_tasks.is_empty() && q.is_empty() && project_groups.len() <= 1 {
                         ui.add_space(theme::SPACE_XS);
                         ui.weak("no open tasks yet \u{2014} declare one above, or accept what the feed proposes");
                     }
-                    for &o in &open_vis {
-                        let t = &open_tasks[o];
-                        let color = theme::task_color(t.task_id, t.project.as_deref());
-                        if edit.as_ref().is_some_and(|e| e.task_id == t.task_id) {
-                            // Same two-row form as the timeline's compact
-                            // card: label alone, then project + actions.
-                            {
-                                let e = edit.as_mut().expect("checked above");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut e.label)
-                                        .desired_width(content_w - 20.0),
-                                );
+                    // One line per project (m35 chunk 3), its tasks under
+                    // it; the unfiled group last and only when it has any.
+                    for group in project_groups {
+                        let vis: Vec<usize> = group
+                            .tasks
+                            .iter()
+                            .copied()
+                            .filter(|i| open_vis.contains(i))
+                            .collect();
+                        let key = group.name.clone().unwrap_or_default();
+                        if vis.is_empty() && (!q.is_empty() || group.name.is_none()) {
+                            continue;
+                        }
+                        let open = !collapsed.contains(&key);
+                        ui.add_space(theme::SPACE_SM);
+                        match project_header(ui, group, open_tasks, open, &mut pending) {
+                            HeaderClick::Toggle => toggle_collapse = Some(key.clone()),
+                            HeaderClick::Declare => {
+                                *new_project = key.clone();
+                                declare_here = true;
                             }
+                            HeaderClick::None => {}
+                        }
+                        if !open {
+                            continue;
+                        }
+                        if vis.is_empty() {
                             ui.horizontal(|ui| {
-                                let e = edit.as_mut().expect("checked above");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut e.project)
-                                        .desired_width(content_w - 130.0)
-                                        .hint_text("project"),
-                                );
-                                if ui.button("save").clicked()
-                                    && let Some(e) = edit.take()
-                                {
-                                    pending = Some(Action::Rename(e));
-                                }
-                                if ui.button("cancel").clicked() {
-                                    *edit = None;
-                                }
+                                ui.add_space(theme::STATUS_COL + theme::SPACE_SM);
+                                ui.weak("no open task \u{2014} its time goes to \u{ab}other work\u{bb}");
                             });
                             continue;
                         }
-                        task_row(t, color, true)
-                            .emphasis()
-                            .padded()
-                            .subtitle(working_subtitle(t))
-                            .show(ui, content_w, |ui| {
-                                ui.menu_button("\u{2026}", |ui| {
-                                    if ui.button("rename").clicked() {
-                                        *edit = Some(EditState {
-                                            task_id: t.task_id,
-                                            label: t.label.clone(),
-                                            project: t.project.clone().unwrap_or_default(),
-                                            description: None,
-                                        });
-                                        ui.close();
+                        for o in vis {
+                            let t = &open_tasks[o];
+                            let color = theme::task_color(t.task_id, t.project.as_deref());
+                            if edit.as_ref().is_some_and(|e| e.task_id == t.task_id) {
+                                // Same two-row form as the timeline's compact
+                                // card: label alone, then project + actions.
+                                {
+                                    let e = edit.as_mut().expect("checked above");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut e.label)
+                                            .desired_width(content_w - 20.0),
+                                    );
+                                }
+                                ui.horizontal(|ui| {
+                                    let e = edit.as_mut().expect("checked above");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut e.project)
+                                            .desired_width(content_w - 130.0)
+                                            .hint_text("project"),
+                                    );
+                                    if ui.button("save").clicked()
+                                        && let Some(e) = edit.take()
+                                    {
+                                        pending = Some(Action::Rename(e));
                                     }
-                                    if ui.button("close").clicked() {
-                                        pending = Some(Action::Close(t.task_id));
-                                        ui.close();
+                                    if ui.button("cancel").clicked() {
+                                        *edit = None;
                                     }
-                                    merge_item(ui, t.task_id, merge_pick);
                                 });
-                            });
-                        if *merge_pick == Some(t.task_id)
-                            && !merge_picker(
-                                ui,
-                                content_w,
-                                color,
-                                t.task_id,
-                                &candidates,
-                                &mut pending,
-                            )
-                        {
-                            *merge_pick = None;
+                                continue;
+                            }
+                            task_row(t, color, true)
+                                .emphasis()
+                                .padded()
+                                .subtitle(working_subtitle(t))
+                                .show(ui, content_w, |ui| {
+                                    ui.menu_button("\u{2026}", |ui| {
+                                        if ui.button("rename").clicked() {
+                                            *edit = Some(EditState {
+                                                task_id: t.task_id,
+                                                label: t.label.clone(),
+                                                project: t.project.clone().unwrap_or_default(),
+                                                description: None,
+                                            });
+                                            ui.close();
+                                        }
+                                        if t.declared
+                                            && !t.current
+                                            && ui
+                                                .button("make current")
+                                                .on_hover_text(
+                                                    "the project's sink: new time on it goes here",
+                                                )
+                                                .clicked()
+                                        {
+                                            pending = Some(Action::SetCurrent(t.task_id));
+                                            ui.close();
+                                        }
+                                        if ui.button("close").clicked() {
+                                            pending = Some(Action::Close(t.task_id));
+                                            ui.close();
+                                        }
+                                        merge_item(ui, t.task_id, merge_pick);
+                                    });
+                                });
+                            if *merge_pick == Some(t.task_id)
+                                && !merge_picker(
+                                    ui,
+                                    content_w,
+                                    color,
+                                    t.task_id,
+                                    &candidates,
+                                    &mut pending,
+                                )
+                            {
+                                *merge_pick = None;
+                            }
                         }
                     }
                     // AI declare-suggestion outcome: a dismissible chip whose
@@ -630,10 +695,189 @@ impl TimelineApp {
         if let Some(action) = pending {
             self.apply_action(action);
         }
+        if let Some(key) = toggle_collapse {
+            self.toggle_project_collapsed(&key);
+        }
+        if declare_here {
+            self.declare_focus = true;
+        }
         if open_triage {
             self.open_triage();
         }
+        if open_manager {
+            self.open_tasks_panel();
+        }
     }
+}
+
+/// The declare label input, so a project line's "+" can focus it.
+fn declare_id() -> egui::Id {
+    egui::Id::new("home_declare_label")
+}
+
+/// What a project line's header was clicked for.
+enum HeaderClick {
+    None,
+    /// Collapse or expand the project.
+    Toggle,
+    /// Declare a task in this project (the "+").
+    Declare,
+}
+
+/// A project line (m35 chunk 3): caret, hue dot, name, the live dot when
+/// a window of it is on screen now, today's minutes and "+"; under it,
+/// when expanded, the current task with its picker and "n not on a task",
+/// then the sources that fed it this week. The unfiled group is a plain
+/// header; an unconfigured name wears a chip saying so.
+fn project_header(
+    ui: &mut egui::Ui,
+    group: &super::ProjectGroup,
+    open_tasks: &[OpenRow],
+    open: bool,
+    pending: &mut Option<Action>,
+) -> HeaderClick {
+    let mut click = HeaderClick::None;
+    let name = group.name.as_deref().unwrap_or("Unfiled");
+    let hue = match &group.name {
+        Some(n) => theme::project_hue(n),
+        None => theme::palette::TEXT_DIM,
+    };
+    let resp = ui
+        .scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| {
+            let hovered = ui.response().hovered();
+            ui.style_mut().interaction.selectable_labels = false;
+            ui.horizontal(|ui| {
+                let caret = if open {
+                    theme::icon::CARET_DOWN
+                } else {
+                    theme::icon::CARET_RIGHT
+                };
+                ui.label(
+                    theme::glyph(caret)
+                        .text_style(egui::TextStyle::Small)
+                        .color(if hovered {
+                            theme::palette::TEXT
+                        } else {
+                            theme::palette::TEXT_DIM
+                        }),
+                );
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(theme::STATUS_COL, ui.spacing().interact_size.y),
+                    egui::Sense::hover(),
+                );
+                ui.painter().circle_filled(rect.center(), 4.0, hue);
+                ui.label(
+                    egui::RichText::new(name)
+                        .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                        .color(theme::palette::TEXT),
+                );
+                if group.live {
+                    let (rect, r) = ui.allocate_exact_size(
+                        egui::vec2(10.0, ui.spacing().interact_size.y),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter()
+                        .circle_filled(rect.center(), 3.0, theme::palette::GREEN);
+                    r.on_hover_text("on screen now");
+                }
+                if group.name.is_some() && !group.configured {
+                    theme::badge(ui, "not configured", theme::palette::AMBER);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if group.name.is_some()
+                        && theme::ghost_button(ui, "+")
+                            .on_hover_text(format!("declare a task in {name}"))
+                            .clicked()
+                    {
+                        click = HeaderClick::Declare;
+                    }
+                    if group.today_ms > 0 {
+                        ui.label(theme::num(fmt_dur(group.today_ms)))
+                            .on_hover_text("today, across its tasks");
+                    }
+                });
+            });
+        })
+        .response;
+    if resp.clicked() && matches!(click, HeaderClick::None) {
+        click = HeaderClick::Toggle;
+    }
+    if !open || group.name.is_none() {
+        return click;
+    }
+    // Current task and the general-task minutes, one dim line.
+    let declared: Vec<&OpenRow> = group
+        .tasks
+        .iter()
+        .map(|&i| &open_tasks[i])
+        .filter(|t| t.declared)
+        .collect();
+    let current_label = group
+        .current
+        .and_then(|id| open_tasks.iter().find(|t| t.task_id == id))
+        .map(|t| t.label.as_str());
+    if !declared.is_empty() || group.general_ms > 0 {
+        ui.horizontal(|ui| {
+            ui.add_space(theme::STATUS_COL + theme::SPACE_SM);
+            ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
+            if !declared.is_empty() {
+                let text = match current_label {
+                    Some(l) => format!("current: {}", super::clip_chars(l, 34)),
+                    None => "current: newest declared".to_owned(),
+                };
+                ui.label(
+                    egui::RichText::new(text)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                );
+                ui.scope(|ui| {
+                    let w = &mut ui.style_mut().visuals.widgets;
+                    w.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                    w.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::TRANSPARENT);
+                    ui.menu_button(
+                        egui::RichText::new("change")
+                            .text_style(egui::TextStyle::Small)
+                            .color(theme::palette::TEXT_DIM),
+                        |ui| {
+                            for t in &declared {
+                                if ui
+                                    .add_enabled(!t.current, egui::Button::new(t.label.as_str()))
+                                    .clicked()
+                                {
+                                    *pending = Some(Action::SetCurrent(t.task_id));
+                                    ui.close();
+                                }
+                            }
+                        },
+                    )
+                    .response
+                    .on_hover_text(
+                        "set the project's current task: new time with no better home lands on it",
+                    );
+                });
+            }
+            if group.general_ms > 0 {
+                ui.label(
+                    egui::RichText::new(format!("{} not on a task", fmt_dur(group.general_ms)))
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                )
+                .on_hover_text("today's time on the project with no task claiming it");
+            }
+        });
+    }
+    if !group.sources.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(theme::STATUS_COL + theme::SPACE_SM);
+            ui.label(
+                egui::RichText::new(format!("sources: {}", group.sources.join(" \u{b7} ")))
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::TEXT_DIM),
+            )
+            .on_hover_text("collectors that fed this project this week");
+        });
+    }
+    click
 }
 
 /// Project input width on the declare row.
@@ -661,7 +905,9 @@ fn feed_help_ui(ui: &mut egui::Ui) {
 fn task_row<'a>(task: &'a OpenRow, color: egui::Color32, bar: bool) -> theme::ListRow<'a> {
     let mut row = theme::ListRow::new(&task.label);
     row = if bar { row.bar(color) } else { row.dot(color) };
-    if let Some(project) = &task.project {
+    // Working-on rows sit under their project's line; the chip would
+    // repeat it.
+    if !bar && let Some(project) = &task.project {
         row = row.chip(project.as_str(), color);
     }
     if bar && let Some(anchor) = &task.anchor {
@@ -669,6 +915,9 @@ fn task_row<'a>(task: &'a OpenRow, color: egui::Color32, bar: bool) -> theme::Li
     }
     if task.declared {
         row = row.chip("declared", theme::palette::TEXT_DIM);
+    }
+    if task.current {
+        row = row.chip("current", theme::palette::ACCENT);
     }
     if task.intent {
         row = row.chip("intent", theme::palette::ACCENT);

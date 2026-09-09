@@ -1119,6 +1119,137 @@ pub fn normalize_task_projects(
     Ok((changed, unknown))
 }
 
+/// The general task of every project that has one (m35 chunk 3): the
+/// Home project line's "not on a task" minutes come from these ids.
+pub fn general_tasks(conn: &Connection) -> Result<Vec<(i64, String)>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT id, project FROM tasks WHERE source='project' ORDER BY id")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Projects with a focus span ending at or after `since_ms` (m35 chunk 3):
+/// at a two-minute horizon these are the projects on screen now (Home's
+/// live dot); at a week's, the ones the screen fed at all.
+pub fn span_projects_since(conn: &Connection, since_ms: i64) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project FROM spans
+         WHERE kind='focus' AND project IS NOT NULL AND end_ts >= ?1",
+    )?;
+    let rows = stmt.query_map([since_ms], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Distinct `(repo, kind)` pairs of the activity inside `[lo, hi)` (m35
+/// chunk 3): which collectors fed each repo this week, for the Home
+/// project line's sources row once the repo resolves to a project.
+pub fn activity_kinds_by_repo(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(String, ActivityKind)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT repo, kind FROM activity_events
+         WHERE repo <> '' AND ts < ?2 AND COALESCE(end_ts, ts) >= ?1",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (repo, kind) = row?;
+        if let Some(kind) = ActivityKind::parse(&kind) {
+            out.push((repo, kind));
+        }
+    }
+    Ok(out)
+}
+
+/// One task as the task manager lists it (m35 chunk 3): identity, state
+/// and when it last had time. General tasks are not listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedTask {
+    pub id: i64,
+    pub label: String,
+    pub project: Option<String>,
+    pub open: bool,
+    /// `source = 'user'`.
+    pub declared: bool,
+    /// Marked current in its project (declared tasks only).
+    pub current: bool,
+    pub external_ref: Option<String>,
+    pub created_ts: i64,
+    pub closed_ts: Option<i64>,
+    /// End of the task's newest interval.
+    pub last_ts: Option<i64>,
+}
+
+/// Every task but the general ones, newest activity first (a task with no
+/// intervals sorts by its creation).
+pub fn all_tasks(conn: &Connection) -> Result<Vec<ManagedTask>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.label, t.project, t.status='open', t.source='user', t.current<>0,
+                t.external_ref, t.created_ts, t.closed_ts,
+                (SELECT MAX(i.end_ts) FROM intervals i WHERE i.task_id=t.id)
+         FROM tasks t WHERE t.source <> 'project'
+         ORDER BY COALESCE((SELECT MAX(i.end_ts) FROM intervals i WHERE i.task_id=t.id), t.created_ts) DESC, t.id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ManagedTask {
+            id: r.get(0)?,
+            label: r.get(1)?,
+            project: r.get(2)?,
+            open: r.get(3)?,
+            declared: r.get(4)?,
+            current: r.get(5)?,
+            external_ref: r.get(6)?,
+            created_ts: r.get(7)?,
+            closed_ts: r.get(8)?,
+            last_ts: r.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Delete a derived task outright (m35 chunk 3, the manager's
+/// "delete derived"): its intervals go back to unassigned time, its
+/// evidence, workspace, corrections, verdicts and embedding go with it, and
+/// a proposal that became it forgets the link. A declared task is never
+/// deleted this way (close it); `Ok(false)` when the id is not an open or
+/// closed derived task.
+pub fn delete_derived_task(conn: &mut Connection, task_id: i64) -> Result<bool, StorageError> {
+    let tx = conn.transaction()?;
+    let derived: bool = tx.query_row(
+        "SELECT COUNT(*) > 0 FROM tasks WHERE id=?1 AND source='derived'",
+        [task_id],
+        |r| r.get(0),
+    )?;
+    if !derived {
+        return Ok(false);
+    }
+    tx.execute(
+        "DELETE FROM verdict_log WHERE task_id=?1 OR interval_id IN
+             (SELECT id FROM intervals WHERE task_id=?1)",
+        [task_id],
+    )?;
+    tx.execute(
+        "DELETE FROM corrections WHERE task_id=?1 OR interval_id IN
+             (SELECT id FROM intervals WHERE task_id=?1)",
+        [task_id],
+    )?;
+    tx.execute("DELETE FROM intervals WHERE task_id=?1", [task_id])?;
+    tx.execute("DELETE FROM task_embeddings WHERE task_id=?1", [task_id])?;
+    tx.execute(
+        "UPDATE proposals SET task_id=NULL WHERE task_id=?1",
+        [task_id],
+    )?;
+    // task_evidence, task_context, journal_entries and checkpoints cascade;
+    // a task-scoped conversation keeps its messages and loses the link.
+    tx.execute("DELETE FROM tasks WHERE id=?1", [task_id])?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Open declared tasks with no row in the evidence cache: declared before
 /// the cache was seeded on declare, or through a path that does not seed.
 pub fn unseeded_user_tasks(conn: &Connection) -> Result<Vec<i64>, StorageError> {

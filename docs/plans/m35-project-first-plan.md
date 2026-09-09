@@ -378,6 +378,51 @@ exists.
   rows with shares (they already multiply by `share`, as the split rows
   needed since m32 chunk 3; the timeline draws them as the split rows).
 
+## Shipped: chunk 3 (2026-09-09 afternoon)
+
+- Home groups Working on by project (`ProjectGroup`, `load_project_groups`
+  in `crates/app/src/ui/mod.rs`): configured projects in config order,
+  then names no rule knows (an amber "not configured" chip), then the
+  unfiled group when it has a task. A project line carries the hue dot,
+  a green dot while a focus span of it ended inside the last two minutes
+  (`storage::span_projects_since`), today's minutes across its tasks and
+  general task, and "+" (pre-fills the project and focuses the declare
+  input; Enter in the input declares). Expanded, the line shows the
+  current declared task with a "change" picker (`Action::SetCurrent` →
+  `set_current_task`; "newest declared" when none is marked), "n not on a
+  task" from the general task (`storage::general_tasks`), and the sources
+  row — screen plus the collectors whose repos resolve to the project this
+  week (`storage::activity_kinds_by_repo` through `Matcher::resolve`).
+  Collapsing persists in meta `ui_projects_collapsed`. Rows lose the
+  project chip (the line says it) and gain a "current" chip and a "make
+  current" menu item; the derived cap on Home went from 8 to 40 since a
+  collapsed project costs one line.
+- Task manager takeover (`crates/app/src/ui/tasks.rs`, Home › Working on ›
+  manage, `CHRONICLE_UI_VIEW=tasks`): every task but the general ones
+  (`storage::all_tasks`, newest activity first) with project, anchor,
+  current / derived / closed chips, today's minutes, and week minutes ·
+  last activity · birth on the second line; filters open / closed / all,
+  any source / declared / derived, a project combo (every, one, unfiled)
+  and a text filter; inline rename with a project picker; a row menu with
+  rename, open in timeline, make current, close / reopen, merge into…,
+  delete (derived); a checkbox per row and a bulk row over the selection
+  with close, reopen, make current (one declared open task), merge into…,
+  move to… (a `Rename` per task, so a correction is written), delete N
+  derived (two-step) and clear. Every row-menu action is reachable in
+  bulk. `storage::delete_derived_task` removes a derived task outright:
+  intervals (their time returns to unassigned), corrections on it or its
+  intervals, verdicts, its embedding; evidence, workspace and context
+  cascade; a proposal that became it forgets the link. Declared tasks are
+  never deleted (close them).
+- Gate: screenshot loop at the standalone-UI scale (400×640, scale 1.6)
+  over a sandbox copy of the live DB — Home expanded and collapsed (five
+  configured projects, sprog's empty line, brotherhood-tooling and "ai
+  server" with the chip, the general-task minutes on acme-ai) and the
+  manager's list; the bulk row and menus were not click-tested (James was
+  at the keyboard), only read.
+- Not in this chunk: the timeline, reports and self-score by project
+  (chunk 4), placeholder labels (chunk 5).
+
 ## Open questions for James
 
 - One silo or four for contoso, mailer, admin-api and
