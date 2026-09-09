@@ -283,6 +283,7 @@ impl Engine {
                         Some(serde_json::from_str(prompts::SUGGEST_SCHEMA)?)
                     }
                     JobKind::Advise => Some(serde_json::from_str(prompts::ADVISE_SCHEMA)?),
+                    JobKind::Judge => Some(serde_json::from_str(prompts::JUDGE_SCHEMA)?),
                     JobKind::TaskDescription | JobKind::Journal | JobKind::Narrative => {
                         Some(serde_json::from_str(prompts::CLAIMS_SCHEMA)?)
                     }
@@ -327,6 +328,7 @@ impl Engine {
                 Some(serde_json::from_str(prompts::SUGGEST_SCHEMA)?)
             }
             JobKind::Advise => Some(serde_json::from_str(prompts::ADVISE_SCHEMA)?),
+            JobKind::Judge => Some(serde_json::from_str(prompts::JUDGE_SCHEMA)?),
             JobKind::TaskDescription | JobKind::Journal | JobKind::Narrative => {
                 Some(serde_json::from_str(prompts::CLAIMS_SCHEMA)?)
             }
@@ -510,7 +512,7 @@ impl Engine {
         Ok(v)
     }
 
-    fn standup(&self, digest: &str) -> anyhow::Result<String> {
+    pub(crate) fn standup(&self, digest: &str) -> anyhow::Result<String> {
         let prompt = prompts::render_standup(digest);
         non_empty(self.complete(JobKind::Standup, &prompt)?, "standup draft")
     }
@@ -529,7 +531,7 @@ impl Engine {
     }
 
     /// `job` is `SuggestTask` or `NameTask`; both use the suggestion prompt.
-    fn suggest_task(&self, job: JobKind, digest: &str) -> anyhow::Result<SuggestedTask> {
+    pub(crate) fn suggest_task(&self, job: JobKind, digest: &str) -> anyhow::Result<SuggestedTask> {
         let prompt = prompts::render_suggest(digest);
         let mut s = prompts::parse_suggest(&self.complete(job, &prompt)?)?;
         // Glyphs quoted from a terminal title must not become a label.
@@ -583,7 +585,7 @@ impl std::error::Error for SkipJob {}
 /// when its document or site holds [`profile::NAMING_SHARE`] of the
 /// range's focus. The page glanced at for two minutes of an hour must not
 /// name the hour. Nothing is dropped when that would leave no focus span.
-fn naming_spans(
+pub(crate) fn naming_spans(
     spans: Vec<SpanDraft>,
     anchored: &[chronicle_core::profile::AnchoredSpan],
     lo: i64,

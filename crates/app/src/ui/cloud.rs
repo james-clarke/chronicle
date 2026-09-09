@@ -225,6 +225,9 @@ pub(super) struct CloudPanel {
     /// Set on every successful save; the caller polls and clears it with
     /// [`Self::take_changed`] to refresh `TimelineApp::cloud_kinds`.
     changed: bool,
+    /// The six numbers per backend over the last week (m36 chunk 5),
+    /// 'local' included, as `BackendSummary::line` renders them.
+    scores: std::collections::BTreeMap<String, String>,
 }
 
 impl CloudPanel {
@@ -249,6 +252,28 @@ impl CloudPanel {
         let cap_hit = conn
             .and_then(|c| storage::get_meta(c, &cap_hit_key()).ok().flatten())
             .is_some();
+        let scores = conn
+            .map(|c| {
+                let rows = storage::backend_scores(c, chronicle_core::self_score::DAYS)
+                    .unwrap_or_default();
+                let notes = crate::status::bench_notes(c).unwrap_or_default();
+                chronicle_core::self_score::BackendSummary::of(&rows)
+                    .into_iter()
+                    .map(|b| {
+                        let (replay, drift) = notes
+                            .get(&b.backend)
+                            .map(|(r, d)| (r.as_deref(), d.as_deref()))
+                            .unwrap_or((None, None));
+                        let line = b.line(replay, drift);
+                        (
+                            b.backend,
+                            line.split_once(": ")
+                                .map_or(line.clone(), |(_, l)| l.to_owned()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             cfg,
             load_error,
@@ -260,6 +285,27 @@ impl CloudPanel {
             cost_today,
             cap_hit,
             changed: false,
+            scores,
+        }
+    }
+
+    /// The last week's numbers under a backend row (m36 chunk 5).
+    fn score_line(&self, ui: &mut egui::Ui, backend: &str) {
+        if let Some(line) = self.scores.get(backend) {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "last {} days: {line}",
+                            chronicle_core::self_score::DAYS
+                        ))
+                        .text_style(theme::caption())
+                        .color(palette::TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+            });
         }
     }
 
@@ -446,6 +492,16 @@ impl CloudPanel {
                     .on_hover_text(err);
                 });
             }
+            self.score_line(ui, name);
+        }
+        if self.scores.contains_key("local") {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("local model")
+                    .text_style(theme::caption())
+                    .color(palette::TEXT),
+            );
+            self.score_line(ui, "local");
         }
         match act {
             Some(RowAct::Arm(n)) => self.arm_remove = Some(n),

@@ -89,7 +89,8 @@ impl TextBackend for Redacting {
             classes.extend(r.classes);
             r.text
         };
-        let owned: Vec<(Option<String>, String, Vec<(String, String)>)> = reqs
+        type Owned = (Option<String>, String, Vec<(String, String)>);
+        let owned: Vec<Owned> = reqs
             .iter()
             .map(|req| {
                 (
@@ -219,7 +220,7 @@ pub fn max_output_for(job: JobKind) -> u32 {
         JobKind::Narrative | JobKind::Standup | JobKind::Journal | JobKind::TaskDescription => 1024,
         JobKind::Derive | JobKind::Consolidate => 2048,
         JobKind::Checkpoint | JobKind::SuggestTask | JobKind::NameTask | JobKind::Live => 600,
-        JobKind::Advise => 300,
+        JobKind::Advise | JobKind::Judge => 300,
     }
 }
 

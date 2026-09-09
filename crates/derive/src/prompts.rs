@@ -15,6 +15,9 @@ pub const STANDUP_PROMPT: &str = include_str!("../../../prompts/standup_v1.txt")
 pub const ADVISE_PROMPT: &str = include_str!("../../../prompts/advise_v1.txt");
 pub const ADVISE_GRAMMAR: &str = include_str!("../../../grammars/advise_v1.gbnf");
 pub const ADVISE_SCHEMA: &str = include_str!("../../../grammars/advise_v1.json");
+pub const JUDGE_PROMPT: &str = include_str!("../../../prompts/judge_v1.txt");
+pub const JUDGE_GRAMMAR: &str = include_str!("../../../grammars/judge_v1.gbnf");
+pub const JUDGE_SCHEMA: &str = include_str!("../../../grammars/judge_v1.json");
 pub const CLAIMS_GRAMMAR: &str = include_str!("../../../grammars/claims_v1.gbnf");
 pub const CLAIMS_SCHEMA: &str = include_str!("../../../grammars/claims_v1.json");
 pub const CHECKPOINT_GRAMMAR: &str = include_str!("../../../grammars/checkpoint_v1.gbnf");
@@ -58,7 +61,8 @@ pub fn split_prefix(job: crate::text::JobKind, rendered: &str) -> Option<Split> 
         | JobKind::Derive
         | JobKind::Live
         | JobKind::Consolidate
-        | JobKind::Advise => "Output only JSON matching the required schema.\n",
+        | JobKind::Advise
+        | JobKind::Judge => "Output only JSON matching the required schema.\n",
     };
     let at = rendered.find(marker)?;
     let cut = match job {
@@ -163,6 +167,30 @@ pub fn render_checkpoint(
         .replace("{project_line}", &project_line(project))
         .replace("{context_section}", &context_section(context))
         .replace("{journal}", journal)
+}
+
+/// The pairwise naming judge's prompt (m36 chunk 5).
+pub fn render_judge(digest: &str, a: &str, b: &str) -> String {
+    JUDGE_PROMPT
+        .replace("{digest}", digest)
+        .replace("{a}", a)
+        .replace("{b}", b)
+}
+
+#[derive(serde::Deserialize)]
+struct JudgeOut {
+    winner: String,
+    reason: String,
+}
+
+/// `(winner, reason)`, winner one of "A", "B", "tie".
+pub fn parse_judge(out: &str) -> anyhow::Result<(String, String)> {
+    let parsed: JudgeOut = serde_json::from_str(out)
+        .with_context(|| format!("model output is not valid judge JSON: {out}"))?;
+    if !matches!(parsed.winner.as_str(), "A" | "B" | "tie") {
+        anyhow::bail!("judge winner {:?} is not A, B or tie", parsed.winner);
+    }
+    Ok((parsed.winner, parsed.reason))
 }
 
 pub fn render_suggest(digest: &str) -> String {
@@ -323,6 +351,7 @@ mod tests {
             (JobKind::Checkpoint, CHECKPOINT_PROMPT.to_owned()),
             (JobKind::TaskDescription, DESCRIPTION_PROMPT.to_owned()),
             (JobKind::Advise, ADVISE_PROMPT.to_owned()),
+            (JobKind::Judge, JUDGE_PROMPT.to_owned()),
         ] {
             assert!(split_prefix(job, strip_no_think(&t)).is_some(), "{job}");
         }
@@ -377,6 +406,7 @@ mod tests {
             SUGGEST_SCHEMA,
             ADVISE_SCHEMA,
             CLAIMS_SCHEMA,
+            JUDGE_SCHEMA,
             crate::runner::Prompt::Batch.schema_json(),
             crate::runner::Prompt::Live.schema_json(),
             crate::runner::Prompt::Consolidate.schema_json(),
@@ -392,6 +422,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(d.intervals.len(), 1);
+    }
+
+    #[test]
+    fn judge_parses_and_rejects() {
+        let (w, r) = parse_judge(r#"{"winner":"tie","reason":"both vague"}"#).unwrap();
+        assert_eq!((w.as_str(), r.as_str()), ("tie", "both vague"));
+        assert!(parse_judge(r#"{"winner":"C","reason":""}"#).is_err());
+        let p = render_judge("## Timeline\n- 0–3m Code", "fixing checkout", "cart.py");
+        assert!(p.contains("## Label A\nfixing checkout\n\n## Label B\ncart.py"));
     }
 
     #[test]

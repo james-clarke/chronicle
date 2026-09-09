@@ -124,6 +124,7 @@ impl Describer {
             JobKind::Checkpoint => Some(CHECKPOINT_GRAMMAR),
             JobKind::SuggestTask | JobKind::NameTask => Some(SUGGEST_GRAMMAR),
             JobKind::Advise => Some(crate::prompts::ADVISE_GRAMMAR),
+            JobKind::Judge => Some(crate::prompts::JUDGE_GRAMMAR),
             JobKind::TaskDescription | JobKind::Journal | JobKind::Narrative => {
                 Some(crate::prompts::CLAIMS_GRAMMAR)
             }

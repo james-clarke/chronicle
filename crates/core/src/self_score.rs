@@ -10,7 +10,7 @@ use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use rusqlite::Connection;
 
 use crate::report;
-use crate::storage::{self, SelfScore, StorageError};
+use crate::storage::{self, BackendScore, SelfScore, StorageError};
 use crate::types::ts_to_ms;
 
 /// Days shown, today included.
@@ -60,9 +60,111 @@ pub fn refresh(
             .map_err(jiff_err)?;
         let row = score_day(conn, day, tz, now)?;
         storage::upsert_self_score(conn, &row)?;
+        // The backends' day beside it (m36 chunk 5).
+        let bound = |d: Date| d.to_zoned(tz.clone()).map(|z| ts_to_ms(z.timestamp()));
+        let lo = bound(day).map_err(jiff_err)?;
+        let hi = day
+            .tomorrow()
+            .map_err(jiff_err)
+            .and_then(|d| bound(d).map_err(jiff_err))?;
+        for mut b in storage::backend_score_counts(conn, lo, hi)? {
+            b.day = row.day.clone();
+            storage::upsert_backend_score(conn, &b)?;
+        }
         rows.push(row);
     }
     Ok(rows)
+}
+
+/// One backend's rows folded over the days shown (m36 chunk 5).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackendSummary {
+    pub backend: String,
+    pub days: usize,
+    pub jobs: i64,
+    pub claims: i64,
+    pub claims_ok: i64,
+    pub advised: i64,
+    pub unsure: i64,
+    pub invalid: i64,
+    pub changed_right: i64,
+    pub changed_wrong: i64,
+    pub prompt_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cost_usd: f64,
+}
+
+impl BackendSummary {
+    /// One summary per backend, in name order.
+    pub fn of(rows: &[BackendScore]) -> Vec<BackendSummary> {
+        let mut by: std::collections::BTreeMap<&str, BackendSummary> = Default::default();
+        let days: std::collections::BTreeSet<&str> = rows.iter().map(|r| r.day.as_str()).collect();
+        for r in rows {
+            let s = by.entry(&r.backend).or_insert_with(|| BackendSummary {
+                backend: r.backend.clone(),
+                days: days.len(),
+                ..Default::default()
+            });
+            s.jobs += r.jobs;
+            s.claims += r.claims;
+            s.claims_ok += r.claims_ok;
+            s.advised += r.advised;
+            s.unsure += r.unsure;
+            s.invalid += r.invalid;
+            s.changed_right += r.changed_right;
+            s.changed_wrong += r.changed_wrong;
+            s.prompt_tokens += r.prompt_tokens;
+            s.cache_read_tokens += r.cache_read_tokens;
+            s.cost_usd += r.cost_usd;
+        }
+        by.into_values().collect()
+    }
+
+    /// The six numbers on one line: faithfulness, the advisor's
+    /// abstention and precision, cache-read share, cost a day, and the
+    /// bench's replay placement and re-run drift when they were run.
+    pub fn line(&self, replay: Option<&str>, drift: Option<&str>) -> String {
+        let mut parts = vec![format!("{} jobs", self.jobs)];
+        parts.push(if self.claims > 0 {
+            format!(
+                "faithfulness {} ({}/{} claims)",
+                pct(self.claims_ok, self.claims),
+                self.claims_ok,
+                self.claims
+            )
+        } else {
+            "faithfulness –".to_owned()
+        });
+        parts.push(if self.advised > 0 {
+            let changed = self.changed_right + self.changed_wrong;
+            format!(
+                "advisor unsure {} of {}, invalid {}, changed {}: {} right {} wrong",
+                pct(self.unsure, self.advised),
+                self.advised,
+                self.invalid,
+                changed,
+                self.changed_right,
+                self.changed_wrong
+            )
+        } else {
+            "advisor –".to_owned()
+        });
+        parts.push(if self.prompt_tokens > 0 {
+            format!(
+                "cache-read {}",
+                pct(self.cache_read_tokens, self.prompt_tokens)
+            )
+        } else {
+            "cache-read –".to_owned()
+        });
+        parts.push(format!(
+            "${:.2}/day",
+            self.cost_usd / self.days.max(1) as f64
+        ));
+        parts.push(format!("replay {}", replay.unwrap_or("not run")));
+        parts.push(format!("drift {}", drift.unwrap_or("not run")));
+        format!("{}: {}", self.backend, parts.join(" \u{b7} "))
+    }
 }
 
 /// Once a day from the daemon tick (stamp in `meta`); true when it ran.
@@ -401,5 +503,51 @@ mod tests {
         assert_eq!(pct(0, 0), "\u{2013}");
         assert_eq!(fmt_ms(3_600_000 * 3 + 600_000), "3h10m");
         assert_eq!(fmt_ms(59_000), "0m");
+    }
+
+    #[test]
+    fn backend_summary_folds_days_and_renders_six_numbers() {
+        let row = |day: &str, backend: &str, claims: i64, ok: i64| BackendScore {
+            day: day.into(),
+            backend: backend.into(),
+            jobs: 2,
+            claims,
+            claims_ok: ok,
+            advised: 4,
+            unsure: 1,
+            invalid: 1,
+            changed_right: 2,
+            changed_wrong: 0,
+            prompt_tokens: 1000,
+            cache_read_tokens: 750,
+            cost_usd: 0.5,
+        };
+        let rows = [
+            row("2026-09-08", "anthropic", 10, 9),
+            row("2026-09-08", "local", 4, 2),
+            row("2026-09-09", "anthropic", 10, 10),
+        ];
+        let s = BackendSummary::of(&rows);
+        assert_eq!(s.len(), 2);
+        assert_eq!(
+            (s[0].backend.as_str(), s[0].days, s[0].jobs),
+            ("anthropic", 2, 4)
+        );
+        assert_eq!(
+            s[0].line(Some("27/75 placed (2026-09-09)"), None),
+            "anthropic: 4 jobs · faithfulness 95% (19/20 claims) · advisor unsure 25% of 8, invalid 2, changed 4: 4 right 0 wrong · cache-read 75% · $0.50/day · replay 27/75 placed (2026-09-09) · drift not run"
+        );
+        let local = &s[1];
+        assert!(
+            local
+                .line(None, None)
+                .starts_with("local: 2 jobs · faithfulness 50% (2/4 claims)")
+        );
+        let none = BackendSummary::default().line(None, None);
+        assert!(
+            none.contains("faithfulness –")
+                && none.contains("advisor –")
+                && none.contains("cache-read –")
+        );
     }
 }

@@ -1,0 +1,8 @@
+# Constrains the pairwise naming judge (m36 chunk 5): a winner and a sentence.
+
+root ::= "{" ws "\"winner\"" ws ":" ws winner ws "," ws "\"reason\"" ws ":" ws string ws "}"
+
+winner ::= "\"A\"" | "\"B\"" | "\"tie\""
+string ::= "\"" char{0,300} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= [ \n\t]{0,4}

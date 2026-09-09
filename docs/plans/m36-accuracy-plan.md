@@ -308,6 +308,33 @@ descriptions will show the rate in `chronicle status` once chunk 5 lands.
 - Gate: the numbers render for both a local and a cloud backend over one
   week; the doc's "First actions" all show green or a number.
 
+**Shipped 2026-09-09.** Migration 035 `backend_score(day, backend, …)`:
+beside each day's self-score the daemon folds `ai_jobs` per backend
+('local' when none) — jobs, claims and claims_ok (faithfulness before the
+drop), advisor questions, unsure and invalid answers, and the changed
+placements (Move/Mint) joined to `verdict_log.outcome` for right/wrong —
+plus prompt tokens, cache-read tokens and cost. `BackendSummary::line`
+prints the six numbers on one line ("anthropic: 4 jobs · faithfulness 95
+% (19/20 claims) · advisor unsure 25 % of 8, invalid 2, changed 4: 4
+right 0 wrong · cache-read 75 % · $0.50/day · replay 27/75 placed
+(2026-09-09) · drift not run"); `chronicle status` prints one per backend
+under "per backend, same days" (and `--json` carries the rows), Settings ›
+Model shows the same line under each backend row and under a "local
+model" heading. Replay placement and re-run drift are bench numbers kept
+in meta: `bench --replay` writes `replay_score:<scorer | backend>`
+("14/46 placed (date)"), the new `bench --drift [--backend]` re-runs
+yesterday's standup and five naming prompts and writes `drift:<backend>`
+(mean word-set Jaccard), and the new `bench --judge [--backend]` names
+ten recent derived tasks with and without past-correction examples on the
+local model, has `--backend` (else the local model) pick the better label
+pairwise with positions alternating (`prompts/judge_v1`, `JobKind::Judge`,
+never routed), prints every pair and writes `judge:<backend>` ("examples
+win a, lose b, tie c of n") — chunk 2's naming gate. Gate: the numbers
+render for 'local' as soon as the daemon's next daily self-score runs
+(the migration is empty until then); a cloud backend's week waits for a
+key. The local drift and judge runs on the sandbox copy are in the
+handoff notes.
+
 Order 0 → 1 → 2 → 3 → 4 → 5. Chunk 0 is a day and unblocks the decision;
 1 is a prerequisite for any user other than James; 2–3 are the accuracy
 work proper; 4 is the trust work; 5 keeps it honest.

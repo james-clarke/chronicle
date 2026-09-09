@@ -122,6 +122,30 @@ pub(crate) struct DbStatus {
     pub(crate) underived_today_ms: i64,
     /// The daemon's daily self-score rows, oldest first (m32 chunk 6).
     pub(crate) self_score: Vec<chronicle_core::storage::SelfScore>,
+    /// Per-backend rows over the same days (m36 chunk 5), and the bench's
+    /// replay and drift notes per backend from meta.
+    pub(crate) backend_score: Vec<chronicle_core::storage::BackendScore>,
+    pub(crate) bench_notes: BenchNotes,
+}
+
+/// Per backend: the bench's last replay note and drift note.
+pub(crate) type BenchNotes = std::collections::BTreeMap<String, (Option<String>, Option<String>)>;
+
+/// The bench's replay placement and re-run drift per backend (m36 chunk
+/// 5), as `chronicle bench` last wrote them to meta.
+pub(crate) fn bench_notes(conn: &rusqlite::Connection) -> anyhow::Result<BenchNotes> {
+    let mut out = std::collections::BTreeMap::new();
+    for (key, value) in chronicle_core::storage::meta_with_prefix(conn, "replay_score:")? {
+        out.entry(key.trim_start_matches("replay_score:").to_owned())
+            .or_insert((None, None))
+            .0 = Some(value);
+    }
+    for (key, value) in chronicle_core::storage::meta_with_prefix(conn, "drift:")? {
+        out.entry(key.trim_start_matches("drift:").to_owned())
+            .or_insert((None, None))
+            .1 = Some(value);
+    }
+    Ok(out)
 }
 
 pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
@@ -136,6 +160,8 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         not_captured_today_ms,
         underived_today_ms,
         self_score,
+        backend_score,
+        bench_notes,
     } = db;
     let mut out = String::new();
     match liveness {
@@ -218,6 +244,17 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
             out.push_str(&format!("    {line}\n"));
         }
     }
+    let backends = chronicle_core::self_score::BackendSummary::of(backend_score);
+    if !backends.is_empty() {
+        out.push_str("  per backend, same days:\n");
+        for b in &backends {
+            let (replay, drift) = bench_notes
+                .get(&b.backend)
+                .map(|(r, d)| (r.as_deref(), d.as_deref()))
+                .unwrap_or((None, None));
+            out.push_str(&format!("    {}\n", b.line(replay, drift)));
+        }
+    }
     out.push_str(&format!(
         "  model: {}\n",
         model_file.as_deref().unwrap_or("not downloaded")
@@ -276,6 +313,11 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
         not_captured_today_ms,
         underived_today_ms: chronicle_core::storage::underived_ms(&conn, today_ms, now_ms)?,
         self_score: chronicle_core::storage::self_scores(&conn, chronicle_core::self_score::DAYS)?,
+        backend_score: chronicle_core::storage::backend_scores(
+            &conn,
+            chronicle_core::self_score::DAYS,
+        )?,
+        bench_notes: bench_notes(&conn)?,
     };
 
     if json {
@@ -298,6 +340,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             "not_captured_today_ms": db.not_captured_today_ms,
             "underived_today_ms": db.underived_today_ms,
             "self_score": db.self_score,
+            "backend_score": db.backend_score,
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {

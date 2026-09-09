@@ -727,6 +727,220 @@ pub(crate) fn backfill_embeddings(data_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The engine a bench command answers on: `--backend` from models.toml,
+/// else the downloaded local model.
+fn bench_engine(
+    data_dir: &Path,
+    config: &Config,
+    backend: Option<&str>,
+) -> anyhow::Result<crate::ai_job::Engine> {
+    Ok(match backend {
+        Some(name) => {
+            let mc = chronicle_core::models_config::ModelsConfig::load(data_dir)?;
+            let cfg = mc
+                .backends
+                .get(name)
+                .with_context(|| format!("no [backends.{name}] in models.toml"))?;
+            crate::ai_job::Engine::Cloud {
+                name: name.to_owned(),
+                model: cfg.model.clone(),
+                backend: chronicle_derive::cloud::build(name, cfg)?,
+                usage: std::cell::RefCell::new(None),
+            }
+        }
+        None => {
+            let path = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+                .context("no local model; `chronicle model pull` or pass --backend")?;
+            crate::ai_job::Engine::Local(chronicle_derive::describe::Describer::load(&path)?)
+        }
+    })
+}
+
+/// Recent derived tasks with their spans, for the judge and the drift
+/// check: `(task_id, label, digest spans)`, newest first, up to `n`.
+fn naming_cases(
+    conn: &rusqlite::Connection,
+    n: usize,
+) -> anyhow::Result<Vec<(i64, String, Vec<chronicle_core::sessionizer::SpanDraft>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.label, MIN(i.start_ts), MAX(i.end_ts) FROM tasks t
+         JOIN intervals i ON i.task_id = t.id
+         WHERE t.source = 'derived' GROUP BY t.id
+         HAVING MAX(i.end_ts) - MIN(i.start_ts) BETWEEN 300000 AND 14400000
+         ORDER BY t.id DESC LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String, i64, i64)> = stmt
+        .query_map([n as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut out = Vec::new();
+    for (id, label, lo, hi) in rows {
+        let spans = crate::ai_job::naming_spans(
+            chronicle_core::storage::spans_in_range(conn, lo, hi)?,
+            &chronicle_core::storage::anchored_spans(conn, lo, hi)?,
+            lo,
+            hi,
+        );
+        if spans
+            .iter()
+            .any(|s| s.kind == chronicle_core::sessionizer::SpanKind::Focus)
+        {
+            out.push((id, label, spans));
+        }
+    }
+    Ok(out)
+}
+
+/// `chronicle bench --judge [--backend NAME]` (m36 chunk 5): the naming
+/// prompt with past-correction examples against the same prompt without,
+/// on recent derived tasks, judged pairwise. Positions alternate so a
+/// judge that favours "A" cancels out. The verdict lands in meta
+/// `judge:<judge backend>`.
+pub(crate) fn judge(data_dir: &Path, backend: Option<&str>) -> anyhow::Result<()> {
+    use chronicle_derive::text::JobKind;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let namer = bench_engine(data_dir, &config, None)?;
+    let judge = bench_engine(data_dir, &config, backend)?;
+    let cases = naming_cases(&conn, 10)?;
+    if cases.is_empty() {
+        bail!("no derived tasks with spans to name");
+    }
+    let tz = TimeZone::system();
+    let (mut wins, mut losses, mut ties) = (0usize, 0usize, 0usize);
+    for (i, (task_id, current, spans)) in cases.iter().enumerate() {
+        let examples =
+            crate::ai_job::nearest_examples(&conn, &config, data_dir, JobKind::NameTask, spans);
+        let with = chronicle_core::digest::build_digest(
+            spans,
+            &tz,
+            &[],
+            &examples,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+        );
+        let without =
+            chronicle_core::digest::build_digest(spans, &tz, &[], &[], &[], &[], None, None, None);
+        let a = namer.suggest_task(JobKind::NameTask, &with)?.label;
+        let b = namer.suggest_task(JobKind::NameTask, &without)?.label;
+        // Even cases show the example-backed label first; odd ones second.
+        let (first, second, swapped) = if i % 2 == 0 {
+            (&a, &b, false)
+        } else {
+            (&b, &a, true)
+        };
+        let prompt = chronicle_derive::prompts::render_judge(&without, first, second);
+        let (winner, reason) =
+            chronicle_derive::prompts::parse_judge(&judge.complete(JobKind::Judge, &prompt)?)?;
+        let examples_won = match (winner.as_str(), swapped) {
+            ("A", false) | ("B", true) => Some(true),
+            ("B", false) | ("A", true) => Some(false),
+            _ => None,
+        };
+        match examples_won {
+            Some(true) => wins += 1,
+            Some(false) => losses += 1,
+            None => ties += 1,
+        }
+        println!(
+            "task {task_id} ({current}): with examples \"{a}\" vs without \"{b}\" → {} ({} examples; {reason})",
+            match examples_won {
+                Some(true) => "examples win",
+                Some(false) => "examples lose",
+                None => "tie",
+            },
+            examples.len()
+        );
+    }
+    let note = format!(
+        "examples win {wins}, lose {losses}, tie {ties} of {} ({})",
+        cases.len(),
+        jiff::Zoned::now().date()
+    );
+    println!("{note}");
+    let _ = chronicle_core::storage::set_meta(
+        &conn,
+        &format!("judge:{}", backend.unwrap_or("local")),
+        Some(&note),
+    );
+    Ok(())
+}
+
+/// Word-set Jaccard of two texts, 0..1.
+fn similarity(a: &str, b: &str) -> f64 {
+    let words = |t: &str| -> std::collections::BTreeSet<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let (x, y) = (words(a), words(b));
+    let union = x.union(&y).count();
+    if union == 0 {
+        return 1.0;
+    }
+    x.intersection(&y).count() as f64 / union as f64
+}
+
+/// `chronicle bench --drift [--backend NAME]` (m36 chunk 5): the same
+/// prompt twice on the same rows — yesterday's standup and a few naming
+/// prompts — and how alike the answers are. Lands in meta `drift:<backend>`.
+pub(crate) fn drift(data_dir: &Path, backend: Option<&str>) -> anyhow::Result<()> {
+    use chronicle_derive::text::JobKind;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let engine = bench_engine(data_dir, &config, backend)?;
+    let tz = TimeZone::system();
+    let mut sims: Vec<(String, f64)> = Vec::new();
+    let today = jiff::Zoned::now().date();
+    if let Ok(yd) = today.checked_sub(jiff::Span::new().days(1))
+        && let (Ok(lo), Ok(hi)) = (yd.to_zoned(tz.clone()), today.to_zoned(tz.clone()))
+    {
+        let rows = chronicle_core::storage::standup_digest(
+            &conn,
+            lo.timestamp().as_millisecond(),
+            hi.timestamp().as_millisecond(),
+        )?;
+        if !rows.is_empty() {
+            let digest = crate::ai_job::standup_digest_text(&rows, &tz, None, &Default::default());
+            let first = engine.standup(&digest)?;
+            let second = engine.standup(&digest)?;
+            let s = similarity(&first, &second);
+            println!("standup {yd}: similarity {s:.2}");
+            sims.push((format!("standup {yd}"), s));
+        }
+    }
+    for (task_id, label, spans) in naming_cases(&conn, 5)? {
+        let digest =
+            chronicle_core::digest::build_digest(&spans, &tz, &[], &[], &[], &[], None, None, None);
+        let first = engine.suggest_task(JobKind::NameTask, &digest)?.label;
+        let second = engine.suggest_task(JobKind::NameTask, &digest)?.label;
+        let s = similarity(&first, &second);
+        println!("task {task_id} ({label}): \"{first}\" vs \"{second}\" similarity {s:.2}");
+        sims.push((format!("task {task_id}"), s));
+    }
+    if sims.is_empty() {
+        bail!("nothing to re-run: no standup rows yesterday and no derived tasks with spans");
+    }
+    let mean = sims.iter().map(|(_, s)| s).sum::<f64>() / sims.len() as f64;
+    let note = format!(
+        "similarity {mean:.2} over {} re-runs ({})",
+        sims.len(),
+        jiff::Zoned::now().date()
+    );
+    println!("{note}");
+    let _ = chronicle_core::storage::set_meta(
+        &conn,
+        &format!("drift:{}", backend.unwrap_or("local")),
+        Some(&note),
+    );
+    Ok(())
+}
+
 /// `chronicle bench --examples <text>` (m36 chunk 2): what the example
 /// memory returns for one piece of work, by cosine and by FTS, so the two
 /// can be compared on real corrections.
@@ -1495,6 +1709,23 @@ pub(crate) fn replay_eval(
             }
         }
         let mut scorer_totals = print_totals("scorer replay score", &scorer_results);
+        // The number `chronicle status` and Settings › Model show beside the
+        // backend that answered (m36 chunk 5): the scorer alone, or the
+        // scorer with this backend's advisor.
+        {
+            let placed = scorer_results.iter().filter(|r| r.pass).count();
+            let note = format!(
+                "{placed}/{} placed ({})",
+                scorer_results.len(),
+                jiff::Zoned::now().date()
+            );
+            let who = if advisor_engine.is_some() {
+                backend.unwrap_or("local").to_owned()
+            } else {
+                "scorer".to_owned()
+            };
+            let _ = storage::set_meta(&conn, &format!("replay_score:{who}"), Some(&note));
+        }
         if advisor_engine.is_some() {
             let advised_pass = scorer_results
                 .iter()

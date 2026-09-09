@@ -285,6 +285,17 @@ enum Cmd {
         /// exist, the FTS path beside it.
         #[arg(long)]
         examples: Option<String>,
+        /// Pairwise naming judge (m36 chunk 5): name recent derived tasks
+        /// with and without past-correction examples on the local model
+        /// and let `--backend` (else the local model) pick the better
+        /// label; prints the win rate and every pair.
+        #[arg(long)]
+        judge: bool,
+        /// Same-day re-run drift (m36 chunk 5): yesterday's standup and a
+        /// few naming prompts twice through `--backend` (else the local
+        /// model); prints the word-overlap similarity per pair.
+        #[arg(long)]
+        drift: bool,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -423,9 +434,15 @@ fn main() -> anyhow::Result<()> {
             live,
             embed,
             examples,
+            judge,
+            drift,
             backend,
         } => {
-            if let Some(text) = examples {
+            if judge {
+                bench::judge(&data_dir, backend.as_deref())
+            } else if drift {
+                bench::drift(&data_dir, backend.as_deref())
+            } else if let Some(text) = examples {
                 bench::examples(&data_dir, &text)
             } else if let Some(path) = embed {
                 bench::embed_bench(&data_dir, &path)

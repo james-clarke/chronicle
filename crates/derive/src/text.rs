@@ -22,11 +22,13 @@ pub enum JobKind {
     Consolidate,
     /// The pairwise advisor on a low-margin verdict (m36 chunk 3).
     Advise,
+    /// The bench's pairwise naming judge (m36 chunk 5); never routed.
+    Judge,
 }
 
 impl JobKind {
     /// Every kind a route can name, in Settings order.
-    pub const ALL: [JobKind; 12] = [
+    pub const ALL: [JobKind; 13] = [
         JobKind::Chat,
         JobKind::Narrative,
         JobKind::Standup,
@@ -39,6 +41,7 @@ impl JobKind {
         JobKind::Derive,
         JobKind::Live,
         JobKind::Advise,
+        JobKind::Judge,
     ];
 
     /// The `ai_jobs.kind` / `[routes]` key.
@@ -56,6 +59,7 @@ impl JobKind {
             JobKind::Live => "live",
             JobKind::Consolidate => "consolidate",
             JobKind::Advise => "advise",
+            JobKind::Judge => "judge",
         }
     }
 
@@ -80,6 +84,7 @@ impl JobKind {
                 | JobKind::Live
                 | JobKind::Consolidate
                 | JobKind::Advise
+                | JobKind::Judge
         )
     }
 }

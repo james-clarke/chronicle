@@ -60,6 +60,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/032_example_embeddings.sql")),
         M::up(include_str!("../migrations/033_verdict_advice.sql")),
         M::up(include_str!("../migrations/034_claims.sql")),
+        M::up(include_str!("../migrations/035_backend_score.sql")),
     ])
 });
 
@@ -2205,6 +2206,19 @@ pub fn set_meta(conn: &Connection, key: &str, value: Option<&str>) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Every meta row whose key starts with `prefix`, `(key, value)` in key order.
+pub fn meta_with_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<(String, String)>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT key, value FROM meta WHERE key LIKE ?1 || '%' ORDER BY key")?;
+    let rows = stmt
+        .query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
 }
 
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>, StorageError> {
@@ -4673,6 +4687,128 @@ pub fn upsert_self_score(conn: &Connection, s: &SelfScore) -> Result<(), Storage
 }
 
 /// The newest `n` self-score rows, oldest first.
+/// One backend's day (m36 chunk 5): see migration 035.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct BackendScore {
+    pub day: String,
+    pub backend: String,
+    pub jobs: i64,
+    pub claims: i64,
+    pub claims_ok: i64,
+    pub advised: i64,
+    pub unsure: i64,
+    pub invalid: i64,
+    pub changed_right: i64,
+    pub changed_wrong: i64,
+    pub prompt_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cost_usd: f64,
+}
+
+/// The day's done jobs grouped by backend ('local' when none), with the
+/// advisor's changed placements joined to the verdict log's outcome.
+pub fn backend_score_counts(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<BackendScore>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(j.backend, 'local'), COUNT(*),
+                COALESCE(SUM(j.claims), 0), COALESCE(SUM(j.claims_ok), 0),
+                SUM(j.kind = 'advise'),
+                SUM(j.kind = 'advise' AND CASE WHEN json_valid(j.result) THEN json_extract(j.result, '$.answer') END = 'unsure'),
+                SUM(j.kind = 'advise' AND CASE WHEN json_valid(j.result) THEN json_extract(j.result, '$.decision') END = 'Invalid'),
+                SUM(j.kind = 'advise' AND CASE WHEN json_valid(j.result) THEN json_extract(j.result, '$.decision') END IN ('Move', 'Mint') AND v.outcome = 'right'),
+                SUM(j.kind = 'advise' AND CASE WHEN json_valid(j.result) THEN json_extract(j.result, '$.decision') END IN ('Move', 'Mint') AND v.outcome = 'wrong'),
+                COALESCE(SUM(j.prompt_tokens), 0), COALESCE(SUM(j.cache_read_tokens), 0),
+                COALESCE(SUM(j.cost_usd), 0)
+         FROM ai_jobs j
+         LEFT JOIN verdict_log v ON j.kind = 'advise' AND v.id = CASE WHEN json_valid(j.payload) THEN json_extract(j.payload, '$.verdict_id') END
+         WHERE j.status = 'done' AND j.finished_ts >= ?1 AND j.finished_ts < ?2
+           AND j.kind <> 'fetch_context'
+         GROUP BY COALESCE(j.backend, 'local') ORDER BY 1",
+    )?;
+    let rows = stmt
+        .query_map([lo, hi], |r| {
+            Ok(BackendScore {
+                day: String::new(),
+                backend: r.get(0)?,
+                jobs: r.get(1)?,
+                claims: r.get(2)?,
+                claims_ok: r.get(3)?,
+                advised: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                unsure: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                invalid: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                changed_right: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                changed_wrong: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
+                prompt_tokens: r.get(9)?,
+                cache_read_tokens: r.get(10)?,
+                cost_usd: r.get(11)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn upsert_backend_score(conn: &Connection, s: &BackendScore) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO backend_score (day, backend, jobs, claims, claims_ok, advised, unsure, invalid,
+             changed_right, changed_wrong, prompt_tokens, cache_read_tokens, cost_usd)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(day, backend) DO UPDATE SET jobs=excluded.jobs, claims=excluded.claims,
+             claims_ok=excluded.claims_ok, advised=excluded.advised, unsure=excluded.unsure,
+             invalid=excluded.invalid, changed_right=excluded.changed_right,
+             changed_wrong=excluded.changed_wrong, prompt_tokens=excluded.prompt_tokens,
+             cache_read_tokens=excluded.cache_read_tokens, cost_usd=excluded.cost_usd",
+        params![
+            s.day,
+            s.backend,
+            s.jobs,
+            s.claims,
+            s.claims_ok,
+            s.advised,
+            s.unsure,
+            s.invalid,
+            s.changed_right,
+            s.changed_wrong,
+            s.prompt_tokens,
+            s.cache_read_tokens,
+            s.cost_usd
+        ],
+    )?;
+    Ok(())
+}
+
+/// The last `n` days' backend rows, oldest day first, backend within.
+pub fn backend_scores(conn: &Connection, n: usize) -> Result<Vec<BackendScore>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT day, backend, jobs, claims, claims_ok, advised, unsure, invalid, changed_right,
+                changed_wrong, prompt_tokens, cache_read_tokens, cost_usd
+         FROM backend_score WHERE day IN (SELECT day FROM backend_score GROUP BY day ORDER BY day DESC LIMIT ?1)
+         ORDER BY day, backend",
+    )?;
+    let rows = stmt
+        .query_map([n as i64], |r| {
+            Ok(BackendScore {
+                day: r.get(0)?,
+                backend: r.get(1)?,
+                jobs: r.get(2)?,
+                claims: r.get(3)?,
+                claims_ok: r.get(4)?,
+                advised: r.get(5)?,
+                unsure: r.get(6)?,
+                invalid: r.get(7)?,
+                changed_right: r.get(8)?,
+                changed_wrong: r.get(9)?,
+                prompt_tokens: r.get(10)?,
+                cache_read_tokens: r.get(11)?,
+                cost_usd: r.get(12)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
 pub fn self_scores(conn: &Connection, n: usize) -> Result<Vec<SelfScore>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT day, computed_ts, active_ms, uncaptured_ms, underived_ms, placed_ms,
@@ -5964,6 +6100,116 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         assert!(super::MIGRATIONS.validate().is_ok());
+    }
+
+    // m36 chunk 5: the day's jobs fold per backend, the advisor's changed
+    // placements carry the verdict log's outcome, local is its own row.
+    #[test]
+    fn backend_scores_fold_jobs_claims_and_advice() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO verdict_log (id, interval_id, ts, task_id, runner_up, margin, confident, outcome, advice)
+             VALUES (5, 1, 100, 1, 2, 0.1, 0, 'right', 'B'), (6, 2, 100, 1, 2, 0.1, 0, 'wrong', 'new'), (7, 3, 100, 1, 2, 0.1, 0, NULL, 'unsure')",
+            [],
+        )
+        .unwrap();
+        let rows = [
+            (
+                "task_description",
+                "anthropic",
+                r#"{"task_id":1}"#,
+                "text",
+                Some((4, 3)),
+                1000,
+                800,
+                0.02,
+            ),
+            (
+                "advise",
+                "anthropic",
+                r#"{"verdict_id":5}"#,
+                r#"{"answer":"B","decision":"Move"}"#,
+                None,
+                500,
+                0,
+                0.01,
+            ),
+            (
+                "advise",
+                "anthropic",
+                r#"{"verdict_id":6}"#,
+                r#"{"answer":"new","decision":"Mint"}"#,
+                None,
+                500,
+                0,
+                0.01,
+            ),
+            (
+                "advise",
+                "anthropic",
+                r#"{"verdict_id":7}"#,
+                r#"{"answer":"unsure","decision":"Unsure"}"#,
+                None,
+                500,
+                0,
+                0.01,
+            ),
+            (
+                "journal",
+                "",
+                r#"{"task_id":1}"#,
+                "text",
+                Some((2, 2)),
+                700,
+                0,
+                0.0,
+            ),
+        ];
+        for (kind, backend, payload, result, claims, prompt, cache, cost) in rows {
+            conn.execute(
+                "INSERT INTO ai_jobs (kind, status, payload, result, created_ts, finished_ts, backend, claims, claims_ok, prompt_tokens, cache_read_tokens, cost_usd)
+                 VALUES (?1, 'done', ?2, ?3, 10, 50, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    kind,
+                    payload,
+                    result,
+                    if backend.is_empty() { None } else { Some(backend) },
+                    claims.map(|c| c.0),
+                    claims.map(|c| c.1),
+                    prompt,
+                    cache,
+                    cost
+                ],
+            )
+            .unwrap();
+        }
+        let scores = super::backend_score_counts(&conn, 0, 100).unwrap();
+        assert_eq!(scores.len(), 2);
+        let a = &scores[0];
+        assert_eq!(a.backend, "anthropic");
+        assert_eq!((a.jobs, a.claims, a.claims_ok), (4, 4, 3));
+        assert_eq!((a.advised, a.unsure, a.invalid), (3, 1, 0));
+        assert_eq!((a.changed_right, a.changed_wrong), (1, 1));
+        assert_eq!((a.prompt_tokens, a.cache_read_tokens), (2500, 800));
+        assert!((a.cost_usd - 0.05).abs() < 1e-9);
+        let l = &scores[1];
+        assert_eq!(
+            (l.backend.as_str(), l.jobs, l.claims_ok, l.advised),
+            ("local", 1, 2, 0)
+        );
+        let mut day = a.clone();
+        day.day = "2026-09-09".into();
+        super::upsert_backend_score(&conn, &day).unwrap();
+        super::upsert_backend_score(&conn, &day).unwrap();
+        let back = super::backend_scores(&conn, 7).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0], day);
+        assert!(
+            super::backend_score_counts(&conn, 200, 300)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // m36 chunk 4: claims are keyed by output; an empty list clears them;
