@@ -81,6 +81,52 @@ impl TextBackend for Redacting {
         c.redactions = classes.into_iter().collect();
         Ok(c)
     }
+
+    fn batch(&self, reqs: &[Request<'_>]) -> anyhow::Result<Vec<anyhow::Result<Completion>>> {
+        let mut classes = std::collections::BTreeSet::new();
+        let mut take = |text: &str| {
+            let r = redact(text);
+            classes.extend(r.classes);
+            r.text
+        };
+        let owned: Vec<(Option<String>, String, Vec<(String, String)>)> = reqs
+            .iter()
+            .map(|req| {
+                (
+                    req.system.map(&mut take),
+                    take(req.user),
+                    req.history
+                        .iter()
+                        .map(|(q, a)| (take(q), take(a)))
+                        .collect(),
+                )
+            })
+            .collect();
+        let clean: Vec<Request<'_>> = reqs
+            .iter()
+            .zip(&owned)
+            .map(|(req, (system, user, history))| Request {
+                job: req.job,
+                system: system.as_deref(),
+                user,
+                history,
+                schema: req.schema,
+                max_output: req.max_output,
+            })
+            .collect();
+        let classes: Vec<crate::redact::Class> = classes.into_iter().collect();
+        Ok(self
+            .0
+            .batch(&clean)?
+            .into_iter()
+            .map(|r| {
+                r.map(|mut c| {
+                    c.redactions = classes.clone();
+                    c
+                })
+            })
+            .collect())
+    }
 }
 
 /// Why a cloud call failed, classified so the caller can decide between

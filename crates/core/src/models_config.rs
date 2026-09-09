@@ -39,6 +39,7 @@ pub const ALL_KINDS: &[&str] = &[
     "derive",
     "live",
     "advise",
+    "reconcile_day",
 ];
 
 fn default_max_usd() -> f64 {
@@ -196,7 +197,7 @@ impl ModelsConfig {
             self.routes.insert((*kind).to_string(), backend.to_string());
         }
         if preset == Preset::Everything {
-            for kind in ["consolidate", "derive", "live"] {
+            for kind in ["consolidate", "derive", "live", "reconcile_day"] {
                 self.routes.insert(kind.to_string(), backend.to_string());
             }
         }
@@ -309,7 +310,7 @@ mod tests {
         assert!(!cfg.routes.contains_key("derive"));
 
         cfg.apply_preset(Preset::Everything, "anthropic");
-        for kind in ["consolidate", "derive", "live"] {
+        for kind in ["consolidate", "derive", "live", "reconcile_day"] {
             assert_eq!(cfg.routes.get(kind).map(String::as_str), Some("anthropic"));
         }
         assert_eq!(cfg.cloud_kinds().len(), ALL_KINDS.len());

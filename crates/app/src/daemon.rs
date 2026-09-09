@@ -546,7 +546,11 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
-                maybe_enqueue_standup(&conn, now);
+                maybe_enqueue_standup(
+                    &conn,
+                    now,
+                    scheduler.cloud_kinds.iter().any(|k| k == "reconcile_day"),
+                );
                 reap_ui(&mut ui_child);
                 next_refresh = Instant::now() + SESSIONIZE_EVERY;
             }
@@ -638,7 +642,7 @@ pub(crate) fn maybe_enqueue_checkpoints(
 /// queued job exists for it, queue a background standup job. The gate is
 /// pure DB state (draft row + job dedupe), so it is restart-safe and cheap
 /// to re-check every tick.
-pub(crate) fn maybe_enqueue_standup(conn: &rusqlite::Connection, now: Timestamp) {
+pub(crate) fn maybe_enqueue_standup(conn: &rusqlite::Connection, now: Timestamp, nightly: bool) {
     use chronicle_core::storage;
     let tz = TimeZone::system();
     let today = now.to_zoned(tz.clone()).date();
@@ -646,6 +650,18 @@ pub(crate) fn maybe_enqueue_standup(conn: &rusqlite::Connection, now: Timestamp)
         return;
     };
     let day = yd.to_string();
+    // With a night-pass route (m36 chunk 4) yesterday goes to the batch as
+    // one job — advisories, unnamed tasks and the standup — once per day.
+    if nightly {
+        let payload = storage::standup_payload(&day);
+        if storage::job_seen(conn, "reconcile_day", &payload).unwrap_or(true) {
+            return;
+        }
+        if let Err(e) = storage::enqueue_ai_job(conn, now, "reconcile_day", 0, &payload) {
+            tracing::error!(%day, "night pass enqueue failed: {e}");
+        }
+        return;
+    }
     if storage::get_standup_draft(conn, &day)
         .map(|d| d.is_some())
         .unwrap_or(true)
@@ -674,6 +690,8 @@ pub(crate) fn maybe_enqueue_standup(conn: &rusqlite::Connection, now: Timestamp)
 }
 
 pub(crate) const DERIVE_TIMEOUT: Duration = Duration::from_secs(300);
+/// The night pass polls a message batch that may take an hour or more.
+pub(crate) const NIGHT_PASS_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 /// "Low 1-min load" gate for deriving while the user is active.
 pub(crate) const LOW_LOAD: f64 = 1.0;
 pub(crate) const BATTERY_DEFER_PCT: u32 = 30;
@@ -723,7 +741,9 @@ pub(crate) const CLOUD_BACKOFF_MAX: Duration = Duration::from_secs(600);
 pub(crate) struct Scheduler {
     /// AI jobs stay one-shot subprocesses (`Describer`/`ChatModel`); at most
     /// one inference process works at a time, derive or ai-job.
-    ai_job: Option<(Child, Instant, i64)>,
+    /// The running ai-job worker, when it started, its id, and how long
+    /// it may run (the night pass waits on a batch for hours).
+    ai_job: Option<(Child, Instant, i64, Duration)>,
     /// A second slot for jobs routed to a cloud backend (m31): they wait on
     /// the network, not the CPU, so they neither queue behind a local batch
     /// nor hold one up, and they skip the idle and battery gates.
@@ -847,7 +867,7 @@ impl Scheduler {
     /// What the local inference slot is doing, and since when. The cloud
     /// slot (m31) is separate: it never blocks derivation or a live pass.
     fn busy(&self) -> Option<(String, Instant)> {
-        if let Some((_, started, id)) = &self.ai_job {
+        if let Some((_, started, id, _)) = &self.ai_job {
             return Some((format!("ai job {id}"), *started));
         }
         if let Some(r) = &self.resident
@@ -951,7 +971,7 @@ impl Scheduler {
             return;
         }
         if let Some(job_id) = interactive {
-            self.spawn_ai_job(job_id);
+            self.spawn_ai_job(conn, job_id);
             return;
         }
         // Derivation stays ahead of background summarization.
@@ -970,7 +990,7 @@ impl Scheduler {
             return;
         }
         if let Ok(Some(job_id)) = storage::next_eligible_ai_job_in(conn, i64::MIN, &cloud, false) {
-            self.spawn_ai_job(job_id);
+            self.spawn_ai_job(conn, job_id);
         }
     }
 
@@ -1119,10 +1139,10 @@ impl Scheduler {
 
     fn reap_ai_job(&mut self, conn: &rusqlite::Connection) {
         use chronicle_core::storage;
-        let Some((child, started, id)) = &mut self.ai_job else {
+        let Some((child, started, id, timeout)) = &mut self.ai_job else {
             return;
         };
-        let id = *id;
+        let (id, timeout) = (*id, *timeout);
         // A worker that died before reporting leaves its row `running`;
         // count that as the failed attempt it was.
         let mark_dead = |conn: &rusqlite::Connection| {
@@ -1143,7 +1163,7 @@ impl Scheduler {
                 self.ai_job = None;
             }
             Ok(None) => {
-                if started.elapsed() >= DERIVE_TIMEOUT {
+                if started.elapsed() >= timeout {
                     tracing::warn!(id, "ai-job worker timed out; killing");
                     let _ = child.kill();
                     let _ = child.wait();
@@ -1296,11 +1316,15 @@ impl Scheduler {
         }
     }
 
-    fn spawn_ai_job(&mut self, job_id: i64) {
+    fn spawn_ai_job(&mut self, conn: &rusqlite::Connection, job_id: i64) {
+        let timeout = match chronicle_core::storage::ai_job_kind(conn, job_id) {
+            Ok(Some(k)) if k == "reconcile_day" => NIGHT_PASS_TIMEOUT,
+            _ => DERIVE_TIMEOUT,
+        };
         match spawn_ai_job_worker(job_id) {
             Ok(child) => {
                 tracing::info!(id = job_id, "ai-job worker spawned");
-                self.ai_job = Some((child, Instant::now(), job_id));
+                self.ai_job = Some((child, Instant::now(), job_id, timeout));
             }
             Err(e) => tracing::error!(id = job_id, "failed to spawn ai-job worker: {e}"),
         }
@@ -1391,7 +1415,7 @@ impl Scheduler {
     /// transaction and `fail_batch` records the burned attempt immediately.
     fn shutdown(&mut self, conn: &rusqlite::Connection) {
         use chronicle_core::storage;
-        if let Some((mut child, _, id)) = self.ai_job.take() {
+        if let Some((mut child, _, id, _)) = self.ai_job.take() {
             let _ = child.kill();
             let _ = child.wait();
             let _ = storage::fail_ai_job(conn, id, "daemon shutdown");
@@ -1724,8 +1748,11 @@ fn reconcile_due(conn: &mut rusqlite::Connection, config: &Config, distractions:
 /// Advisor questions a day (m36 chunk 3): the online cap; the nightly
 /// pass has none.
 const ADVISE_PER_DAY: usize = 60;
-/// How far back a low-margin verdict is still worth asking about.
-const ADVISE_LOOKBACK_MS: i64 = 2 * 24 * 3_600_000;
+/// The online advisor only looks at today (m36 chunk 4): yesterday is the
+/// night pass's, and the online pass never rewrites it.
+fn advise_since_ms() -> i64 {
+    crate::ai_job::day_start_ms()
+}
 /// Queue an `advise` job per unsure reconciled verdict with a runner-up
 /// (m36 chunk 3), up to the day's cap; the row is marked pending so the
 /// next tick does not queue it twice.
@@ -1740,11 +1767,7 @@ fn advise_due(conn: &rusqlite::Connection) {
         return;
     }
     let now = Timestamp::now();
-    let due = match storage::unadvised_verdicts(
-        conn,
-        now.as_millisecond() - ADVISE_LOOKBACK_MS,
-        ADVISE_PER_DAY - used,
-    ) {
+    let due = match storage::unadvised_verdicts(conn, advise_since_ms(), ADVISE_PER_DAY - used) {
         Ok(d) => d,
         Err(e) => {
             tracing::error!("unadvised verdict query failed: {e}");

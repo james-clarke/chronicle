@@ -59,6 +59,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/031_self_score_project.sql")),
         M::up(include_str!("../migrations/032_example_embeddings.sql")),
         M::up(include_str!("../migrations/033_verdict_advice.sql")),
+        M::up(include_str!("../migrations/034_claims.sql")),
     ])
 });
 
@@ -1939,11 +1940,12 @@ pub fn record_ai_job_usage(
     backend: &str,
     prompt_tokens: i64,
     gen_tokens: i64,
+    cache_read_tokens: i64,
     cost_usd: Option<f64>,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "UPDATE ai_jobs SET backend=?2, prompt_tokens=?3, gen_tokens=?4, cost_usd=?5 WHERE id=?1",
-        params![id, backend, prompt_tokens, gen_tokens, cost_usd],
+        "UPDATE ai_jobs SET backend=?2, prompt_tokens=?3, gen_tokens=?4, cost_usd=?5, cache_read_tokens=?6 WHERE id=?1",
+        params![id, backend, prompt_tokens, gen_tokens, cost_usd, cache_read_tokens],
     )?;
     Ok(())
 }
@@ -1971,6 +1973,62 @@ pub fn insert_done_ai_job(
 }
 
 /// Today's total spend across every job that ran on a cloud backend.
+/// The faithfulness of a prose job (m36 chunk 4): claims made and claims
+/// whose evidence resolved, logged before the drop.
+pub fn record_ai_job_claims(
+    conn: &Connection,
+    id: i64,
+    claims: i64,
+    claims_ok: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE ai_jobs SET claims=?2, claims_ok=?3 WHERE id=?1",
+        params![id, claims, claims_ok],
+    )?;
+    Ok(())
+}
+
+/// Store the claims JSON behind one output (m36 chunk 4); an empty list
+/// deletes the row.
+pub fn set_claims(
+    conn: &Connection,
+    kind: &str,
+    key: &str,
+    json: &str,
+) -> Result<(), StorageError> {
+    if json.trim().is_empty() || json.trim() == "[]" {
+        conn.execute(
+            "DELETE FROM claims WHERE kind=?1 AND key=?2",
+            params![kind, key],
+        )?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO claims (kind, key, claims, ts) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(kind, key) DO UPDATE SET claims=excluded.claims, ts=excluded.ts",
+        params![kind, key, json, jiff::Timestamp::now().as_millisecond()],
+    )?;
+    Ok(())
+}
+
+pub fn claims_for(
+    conn: &Connection,
+    kind: &str,
+    key: &str,
+) -> Result<Option<String>, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT claims FROM claims WHERE kind=?1 AND key=?2",
+            params![kind, key],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?)
+}
+
 /// Meta key for the redaction classes that fired on a day's cloud
 /// requests (m36 chunk 1); `day` is the local date, `YYYY-MM-DD`.
 pub fn redactions_key(day: &str) -> String {
@@ -2417,6 +2475,8 @@ pub struct JournalEntry {
     pub start_ts: i64,
     pub end_ts: i64,
     pub entry: String,
+    /// The entry's claims JSON (m36 chunk 4), when the job stored them.
+    pub claims: Option<String>,
 }
 
 /// Latest "where I am / what's next" for a task.
@@ -2539,10 +2599,11 @@ pub fn journal_tail(
     n: usize,
 ) -> Result<Vec<JournalEntry>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT id, batch_id, start_ts, end_ts, entry FROM (
-             SELECT id, batch_id, start_ts, end_ts, entry FROM journal_entries
+        "SELECT j.id, j.batch_id, j.start_ts, j.end_ts, j.entry, c.claims FROM (
+             SELECT id, task_id, batch_id, start_ts, end_ts, entry FROM journal_entries
              WHERE task_id=?1 ORDER BY start_ts DESC, id DESC LIMIT ?2
-         ) ORDER BY start_ts, id",
+         ) j LEFT JOIN claims c ON c.kind='journal' AND c.key = j.task_id || ':' || j.batch_id
+         ORDER BY j.start_ts, j.id",
     )?;
     let rows = stmt.query_map(params![task_id, n as i64], |r| {
         Ok(JournalEntry {
@@ -2551,6 +2612,7 @@ pub fn journal_tail(
             start_ts: r.get(2)?,
             end_ts: r.get(3)?,
             entry: r.get(4)?,
+            claims: r.get(5)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -2773,6 +2835,7 @@ pub fn standup_digest(
             start_ts: r.get(6)?,
             end_ts: r.get(7)?,
             entry: r.get(8)?,
+            claims: None,
         };
         match out.last_mut() {
             Some(row) if row.task_id == task_id => row.entries.push(entry),
@@ -4011,6 +4074,73 @@ pub fn unadvised_verdicts(
         })?
         .collect::<Result<_, _>>()?;
     Ok(rows)
+}
+
+/// The night pass's advisories (m36 chunk 4): every unsure verdict with a
+/// runner-up whose interval starts in `lo..hi`, advised or not yet, still
+/// open and still where it was placed — the nightly model re-runs the
+/// day's advisories on the same rows.
+pub fn unadvised_verdicts_in(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(i64, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT v.id, v.interval_id FROM verdict_log v JOIN intervals i ON i.id = v.interval_id
+         WHERE v.confident = 0 AND v.runner_up IS NOT NULL
+           AND (v.advice IS NULL OR v.advice IN ('pending', 'unsure', 'invalid'))
+           AND v.outcome IS NULL AND i.start_ts >= ?1 AND i.start_ts < ?2 AND i.task_id = v.task_id
+         ORDER BY i.start_ts",
+    )?;
+    let rows = stmt
+        .query_map(params![lo, hi], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Derived tasks minted in `lo..hi` still under their placeholder label
+/// (m36 chunk 4): `(id, label, first start, last end)`, for the night
+/// pass's naming.
+pub fn placeholder_tasks_between(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(i64, String, i64, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.label, MIN(i.start_ts), MAX(i.end_ts) FROM tasks t
+         JOIN intervals i ON i.task_id = t.id
+         WHERE t.source = 'derived' AND t.created_ts >= ?1 AND t.created_ts < ?2
+           AND (t.label = 'new work' OR t.label LIKE '% \u{b7} new work')
+         GROUP BY t.id ORDER BY t.id",
+    )?;
+    let rows = stmt
+        .query_map(params![lo, hi], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn ai_job_kind(conn: &Connection, id: i64) -> Result<Option<String>, StorageError> {
+    Ok(conn
+        .query_row("SELECT kind FROM ai_jobs WHERE id=?1", [id], |r| r.get(0))
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?)
+}
+
+/// True while a job of `kind` with exactly this payload is queued or
+/// running, or has already run to completion.
+pub fn job_seen(conn: &Connection, kind: &str, payload: &str) -> Result<bool, StorageError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ai_jobs
+         WHERE kind=?1 AND status IN ('pending','running','done') AND payload=?2",
+        params![kind, payload],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 pub fn mark_verdict_advice(
@@ -5836,6 +5966,44 @@ mod tests {
         assert!(super::MIGRATIONS.validate().is_ok());
     }
 
+    // m36 chunk 4: claims are keyed by output; an empty list clears them;
+    // the journal tail carries its claims.
+    #[test]
+    fn claims_round_trip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, status, source, created_ts) VALUES (1, 'a', 'open', 'derived', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO batches (id, start_ts, end_ts, status) VALUES (7, 0, 10, 'done')",
+            [],
+        )
+        .unwrap();
+        super::set_claims(&conn, "description", "1", r#"[{"text":"x","evidence":[]}]"#).unwrap();
+        assert_eq!(
+            super::claims_for(&conn, "description", "1")
+                .unwrap()
+                .as_deref(),
+            Some(r#"[{"text":"x","evidence":[]}]"#)
+        );
+        super::set_claims(&conn, "description", "1", "[]").unwrap();
+        assert_eq!(super::claims_for(&conn, "description", "1").unwrap(), None);
+        super::insert_journal_entry(&conn, 1, 7, 0, 10, "did x [^1]", "[]").unwrap();
+        super::set_claims(
+            &conn,
+            "journal",
+            "1:7",
+            r#"[{"text":"did x","evidence":[{"id":1,"text":"e"}]}]"#,
+        )
+        .unwrap();
+        let tail = super::journal_tail(&conn, 1, 5).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert!(tail[0].claims.as_deref().unwrap().contains("did x"));
+    }
+
     // m36 chunk 3: an unsure verdict with a runner-up is a case until it is
     // advised; B moves the interval, "new" mints, the verdict row records it.
     #[test]
@@ -6558,7 +6726,7 @@ mod tests {
         let ts = crate::types::ms_to_ts(1_000);
         let job = super::enqueue_ai_job(&conn, ts, "journal", 0, "{}").unwrap();
         super::claim_ai_job(&conn, job).unwrap().unwrap();
-        super::record_ai_job_usage(&conn, job, "anthropic", 500, 80, Some(0.02)).unwrap();
+        super::record_ai_job_usage(&conn, job, "anthropic", 500, 80, 100, Some(0.02)).unwrap();
         super::complete_ai_job(&conn, job, "ok").unwrap();
 
         assert_eq!(super::cost_today(&conn, 0).unwrap(), 0.02);

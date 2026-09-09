@@ -44,8 +44,16 @@ impl Describer {
         project: Option<&str>,
         evidence: &str,
     ) -> anyhow::Result<String> {
-        let prompt = prompts::render_description(label, project, evidence);
-        non_empty(self.generate(&prompt, None)?, "description")
+        // Claims in, prose out (m36 chunk 4): the backfill keeps the text
+        // and leaves the evidence to the queued job.
+        let (numbered, lines) = crate::claims::number_lines(evidence);
+        let prompt = prompts::render_description(label, project, &numbered);
+        let out = self.generate(&prompt, Some(crate::prompts::CLAIMS_GRAMMAR))?;
+        let v = crate::claims::verify(&crate::claims::parse(&out)?, &lines);
+        non_empty(
+            crate::claims::strip_markers(&crate::claims::render_prose(&v)),
+            "description",
+        )
     }
 
     /// 1-3 sentence journal entry for one batch's slice of a task. `context`
@@ -116,6 +124,9 @@ impl Describer {
             JobKind::Checkpoint => Some(CHECKPOINT_GRAMMAR),
             JobKind::SuggestTask | JobKind::NameTask => Some(SUGGEST_GRAMMAR),
             JobKind::Advise => Some(crate::prompts::ADVISE_GRAMMAR),
+            JobKind::TaskDescription | JobKind::Journal | JobKind::Narrative => {
+                Some(crate::prompts::CLAIMS_GRAMMAR)
+            }
             _ => None,
         }
     }

@@ -20,12 +20,18 @@ const MAX_TRIES: u32 = 3;
 const RETRY_BUDGET: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the night pass asks whether its batch has ended.
+const BATCH_POLL: Duration = Duration::from_secs(30);
+/// Most batches end within the hour; the API allows a day. The nightly
+/// worker's own timeout is the real bound.
+const BATCH_BUDGET: Duration = Duration::from_secs(3 * 3600);
 
 pub struct AnthropicBackend {
     name: String,
     model: String,
     api_key: String,
     base_url: String,
+    batch_poll: Duration,
 }
 
 impl AnthropicBackend {
@@ -38,7 +44,137 @@ impl AnthropicBackend {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_owned(),
+            batch_poll: BATCH_POLL,
         }
+    }
+
+    /// The Message Batches API (m36 chunk 4): one request set, polled
+    /// until it ends, results keyed by `custom_id` (they come back in any
+    /// order), each billed at half list — `cost_usd` carries that figure.
+    fn call_batch(
+        &self,
+        reqs: &[Request<'_>],
+    ) -> Result<Vec<Result<Completion, CloudError>>, CloudError> {
+        let requests: Vec<Value> = reqs
+            .iter()
+            .enumerate()
+            .map(|(i, req)| {
+                let mut params: Value =
+                    serde_json::from_str(&self.body(req)).unwrap_or(Value::Null);
+                if let Some(o) = params.as_object_mut() {
+                    o.remove("stream");
+                }
+                json!({ "custom_id": format!("r{i}"), "params": params })
+            })
+            .collect();
+        let created = self.json_call(
+            "POST",
+            "/v1/messages/batches",
+            Some(&json!({ "requests": requests }).to_string()),
+        )?;
+        let id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CloudError::Stopped("batch reply carried no id".into()))?
+            .to_owned();
+        tracing::info!(batch = %id, n = reqs.len(), "message batch submitted");
+        let started = Instant::now();
+        let results_url = loop {
+            let status = self.json_call("GET", &format!("/v1/messages/batches/{id}"), None)?;
+            if status.get("processing_status").and_then(Value::as_str) == Some("ended") {
+                break status
+                    .get("results_url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        CloudError::Stopped("ended batch carried no results_url".into())
+                    })?
+                    .to_owned();
+            }
+            if started.elapsed() > BATCH_BUDGET {
+                return Err(CloudError::Transport(format!(
+                    "batch {id} still running after {} s",
+                    BATCH_BUDGET.as_secs()
+                )));
+            }
+            std::thread::sleep(self.batch_poll);
+        };
+        let body = self.text_call(&results_url)?;
+        let mut by_id: std::collections::HashMap<String, Result<Completion, CloudError>> =
+            std::collections::HashMap::new();
+        for line in body.lines().filter(|l| !l.trim().is_empty()) {
+            let v: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let Some(cid) = v.get("custom_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let result = &v["result"];
+            let outcome = match result.get("type").and_then(Value::as_str) {
+                Some("succeeded") => parse_message(&result["message"]).map(|mut c| {
+                    c.cost_usd = super::cost_usd(&self.model, &c).map(|usd| usd * 0.5);
+                    c
+                }),
+                Some(other) => Err(CloudError::Stopped(format!(
+                    "{other}: {}",
+                    api_message(
+                        &result
+                            .get("error")
+                            .map(Value::to_string)
+                            .unwrap_or_default()
+                    )
+                ))),
+                None => Err(CloudError::Stopped("result without a type".into())),
+            };
+            by_id.insert(cid.to_owned(), outcome);
+        }
+        Ok((0..reqs.len())
+            .map(|i| {
+                by_id.remove(&format!("r{i}")).unwrap_or_else(|| {
+                    Err(CloudError::Stopped("no result for this request".into()))
+                })
+            })
+            .collect())
+    }
+
+    /// One non-streaming JSON exchange with the API, no retries.
+    fn json_call(&self, method: &str, path: &str, body: Option<&str>) -> Result<Value, CloudError> {
+        let url = format!("{}{path}", self.base_url);
+        let text = self.raw_call(method, &url, body)?;
+        serde_json::from_str(&text).map_err(|_| CloudError::Stopped("malformed batch reply".into()))
+    }
+
+    fn text_call(&self, url: &str) -> Result<String, CloudError> {
+        self.raw_call("GET", url, None)
+    }
+
+    fn raw_call(&self, method: &str, url: &str, body: Option<&str>) -> Result<String, CloudError> {
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+            .build()
+            .new_agent();
+        let resp = match method {
+            "POST" => agent
+                .post(url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .send(body.unwrap_or("")),
+            _ => agent
+                .get(url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .call(),
+        }
+        .map_err(|e| CloudError::Transport(transport_brief(&e)))?;
+        let status = resp.status().as_u16();
+        let text = resp.into_body().read_to_string().unwrap_or_default();
+        if status != 200 {
+            return Err(classify_status(status, &text));
+        }
+        Ok(text)
     }
 
     /// One tiny request, for the Settings test button: `Ok(latency)` or the
@@ -180,6 +316,39 @@ impl TextBackend for AnthropicBackend {
         on_token: &mut dyn FnMut(&str),
     ) -> anyhow::Result<Completion> {
         Ok(self.call(req, on_token)?)
+    }
+
+    fn batch(&self, reqs: &[Request<'_>]) -> anyhow::Result<Vec<anyhow::Result<Completion>>> {
+        if reqs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .call_batch(reqs)?
+            .into_iter()
+            .map(|r| r.map_err(anyhow::Error::from))
+            .collect())
+    }
+}
+
+/// A non-streamed message object (a batch result): its text, usage and
+/// stop reason.
+fn parse_message(msg: &Value) -> Result<Completion, CloudError> {
+    let mut c = Completion::default();
+    for block in msg["content"].as_array().into_iter().flatten() {
+        if block["type"] == "text"
+            && let Some(t) = block["text"].as_str()
+        {
+            c.text.push_str(t);
+        }
+    }
+    let usage = &msg["usage"];
+    c.input_tokens = usage["input_tokens"].as_u64().unwrap_or(0) as u32;
+    c.cache_read_tokens = usage["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+    c.output_tokens = usage["output_tokens"].as_u64().unwrap_or(0) as u32;
+    match msg["stop_reason"].as_str() {
+        Some("end_turn") => Ok(c),
+        Some(other) => Err(CloudError::Stopped(other.to_owned())),
+        None => Err(CloudError::Stopped("no stop reason".into())),
     }
 }
 
@@ -396,6 +565,115 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][2]["content"], "hi");
         assert!(body.get("thinking").is_none());
+    }
+
+    /// The night pass: create, poll (one "in_progress" then "ended"),
+    /// fetch the JSONL results, key them by custom_id, bill at half.
+    #[test]
+    fn batches_round_trip() {
+        let results = "{\"custom_id\":\"r1\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}}\n{\"custom_id\":\"r0\",\"result\":{\"type\":\"errored\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"too long\"}}}\n";
+        let (base, rx) = mock_batch(results);
+        let mut b = AnthropicBackend::new("a", "claude-sonnet-5", "k", Some(&base));
+        b.batch_poll = Duration::from_millis(10);
+        let schema = json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false});
+        let reqs = vec![
+            Request {
+                job: JobKind::Advise,
+                system: Some("sys"),
+                user: "one",
+                history: &[],
+                schema: Some(&schema),
+                max_output: 0,
+            },
+            Request {
+                job: JobKind::Standup,
+                system: None,
+                user: "two",
+                history: &[],
+                schema: None,
+                max_output: 0,
+            },
+        ];
+        let out = b.batch(&reqs).unwrap();
+        assert_eq!(out.len(), 2);
+        let e = out[0].as_ref().unwrap_err().to_string();
+        assert!(e.contains("errored") && e.contains("too long"), "{e}");
+        let c = out[1].as_ref().unwrap();
+        assert_eq!(c.text, "second");
+        // 1M input at $2 list, half price on a batch.
+        assert!((c.cost_usd.unwrap() - 1.0).abs() < 1e-9, "{:?}", c.cost_usd);
+        let sent = rx.recv().unwrap();
+        let body: Value = serde_json::from_str(sent.split_once("\n\n").unwrap().1.trim()).unwrap();
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs[0]["custom_id"], "r0");
+        assert!(reqs[0]["params"].get("stream").is_none());
+        assert_eq!(reqs[0]["params"]["system"][0]["text"], "sys");
+        assert_eq!(
+            reqs[0]["params"]["output_config"]["format"]["type"],
+            "json_schema"
+        );
+        assert_eq!(reqs[1]["params"]["messages"][0]["content"], "two");
+    }
+
+    /// A mock whose "ended" reply points the results URL back at itself.
+    fn mock_batch(results: &str) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = vec![
+            http(
+                "200 OK",
+                "content-type: application/json\r\n",
+                r#"{"id":"msgbatch_1","processing_status":"in_progress"}"#,
+            ),
+            http(
+                "200 OK",
+                "content-type: application/json\r\n",
+                r#"{"id":"msgbatch_1","processing_status":"in_progress"}"#,
+            ),
+            http(
+                "200 OK",
+                "content-type: application/json\r\n",
+                &format!(
+                    r#"{{"id":"msgbatch_1","processing_status":"ended","results_url":"{base}/v1/messages/batches/msgbatch_1/results"}}"#
+                ),
+            ),
+            http("200 OK", "content-type: application/jsonl\r\n", results),
+        ];
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for resp in responses {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                let body_start;
+                loop {
+                    let n = s.read(&mut tmp).unwrap();
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        body_start = i + 4;
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                while buf.len() < body_start + len {
+                    let n = s.read(&mut tmp).unwrap();
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                let body = String::from_utf8_lossy(&buf[body_start..]).to_string();
+                let _ = tx.send(format!("{head}\n{body}"));
+                s.write_all(resp.as_bytes()).unwrap();
+                s.flush().unwrap();
+            }
+        });
+        (base, rx)
     }
 
     #[test]

@@ -1,0 +1,12 @@
+# Constrains a prose job's answer to claims with evidence ids (m36 chunk 4):
+# one to eight claims, each a sentence and at least one id.
+# Bounded repetition (x{0,N}) only — chained x? x? is pathologically slow.
+
+root ::= "{" ws "\"claims\"" ws ":" ws "[" ws claim (ws "," ws claim){0,7} ws "]" ws "}"
+
+claim ::= "{" ws "\"text\"" ws ":" ws string ws "," ws "\"evidence_ids\"" ws ":" ws ids ws "}"
+ids ::= "[" ws int (ws "," ws int){0,11} ws "]"
+int ::= [0-9]{1,5}
+string ::= "\"" char{1,400} "\""
+char ::= [^"\\\x00-\x1f] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws ::= [ \n\t]{0,4}

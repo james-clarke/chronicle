@@ -119,6 +119,7 @@ fn run_routed(
                                     name,
                                     i64::from(c.input_tokens),
                                     i64::from(c.output_tokens),
+                                    i64::from(c.cache_read_tokens),
                                     cloud::cost_usd(&cfg.model, c),
                                 )?;
                                 note_redactions(conn, &c.redactions);
@@ -246,7 +247,30 @@ pub(crate) enum Engine {
     },
     /// No model at all (fetch_context needs none; any LLM arm bails).
     None,
+    /// The night pass's first pass (m36 chunk 4): every prompt a job would
+    /// have sent is recorded and the job stops with [`Collecting`].
+    Collect {
+        prompts: RefCell<Vec<(JobKind, String)>>,
+    },
+    /// The night pass's second pass: the batched answer for each prompt,
+    /// keyed by the prompt itself (a job re-renders the same prompt from
+    /// the same rows; one that changed since has no answer and fails).
+    Replay {
+        answers: RefCell<std::collections::HashMap<(JobKind, String), String>>,
+    },
 }
+
+/// The first pass of the night stops each job here, before it applies.
+#[derive(Debug)]
+pub(crate) struct Collecting;
+
+impl std::fmt::Display for Collecting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("prompt collected for the night batch")
+    }
+}
+
+impl std::error::Error for Collecting {}
 
 impl Engine {
     pub(crate) fn complete(&self, job: JobKind, prompt: &str) -> anyhow::Result<String> {
@@ -259,6 +283,9 @@ impl Engine {
                         Some(serde_json::from_str(prompts::SUGGEST_SCHEMA)?)
                     }
                     JobKind::Advise => Some(serde_json::from_str(prompts::ADVISE_SCHEMA)?),
+                    JobKind::TaskDescription | JobKind::Journal | JobKind::Narrative => {
+                        Some(serde_json::from_str(prompts::CLAIMS_SCHEMA)?)
+                    }
                     _ => None,
                 };
                 // The frozen prefix rides in `system` so the provider
@@ -281,6 +308,95 @@ impl Engine {
             Engine::None => bail!(
                 "no model available; run `chronicle model pull` or add a cloud backend in Settings"
             ),
+            Engine::Collect { prompts } => {
+                prompts.borrow_mut().push((job, prompt.to_owned()));
+                Err(Collecting.into())
+            }
+            Engine::Replay { answers } => answers
+                .borrow_mut()
+                .remove(&(job, prompt.to_owned()))
+                .ok_or_else(|| anyhow::anyhow!("no batched answer for this {job} prompt")),
+        }
+    }
+
+    /// The schema a JSON kind's cloud request carries.
+    fn cloud_schema(job: JobKind) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(match job {
+            JobKind::Checkpoint => Some(serde_json::from_str(prompts::CHECKPOINT_SCHEMA)?),
+            JobKind::SuggestTask | JobKind::NameTask => {
+                Some(serde_json::from_str(prompts::SUGGEST_SCHEMA)?)
+            }
+            JobKind::Advise => Some(serde_json::from_str(prompts::ADVISE_SCHEMA)?),
+            JobKind::TaskDescription | JobKind::Journal | JobKind::Narrative => {
+                Some(serde_json::from_str(prompts::CLAIMS_SCHEMA)?)
+            }
+            _ => None,
+        })
+    }
+
+    /// Answer many prompts at once (m36 chunk 4): the cloud backend's
+    /// batch (one Batches API set on Anthropic, sequential elsewhere), the
+    /// local model one after another. Usage is summed onto `usage`.
+    pub(crate) fn batch_answers(
+        &self,
+        prompts: &[(JobKind, String)],
+    ) -> anyhow::Result<Vec<anyhow::Result<String>>> {
+        match self {
+            Engine::Local(d) => Ok(prompts.iter().map(|(job, p)| d.complete(*job, p)).collect()),
+            Engine::Cloud { backend, usage, .. } => {
+                let schemas: Vec<Option<serde_json::Value>> = prompts
+                    .iter()
+                    .map(|(job, _)| Self::cloud_schema(*job))
+                    .collect::<anyhow::Result<_>>()?;
+                let stripped: Vec<&str> = prompts.iter().map(|(_, p)| strip_no_think(p)).collect();
+                let splits: Vec<Option<prompts::Split>> = prompts
+                    .iter()
+                    .zip(&stripped)
+                    .map(|((job, _), p)| prompts::split_prefix(*job, p))
+                    .collect();
+                let reqs: Vec<Request<'_>> = prompts
+                    .iter()
+                    .zip(&stripped)
+                    .zip(&splits)
+                    .zip(&schemas)
+                    .map(|((((job, _), p), split), schema)| Request {
+                        job: *job,
+                        system: split.as_ref().map(|s| s.system.as_str()),
+                        user: split.as_ref().map_or(p, |s| s.user.as_str()),
+                        history: &[],
+                        schema: schema.as_ref(),
+                        max_output: 0,
+                    })
+                    .collect();
+                let results = backend.batch(&reqs)?;
+                let mut sum = Completion::default();
+                let mut out = Vec::with_capacity(results.len());
+                for r in results {
+                    match r {
+                        Ok(c) => {
+                            sum.input_tokens += c.input_tokens;
+                            sum.cache_read_tokens += c.cache_read_tokens;
+                            sum.output_tokens += c.output_tokens;
+                            sum.wall_ms += c.wall_ms;
+                            if let Some(usd) = c.cost_usd {
+                                sum.cost_usd = Some(sum.cost_usd.unwrap_or(0.0) + usd);
+                            }
+                            for class in c.redactions {
+                                if !sum.redactions.contains(&class) {
+                                    sum.redactions.push(class);
+                                }
+                            }
+                            out.push(Ok(c.text));
+                        }
+                        Err(e) => out.push(Err(e)),
+                    }
+                }
+                *usage.borrow_mut() = Some(sum);
+                Ok(out)
+            }
+            Engine::None | Engine::Collect { .. } | Engine::Replay { .. } => {
+                bail!("no model available for the night pass")
+            }
         }
     }
 
@@ -290,6 +406,44 @@ impl Engine {
             Engine::Local(_) => "local".into(),
             Engine::Cloud { name, model, .. } => format!("{name} ({model})"),
             Engine::None => "none".into(),
+            Engine::Collect { .. } => "collect".into(),
+            Engine::Replay { .. } => "replay".into(),
+        }
+    }
+
+    /// A claims job (m36 chunk 4): run, verify every cited id against the
+    /// lines that were sent, and run once more when more than a third of
+    /// the claims dropped, keeping the better of the two.
+    fn claimed(
+        &self,
+        job: JobKind,
+        prompt: &str,
+        lines: &[String],
+    ) -> anyhow::Result<chronicle_derive::claims::Verified> {
+        use chronicle_derive::claims;
+        let first = claims::verify(&claims::parse(&self.complete(job, prompt)?)?, lines);
+        tracing::info!(%job, claims = first.total, kept = first.kept, "claims verified");
+        if !first.should_retry() {
+            return Ok(first);
+        }
+        tracing::info!(%job, "more than a third of the claims dropped; one more try");
+        match self
+            .complete(job, prompt)
+            .and_then(|out| claims::parse(&out))
+        {
+            Ok(again) => {
+                let second = claims::verify(&again, lines);
+                tracing::info!(%job, claims = second.total, kept = second.kept, "claims verified (retry)");
+                Ok(if second.kept > first.kept {
+                    second
+                } else {
+                    first
+                })
+            }
+            Err(e) => {
+                tracing::warn!(%job, "retry failed: {e:#}");
+                Ok(first)
+            }
         }
     }
 
@@ -298,12 +452,14 @@ impl Engine {
         label: &str,
         project: Option<&str>,
         evidence: &str,
-    ) -> anyhow::Result<String> {
-        let prompt = prompts::render_description(label, project, evidence);
-        non_empty(
-            self.complete(JobKind::TaskDescription, &prompt)?,
-            "description",
-        )
+    ) -> anyhow::Result<chronicle_derive::claims::Verified> {
+        let (numbered, lines) = chronicle_derive::claims::number_lines(evidence);
+        let prompt = prompts::render_description(label, project, &numbered);
+        let v = self.claimed(JobKind::TaskDescription, &prompt, &lines)?;
+        if v.claims.is_empty() {
+            anyhow::bail!("model produced no sourced description claim");
+        }
+        Ok(v)
     }
 
     fn journal_entry(
@@ -313,14 +469,45 @@ impl Engine {
         context: &str,
         truth: &str,
         evidence: &str,
-    ) -> anyhow::Result<String> {
-        let prompt = prompts::render_journal(label, project, context, truth, evidence);
-        non_empty(self.complete(JobKind::Journal, &prompt)?, "journal entry")
+    ) -> anyhow::Result<chronicle_derive::claims::Verified> {
+        // One id space over both sections: truth first, then the screen;
+        // an empty section is "(none)" so the ids stay dense.
+        let truth = if truth.trim().is_empty() {
+            "(none)"
+        } else {
+            truth.trim_end()
+        };
+        let evidence = if evidence.trim().is_empty() {
+            "(none)"
+        } else {
+            evidence.trim_end()
+        };
+        let (numbered, lines) =
+            chronicle_derive::claims::number_lines(&format!("{truth}\n{evidence}"));
+        let n_truth = truth.lines().filter(|l| !l.trim().is_empty()).count();
+        let numbered: Vec<&str> = numbered.lines().filter(|l| !l.trim().is_empty()).collect();
+        let prompt = prompts::render_journal(
+            label,
+            project,
+            context,
+            &numbered[..n_truth].join("\n"),
+            &numbered[n_truth..].join("\n"),
+        );
+        let v = self.claimed(JobKind::Journal, &prompt, &lines)?;
+        if v.claims.is_empty() {
+            anyhow::bail!("model produced no sourced journal claim");
+        }
+        Ok(v)
     }
 
-    fn narrative(&self, digest: &str) -> anyhow::Result<String> {
-        let prompt = prompts::render_narrative(digest);
-        non_empty(self.complete(JobKind::Narrative, &prompt)?, "narrative")
+    fn narrative(&self, digest: &str) -> anyhow::Result<chronicle_derive::claims::Verified> {
+        let (numbered, lines) = chronicle_derive::claims::number_lines(digest);
+        let prompt = prompts::render_narrative(&numbered);
+        let v = self.claimed(JobKind::Narrative, &prompt, &lines)?;
+        if v.claims.is_empty() {
+            anyhow::bail!("model produced no sourced narrative claim");
+        }
+        Ok(v)
     }
 
     fn standup(&self, digest: &str) -> anyhow::Result<String> {
@@ -555,9 +742,116 @@ pub(crate) fn run_ai_job(
                 (true, false) => format!("(no window titles)\nGround truth:\n{truth}"),
                 (false, false) => format!("{spans}Ground truth:\n{truth}"),
             };
-            let desc = engine.describe_task(&label, project.as_deref(), &evidence)?;
+            let v = engine.describe_task(&label, project.as_deref(), &evidence)?;
+            let desc = chronicle_derive::claims::render_prose(&v);
             storage::set_task_description(conn, task_id, Some(&desc))?;
+            storage::set_claims(conn, "description", &task_id.to_string(), &v.json())?;
+            storage::record_ai_job_claims(conn, job.id, v.total as i64, v.kept as i64)?;
             Ok(desc)
+        }
+        "reconcile_day" => {
+            // The night pass (m36 chunk 4): the day's advisories, its
+            // unnamed tasks and the standup, rendered once with a
+            // collecting engine, answered in one batch, applied with a
+            // replaying engine. The online pass never rewrites yesterday;
+            // this is the pass that does.
+            let day = payload["day"].as_str().context("payload lacks day")?;
+            let tz = TimeZone::system();
+            let date: jiff::civil::Date = day.parse().context("bad day in payload")?;
+            let start = date.to_zoned(tz.clone())?;
+            let lo = start.timestamp().as_millisecond();
+            let hi = start
+                .checked_add(jiff::Span::new().days(1))?
+                .timestamp()
+                .as_millisecond();
+            let mut subs: Vec<storage::AiJobRow> = Vec::new();
+            for (verdict_id, _) in storage::unadvised_verdicts_in(conn, lo, hi)? {
+                storage::mark_verdict_advice(conn, verdict_id, "pending")?;
+                subs.push(storage::AiJobRow {
+                    id: job.id,
+                    kind: "advise".into(),
+                    payload: serde_json::json!({ "verdict_id": verdict_id }).to_string(),
+                });
+            }
+            for (task_id, label, tlo, thi) in storage::placeholder_tasks_between(conn, lo, hi)? {
+                subs.push(storage::AiJobRow {
+                    id: job.id,
+                    kind: "name_task".into(),
+                    payload: serde_json::json!({
+                        "task_id": task_id, "lo": tlo, "hi": thi, "placeholder": label
+                    })
+                    .to_string(),
+                });
+            }
+            if storage::get_standup_draft(conn, day)?.is_none() {
+                subs.push(storage::AiJobRow {
+                    id: job.id,
+                    kind: "standup".into(),
+                    payload: storage::standup_payload(day),
+                });
+            }
+            if subs.is_empty() {
+                return Err(SkipJob(format!("nothing to reconcile on {day}")).into());
+            }
+            let collect = Engine::Collect {
+                prompts: RefCell::new(Vec::new()),
+            };
+            let mut collected: Vec<bool> = Vec::with_capacity(subs.len());
+            for sub in &subs {
+                match run_ai_job(conn, config, data_dir, &collect, sub) {
+                    Err(e) if e.is::<Collecting>() => collected.push(true),
+                    Ok(_) => collected.push(false),
+                    Err(e) => {
+                        tracing::info!(kind = %sub.kind, "night pass: {e:#}");
+                        collected.push(false);
+                    }
+                }
+            }
+            let prompts = match collect {
+                Engine::Collect { prompts } => prompts.into_inner(),
+                _ => Vec::new(),
+            };
+            tracing::info!(%day, prompts = prompts.len(), "night pass batch");
+            let answers = engine.batch_answers(&prompts)?;
+            let mut map = std::collections::HashMap::new();
+            let mut failed = 0usize;
+            for ((job_kind, prompt), answer) in prompts.into_iter().zip(answers) {
+                match answer {
+                    Ok(text) => {
+                        map.insert((job_kind, prompt), text);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(%job_kind, "night pass answer failed: {e:#}");
+                    }
+                }
+            }
+            let replay = Engine::Replay {
+                answers: RefCell::new(map),
+            };
+            let (mut done, mut skipped) = (0usize, 0usize);
+            for (sub, was_collected) in subs.iter().zip(&collected) {
+                if !was_collected {
+                    skipped += 1;
+                    continue;
+                }
+                match run_ai_job(conn, config, data_dir, &replay, sub) {
+                    Ok(_) => done += 1,
+                    Err(e) if e.is::<SkipJob>() => skipped += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(kind = %sub.kind, "night pass apply failed: {e:#}");
+                    }
+                }
+            }
+            let _ = storage::set_meta(
+                conn,
+                &format!("night_pass:{day}"),
+                Some(&Timestamp::now().as_millisecond().to_string()),
+            );
+            tracing::info!(%day, done, skipped, failed, "night pass finished");
+            Ok(serde_json::json!({ "day": day, "done": done, "skipped": skipped, "failed": failed })
+                .to_string())
         }
         "advise" => {
             // The pairwise advisor (m36 chunk 3): a low-margin verdict
@@ -776,8 +1070,11 @@ pub(crate) fn run_ai_job(
             let context: String = storage::task_context(conn, task_id)?
                 .map(|(_, c)| c.chars().take(1200).collect())
                 .unwrap_or_default();
-            let entry =
+            let v =
                 engine.journal_entry(&label, project.as_deref(), &context, &truth, &evidence)?;
+            let entry = chronicle_derive::claims::render_prose(&v);
+            storage::set_claims(conn, "journal", &format!("{task_id}:{batch_id}"), &v.json())?;
+            storage::record_ai_job_claims(conn, job.id, v.total as i64, v.kept as i64)?;
             storage::insert_journal_entry(
                 conn,
                 task_id,
@@ -841,9 +1138,12 @@ pub(crate) fn run_ai_job(
                 (pr.grand_total_ms > 0).then(|| insights::delta(&r, &pr))
             });
             let digest = insights::narrative_digest(&r, &metrics, &apps, delta.as_ref());
-            let text = engine.narrative(&digest)?;
+            let v = engine.narrative(&digest)?;
+            let text = chronicle_derive::claims::render_prose(&v);
             let hash = insights::report_data_hash(&r);
             storage::upsert_narrative(conn, lo, hi, hash, Timestamp::now(), &text)?;
+            storage::set_claims(conn, "narrative", &format!("{lo}:{hi}"), &v.json())?;
+            storage::record_ai_job_claims(conn, job.id, v.total as i64, v.kept as i64)?;
             Ok(text)
         }
         "standup" => {
@@ -924,6 +1224,16 @@ pub(crate) fn run_ai_job(
                 let Some(text) = prompts::keep_sourced(&draft) else {
                     bail!("standup draft for {day} carried no sourced claim: {draft}");
                 };
+                // The bullets' tags are their evidence ids (m36 chunk 4).
+                let v = chronicle_derive::claims::standup_claims(&draft, &digest);
+                tracing::info!(
+                    job_id = job.id,
+                    claims = v.total,
+                    kept = v.kept,
+                    "standup claims verified"
+                );
+                storage::set_claims(conn, "standup", day, &v.json())?;
+                storage::record_ai_job_claims(conn, job.id, v.total as i64, v.kept as i64)?;
                 if text.lines().count() < draft.lines().filter(|l| !l.trim().is_empty()).count() {
                     tracing::debug!(
                         job_id = job.id,

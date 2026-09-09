@@ -1180,7 +1180,12 @@ fn card_frame(
             // Summary at the title's x, so the card keeps one left edge.
             ui.horizontal(|ui| {
                 ui.add_space(theme::STATUS_COL + ui.spacing().item_spacing.x);
-                theme::summary_line(ui, group.ai_summary.as_deref(), false);
+                theme::summary_line_claims(
+                    ui,
+                    group.ai_summary.as_deref(),
+                    group.ai_summary_claims.as_deref(),
+                    false,
+                );
             });
         });
 }
@@ -1393,7 +1398,12 @@ fn detail_ui(
             .on_hover_text("how the time was spent, by kind of work (m30)");
     }
     ui.add_space(theme::SPACE_SM);
-    theme::summary_line(ui, group.ai_summary.as_deref(), true);
+    theme::summary_line_claims(
+        ui,
+        group.ai_summary.as_deref(),
+        group.ai_summary_claims.as_deref(),
+        true,
+    );
     if group.ai_pending {
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(12.0));
@@ -1629,6 +1639,7 @@ fn detail_ui(
                         },
                     )
                     .inner;
+                let resp = theme::claims_hover(resp, j.claims.as_deref());
                 if resp.clicked() {
                     *ws_edit = Some(WorkspaceEdit::Journal {
                         entry_id: j.id,

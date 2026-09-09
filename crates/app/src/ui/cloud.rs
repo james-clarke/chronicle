@@ -71,6 +71,7 @@ pub(super) fn route_kind_label(kind: &str) -> &'static str {
         "derive" => "derive batches",
         "live" => "live tier",
         "advise" => "advise placements",
+        "reconcile_day" => "night pass",
         _ => "unknown",
     }
 }

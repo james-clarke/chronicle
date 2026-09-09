@@ -272,6 +272,8 @@ struct TaskGroup {
     /// 1-2 sentence summary from `tasks.description` (AI-written on close,
     /// user-editable).
     ai_summary: Option<String>,
+    /// The summary's claims JSON (m36 chunk 4), for the evidence popover.
+    ai_summary_claims: Option<String>,
     /// A description job for this task is queued or running.
     ai_pending: bool,
     /// External anchor (ticket key from `tasks.external_ref`).
@@ -301,6 +303,8 @@ struct JournalRow {
     /// "Mon 09:41".
     time: String,
     entry: String,
+    /// Claims JSON (m36 chunk 4), for the evidence popover.
+    claims: Option<String>,
 }
 
 /// One activity event shown as task evidence.
@@ -545,6 +549,8 @@ struct WeekInsights {
     delta: Option<chronicle_core::insights::Delta>,
     /// Cached narrative whose hash matches the current report.
     narrative: Option<String>,
+    /// Its claims JSON (m36 chunk 4), for the evidence popover.
+    narrative_claims: Option<String>,
     /// A cached narrative exists but the data moved on.
     narrative_stale: bool,
 }
@@ -1316,6 +1322,10 @@ impl TimelineApp {
             Some(_) => (None, true),
             None => (None, false),
         };
+        let narrative_claims = narrative
+            .as_ref()
+            .and_then(|_| storage::claims_for(conn, "narrative", &format!("{lo}:{hi}")).ok())
+            .flatten();
         Ok(WeekInsights {
             range: (lo, hi),
             metrics,
@@ -1324,6 +1334,7 @@ impl TimelineApp {
             delta,
             narrative,
             narrative_stale,
+            narrative_claims,
         })
     }
 
@@ -1392,6 +1403,7 @@ impl TimelineApp {
                         evidence: Vec::new(),
                         total_ms: 0,
                         ai_summary: t.description.clone(),
+                        ai_summary_claims: None,
                         ai_pending: false,
                         external_ref: t.external_ref.clone(),
                         activity: Vec::new(),
@@ -1490,8 +1502,15 @@ impl TimelineApp {
                         .strftime("%a %H:%M")
                         .to_string(),
                     entry: e.entry,
+                    claims: e.claims,
                 })
                 .collect();
+            group.ai_summary_claims = chronicle_core::storage::claims_for(
+                conn,
+                "description",
+                &group.task_id.to_string(),
+            )
+            .unwrap_or(None);
             group.checkpoint =
                 chronicle_core::storage::get_checkpoint(conn, group.task_id).unwrap_or(None);
         }

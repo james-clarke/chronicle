@@ -135,6 +135,14 @@ pub trait TextBackend: Send + Sync {
         req: &Request<'_>,
         on_token: &mut dyn FnMut(&str),
     ) -> anyhow::Result<Completion>;
+
+    /// Many requests at once (m36 chunk 4): the night pass. By default one
+    /// after another; the Anthropic backend sends one Batches API request
+    /// set at half price. The outer error is "the batch as a whole failed";
+    /// each inner result is that request's.
+    fn batch(&self, reqs: &[Request<'_>]) -> anyhow::Result<Vec<anyhow::Result<Completion>>> {
+        Ok(reqs.iter().map(|r| self.complete(r, &mut |_| {})).collect())
+    }
 }
 
 #[cfg(test)]

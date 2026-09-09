@@ -1,8 +1,10 @@
 //! Digest→prompt, llama runner, GBNF grammar, model manager.
 //! Corrections retrieval lands in M5.
 
+pub mod advise;
 mod backend;
 pub mod chat;
+pub mod claims;
 pub mod cloud;
 pub mod describe;
 pub mod embed;

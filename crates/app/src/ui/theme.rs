@@ -186,10 +186,19 @@ pub(super) fn empty_state(ui: &mut egui::Ui, headline: &str, hint: &str) {
 /// An AI-written task summary at Body size in `TEXT_DIM` (m29: no italics,
 /// no Small); renders nothing while no summary exists. `wrap` for the roomy
 /// detail pane; cards get two lines, then `…` with the whole text on hover.
-pub(super) fn summary_line(ui: &mut egui::Ui, text: Option<&str>, wrap: bool) {
+/// `summary_line` with the evidence popover (m36 chunk 4): hovering the
+/// text lists each claim's footnote and the evidence lines it rests on.
+pub(super) fn summary_line_claims(
+    ui: &mut egui::Ui,
+    text: Option<&str>,
+    claims: Option<&str>,
+    wrap: bool,
+) {
     let Some(text) = text else { return };
     if wrap {
-        ui.add(egui::Label::new(egui::RichText::new(text).color(palette::TEXT_DIM)).wrap());
+        let resp =
+            ui.add(egui::Label::new(egui::RichText::new(text).color(palette::TEXT_DIM)).wrap());
+        claims_hover(resp, claims);
         return;
     }
     let font = egui::TextStyle::Body.resolve(ui.style());
@@ -205,9 +214,49 @@ pub(super) fn summary_line(ui: &mut egui::Ui, text: Option<&str>, wrap: bool) {
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let elided = galley.elided;
     let resp = ui.add(egui::Label::new(galley).selectable(false));
-    if elided {
+    let resp = claims_hover(resp, claims);
+    if elided && claims.is_none() {
         resp.on_hover_text(text.to_owned());
     }
+}
+
+/// The evidence popover behind a claims-bearing text (m36 chunk 4): each
+/// `[^n]` footnote with the evidence lines that claim rests on. No claims,
+/// no popover.
+pub(super) fn claims_hover(resp: egui::Response, claims: Option<&str>) -> egui::Response {
+    let Some(json) = claims else { return resp };
+    let Ok(claims) = serde_json::from_str::<Vec<chronicle_derive::claims::Resolved>>(json) else {
+        return resp;
+    };
+    if claims.is_empty() {
+        return resp;
+    }
+    resp.on_hover_ui(|ui| {
+        ui.set_max_width(420.0);
+        ui.label(
+            egui::RichText::new("evidence")
+                .text_style(egui::TextStyle::Small)
+                .color(palette::TEXT_DIM),
+        );
+        for (i, c) in claims.iter().enumerate() {
+            ui.add_space(SPACE_XS);
+            ui.label(
+                egui::RichText::new(format!(
+                    "[{}] {}",
+                    i + 1,
+                    chronicle_derive::claims::strip_markers(&c.text)
+                ))
+                .color(palette::TEXT),
+            );
+            for e in &c.evidence {
+                ui.label(
+                    egui::RichText::new(format!("    {}", e.text))
+                        .text_style(egui::TextStyle::Small)
+                        .color(palette::TEXT_DIM),
+                );
+            }
+        }
+    })
 }
 
 pub(super) fn apply(ctx: &egui::Context) {

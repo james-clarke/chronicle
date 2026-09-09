@@ -218,6 +218,29 @@ with monetization and UI rows; the pairwise naming gate waits for chunk
   abstention rate is under 20 % of low-margin verdicts; a `bench
   --scorer --advisor` flag replays with and without.
 
+**Shipped 2026-09-09.** `JobKind::Advise` with `prompts/advise_v1.txt`, a
+GBNF that requires at least one cited id, and a JSON schema;
+`derive::advise` renders the segment's focus rows by `spans.id` ("id 412:
+25m Firefox: Stripe API reference [place:shop]"), both candidates with
+their eight strongest profile keys, and the nearest corrections; the
+answer is A, B, new or unsure, and `decide` re-ranks only when every
+cited id is a row of the segment (no citation, or one outside, is
+`invalid` and changes nothing). Migration 033 adds `verdict_log.advice`.
+The daemon tick queues an `advise` job for each unsure reconciled verdict
+with a runner-up, 60 a day, today only; the worker keeps (A), moves the
+interval to the runner-up with reason "advisor: B" (not a correction: the
+scorer never learns from it as truth), mints under the placeholder label
+and queues the naming job (new), or leaves it to confirm (unsure), then
+refreshes the touched tasks' evidence. `chronicle bench --replay --scorer
+--advisor [--backend NAME]` asks on every unsure probe and prints asked /
+changed / unsure / invalid and the unsure-verdict probes passing with and
+without. Gate, sandbox copy of the live DB, `--since 7` (48 probes on
+2026-09-09 evening): local qwen3-4b asked 32, changed 2, unsure 2 (6 %),
+invalid 25 — every invalid was an empty citation under the first grammar,
+which is why the grammar now demands one — 11 unsure-verdict probes
+passing with the advisor against 10 without; the frontier run through
+`claude_code` is below.
+
 ### 4. Claims carry evidence, and the night pass
 
 - `standup`, `narrative`, `task_description`, `journal` schemas gain
@@ -235,6 +258,42 @@ with monetization and UI rows; the pairwise naming gate waits for chunk
 - Gate: faithfulness (share of claims whose ids resolve) is 100 % on the
   rendered output and logged before the drop; a night's batch completes
   under the cap and the morning Home shows the reconciled day.
+
+**Shipped 2026-09-09.** Claims: `derive::claims` numbers every evidence
+line (`E7: …`) before a description, journal or narrative prompt renders
+(`_v2` templates, `grammars/claims_v1`), the model answers `{claims:
+[{text, evidence_ids}]}`, `verify` keeps the ids that name a sent line and
+drops a claim left with none, the job runs once more when more than a
+third dropped, and the text is stored with a `[^n]` marker per claim; the
+claims themselves — each with the evidence lines it rests on — go to the
+new `claims` table (migration 034; keyed description → task id, journal →
+task:batch, narrative → lo:hi, standup → day), read back into the
+timeline's summary line and journal rows and the reports' narrative card
+as a hover popover. The standup keeps its `[source]` tags as ids:
+`standup_claims` resolves each sourced bullet to the DATA lines carrying
+the same tag. Faithfulness before the drop lands on `ai_jobs.claims /
+claims_ok`, and `ai_jobs.cache_read_tokens` now persists (chunk 5 reads
+both). Resolution is against the lines the prompt carried, which are the
+`activity_events`, journal, checkpoint and span rows rendered into it —
+the popover shows those lines rather than re-querying the tables. Night
+pass: `TextBackend::batch` (sequential by default; `Redacting` cleans
+each) and on the Anthropic backend the Message Batches API — one request
+set, polled every 30 s, results keyed by `custom_id`, each billed at half
+list on `Completion.cost_usd`; the `reconcile_day` job (route key
+`reconcile_day`, "night pass" in Settings, flipped by the Everything
+preset) gathers the day's advisories (every unsure verdict, no cap), its
+tasks still under a placeholder label and the standup, runs each through
+a collecting engine that records the prompt and stops, sends the set in
+one batch, then re-runs each through a replaying engine that answers from
+the batch — a job whose rows changed in between renders a different
+prompt, finds no answer and fails, which is the right outcome. The
+daemon enqueues it once per day in place of the standup job when the
+route exists (`storage::job_seen` dedupes), the worker gets a four-hour
+timeout for it, and the online advisor now looks only at today. Gate: the
+claims and batch tests pass (316 workspace, the batch against a loopback
+mock); faithfulness on real jobs and a night's batch under the cap wait
+for a key — the local 4B answers the claims grammar, and its first live
+descriptions will show the rate in `chronicle status` once chunk 5 lands.
 
 ### 5. Six metrics, per backend
 

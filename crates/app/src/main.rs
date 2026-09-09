@@ -903,6 +903,7 @@ mod tests {
                 start_ts: 0,
                 end_ts: 60_000,
                 entry: "wired the picker".into(),
+                claims: None,
             }],
             checkpoint: None,
         }];

@@ -64,7 +64,7 @@ impl TimelineApp {
                         });
                         ui.add_space(theme::SPACE_SM);
                         if let Some(text) = &wi.narrative {
-                            narrative_card(ui, text);
+                            narrative_card(ui, text, wi.narrative_claims.as_deref());
                             ui.add_space(theme::CARD_GAP);
                         }
                         focus_tiles(ui, content_w, wi, r, &day_totals);
@@ -142,10 +142,10 @@ fn narrative_control(
     }
 }
 
-fn narrative_card(ui: &mut egui::Ui, text: &str) {
+fn narrative_card(ui: &mut egui::Ui, text: &str, claims: Option<&str>) {
     theme::hover_card(ui, "narrative_card", |ui| {
         ui.set_width(ui.available_width());
-        ui.add(
+        let resp = ui.add(
             egui::Label::new(
                 egui::RichText::new(text)
                     .text_style(egui::TextStyle::Small)
@@ -154,6 +154,7 @@ fn narrative_card(ui: &mut egui::Ui, text: &str) {
             )
             .wrap(),
         );
+        theme::claims_hover(resp, claims);
     });
 }
 
