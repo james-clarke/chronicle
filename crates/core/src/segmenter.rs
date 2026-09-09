@@ -840,28 +840,13 @@ pub fn decide(
         if c.minutes < sp.new_task_min {
             continue;
         }
-        let evidence = Segment {
-            start_ts: c.lo,
-            end_ts: c.hi,
-            minutes: c.minutes,
-            keys: c.keys.clone(),
-            vec: None,
+        // The placeholder until the naming job runs (m35 chunk 5): the
+        // project and "new work", never a window title — a title read as
+        // a label was the m30 leak of raw screen text into task lists.
+        let label = match &project {
+            Some(p) => format!("{p} \u{b7} new work"),
+            None => "new work".to_owned(),
         };
-        let mut label = crate::evidence::strip_glyphs(&evidence.describe(2)).to_owned();
-        if label.is_empty() {
-            let mut words: Vec<(&String, f64)> = c.ties.iter().map(|(t, m)| (t, *m)).collect();
-            words.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            label = words
-                .iter()
-                .map(|(t, _)| crate::evidence::strip_glyphs(t.as_str()))
-                .filter(|t| !t.is_empty())
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" ");
-        }
-        if label.is_empty() {
-            label = "new work".to_owned();
-        }
         for &i in members {
             let (seg, _, v) = &scored[i];
             placed[i] = Some(Placement {
@@ -1737,7 +1722,6 @@ mod tests {
         let profiles = vec![Profile {
             task_id: 7,
             minutes,
-            declared: Default::default(),
             last_ts: Some(0),
             vec: None,
         }];
@@ -1954,7 +1938,6 @@ mod tests {
         let profiles = vec![Profile {
             task_id: 7,
             minutes,
-            declared: Default::default(),
             last_ts: Some(0),
             vec: None,
         }];
@@ -1989,8 +1972,10 @@ mod tests {
         assert_eq!(ranges, [(0, 20), (20, 26), (26, 40), (40, 46)], "{out:?}");
         assert_eq!(out[0].target, Target::Existing(7));
         assert!(out[0].confident);
+        // The placeholder is the project and "new work" (m35 chunk 5), never
+        // the document's title; the naming job writes the real label.
         assert!(
-            matches!(&out[1].target, Target::New { cluster: 0, label, .. } if label == "Roadmap"),
+            matches!(&out[1].target, Target::New { cluster: 0, label, .. } if label == "new work"),
             "{:?}",
             out[1].target
         );
@@ -2130,14 +2115,12 @@ mod tests {
             Profile {
                 task_id: 7,
                 minutes: a,
-                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },
             Profile {
                 task_id: 9,
                 minutes: b,
-                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },
@@ -2391,7 +2374,6 @@ mod tests {
         let profile = Profile {
             task_id: 7,
             minutes,
-            declared: Default::default(),
             last_ts: Some(0),
             vec: None,
         };
@@ -2480,14 +2462,12 @@ mod tests {
             Profile {
                 task_id: 7,
                 minutes: learned,
-                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },
             Profile {
                 task_id: 9,
                 minutes: seeded,
-                declared: Default::default(),
                 last_ts: None,
                 vec: None,
             },
@@ -2633,14 +2613,12 @@ mod tests {
             Profile {
                 task_id: 85,
                 minutes: a,
-                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },
             Profile {
                 task_id: 86,
                 minutes: b,
-                declared: Default::default(),
                 last_ts: Some(0),
                 vec: None,
             },

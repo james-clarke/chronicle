@@ -466,6 +466,30 @@ exists.
   22m + 20m = the day's 10h31m. Lanes screenshot at the standalone scale
   shows the project row over six project-grouped task lanes.
 
+## Shipped: chunk 5 (2026-09-09 afternoon)
+
+- A new derived task's placeholder is "<project> · new work" ("new work"
+  with no project), never a window title or a document name
+  (`segmenter::decide`); the naming job still replaces it by matching the
+  placeholder, so a label the person changed first stays.
+- Pending `name_task` jobs whose task is gone are dropped where tasks go:
+  `merge_task` and every path that runs `DELETE_ORPHAN_TASKS`, and
+  `delete_derived_task` (`DELETE_ORPHAN_NAME_JOBS`, by the payload's
+  task id).
+- The m33 chunk C cross-project evidence rules are deleted:
+  `profile::keys_in_owned` folds back into `keys_in` (an interval only
+  covers its own project's spans since chunk 2, so every key feeds the
+  task), `Profile.declared` and its test
+  `interval_evidence_stays_in_the_task_project` are gone; the segmenter
+  fixtures lose the field.
+- Not done: the site's proof block. `site/build.sh` counts what the page
+  itself contains (third-party requests, script bytes) at build time on
+  Render, where no database exists, so "unfiled minutes" and
+  "cross-project placements: 0" cannot be written there honestly yet.
+  They print in `chronicle status` and Settings › Derivation; putting them
+  on the page needs a data path from James's machine to the build (the
+  M34 pulse line reads git history, not the DB) — a M37 item.
+
 ## Open questions for James
 
 - One silo or four for contoso, mailer, admin-api and

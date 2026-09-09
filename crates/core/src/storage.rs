@@ -1247,6 +1247,7 @@ pub fn delete_derived_task(conn: &mut Connection, task_id: i64) -> Result<bool, 
     // task_evidence, task_context, journal_entries and checkpoints cascade;
     // a task-scoped conversation keeps its messages and loses the link.
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_id])?;
+    tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
     tx.commit()?;
     Ok(true)
 }
@@ -2875,6 +2876,12 @@ const DELETE_ORPHAN_TASKS: &str = "DELETE FROM tasks WHERE source='derived' \
      AND id NOT IN (SELECT task_id FROM intervals) \
      AND id NOT IN (SELECT task_id FROM corrections)";
 
+/// A pending naming job for a task that is gone (merged away, deleted)
+/// would only fail on its turn (m35 chunk 5): drop it with the task.
+const DELETE_ORPHAN_NAME_JOBS: &str = "DELETE FROM ai_jobs WHERE kind='name_task' \
+     AND status='pending' \
+     AND json_extract(payload, '$.task_id') NOT IN (SELECT id FROM tasks)";
+
 /// Replace the batch's derived intervals and mark it done. `New` slots become
 /// task identity rows (created_ts = their earliest interval); derived tasks
 /// orphaned by the replace are removed. Replacing keeps a retried batch
@@ -3086,6 +3093,7 @@ pub fn reassign_intervals(
         mark_verdicts(&tx, &[interval_id], "wrong")?;
     }
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
     tx.commit()?;
     Ok(())
 }
@@ -5061,6 +5069,7 @@ pub fn merge_task(
         params![ts_to_ms(ts), from_task],
     )?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
     tx.commit()?;
     Ok(())
 }

@@ -7,7 +7,7 @@
 //! runner-up clears [`Params::delta`], else the segment is "to confirm".
 //! Nothing here touches the model or the database.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use regex::Regex;
 
@@ -325,9 +325,6 @@ pub struct Profile {
     pub task_id: i64,
     /// Decayed minutes per key across sources.
     pub minutes: HashMap<Key, f64>,
-    /// The keys the person declared (label ticket, project): what the
-    /// place veto trusts over anything an interval taught (m33 chunk C).
-    pub declared: HashSet<Key>,
     /// End of the task's latest interval, if any.
     pub last_ts: Option<i64>,
     /// Centroid of the task's embedded spans (m30 chunk 6), if any.
@@ -343,14 +340,10 @@ impl Profile {
             let p = by_task.entry(r.task_id).or_insert_with(|| Profile {
                 task_id: r.task_id,
                 minutes: HashMap::new(),
-                declared: HashSet::new(),
                 last_ts: None,
                 vec: None,
             });
             *p.minutes.entry(r.key.clone()).or_insert(0.0) += r.minutes;
-            if r.source == Source::Declared {
-                p.declared.insert(r.key.clone());
-            }
         }
         for iv in intervals {
             if let Some(p) = by_task.get_mut(&iv.task_id) {
@@ -375,22 +368,11 @@ fn minutes(ms: i64) -> f64 {
     ms as f64 / 60_000.0
 }
 
-/// Minutes of each key across the spans overlapping `range`.
+/// Minutes of each key across the spans overlapping `range`. Since m35
+/// chunk 2 an interval only ever covers its own project's spans, so every
+/// key feeds the task (the m33 repo-bound filter is gone with the mixed
+/// stretches it guarded against).
 fn keys_in(spans: &[AnchoredSpan], range: (i64, i64)) -> HashMap<Key, (f64, i64, i64)> {
-    keys_in_owned(spans, range, None)
-}
-
-/// [`keys_in`] as evidence for a task in `project` (m33 chunk C): a span
-/// whose place is another repo feeds only its repo-free keys (documents,
-/// sites, people, events, title terms), never its place, branch, ticket,
-/// change or session, so a task that wins a mixed stretch does not learn
-/// the other repos' work as its own. A span with no place, or a task with
-/// no project, is not constrained.
-fn keys_in_owned(
-    spans: &[AnchoredSpan],
-    range: (i64, i64),
-    project: Option<&str>,
-) -> HashMap<Key, (f64, i64, i64)> {
     let mut out: HashMap<Key, (f64, i64, i64)> = HashMap::new();
     // Spans are sorted by start; skip straight to the first that can
     // overlap. (A span longer than any before it could start earlier and
@@ -410,14 +392,7 @@ fn keys_in_owned(
         }
         let lo = s.start_ts.max(range.0);
         let hi = s.end_ts.min(range.1);
-        let foreign = project.is_some_and(|pr| {
-            let mut places = s.anchors.iter().filter(|a| a.kind == AnchorKind::Place);
-            places.clone().next().is_some() && !places.any(|a| a.value.eq_ignore_ascii_case(pr))
-        });
         for k in span_keys(s) {
-            if foreign && k.repo_bound() {
-                continue;
-            }
             let e = out.entry(k).or_insert((0.0, lo, hi));
             e.0 += minutes(ms);
             e.1 = e.1.min(lo);
@@ -473,17 +448,16 @@ pub fn build_evidence(
 
     // An unsure placement feeds nothing until kept, corrected or passively
     // accepted (m32 chunk 4): a guess must not teach the profile that
-    // then confirms the guess. A span in another repo feeds the task only
-    // its repo-free keys (m33 chunk C).
+    // then confirms the guess.
     for iv in intervals
         .iter()
         .filter(|iv| iv.end_ts <= before_ts && !iv.pending)
     {
-        let Some((_, project)) = named.get(&iv.task_id) else {
+        if !named.contains_key(&iv.task_id) {
             continue;
-        };
+        }
         let d = decay(iv.end_ts);
-        for (k, (m, lo, hi)) in keys_in_owned(spans, (iv.start_ts, iv.end_ts), project.as_deref()) {
+        for (k, (m, lo, hi)) in keys_in(spans, (iv.start_ts, iv.end_ts)) {
             add(iv.task_id, k, Source::Interval, m * d, lo, hi);
         }
     }
@@ -1195,75 +1169,6 @@ mod tests {
             .unwrap();
         // 10 minutes, one half-life old.
         assert!((place.minutes - 5.0).abs() < 0.01, "{place:?}");
-    }
-
-    /// A span in another repo feeds a project's task only its repo-free
-    /// keys; a span with no place, or a task with no project, feeds all.
-    #[test]
-    fn interval_evidence_stays_in_the_task_project() {
-        let mut shop = task(1, "checkout", 0);
-        shop.project = Some("shop".into());
-        let tasks = vec![shop, task(2, "loose ends", 0)];
-        let spans = vec![
-            span(
-                1,
-                0,
-                10 * MIN,
-                "cart.rs - shop",
-                &[(AnchorKind::Place, "shop"), (AnchorKind::Branch, "main")],
-            ),
-            span(
-                2,
-                10 * MIN,
-                20 * MIN,
-                "api.py - other",
-                &[
-                    (AnchorKind::Place, "other"),
-                    (AnchorKind::Branch, "feat"),
-                    (AnchorKind::Item, "OT-1"),
-                    (AnchorKind::Session, "s-other"),
-                    (AnchorKind::Doc, "Notes"),
-                ],
-            ),
-            span(
-                3,
-                20 * MIN,
-                25 * MIN,
-                "scratch",
-                &[(AnchorKind::Branch, "loose")],
-            ),
-        ];
-        let ivs = vec![iv(1, 1, 0, 25 * MIN), iv(2, 2, 0, 25 * MIN)];
-        let rows = build_evidence(
-            &tasks,
-            &ivs,
-            &spans,
-            &[],
-            &re(),
-            30 * MIN,
-            &Params::default(),
-        );
-        let has = |task: i64, key: Key| {
-            rows.iter()
-                .any(|r| r.task_id == task && r.key == key && r.source == Source::Interval)
-        };
-        let place = |v: &str| Key::Anchor(AnchorKind::Place, v.into());
-        let branch = |v: &str| Key::Anchor(AnchorKind::Branch, v.into());
-        assert!(has(1, place("shop")));
-        assert!(has(1, branch("main")));
-        assert!(
-            has(1, branch("loose")),
-            "a span with no place is not constrained"
-        );
-        assert!(has(1, Key::Anchor(AnchorKind::Doc, "Notes".into())));
-        assert!(!has(1, place("other")));
-        assert!(!has(1, branch("feat")));
-        assert!(!has(1, Key::Anchor(AnchorKind::Item, "OT-1".into())));
-        assert!(!has(1, Key::Anchor(AnchorKind::Session, "s-other".into())));
-        // No project: the task takes the whole desk, as before.
-        assert!(has(2, place("other")));
-        assert!(has(2, branch("feat")));
-        assert!(has(2, Key::Anchor(AnchorKind::Item, "OT-1".into())));
     }
 
     #[test]
