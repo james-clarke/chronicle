@@ -372,7 +372,7 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
     for s in spans {
         let dur = minutes(s.end_ts - s.start_ts);
         let sig = signature(s);
-        let distraction = crate::evidence::is_distraction(&s.app, &s.title, distractions);
+        let distraction = crate::evidence::is_furniture(&s.app, &s.title, distractions);
 
         if let Some(c) = cur.as_mut()
             && s.start_ts - c.hi >= AFK_GAP_MS
@@ -569,8 +569,11 @@ pub const KINDS: [&str; 10] = [
 /// change page or a git GUI `review`; a tracker page (item, no change)
 /// `plan`; a calendar entry or a call `meet`, as is a meeting app; chat and
 /// mail `communicate`; a document or site with nothing more `read`; a
-/// distraction `break`.
+/// distraction `break`; Chronicle's own window `admin` (m33).
 fn span_kind(span: &AnchoredSpan, distractions: &[Regex]) -> &'static str {
+    if crate::evidence::is_self_window(&span.app) {
+        return "admin";
+    }
     if crate::evidence::is_distraction(&span.app, &span.title, distractions) {
         return "break";
     }
@@ -604,7 +607,7 @@ fn span_kind(span: &AnchoredSpan, distractions: &[Regex]) -> &'static str {
 }
 
 /// The kind of work over `[lo, hi)`: the kind its spans spent most time
-/// on, `break` only when nothing else is there.
+/// on; `admin` only when no work is there, `break` only when nothing else.
 pub fn kind_of(spans: &[AnchoredSpan], lo: i64, hi: i64, distractions: &[Regex]) -> &'static str {
     let mut ms: HashMap<&'static str, i64> = HashMap::new();
     for s in spans.iter().filter(|s| s.end_ts > lo && s.start_ts < hi) {
@@ -615,10 +618,16 @@ pub fn kind_of(spans: &[AnchoredSpan], lo: i64, hi: i64, distractions: &[Regex])
     }
     let work = ms
         .iter()
-        .filter(|(k, _)| **k != "break")
+        .filter(|(k, _)| **k != "break" && **k != "admin")
         .max_by_key(|(k, m)| (**m, std::cmp::Reverse(**k)))
         .map(|(k, _)| *k);
-    work.unwrap_or(if ms.is_empty() { "read" } else { "break" })
+    work.unwrap_or(if ms.is_empty() {
+        "read"
+    } else if ms.contains_key("admin") {
+        "admin"
+    } else {
+        "break"
+    })
 }
 
 fn label_of(labels: &HashMap<i64, String>, id: i64) -> String {
@@ -1744,6 +1753,28 @@ mod tests {
         assert_eq!(segs[0].minutes, 20.0);
     }
 
+    // m33: Chronicle's own window is furniture. Its title's leading word
+    // matches the chronicle repo, so without the skip it would cut m30's
+    // segment and carry the word as evidence; it stretches instead.
+    #[test]
+    fn the_self_window_stretches_and_carries_no_evidence() {
+        let own = span(2, 10, 15, "chronicle", "Chronicle", &[]);
+        let spans = vec![code(1, 0, 10, "m30"), own, code(3, 15, 20, "m30")];
+        let segs = segment(&spans, &[], &SegParams::default());
+        assert_eq!(ranges(&segs), [(0, 20)]);
+        assert_eq!(segs[0].minutes, 20.0);
+        let seg = crate::profile::Segment::from_spans_skipping(&spans, 0, 20 * M, &[]);
+        // The word is there from m30's own titles (15 minutes of them), not
+        // the 5 the window would have added.
+        assert_eq!(
+            seg.keys[&Key::Term("chronicle".into())],
+            15.0,
+            "{:?}",
+            seg.keys
+        );
+        assert_eq!(seg.minutes, 20.0);
+    }
+
     #[test]
     fn a_short_segment_between_two_about_the_same_thing_folds() {
         // Two minutes on another repo's PR page inside a branch's work: too
@@ -1941,6 +1972,18 @@ mod tests {
         assert_eq!(kind_of(&[watch], 0, 10 * M, &d), "agent");
         let call = span(8, 0, 5, "Firefox", "Meet", &[(AnchorKind::Event, "call:1")]);
         assert_eq!(kind_of(&[call], 0, 5 * M, &d), "meet");
+        // m33: the app's own window is `admin`; it never outweighs work,
+        // and outranks a break when neither has any.
+        let own = span(9, 0, 8, "chronicle", "Chronicle", &[]);
+        assert_eq!(
+            kind_of(&[own.clone(), code(10, 8, 10, "m30")], 0, 10 * M, &d),
+            "author"
+        );
+        assert_eq!(
+            kind_of(&[own.clone(), spans[2].clone()], 0, 20 * M, &d),
+            "admin"
+        );
+        assert_eq!(kind_of(&[own], 0, 8 * M, &d), "admin");
     }
 
     #[test]

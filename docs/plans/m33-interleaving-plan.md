@@ -367,3 +367,36 @@ Open: a strand under `new_task_min` that the scorer calls new is dropped
 (unplaced) rather than folded, so a range's rows can sum to less than 1;
 labels of a segment with strands still come from all its keys (the
 excursion fold keeps merging them, for cut parity).
+
+## Shipped (2026-09-08, the Chronicle window is furniture)
+
+- `evidence::is_self_window(app)` (`app` equals `chronicle`, case-free;
+  the live DB has 371 such spans, all titled `Chronicle`, 198 minutes) and
+  `evidence::is_furniture(app, title, patterns)`, the self window or a
+  distraction. Every site that skipped distractions now skips furniture:
+  `segment()` stretches the open segment instead of cutting (the title's
+  leading word is `chronicle`, so before this the window could cut, and
+  seed, the chronicle repo's segments), `Segment::from_spans_skipping`
+  keeps its minutes but drops its keys and vector, `prepass` and
+  `proposals` never place or seed from a run that starts in it.
+- `span_kind` returns `admin` for the window (the kind existed in `KINDS`
+  and migration 021 unused). `kind_of` ranks it under every work kind and
+  above `break`; `hands_split` counts it in neither hand.
+- The report gets one fixed line, `report::self_line`: "Chronicle, its own
+  window: 2h10m (admin, inside the rows above)", from
+  `storage::self_window_ms` (non-AFK spans, clipped to the range), in
+  the markdown report, `chronicle status`'s report and the Reports view
+  under the hands split. `RangeReport.self_ms` is filled by the callers
+  like `underived_ms`; `build` leaves it 0.
+- Tests: `the_self_window_stretches_and_carries_no_evidence`,
+  `kinds_follow_family_and_anchors` (admin cases), `hands_split_groups_kinds`,
+  `md_prints_gap_and_underived_lines`, `self_window_ms_sums_the_apps_own_spans_clipped`,
+  `is_furniture` in `evidence::tests`. Workspace green, clippy clean.
+
+Deviation: the plan said "outside any task, so the day still sums to
+captured time". The minutes stay inside the task rows. Taking them out
+would mean cutting an interval around every glance at the window, and
+the window is opened for seconds between stretches all day; the report's
+total would fragment into slivers the tidy pass then folds back. The
+line names the minutes instead and says where they sit. Existing
+intervals keep their old kind until a re-score.

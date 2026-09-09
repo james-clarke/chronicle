@@ -75,7 +75,7 @@ pub fn run(
         .filter(|r| {
             !r.lines
                 .first()
-                .is_some_and(|l| crate::evidence::is_distraction(&l.0, &l.1, &distractions))
+                .is_some_and(|l| crate::evidence::is_furniture(&l.0, &l.1, &distractions))
         })
         .collect();
     // Branch-anchor hits for every candidate run in one pass: `anchor_tasks`

@@ -151,6 +151,11 @@ pub struct RangeReport {
     pub gaps: Vec<(i64, i64)>,
     /// Captured span time no done batch covers yet; `build` leaves it 0.
     pub underived_ms: i64,
+    /// Time in Chronicle's own window (m33), from
+    /// [`crate::storage::self_window_ms`]; `build` leaves it 0. Those
+    /// minutes sit inside the task rows (the window stretches the block it
+    /// reviews) and this line names them; it is not added to the total.
+    pub self_ms: i64,
     /// Milliseconds per kind of work over every task, biggest first (m32
     /// chunk 1); only the intervals that carry a kind count.
     pub by_kind: Vec<(String, i64)>,
@@ -160,7 +165,7 @@ pub struct RangeReport {
 const HANDS_OFF: [&str; 3] = ["supervise", "read", "meet"];
 
 /// "hands-on 3h10m · hands-off 4h20m (supervise 2h00m · read 1h20m)": the
-/// range's split by kind (m32 chunk 1). `break` counts in neither; the
+/// range's split by kind (m32 chunk 1). `break` and `admin` count in neither; the
 /// hands-off detail lists its kinds biggest first. Empty when nothing
 /// carries a kind.
 pub fn hands_split(by_kind: &[(String, i64)]) -> String {
@@ -168,7 +173,7 @@ pub fn hands_split(by_kind: &[(String, i64)]) -> String {
     let mut off = 0;
     let mut detail = Vec::new();
     for (kind, ms) in by_kind {
-        if kind == "break" {
+        if kind == "break" || kind == "admin" {
             continue;
         }
         if HANDS_OFF.contains(&kind.as_str()) {
@@ -304,6 +309,7 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
         tz: tz.clone(),
         gaps: Vec::new(),
         underived_ms: 0,
+        self_ms: 0,
         by_kind,
     })
 }
@@ -381,7 +387,19 @@ pub fn to_md(r: &RangeReport) -> String {
             fmt_dur(r.underived_ms)
         );
     }
+    if r.self_ms > 0 {
+        let _ = writeln!(out, "- {}", self_line(r.self_ms));
+    }
     out
+}
+
+/// "Chronicle, its own window: 2h10m (admin, inside the rows above)": the
+/// m33 furniture line, the same in the markdown report and the UI.
+pub fn self_line(ms: i64) -> String {
+    format!(
+        "Chronicle, its own window: {} (admin, inside the rows above)",
+        fmt_dur(ms)
+    )
 }
 
 #[cfg(test)]
@@ -485,6 +503,7 @@ mod tests {
             "hands-on 45m00s \u{b7} hands-off 0s"
         );
         assert_eq!(hands_split(&by_kind(&[("break", 15)])), "");
+        assert_eq!(hands_split(&by_kind(&[("admin", 15)])), "");
         assert_eq!(hands_split(&[]), "");
     }
 
@@ -590,10 +609,12 @@ mod tests {
         let lo = at(mon, 0, 0).timestamp().as_millisecond();
         r.gaps = vec![(lo + 9 * 3_600_000, lo + 10 * 3_600_000 + 1_800_000)];
         r.underived_ms = 170 * 60_000;
+        r.self_ms = 130 * 60_000;
         assert!(to_md(&r).ends_with(
             "- total: 0s\n\
              - not captured: Mon 09:00 \u{2192} Mon 10:30\n\
-             - captured, not yet derived: 2h50m\n"
+             - captured, not yet derived: 2h50m\n\
+             - Chronicle, its own window: 2h10m (admin, inside the rows above)\n"
         ));
     }
 }

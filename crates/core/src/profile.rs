@@ -692,9 +692,10 @@ impl Segment {
         Self::from_spans_skipping(spans, lo, hi, &[])
     }
 
-    /// [`Segment::from_spans`] with spans matching a distraction pattern
-    /// left out: a video inside a work block is not evidence of anything.
-    /// Their minutes still count toward the segment's length.
+    /// [`Segment::from_spans`] with spans matching a distraction pattern,
+    /// and Chronicle's own window, left out: a video inside a work block is
+    /// not evidence of anything, nor is the app reviewing the block. Their
+    /// minutes still count toward the segment's length.
     pub fn from_spans_skipping(
         spans: &[AnchoredSpan],
         lo: i64,
@@ -708,7 +709,7 @@ impl Segment {
         let kept: Vec<AnchoredSpan> = spans
             .iter()
             .filter(|s| s.end_ts > lo && s.start_ts < hi)
-            .filter(|s| !crate::evidence::is_distraction(&s.app, &s.title, distractions))
+            .filter(|s| !crate::evidence::is_furniture(&s.app, &s.title, distractions))
             .cloned()
             .collect();
         let keys = keys_in(&kept, (lo, hi))

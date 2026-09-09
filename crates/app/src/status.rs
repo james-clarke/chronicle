@@ -349,6 +349,7 @@ pub(crate) fn report(
     let (ledger_start, runs) = chronicle_core::storage::runs_for_report(&conn, lo, hi)?;
     r.gaps = chronicle_core::report::capture_gaps(&runs, ledger_start, lo, hi.min(now));
     r.underived_ms = chronicle_core::storage::underived_ms(&conn, lo, hi)?;
+    r.self_ms = chronicle_core::storage::self_window_ms(&conn, lo, hi)?;
     match format {
         ReportFormat::Csv => print!("{}", chronicle_core::report::to_csv(&r)),
         ReportFormat::Md => print!("{}", chronicle_core::report::to_md(&r)),

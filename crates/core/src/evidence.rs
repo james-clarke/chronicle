@@ -138,6 +138,19 @@ pub fn is_distraction(app: &str, title: &str, patterns: &[Regex]) -> bool {
         .any(|p| p.is_match(app) || p.is_match(title))
 }
 
+/// Chronicle's own window (m33): furniture, not work. Its title is the
+/// product name, so as evidence it would only ever point at the chronicle
+/// repo; and the minutes spent reviewing a task are not that task's.
+pub fn is_self_window(app: &str) -> bool {
+    app.eq_ignore_ascii_case("chronicle")
+}
+
+/// A span that carries no evidence and never cuts or seeds anything: a
+/// distraction, or the app's own window.
+pub fn is_furniture(app: &str, title: &str, patterns: &[Regex]) -> bool {
+    is_self_window(app) || is_distraction(app, title, patterns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +235,8 @@ mod tests {
         assert_eq!(pats.len(), 1);
         assert!(is_distraction("firefox", "Cats - YouTube", &pats));
         assert!(!is_distraction("Terminator", "ACME-11382 tests", &pats));
+        assert!(is_furniture("chronicle", "Chronicle", &[]));
+        assert!(is_furniture("firefox", "Cats - YouTube", &pats));
+        assert!(!is_furniture("Terminator", "chronicle (main) — zsh", &pats));
     }
 }

@@ -1293,7 +1293,9 @@ impl TimelineApp {
             .as_millisecond();
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let tasks = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
-        Ok(chronicle_core::report::build(&tasks, days, &self.tz)?)
+        let mut r = chronicle_core::report::build(&tasks, days, &self.tz)?;
+        r.self_ms = chronicle_core::storage::self_window_ms(conn, lo, hi)?;
+        Ok(r)
     }
 
     /// The day's AI sessions for the agents lane.

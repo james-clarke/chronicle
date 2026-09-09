@@ -1364,6 +1364,19 @@ pub fn underived_ms(conn: &Connection, lo: i64, hi: i64) -> Result<i64, StorageE
     )?)
 }
 
+/// Non-AFK span time inside `[lo, hi)` spent in Chronicle's own window
+/// (m33): reported as one `admin` line, never as a task's evidence.
+pub fn self_window_ms(conn: &Connection, lo: i64, hi: i64) -> Result<i64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)), 0)
+         FROM spans
+         WHERE kind != 'afk' AND LOWER(app) = 'chronicle'
+           AND end_ts > ?1 AND start_ts < ?2",
+        [lo, hi],
+        |r| r.get(0),
+    )?)
+}
+
 /// A focus span whose stream of focus/title/afk events stops for this long
 /// before its end was not watched: the AFK poller emits idle within
 /// `afk_close_secs` of the last input, so an hour without any event while a
@@ -6331,5 +6344,25 @@ mod tests {
         }
         assert_eq!(super::underived_ms(&conn, 0, 300).unwrap(), 150);
         assert_eq!(super::underived_ms(&conn, 0, 250).unwrap(), 100);
+    }
+
+    #[test]
+    fn self_window_ms_sums_the_apps_own_spans_clipped() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        for (lo, hi, app, kind) in [
+            (0, 100, "chronicle", "focus"),
+            (100, 150, "Terminator", "focus"),
+            (150, 200, "Chronicle", "focus"),
+            (200, 300, "chronicle", "afk"),
+        ] {
+            conn.execute(
+                "INSERT INTO spans (start_ts, end_ts, app, title, kind) VALUES (?1, ?2, ?3, 'Chronicle', ?4)",
+                rusqlite::params![lo, hi, app, kind],
+            )
+            .unwrap();
+        }
+        assert_eq!(super::self_window_ms(&conn, 0, 300).unwrap(), 150);
+        assert_eq!(super::self_window_ms(&conn, 50, 175).unwrap(), 75);
     }
 }

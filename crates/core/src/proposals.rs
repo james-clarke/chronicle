@@ -201,13 +201,14 @@ pub fn refresh(
 ) -> Result<Vec<i64>, StorageError> {
     let hi = ts_to_ms(now);
     let lo = hi - WINDOW_MS;
-    // A distraction stretch (video, social) never seeds a proposal.
+    // A distraction stretch (video, social) or the app's own window never
+    // seeds a proposal.
     let runs: Vec<_> = storage::unassigned_runs(conn, lo, hi, RUN_GAP_MS)?
         .into_iter()
         .filter(|r| {
             !r.lines
                 .first()
-                .is_some_and(|l| crate::evidence::is_distraction(&l.0, &l.1, distractions))
+                .is_some_and(|l| crate::evidence::is_furniture(&l.0, &l.1, distractions))
         })
         .collect();
     let titles = day_titles(conn, lo, hi)?;

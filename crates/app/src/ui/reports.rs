@@ -84,6 +84,9 @@ impl TimelineApp {
                     if !split.is_empty() {
                         ui.weak(split);
                     }
+                    if r.self_ms > 0 {
+                        ui.weak(chronicle_core::report::self_line(r.self_ms));
+                    }
                     if r.tasks.is_empty() {
                         ui.add_space(theme::SECTION_GAP);
                         theme::empty_state(
