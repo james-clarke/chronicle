@@ -342,3 +342,46 @@ Deviations:
   reads low. The strip and the week are unaffected. Could switch to the
   head commit's own zone if it grates.
 - The reports caption still says the shot's week (see chunks 1 and 2).
+
+## Shipped (2026-09-08, chunk 5)
+
+- **Copy sync**, each line checked against the code as of `c56691e`:
+  - Sees, para 2: "Five minutes away closes the batch" is gone. Hands off
+    the keyboard is quiet, not away; the stretch stays open until the
+    screen locks, or ten minutes with nothing live, thirty with a page, a
+    call or an agent in front (`quiet_secs` 600, `away_secs` 1800,
+    `crates/core/src/config.rs`; the M32 chunk 1 presence model).
+  - Sees panel: the closing line is now a `quiet` row (no input, Figma
+    still in front) and a `lock` row that closes the batch.
+  - Places, para 3: the quiet/away sentence moved up to Sees; in its place
+    the evidence-scoring segmenter "behind a switch in Settings"
+    (`derive_mode` defaults to `model`, so the segmenter is not the default
+    path the plan table assumed) and the not-captured line ("minutes it
+    was not running are written down as not captured, never guessed", the
+    `status` and report wording).
+  - Band caption: `12m not captured` between away and switches.
+  - Learns: "Rename a task, its project with it" (one edit carries label,
+    project and description). The plan's "the Chronicle window itself is
+    never counted" is not on the page: the M33 skip has not shipped, the
+    window is only classed `Other` and never attaches an agent session.
+  - Reports caption stays `31 aug – 6 sep`: the shot is of that week, and
+    dating it from the build would put a false week under real numbers.
+  - Hero lede unchanged.
+- **Perf pass**: `<link rel=preload as=image>` for the three hero images,
+  `fetchpriority=high` on the preload and the `<img>` for the app shot;
+  `decoding=async` on the five lazy shots; `Cache-Control:
+  max-age=31536000, immutable` for `/img/*` in `render.yaml` (`og.webp`
+  shares the rule; reshoot under a new name if it must change).
+- Budget after: third-party 0, inline JS 348 B, above the fold 199 KB,
+  page 420 KB. The preload links add no fold bytes; the build already
+  counts every `<link href>` and dedupes against the hero `<img>` sources.
+
+Deviations:
+
+- `content-visibility: auto` not applied. It carries paint containment at
+  all times, which clips descendant ink overflow at the section box: the
+  80 px shadows under the two wide shots and the 40 px panel shadows in
+  the stages would be cut at the content edge. The offscreen content is
+  two lazy images and text, so there is nothing to save.
+- Lighthouse still not run (no `lighthouse` on the box); the budget check
+  stands in until it runs against the live host.
