@@ -385,3 +385,20 @@ Deviations:
   two lazy images and text, so there is nothing to save.
 - Lighthouse still not run (no `lighthouse` on the box); the budget check
   stands in until it runs against the live host.
+
+## Shipped (2026-09-08, the domain)
+
+- `chronicled.dev` is live on the Render static site (custom domain, ALIAS
+  at the apex and `www` CNAME at Porkbun, certificate issued), and the
+  `onrender.com` host still answers with no redirect. The page now names
+  the domain itself: `<link rel="canonical">`, `og:url` and `og:image`
+  are fixed to `https://chronicled.dev/` in `index.html`; the `og` marker
+  block and the `RENDER_EXTERNAL_URL` splice are gone from `build.sh`,
+  since that variable stays the `onrender.com` URL under a custom domain.
+- The budget skips the canonical link: it is not a request, so it counts
+  toward neither third-party nor the fold. Third-party 0, inline JS
+  348 B, fold 199 KB, page 420 KB, unchanged.
+- Not done: a host redirect from `chronicle-site.onrender.com` to the
+  domain. Render's static `routes` are path-based, and a script redirect
+  would be the page's first non-decorative JS; the canonical tag covers
+  search, and the old host is not linked anywhere.

@@ -132,13 +132,6 @@ awk '
   { print }
 ' "$html" > "$tmp/wrapped" && cat "$tmp/wrapped" > "$html"
 
-# --- sharing: absolute URLs from Render, a placeholder host otherwise --------
-
-base=${RENDER_EXTERNAL_URL:-https://chronicle-site.onrender.com}
-base=${base%/}
-printf '  <meta property="og:url" content="%s/">\n  <meta property="og:image" content="%s/img/og.webp">\n' "$base" "$base" > "$tmp/og"
-splice og "$tmp/og"
-
 # --- numbers from the tree (nothing that needs a cargo build) ---------------
 
 tests=$(grep -rc '#\[test\]' crates --include='*.rs' | awk -F: '{ s += $2 } END { print s + 0 }')
@@ -156,7 +149,7 @@ fail=0
 bytes() { cat "$@" | wc -c | tr -d ' '; }
 kb() { echo "$(( ($1 + 512) / 1024 )) KB"; }
 
-third=$(grep -cE '<(link|script|img|iframe|source|video|audio|object)[^>]*(src|href)="https?://' "$html" || true)
+third=$(grep -E '<(link|script|img|iframe|source|video|audio|object)[^>]*(src|href)="https?://' "$html" | grep -vc 'rel="canonical"' || true)
 third=$((third + $(grep -cE '(url\(["'"'"']?|@import[^;]*)https?://' "$site/style.css" || true)))
 js=$(awk 'BEGIN { RS = "</script>" } /<script/ { sub(/.*<script[^>]*>/, ""); n += length($0) } END { print n + 0 }' "$html")
 js=$((js + $(grep -oE ' on[a-z]+="[^"]*"' "$html" | wc -c | tr -d ' ')))
@@ -164,7 +157,7 @@ printf '  <p class="proof">This page: <b>%s</b> third-party requests, <b>%s B</b
 splice proof "$tmp/proof"
 
 grep -o '<img[^>]*>' "$html" | grep -v 'loading="lazy"' | sed -n 's/.*src="\([^"]*\)".*/\1/p' > "$tmp/fold"
-sed -n 's/.*<link[^>]*href="\([^"]*\)".*/\1/p' "$html" >> "$tmp/fold"
+sed -n '/rel="canonical"/d; s/.*<link[^>]*href="\([^"]*\)".*/\1/p' "$html" >> "$tmp/fold"
 grep -o '<img[^>]*>' "$html" | sed -n 's/.*src="\([^"]*\)".*/\1/p' > "$tmp/all"
 cat "$tmp/fold" >> "$tmp/all"
 fold=$(( $(bytes "$html") + $(cd "$site" && sort -u "$tmp/fold" | xargs cat | wc -c) ))
