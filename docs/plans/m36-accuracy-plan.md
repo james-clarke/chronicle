@@ -238,8 +238,20 @@ without. Gate, sandbox copy of the live DB, `--since 7` (48 probes on
 2026-09-09 evening): local qwen3-4b asked 32, changed 2, unsure 2 (6 %),
 invalid 25 — every invalid was an empty citation under the first grammar,
 which is why the grammar now demands one — 11 unsure-verdict probes
-passing with the advisor against 10 without; the frontier run through
-`claude_code` is below.
+passing with the advisor against 10 without. Frontier, `--backend claude`
+(claude-sonnet-5 through Claude Code, same 48 probes): asked 32, changed
+16, unsure 2 (6 %), invalid 0 — every answer cited rows of the segment —
+and 10 unsure-verdict probes passing with the advisor against 10 without:
+it moved as many right placements wrong as wrong ones right, so the
+precision gate (≥ 0.7 on changed placements) is not met on this
+correction set, though abstention (6 %) is. Consequence, shipped the same
+evening: the online advisor runs only while `advise` has a cloud route
+(the daemon never queues for the local model; a locally-engined advise
+job skips with advice 'skipped', which the night pass may re-ask), and
+the 4B is asked only by the bench, on purpose. The number to beat before
+routing it: the M30 thesis holds here too — most of the 32 unsure verdicts
+sit between a task and a near-duplicate of it, where the evidence rows
+cannot decide.
 
 ### 4. Claims carry evidence, and the night pass
 
@@ -332,8 +344,9 @@ never routed), prints every pair and writes `judge:<backend>` ("examples
 win a, lose b, tie c of n") — chunk 2's naming gate. Gate: the numbers
 render for 'local' as soon as the daemon's next daily self-score runs
 (the migration is empty until then); a cloud backend's week waits for a
-key. The local drift and judge runs on the sandbox copy are in the
-handoff notes.
+key. On the sandbox copy, local qwen3-4b: `bench --drift` similarity 1.00
+over five naming re-runs (deterministic sampling; no standup row for the
+copy's yesterday), `bench --judge` below.
 
 Order 0 → 1 → 2 → 3 → 4 → 5. Chunk 0 is a day and unblocks the decision;
 1 is a prerequisite for any user other than James; 2–3 are the accuracy

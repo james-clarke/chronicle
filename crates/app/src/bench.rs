@@ -802,7 +802,15 @@ pub(crate) fn judge(data_dir: &Path, backend: Option<&str>) -> anyhow::Result<()
     let config = Config::load(&data_dir.join("config.toml"))?;
     let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
     let namer = bench_engine(data_dir, &config, None)?;
-    let judge = bench_engine(data_dir, &config, backend)?;
+    // One llama backend per process: without `--backend` the namer judges.
+    let cloud_judge;
+    let judge = match backend {
+        Some(_) => {
+            cloud_judge = bench_engine(data_dir, &config, backend)?;
+            &cloud_judge
+        }
+        None => &namer,
+    };
     let cases = naming_cases(&conn, 10)?;
     if cases.is_empty() {
         bail!("no derived tasks with spans to name");
