@@ -534,7 +534,9 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 }
                 if segmenter {
                     reconcile_due(&mut conn, &config, &distractions);
-                    advise_due(&conn);
+                    if scheduler.cloud_kinds.iter().any(|k| k == "advise") {
+                        advise_due(&conn);
+                    }
                     if let Err(e) = chronicle_core::segmenter::daily(&mut conn, &config, now) {
                         tracing::error!("segmenter daily housekeeping failed: {e}");
                     }
@@ -1755,7 +1757,8 @@ fn advise_since_ms() -> i64 {
 }
 /// Queue an `advise` job per unsure reconciled verdict with a runner-up
 /// (m36 chunk 3), up to the day's cap; the row is marked pending so the
-/// next tick does not queue it twice.
+/// next tick does not queue it twice. Called only while `advise` has a
+/// cloud route: the local model is never asked.
 fn advise_due(conn: &rusqlite::Connection) {
     use chronicle_core::storage;
     let used = storage::get_meta(conn, &day_counter_key("advise"))

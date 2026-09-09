@@ -862,6 +862,16 @@ pub(crate) fn run_ai_job(
             let verdict_id = payload["verdict_id"]
                 .as_i64()
                 .context("payload lacks verdict_id")?;
+            // The 4B is not a judge (the local run of the gate changed 2 of
+            // 32 and cited nothing): the advisor answers on a cloud route
+            // or not at all. The bench asks the local model on purpose.
+            if matches!(engine, Engine::Local(_)) {
+                storage::mark_verdict_advice(conn, verdict_id, "skipped")?;
+                return Err(SkipJob(
+                    "the advisor needs a cloud route; the local model is not asked".into(),
+                )
+                .into());
+            }
             let Some(case) = storage::advice_case(conn, verdict_id)? else {
                 storage::mark_verdict_advice(conn, verdict_id, "stale")?;
                 return Err(SkipJob("the interval moved before the advisor ran".into()).into());

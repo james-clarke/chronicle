@@ -4102,7 +4102,7 @@ pub fn unadvised_verdicts_in(
     let mut stmt = conn.prepare(
         "SELECT v.id, v.interval_id FROM verdict_log v JOIN intervals i ON i.id = v.interval_id
          WHERE v.confident = 0 AND v.runner_up IS NOT NULL
-           AND (v.advice IS NULL OR v.advice IN ('pending', 'unsure', 'invalid'))
+           AND (v.advice IS NULL OR v.advice IN ('pending', 'unsure', 'invalid', 'skipped'))
            AND v.outcome IS NULL AND i.start_ts >= ?1 AND i.start_ts < ?2 AND i.task_id = v.task_id
          ORDER BY i.start_ts",
     )?;
