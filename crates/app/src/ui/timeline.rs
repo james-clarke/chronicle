@@ -1348,7 +1348,7 @@ fn detail_ui(
                 );
             });
             ui.add(
-                egui::TextEdit::multiline(&mut e.description)
+                egui::TextEdit::multiline(e.description.get_or_insert_default())
                     .desired_rows(2)
                     .desired_width(ui.available_width())
                     .hint_text("description"),
@@ -2119,7 +2119,7 @@ fn detail_actions(
                 task_id: group.task_id,
                 label: group.label.clone(),
                 project: group.project.clone().unwrap_or_default(),
-                description: group.ai_summary.clone().unwrap_or_default(),
+                description: Some(group.ai_summary.clone().unwrap_or_default()),
             });
         }
         ui.menu_button("\u{2026}", |ui| {
@@ -2170,7 +2170,7 @@ fn card_menu(
                 task_id: group.task_id,
                 label: group.label.clone(),
                 project: group.project.clone().unwrap_or_default(),
-                description: group.ai_summary.clone().unwrap_or_default(),
+                description: Some(group.ai_summary.clone().unwrap_or_default()),
             });
             ui.close();
         }

@@ -1976,6 +1976,22 @@ pub fn close_task(
     Ok(())
 }
 
+/// A task's label, project and description; `None` when there is no such
+/// task.
+pub fn task_identity(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Option<(String, Option<String>, Option<String>)>, StorageError> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT label, project, description FROM tasks WHERE id=?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?)
+}
+
 /// `None` clears the description.
 pub fn set_task_description(
     conn: &Connection,
@@ -6344,6 +6360,22 @@ mod tests {
         }
         assert_eq!(super::underived_ms(&conn, 0, 300).unwrap(), 150);
         assert_eq!(super::underived_ms(&conn, 0, 250).unwrap(), 100);
+    }
+
+    #[test]
+    fn task_identity_reads_one_task_or_none() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, project, source, status, created_ts) VALUES (7, 'landing copy', 'launch', 'user', 'open', 0)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            super::task_identity(&conn, 7).unwrap(),
+            Some(("landing copy".to_owned(), Some("launch".to_owned()), None))
+        );
+        assert_eq!(super::task_identity(&conn, 8).unwrap(), None);
     }
 
     #[test]

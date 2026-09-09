@@ -186,6 +186,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ModelCmd,
     },
+    /// List and edit tasks.
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
     /// Run the allowlisted MCP context calls and print what derivation would inject.
     McpCheck,
     /// Internal: benchmark downloaded models on fixtures and/or real batches.
@@ -293,6 +298,26 @@ enum ModelCmd {
     List,
 }
 
+#[derive(Subcommand)]
+enum TaskCmd {
+    /// Open tasks: id, project, label.
+    List,
+    /// Change a task's label, project or description. Label and project
+    /// edits are kept as a correction the model reads first next time.
+    Rename {
+        /// Task id, from `task list` or the UI.
+        id: i64,
+        #[arg(long)]
+        label: Option<String>,
+        /// An empty string clears the project.
+        #[arg(long)]
+        project: Option<String>,
+        /// An empty string clears the description.
+        #[arg(long)]
+        description: Option<String>,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let data_dir = chronicle_core::data_dir().context("could not resolve a data directory")?;
@@ -316,6 +341,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::DeriveWorker => derive_resident(&data_dir),
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
+        Cmd::Task { cmd } => task_cmd(&data_dir, cmd),
         Cmd::Bench {
             fixtures,
             batch,
@@ -387,6 +413,69 @@ fn main() -> anyhow::Result<()> {
             client_id,
             client_secret,
         } => gcal_login(&data_dir, client_id, client_secret),
+    }
+}
+
+fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
+    use chronicle_core::storage;
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    match cmd {
+        TaskCmd::List => {
+            for t in storage::open_tasks(&conn, usize::MAX)? {
+                println!(
+                    "{:>5}  {:<16}  {}{}",
+                    t.id,
+                    t.project.as_deref().unwrap_or("-"),
+                    t.label,
+                    if t.declared { "  (declared)" } else { "" }
+                );
+            }
+            Ok(())
+        }
+        TaskCmd::Rename {
+            id,
+            label,
+            project,
+            description,
+        } => {
+            if label.is_none() && project.is_none() && description.is_none() {
+                bail!("nothing to change: pass --label, --project or --description");
+            }
+            let Some((old_label, old_project, _)) = storage::task_identity(&conn, id)? else {
+                bail!("no task {id}");
+            };
+            let new_label = label.as_deref().map(str::trim).unwrap_or(&old_label);
+            if new_label.is_empty() {
+                bail!("the label cannot be empty");
+            }
+            let new_project = match project.as_deref().map(str::trim) {
+                Some("") => None,
+                Some(p) => Some(p),
+                None => old_project.as_deref(),
+            };
+            if new_label != old_label || new_project != old_project.as_deref() {
+                storage::insert_correction(
+                    &mut conn,
+                    jiff::Timestamp::now(),
+                    id,
+                    new_label,
+                    new_project,
+                )?;
+                println!(
+                    "task {id}: {old_label} [{}] \u{2192} {new_label} [{}]",
+                    old_project.as_deref().unwrap_or("-"),
+                    new_project.unwrap_or("-")
+                );
+            }
+            if let Some(d) = description.as_deref().map(str::trim) {
+                storage::set_task_description(&conn, id, (!d.is_empty()).then_some(d))?;
+                println!(
+                    "task {id}: description {}",
+                    if d.is_empty() { "cleared" } else { "set" }
+                );
+            }
+            Ok(())
+        }
     }
 }
 

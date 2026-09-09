@@ -400,3 +400,22 @@ the window is opened for seconds between stretches all day; the report's
 total would fragment into slivers the tidy pass then folds back. The
 line names the minutes instead and says where they sit. Existing
 intervals keep their old kind until a re-score.
+
+## Shipped (2026-09-08, rename on Home rows and the CLI)
+
+- Home "Working on" rows get `rename` in their `…` menu, ahead of `close`
+  and `merge into…`: the same two-row form as the timeline's compact card
+  (label, then project beside save and cancel), through the one
+  `Action::Rename` path. `EditState.description` is now `Option<String>`:
+  `None` from a Home row leaves the description alone, the timeline card
+  still edits it. The handler reads the current identity from the Home
+  rows when the task has no group today, so an unchanged save writes no
+  correction.
+- `chronicle task list` (id, project, label, `(declared)`) and
+  `chronicle task rename <id> [--label] [--project] [--description]`, on
+  `storage::task_identity` (new, with a test) plus the existing
+  `insert_correction` and `set_task_description`. An empty `--project` or
+  `--description` clears it; an empty label is refused; nothing passed is
+  refused. Label and project edits are one `rename` correction, read
+  first by the model next time, as from the UI. The CLI does not notify
+  the daemon; the UI picks the change up on its next reload.

@@ -396,7 +396,9 @@ struct EditState {
     task_id: i64,
     label: String,
     project: String,
-    description: String,
+    /// `None` leaves the description alone (the Home row edit has no
+    /// description field; the timeline card's has).
+    description: Option<String>,
 }
 
 /// Deferred mutation collected during rendering, applied after the frame's
@@ -1699,13 +1701,23 @@ impl TimelineApp {
                 let project = edit.project.trim();
                 let project = (!project.is_empty()).then_some(project);
                 let group = self.groups.iter().find(|g| g.task_id == edit.task_id);
-                let identity_changed =
-                    group.is_none_or(|g| g.label != label || g.project.as_deref() != project);
+                // A Home row's task may have no group today; its row still
+                // knows the identity, so an unchanged save writes nothing.
+                let current = group
+                    .map(|g| (g.label.as_str(), g.project.as_deref()))
+                    .or_else(|| {
+                        self.open_tasks
+                            .iter()
+                            .find(|t| t.task_id == edit.task_id)
+                            .map(|t| (t.label.as_str(), t.project.as_deref()))
+                    });
+                let identity_changed = current.is_none_or(|(l, p)| l != label || p != project);
                 // Description edits are separate from the correction few-shot
                 // mechanism: a description-only save records no 'rename'.
-                let desc = edit.description.trim();
-                let desc_changed =
-                    group.is_none_or(|g| g.ai_summary.as_deref().unwrap_or("") != desc);
+                let desc = edit.description.as_deref().map(str::trim);
+                let desc_changed = desc.is_some_and(|d| {
+                    group.is_none_or(|g| g.ai_summary.as_deref().unwrap_or("") != d)
+                });
                 if !identity_changed && !desc_changed {
                     return;
                 }
@@ -1720,7 +1732,10 @@ impl TimelineApp {
                 } else {
                     Ok(())
                 };
-                if result.is_ok() && desc_changed {
+                if result.is_ok()
+                    && desc_changed
+                    && let Some(desc) = desc
+                {
                     let _ = chronicle_core::storage::set_task_description(
                         conn,
                         edit.task_id,

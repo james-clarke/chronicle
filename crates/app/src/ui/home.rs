@@ -8,7 +8,8 @@ use eframe::egui;
 
 use super::timeline::{matches_filter, merge_item, merge_picker};
 use super::{
-    Action, FeedBlock, OpenRow, Proposal, SpanRow, StandupRow, TimelineApp, fmt_dur, theme,
+    Action, EditState, FeedBlock, OpenRow, Proposal, SpanRow, StandupRow, TimelineApp, fmt_dur,
+    theme,
 };
 
 impl TimelineApp {
@@ -363,6 +364,7 @@ impl TimelineApp {
                     let new_label = &mut self.new_label;
                     let new_project = &mut self.new_project;
                     let merge_pick = &mut self.merge_pick;
+                    let edit = &mut self.edit;
                     let suggestion = &self.suggestion;
                     let declare_conflict = &mut self.declare_conflict;
 
@@ -438,12 +440,49 @@ impl TimelineApp {
                     for &o in &open_vis {
                         let t = &open_tasks[o];
                         let color = theme::task_color(t.task_id, t.project.as_deref());
+                        if edit.as_ref().is_some_and(|e| e.task_id == t.task_id) {
+                            // Same two-row form as the timeline's compact
+                            // card: label alone, then project + actions.
+                            {
+                                let e = edit.as_mut().expect("checked above");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut e.label)
+                                        .desired_width(content_w - 20.0),
+                                );
+                            }
+                            ui.horizontal(|ui| {
+                                let e = edit.as_mut().expect("checked above");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut e.project)
+                                        .desired_width(content_w - 130.0)
+                                        .hint_text("project"),
+                                );
+                                if ui.button("save").clicked()
+                                    && let Some(e) = edit.take()
+                                {
+                                    pending = Some(Action::Rename(e));
+                                }
+                                if ui.button("cancel").clicked() {
+                                    *edit = None;
+                                }
+                            });
+                            continue;
+                        }
                         task_row(t, color, true)
                             .emphasis()
                             .padded()
                             .subtitle(working_subtitle(t))
                             .show(ui, content_w, |ui| {
                                 ui.menu_button("\u{2026}", |ui| {
+                                    if ui.button("rename").clicked() {
+                                        *edit = Some(EditState {
+                                            task_id: t.task_id,
+                                            label: t.label.clone(),
+                                            project: t.project.clone().unwrap_or_default(),
+                                            description: None,
+                                        });
+                                        ui.close();
+                                    }
                                     if ui.button("close").clicked() {
                                         pending = Some(Action::Close(t.task_id));
                                         ui.close();
