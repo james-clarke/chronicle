@@ -346,7 +346,15 @@ render for 'local' as soon as the daemon's next daily self-score runs
 (the migration is empty until then); a cloud backend's week waits for a
 key. On the sandbox copy, local qwen3-4b: `bench --drift` similarity 1.00
 over five naming re-runs (deterministic sampling; no standup row for the
-copy's yesterday), `bench --judge` below.
+copy's yesterday); `bench --judge` on ten recent derived tasks, the 4B
+naming both ways: with the 4B as referee, examples win 3, lose 5, tie 2;
+with claude-sonnet-5 through Claude Code as referee, examples win 4, lose
+3, tie 3. Chunk 2's gate is not met by that margin. The losses share a
+shape: four examples at cosine ≥ 0.6 pull the label toward a
+correction's project wording ("Brotherhood Tooling documentation" onto a
+KDE-configuration stretch, "PB-Email system" onto a games search), so the
+first thing to try is fewer examples (k = 2) or a higher floor (0.7),
+re-judged with the frontier referee.
 
 Order 0 → 1 → 2 → 3 → 4 → 5. Chunk 0 is a day and unblocks the decision;
 1 is a prerequisite for any user other than James; 2–3 are the accuracy
