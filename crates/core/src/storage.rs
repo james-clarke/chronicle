@@ -54,6 +54,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/026_interval_share.sql")),
         M::up(include_str!("../migrations/027_self_score.sql")),
         M::up(include_str!("../migrations/028_task_closed_by.sql")),
+        M::up(include_str!("../migrations/029_spans_project.sql")),
     ])
 });
 
@@ -725,6 +726,54 @@ pub fn anchor_spans(
     }
     tx.commit()?;
     Ok(anchored)
+}
+
+/// File the focus spans overlapping `[lo, hi)` into projects (m35 chunk
+/// 0): the matcher over each span's stored anchors, then the join rule,
+/// then `spans.project` rewritten for every one of them. Returns the
+/// number of spans filed.
+pub fn file_spans(
+    conn: &mut Connection,
+    lo: i64,
+    hi: i64,
+    matcher: &crate::project::Matcher,
+    join_min: u32,
+) -> Result<usize, StorageError> {
+    let spans = anchored_spans(conn, lo, hi)?;
+    let filed = filed_spans(&spans, matcher, join_min);
+    let tx = conn.transaction()?;
+    let mut n = 0;
+    {
+        let mut upd = tx.prepare("UPDATE spans SET project = ?2 WHERE id = ?1")?;
+        for (span, project) in spans.iter().zip(&filed) {
+            upd.execute(params![span.id, project])?;
+            n += usize::from(project.is_some());
+        }
+    }
+    tx.commit()?;
+    Ok(n)
+}
+
+/// The project per span of `spans` (time order), matcher then join rule.
+pub fn filed_spans(
+    spans: &[profile::AnchoredSpan],
+    matcher: &crate::project::Matcher,
+    join_min: u32,
+) -> Vec<Option<String>> {
+    let mut rows: Vec<(i64, i64, Option<String>)> = spans
+        .iter()
+        .map(|s| {
+            (
+                s.start_ts,
+                s.end_ts,
+                matcher
+                    .file(&s.app, &s.title, &s.anchors)
+                    .map(str::to_owned),
+            )
+        })
+        .collect();
+    crate::project::join_short(&mut rows, i64::from(join_min) * 60_000);
+    rows.into_iter().map(|r| r.2).collect()
 }
 
 /// Anchors on one span, kind order then value.

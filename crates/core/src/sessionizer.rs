@@ -439,5 +439,8 @@ pub fn refresh(conn: &mut Connection, config: &Config, now: Timestamp) -> Result
     if let Ok(re) = Regex::new(&config.ticket_regex) {
         storage::anchor_spans(conn, t0, i64::MAX, &re)?;
     }
+    // Projects follow the anchors (m35 chunk 0).
+    let matcher = crate::project::Matcher::from_config(config);
+    storage::file_spans(conn, t0, i64::MAX, &matcher, config.project_join_min)?;
     Ok(())
 }

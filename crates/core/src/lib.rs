@@ -13,6 +13,7 @@ pub mod merge;
 pub mod models_config;
 pub mod prepass;
 pub mod profile;
+pub mod project;
 pub mod proposals;
 pub mod replay;
 pub mod report;

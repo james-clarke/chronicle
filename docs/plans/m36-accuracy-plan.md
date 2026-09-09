@@ -129,7 +129,8 @@ per-call floor of about a minute, which rules it out for the live tier.
 
 ### 2. Corrections as memory
 
-- Migration 029: `task_embeddings(task_id, kind, vec BLOB, ts)` and
+- Migration 030 (029 is M35's `spans.project`): `task_embeddings(task_id,
+  kind, vec BLOB, ts)` and
   `correction_embeddings(correction_id, vec BLOB)`; the vectors from
   `embed.rs` (bge-small, 384 floats, already downloaded). Embed on task
   create, rename, and on each correction; a cosine scan over a few

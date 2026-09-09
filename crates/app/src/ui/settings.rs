@@ -31,6 +31,8 @@ pub(super) struct SettingsPanel {
     checkpoint_afk_secs: u32,
     /// As written in config.toml (`~` kept); edited by the Connections rows.
     git_repos: Vec<String>,
+    /// Projects and their rules (m35 chunk 0).
+    projects: super::projects::ProjectsPanel,
     sources: super::connections::LocalSources,
     connections: super::connections::Connections,
     /// Cloud backends + routing (m31 c7); re-read from `models.toml` on
@@ -232,6 +234,7 @@ impl SettingsPanel {
             distraction_patterns: config.distraction_patterns.join("\n"),
             checkpoint_afk_secs: config.checkpoint_afk_secs,
             git_repos: config.git_repos.clone(),
+            projects: super::projects::ProjectsPanel::from_config(&config),
             digest_view: None,
             output_view: None,
             sources: super::connections::LocalSources::from_config(&config),
@@ -275,6 +278,7 @@ impl SettingsPanel {
         config.checkpoint_afk_secs = self.checkpoint_afk_secs;
         config.git_repos = self.git_repos.clone();
         self.sources.apply(&mut config);
+        self.projects.apply(&mut config)?;
         let toml = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
         let before = toml::to_string_pretty(&self.base).map_err(|e| e.to_string())?;
         if toml == before {
@@ -300,6 +304,7 @@ fn switch_row(ui: &mut egui::Ui, on: &mut bool, label: &str) -> bool {
 /// Section titles in form order; the wide-window index lists them.
 const SECTIONS: &[&str] = &[
     "Connections",
+    "Projects",
     "Model",
     "Capture",
     "Derivation",
@@ -625,6 +630,9 @@ impl TimelineApp {
                                 &mut panel.git_repos,
                                 &mut panel.sources,
                             );
+
+                            section(ui, "Projects", false, jump);
+                            panel.projects.ui(ui, conn);
 
                             section(ui, "Model", false, jump);
                             ui.label("model path (empty = default preset)");

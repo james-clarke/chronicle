@@ -9,6 +9,7 @@ mod cloud;
 mod connections;
 mod home;
 mod onboarding;
+mod projects;
 mod reports;
 mod settings;
 mod theme;

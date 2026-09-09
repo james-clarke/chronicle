@@ -4,6 +4,7 @@ mod capture;
 mod chat_worker;
 mod daemon;
 mod derive;
+mod project;
 mod rotate;
 mod status;
 mod ui;
@@ -191,6 +192,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
+    /// Projects (m35): the rules that file time into a project.
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
     /// Run the allowlisted MCP context calls and print what derivation would inject.
     McpCheck,
     /// Internal: benchmark downloaded models on fixtures and/or real batches.
@@ -299,6 +305,26 @@ enum ModelCmd {
 }
 
 #[derive(Subcommand)]
+enum ProjectCmd {
+    /// Projects in force: name, remote, instance paths, rules.
+    List,
+    /// Match the last N days against the current config (the stored column
+    /// is not read): minutes per project, unfiled minutes, the top unfiled
+    /// places and titles to tune the rules by.
+    Test {
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+    },
+    /// Re-file stored spans after a config edit (all history unless --days).
+    Rebuild {
+        #[arg(long)]
+        days: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
 enum TaskCmd {
     /// Open tasks: id, project, label.
     List,
@@ -342,6 +368,11 @@ fn main() -> anyhow::Result<()> {
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Task { cmd } => task_cmd(&data_dir, cmd),
+        Cmd::Project { cmd } => match cmd {
+            ProjectCmd::List => project::list(&data_dir),
+            ProjectCmd::Test { days, top } => project::test(&data_dir, days, top),
+            ProjectCmd::Rebuild { days } => project::rebuild(&data_dir, days),
+        },
         Cmd::Bench {
             fixtures,
             batch,

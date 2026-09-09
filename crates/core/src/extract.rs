@@ -1003,6 +1003,12 @@ pub fn path_place(text: &str) -> Option<String> {
     comps.get(i).and_then(|c| place_value(c))
 }
 
+/// The path a title shows (`~/dev/x/src/main.rs — nvim`), for the project
+/// matcher; None when the title names no home-relative or absolute path.
+pub fn title_path(text: &str) -> Option<&str> {
+    path_in(text)
+}
+
 /// The path a title shows. Spaces are allowed inside it (`~/Documents/Acme
 /// Ltd`), so the match is cut at the first title separator and trailing
 /// whitespace.

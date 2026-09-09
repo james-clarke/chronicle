@@ -103,6 +103,14 @@ pub struct Config {
     /// Repo paths polled for branch/commit evidence (`~` expanded).
     /// Empty = git capture off.
     pub git_repos: Vec<String>,
+    /// Projects (m35 chunk 0): every focus span is filed into the first
+    /// project whose rule matches it (repo path or place, ticket prefix,
+    /// domain, title regex, app), else left unfiled. Empty = one project per
+    /// `git_repos` entry, named after its folder.
+    pub projects: Vec<ProjectCfg>,
+    /// An unfiled span shorter than this many minutes between two spans of
+    /// one project joins that project (a glance at a tab). 0 = off.
+    pub project_join_min: u32,
     /// Directories of AI coding transcripts watched for `ai_session`
     /// evidence (`<dir>/<project>/*.jsonl`, Claude Code layout; `~`
     /// expanded). Empty = off.
@@ -185,6 +193,8 @@ impl Default for Config {
             distraction_patterns: Vec::new(),
             background_minutes: 10,
             git_repos: Vec::new(),
+            projects: Vec::new(),
+            project_join_min: 2,
             ai_session_dirs: vec!["~/.claude/projects".into()],
             github_prs: false,
             mic_capture: true,
@@ -201,7 +211,66 @@ impl Default for Config {
     }
 }
 
+/// One project: a name and the rules that file a span into it. Identity is
+/// the git remote of its repos (`host/org/repo`, read at match time); the
+/// paths and their worktrees are instances of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectCfg {
+    pub name: String,
+    /// Repo or folder paths (`~` expanded); worktrees of a repo count too.
+    pub repos: Vec<String>,
+    /// Work-item key prefixes (`ACME`); matched on item anchors and on
+    /// branch names, case-insensitively.
+    pub tickets: Vec<String>,
+    /// Sites (`contoso.atlassian.net`); a subdomain of a listed site matches.
+    /// `localhost:<port>` is not needed here: the ports collector maps a dev
+    /// server to its repo's place.
+    pub domains: Vec<String>,
+    /// Window-title regexes (find anywhere).
+    pub titles: Vec<String>,
+    /// Whole apps (case-insensitive app name).
+    pub apps: Vec<String>,
+    /// Mint derived sub-tasks inside this project.
+    pub derive: bool,
+}
+
+impl Default for ProjectCfg {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            repos: Vec::new(),
+            tickets: Vec::new(),
+            domains: Vec::new(),
+            titles: Vec::new(),
+            apps: Vec::new(),
+            derive: true,
+        }
+    }
+}
+
 impl Config {
+    /// The projects in force: `projects` as written, else one per
+    /// `git_repos` entry named after its folder (the first-run default).
+    pub fn projects_effective(&self) -> Vec<ProjectCfg> {
+        if !self.projects.is_empty() {
+            return self.projects.clone();
+        }
+        self.git_repos
+            .iter()
+            .filter_map(|p| {
+                let name = expand_home(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_ascii_lowercase())?;
+                Some(ProjectCfg {
+                    name,
+                    repos: vec![p.clone()],
+                    ..ProjectCfg::default()
+                })
+            })
+            .collect()
+    }
+
     /// Missing file = defaults. A present-but-invalid file is an error, not a silent fallback.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {

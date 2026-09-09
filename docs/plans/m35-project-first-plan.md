@@ -223,6 +223,52 @@ Order 0 → 1 → 2 → 3 → 4 → 5. Chunks 0 and 1 are the accuracy win and
 ship first; 3 is the UI James asked for and can start once 0's config
 exists.
 
+## Shipped: chunk 0 (2026-09-09 afternoon)
+
+- Config: `[[projects]]` (`name`, `repos`, `tickets`, `domains`, `titles`,
+  `apps`, `derive`) and `project_join_min` (default 2) in
+  `crates/core/src/config.rs`; `Config::projects_effective` is one project
+  per `git_repos` entry when none is written, so first run needs no edit.
+- Matcher: `crates/core/src/project.rs`. Instances are the configured
+  paths plus every worktree the shared git dir lists (`worktrees_of`);
+  identity is the remote as `host/org/repo` (`remote_of`, `remote_id`).
+  Order per span: a path the title shows under an instance (longest
+  wins) → a place or `repo@branch` anchor naming an instance folder → an
+  item key by ticket prefix, `org/repo#n` by remote slug or folder, or a
+  branch carrying `<prefix>-<n>` in any case → a domain anchor equal to or
+  under a listed site → title regex → app. `join_short` is the glance
+  rule. `localhost:<port>` needs no rule: the ports collector already
+  turns it into the repo's place anchor.
+- Storage: migration 029 `spans.project`; `storage::file_spans` runs the
+  matcher over stored anchors after `anchor_spans` on every tail refresh
+  (`sessionizer::refresh`) and from `chronicle project rebuild`.
+- CLI: `chronicle project list | test [--days 7] [--top 15] | rebuild
+  [--days N]` (`crates/app/src/project.rs`). `test` matches fresh from
+  config, never the stored column, and lists unfiled places (the
+  discovery list: repos no project claims), unfiled domains and titles.
+- Settings › Projects (`crates/app/src/ui/projects.rs`): a row per project
+  with the lists as comma-separated fields, derive, remove, add, the join
+  minutes, and "test last 7 days" rendering the same report from the rows
+  as edited. Save validates the regexes and rejects duplicate names; the
+  per-repo defaults are not written unless edited.
+- Gate: on a sandbox copy of the live DB, 2026-09-02 → 09-09, 1944 focus
+  minutes. Per-repo defaults file 63.7 %; the config below (written to
+  James's config.toml at install) files **90.0 %**. What stays unfiled is
+  personal browsing (Wordle, YouTube, a sorting quiz), New Tab, Google Meet
+  without a title, a markdown viewer tab (58 min) and Memtime (15 min).
+  Two silos as answered: `acme` (contoso, mailer, admin-api; ACME;
+  atlassian.net, acmeapi.example, telnyx.com, circleci.com, heroku.com,
+  amazon.com; titles ` - PB - `, `acme`, `^Meet - `, `mailer|contoso`)
+  and `acme-ai` (ACAI); `chronicle` (chronicled.dev, render.com,
+  onrender.com, porkbun.com, title `chronicle`, app `chronicle`),
+  `fabrikam-web` (fabrikam.example, `FABRIKAM`), `portfolio`, and `sprog` for
+  `~/dev/sprog.io`, which `test` surfaced as the top unfiled place.
+- Not in this chunk: proposing discovered repos in Home (chunk 3 with the
+  Home-by-project work; `project test` lists them today), `#123`
+  repo-scoped keys as a configured rule (the matcher resolves
+  `org/repo#n` from anchors already), and the Settings chips (fields
+  instead).
+
 ## Open questions for James
 
 - One silo or four for contoso, mailer, admin-api and
