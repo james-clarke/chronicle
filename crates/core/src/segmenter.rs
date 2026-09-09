@@ -781,11 +781,7 @@ fn declared_sink(
             score,
         },
     );
-    let runner = v
-        .ranked
-        .get(1)
-        .map_or(0.0, |c| c.score)
-        .max(v.new_task);
+    let runner = v.ranked.get(1).map_or(0.0, |c| c.score).max(v.new_task);
     v.confident = v.best == Some(sink) && v.confident;
     v.best = Some(sink);
     v.margin = score - runner;

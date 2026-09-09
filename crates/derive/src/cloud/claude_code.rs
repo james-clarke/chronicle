@@ -193,7 +193,11 @@ fn parse_output(
     let start = stdout.find('{');
     let doc: Option<Value> = start.and_then(|i| serde_json::from_str(&stdout[i..]).ok());
     let Some(doc) = doc else {
-        let text = if stderr.trim().is_empty() { stdout } else { stderr };
+        let text = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
         return Err(if is_login_failure(text) {
             CloudError::Auth(401, brief(text))
         } else if !exited_ok {
@@ -203,9 +207,21 @@ fn parse_output(
         });
     };
     let result_text = doc.get("result").and_then(Value::as_str).unwrap_or("");
-    if doc.get("is_error").and_then(Value::as_bool).unwrap_or(false) || !exited_ok {
-        let subtype = doc.get("subtype").and_then(Value::as_str).unwrap_or("error");
-        let detail = if result_text.is_empty() { stderr } else { result_text };
+    if doc
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || !exited_ok
+    {
+        let subtype = doc
+            .get("subtype")
+            .and_then(Value::as_str)
+            .unwrap_or("error");
+        let detail = if result_text.is_empty() {
+            stderr
+        } else {
+            result_text
+        };
         return Err(if is_login_failure(detail) {
             CloudError::Auth(401, brief(detail))
         } else {
@@ -318,7 +334,11 @@ mod tests {
         };
         let args = b.args(&req);
         assert!(!args.iter().any(|a| a == "--bare"));
-        let at = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].clone());
+        let at = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .map(|i| args[i + 1].clone())
+        };
         assert_eq!(at("--model").as_deref(), Some("claude-sonnet-5"));
         assert_eq!(at("--max-turns").as_deref(), Some(MAX_TURNS));
         assert_eq!(at("--json-schema").as_deref(), Some(r#"{"type":"object"}"#));
