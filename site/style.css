@@ -703,6 +703,8 @@ section { padding: 72px 0; }
   section { padding: 44px 0; }
   .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 24px; }
   .hero::before { display: none; }
+  /* one column: the width of "written down." on a phone sets the size */
+  h1 { font-size: clamp(2.2rem, 11vw, 4.4rem); }
   .wide-shot, .wipe { margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .wide-shot img, .wipe-box, .wipe-handle { width: 760px; max-width: none; }
   .wipe-before { font-size: 0.58rem; }
