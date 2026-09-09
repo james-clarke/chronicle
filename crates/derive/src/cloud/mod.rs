@@ -3,6 +3,7 @@
 //! `models.toml` route names a backend.
 
 pub mod anthropic;
+pub mod claude_code;
 pub mod sse;
 
 use chronicle_core::models_config::{BackendCfg, BackendKind};
@@ -21,6 +22,11 @@ pub fn build(name: &str, cfg: &BackendCfg) -> anyhow::Result<Box<dyn TextBackend
         BackendKind::OpenAiCompat => {
             anyhow::bail!("backend {name}: openai_compat arrives in m31 chunk 3")
         }
+        BackendKind::ClaudeCode => Ok(Box::new(claude_code::ClaudeCodeBackend::new(
+            name,
+            &cfg.model,
+            cfg.command.as_deref(),
+        ))),
     }
 }
 
@@ -95,6 +101,9 @@ pub fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
 }
 
 pub fn cost_usd(model: &str, c: &Completion) -> Option<f64> {
+    if let Some(reported) = c.cost_usd {
+        return Some(reported);
+    }
     let (inp, out) = price_per_mtok(model)?;
     let fresh = c.input_tokens.saturating_sub(c.cache_read_tokens) as f64;
     let cached = c.cache_read_tokens as f64;

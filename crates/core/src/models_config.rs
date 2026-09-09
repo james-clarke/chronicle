@@ -44,19 +44,27 @@ fn default_max_usd() -> f64 {
 }
 
 /// One cloud backend: a name, a wire shape, and the key to speak it with.
+/// `claude_code` has no key: it spawns the user's own Claude Code login,
+/// and `command` names the binary when it is not `claude` on `PATH`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackendCfg {
     pub kind: BackendKind,
     pub model: String,
+    #[serde(default)]
     pub api_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 impl BackendCfg {
     /// First 7 chars + "…" + last 4, for the UI — the key itself is never
     /// printed anywhere else. Short keys (under 12 chars) mask fully.
     pub fn masked_key(&self) -> String {
+        if self.kind == BackendKind::ClaudeCode {
+            return "your Claude Code login".to_string();
+        }
         let chars: Vec<char> = self.api_key.chars().collect();
         if chars.len() < 12 {
             return "••••".to_string();
@@ -72,6 +80,8 @@ impl BackendCfg {
 pub enum BackendKind {
     Anthropic,
     OpenAiCompat,
+    /// Headless Claude Code (`claude -p`) on the user's own subscription.
+    ClaudeCode,
 }
 
 /// A one-click routing preset. `WritingAndChat` is the proposed default
@@ -216,6 +226,7 @@ mod tests {
             model: model.to_string(),
             api_key: key.to_string(),
             base_url: None,
+            command: None,
         }
     }
 

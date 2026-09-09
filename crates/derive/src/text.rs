@@ -108,6 +108,9 @@ pub struct Completion {
     /// Prompt tokens served from the provider's cache (billed at 0.1×).
     pub cache_read_tokens: u32,
     pub wall_ms: u64,
+    /// The provider's own cost figure when it reports one (Claude Code's
+    /// `total_cost_usd`); `cloud::cost_usd` prefers it to the price table.
+    pub cost_usd: Option<f64>,
 }
 
 pub trait TextBackend: Send + Sync {

@@ -51,6 +51,7 @@ fn kind_label(kind: BackendKind) -> &'static str {
     match kind {
         BackendKind::Anthropic => "Anthropic",
         BackendKind::OpenAiCompat => "OpenAI-compatible",
+        BackendKind::ClaudeCode => "Claude Code login",
     }
 }
 
@@ -332,6 +333,16 @@ impl CloudPanel {
                     }
                     BackendKind::OpenAiCompat => {
                         Err("openai_compat arrives in m31 chunk 3".to_owned())
+                    }
+                    BackendKind::ClaudeCode => {
+                        chronicle_derive::cloud::claude_code::ClaudeCodeBackend::new(
+                            &name,
+                            &cfg.model,
+                            cfg.command.as_deref(),
+                        )
+                        .probe()
+                        .map(|d| d.as_millis() as u64)
+                        .map_err(|e| e.brief())
                     }
                 };
                 let _ = tx.send(result);
@@ -709,6 +720,7 @@ impl CloudPanel {
                 model,
                 api_key: key,
                 base_url,
+                command: None,
             },
         );
         self.commit(next, data_dir)?;
