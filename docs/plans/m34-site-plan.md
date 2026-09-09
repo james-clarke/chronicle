@@ -1,8 +1,7 @@
 # M34 — the site, hyped and honest (draft)
 
-Status: drafted 2026-09-08; chunks 0, 1 and 2 shipped the same evening
-(see "Shipped" at the end). Chunks 3 and 4 are next; chunk 5 waits for
-the M32/M33 copy. Builds on `docs/plans/site-plan.md`
+Status: drafted 2026-09-08; chunks 0 to 4 shipped the same evening (see
+"Shipped" at the end). Chunk 5 (copy sync, perf pass) is what is left. Builds on `docs/plans/site-plan.md`
 (principles still hold: every claim gets a mechanism or a number, the page
 itself is evidence).
 
@@ -300,3 +299,46 @@ Deviations:
   but the handle starts at the left (divider at 0 = placed timeline
   shown) and dragging right reveals the raw column, since the divider's
   position is the value.
+
+## Shipped (2026-09-08, chunks 3 and 4)
+
+- **Panel lines land one by one.** The build wraps every line of a
+  `<pre><code>` panel in `<span style="--i:n">` (awk, once — a file that
+  already carries `--i:` is left alone); a line starting `stored ` gets
+  `class="hit"`. The stylesheet makes the wrapped `code` a flex column
+  (so the newlines between block spans stop rendering as blank lines)
+  and, once the stage has `.in`, slides each span in at `--i × 40 ms`;
+  the hit line also flashes green. The committed page has no spans and
+  no animation; the observer now watches `.stage` too.
+- **The rail draws itself** under `@supports (animation-timeline:
+  view())`: the existing gradient line scales from 0 over `cover 0% …
+  75%` of its own view progress. No SVG path — the gradient line was
+  already there and `scaleY` is the same picture for less. Browsers
+  without scroll timelines keep the static line.
+- **What leaves your machine**: a three-column table (what · without a
+  key · with your key, five rows, every cell from the code as of
+  2026-09-08: one SQLite file, the 1.1 GB model, jobs routed to
+  Anthropic, tab titles over 127.0.0.1:5600, connections only when
+  asked) beside the Storage & server line as the app prints it
+  (`egress_line` in `settings.rs`, both the no-key and with-key forms)
+  and one verify-yourself line (`ss -tnp | grep chronicle`). The table
+  scrolls sideways under 34 em.
+- **The build, in the open**: `<!-- changelog -->` gets the last ten
+  feat|fix|perf subjects grouped by milestone tag, the newest group
+  marked "in progress", each row date · type(scope) · subject cut at 72;
+  the numbers moved here from the footer, plus the binary line typed in
+  with its date (41 MB release, 2026-09-08). The footer gets
+  `<!-- proof -->`: third-party count and script bytes as the budget
+  check measured them.
+- **Places** got its M32 line now that chunks 1 and 3 are live: ten quiet
+  minutes are reading, thirty while an agent works, two windows in turn
+  split by share.
+- Budget after: JS 348 B, above the fold 198 KB, page 419 KB.
+
+Deviations:
+
+- No SVG flow line; the rail is the gradient line scaled (above).
+- "commits today" on the pulse is the UTC day, so late evening EDT it
+  reads low. The strip and the week are unaffected. Could switch to the
+  head commit's own zone if it grates.
+- The reports caption still says the shot's week (see chunks 1 and 2).
