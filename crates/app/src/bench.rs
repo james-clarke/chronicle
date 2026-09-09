@@ -282,6 +282,12 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
         let projects: HashMap<i64, Option<String>> =
             tasks.iter().map(|t| (t.id, t.project.clone())).collect();
         let profiles = profile::build_profiles(&tasks, &[], &aspans, &[], &re, origin, &params);
+        // The newest declared task per project is its sink, as in the daemon.
+        let sinks: HashMap<String, i64> = tasks
+            .iter()
+            .filter(|t| t.declared)
+            .filter_map(|t| t.project.as_ref().map(|p| (p.to_ascii_lowercase(), t.id)))
+            .collect();
         let segs = segmenter::segment(&aspans, &distractions, &sp);
         let placements = segmenter::decide(
             &aspans,
@@ -290,6 +296,7 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
             &profiles,
             &labels,
             &projects,
+            &sinks,
             &distractions,
             &params,
             &sp,

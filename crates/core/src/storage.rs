@@ -53,6 +53,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/025_presence.sql")),
         M::up(include_str!("../migrations/026_interval_share.sql")),
         M::up(include_str!("../migrations/027_self_score.sql")),
+        M::up(include_str!("../migrations/028_task_closed_by.sql")),
     ])
 });
 
@@ -950,6 +951,37 @@ pub fn task_projects(
         .query_map([], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
         })?
+        .collect::<Result<_, _>>()?)
+}
+
+/// The newest open declared task per project, keyed by the project
+/// lowercased: the concurrency split's sink for a session in that repo
+/// (m35 fix 3).
+pub fn declared_sinks(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+    let mut out = std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT project, id FROM tasks
+         WHERE status='open' AND source='user' AND project IS NOT NULL
+         ORDER BY created_ts, id",
+    )?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (project, id) = row?;
+        out.insert(project.to_ascii_lowercase(), id);
+    }
+    Ok(out)
+}
+
+/// Open declared tasks with no row in the evidence cache: declared before
+/// the cache was seeded on declare, or through a path that does not seed.
+pub fn unseeded_user_tasks(conn: &Connection) -> Result<Vec<i64>, StorageError> {
+    Ok(conn
+        .prepare(
+            "SELECT id FROM tasks t WHERE status='open' AND source='user'
+               AND NOT EXISTS (SELECT 1 FROM task_evidence e WHERE e.task_id = t.id)",
+        )?
+        .query_map([], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
 }
 
@@ -1943,7 +1975,7 @@ pub fn recently_closed(conn: &Connection, n: usize) -> Result<Vec<OpenTask>, Sto
 
 pub fn reopen_task(conn: &Connection, task_id: i64) -> Result<(), StorageError> {
     conn.execute(
-        "UPDATE tasks SET status='open', closed_ts=NULL WHERE id=?1",
+        "UPDATE tasks SET status='open', closed_ts=NULL, closed_by=NULL WHERE id=?1",
         [task_id],
     )?;
     Ok(())
@@ -1964,13 +1996,15 @@ pub fn insert_user_task(
     Ok(conn.last_insert_rowid())
 }
 
+/// A close the person made sticks: the task neither scores nor reopens
+/// until they reopen it (m35 fix 2).
 pub fn close_task(
     conn: &Connection,
     ts: jiff::Timestamp,
     task_id: i64,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "UPDATE tasks SET status='closed', closed_ts=?1 WHERE id=?2",
+        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user' WHERE id=?2",
         params![ts_to_ms(ts), task_id],
     )?;
     Ok(())
@@ -2549,7 +2583,7 @@ pub fn autoclose_stale_tasks(
     let now_ms = ts_to_ms(now);
     let cutoff = now_ms - i64::from(days) * 86_400_000;
     Ok(conn.execute(
-        "UPDATE tasks SET status='closed', closed_ts=?1
+        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='auto'
          WHERE status='open' AND source='derived'
            AND id NOT IN (SELECT task_id FROM intervals WHERE end_ts > ?2)",
         params![now_ms, cutoff],
@@ -3291,9 +3325,11 @@ pub fn store_segments(
             wrote = true;
         }
         if wrote && matches!(p.target, Target::Existing(_)) {
-            // A closed task its own evidence brought back reopens itself.
+            // An autoclosed task its own evidence brought back reopens
+            // itself; a task the person closed stays closed.
             tx.execute(
-                "UPDATE tasks SET status='open', closed_ts=NULL WHERE id=?1 AND status='closed'",
+                "UPDATE tasks SET status='open', closed_ts=NULL, closed_by=NULL
+                 WHERE id=?1 AND status='closed' AND closed_by='auto'",
                 [task_id],
             )?;
         }
@@ -3320,14 +3356,15 @@ pub fn live_profiles(
     ),
     StorageError,
 > {
-    // Closed tasks stay scoreable on their strong anchors only: an item,
-    // branch or document coming back reopens the task; a shared place or
-    // a stray word does not.
+    // Autoclosed tasks stay scoreable on their strong anchors only: an
+    // item, commit or event coming back reopens the task; a shared place,
+    // the repo's branch or a stray word does not. A task the person closed
+    // is out of the running until they reopen it.
     let mut stmt = conn.prepare(
         "SELECT e.task_id, e.kind, e.value, e.source, e.minutes, e.first_ts, e.last_ts
          FROM task_evidence e JOIN tasks t ON t.id = e.task_id
          WHERE t.status = 'open'
-            OR e.kind IN ('item', 'change', 'branch', 'session', 'event')",
+            OR (t.closed_by = 'auto' AND e.kind IN ('item', 'change', 'event'))",
     )?;
     let mut rows = Vec::new();
     for row in stmt.query_map([], |r| {
@@ -4115,7 +4152,7 @@ pub fn consolidate_apply(
             params![into, from],
         )?;
         tx.execute(
-            "UPDATE tasks SET status='closed', closed_ts=?1 WHERE id=?2",
+            "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user' WHERE id=?2",
             params![ts_to_ms(ts), from],
         )?;
         before.merges.push(MergeBefore {
@@ -4693,7 +4730,7 @@ pub fn merge_task(
         params![to_task, from_task],
     )?;
     tx.execute(
-        "UPDATE tasks SET status='closed', closed_ts=?1 WHERE id=?2",
+        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user' WHERE id=?2",
         params![ts_to_ms(ts), from_task],
     )?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;

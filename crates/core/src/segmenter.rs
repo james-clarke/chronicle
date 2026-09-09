@@ -732,6 +732,66 @@ fn place_veto(
     });
 }
 
+/// The declared sink (m35 fix 3): a segment whose dominant place has a
+/// task the person declared goes to the newest such task, whatever the
+/// scorer preferred, unless the segment carries a ticket the sink does
+/// not hold and another task does. The scorer's ranking stays underneath
+/// (confidence and margin still describe its view, so the row reads as
+/// uncertain when it disagreed and the runner-up stays one click away).
+/// Returns the place the rule fired on.
+fn declared_sink(
+    v: &mut Verdict,
+    seg: &Segment,
+    profiles: &[Profile],
+    sinks: &HashMap<String, i64>,
+) -> Option<String> {
+    let (place, _) = seg
+        .keys
+        .iter()
+        .filter_map(|(k, m)| match k {
+            Key::Anchor(AnchorKind::Place, p) => Some((p.as_str(), *m)),
+            _ => None,
+        })
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.0.cmp(a.0))
+        })?;
+    let &sink = sinks.get(&place.to_ascii_lowercase())?;
+    let items: Vec<&Key> = seg
+        .keys
+        .keys()
+        .filter(|k| matches!(k, Key::Anchor(AnchorKind::Item, _)))
+        .collect();
+    let holds = |pr: &Profile| items.iter().any(|k| pr.minutes.contains_key(*k));
+    let sink_holds = profiles.iter().any(|pr| pr.task_id == sink && holds(pr));
+    if !sink_holds && profiles.iter().any(|pr| pr.task_id != sink && holds(pr)) {
+        return None;
+    }
+    let score = v
+        .ranked
+        .iter()
+        .find(|c| c.task_id == sink)
+        .map_or(0.0, |c| c.score);
+    v.ranked.retain(|c| c.task_id != sink);
+    v.ranked.insert(
+        0,
+        profile::Candidate {
+            task_id: sink,
+            score,
+        },
+    );
+    let runner = v
+        .ranked
+        .get(1)
+        .map_or(0.0, |c| c.score)
+        .max(v.new_task);
+    v.confident = v.best == Some(sink) && v.confident;
+    v.best = Some(sink);
+    v.margin = score - runner;
+    Some(place.to_owned())
+}
+
 /// Decide every segment in `spans` over `[lo, hi)`: score each against the
 /// profiles under the place veto; the "new" stretches cluster by what
 /// they share, and a cluster with `new_task_min` focus minutes becomes one
@@ -746,12 +806,14 @@ pub fn decide(
     profiles: &[Profile],
     labels: &HashMap<i64, String>,
     projects: &HashMap<i64, Option<String>>,
+    sinks: &HashMap<String, i64>,
     distractions: &[Regex],
     params: &Params,
     sp: &SegParams,
 ) -> Vec<Placement> {
     // 1. Score.
     let mut scored: Vec<(Seg, Segment, Verdict)> = Vec::new();
+    let mut sunk: Vec<Option<String>> = Vec::new();
     for mut seg in segment(spans, distractions, sp) {
         seg.lo = seg.lo.max(lo);
         seg.hi = seg.hi.min(hi);
@@ -775,12 +837,20 @@ pub fn decide(
         }
         let mut v = profile::score(&evidence, profiles, params);
         place_veto(&mut v, &evidence, profiles, projects, params);
+        sunk.push(declared_sink(&mut v, &evidence, profiles, sinks));
         scored.push((seg, evidence, v));
     }
     // 2. Place on existing tasks.
     let mut placed: Vec<Option<Placement>> = scored
         .iter()
-        .map(|(seg, ev, v)| place_existing(ev, seg.share, seg.strand, v, labels))
+        .zip(&sunk)
+        .map(|((seg, ev, v), sunk)| {
+            let mut p = place_existing(ev, seg.share, seg.strand, v, labels)?;
+            if let Some(place) = sunk {
+                p.reason = format!("declared in {place}");
+            }
+            Some(p)
+        })
         .collect();
     // 3. Cluster what is new by what it shares; a cluster with enough
     //    minutes is one new task, however scattered its stretches.
@@ -978,6 +1048,7 @@ pub fn split_concurrent(
     sessions: &[LiveSession],
     profiles: &[Profile],
     projects: &HashMap<i64, Option<String>>,
+    sinks: &HashMap<String, i64>,
     params: &Params,
     sp: &SegParams,
     distractions: &[Regex],
@@ -1052,6 +1123,7 @@ pub fn split_concurrent(
                 &p.target,
                 profiles,
                 projects,
+                sinks,
                 &mut opened,
             );
             match groups.iter_mut().find(|g| g.0 == target) {
@@ -1121,12 +1193,15 @@ pub fn split_concurrent(
     out
 }
 
-/// Where one live session goes given its verdict: its best task when that
-/// task is in the session's repo, has no project, or holds the session's
-/// item; else any task holding the item (a ticket spanning repos is one
-/// task); else the best-ranked task in the session's repo; else a new
-/// task in that repo, one per repo over the window; with no repo at all,
-/// the segment's own target.
+/// Where one live session goes given its verdict: the newest task the
+/// person declared in the session's repo, unless another task holds the
+/// session's item; else its best task when that task is in the session's
+/// repo, has no project, or holds the session's item; else any task
+/// holding the item (a ticket spanning repos is one task); else the
+/// best-ranked task in the session's repo; else a new task in that repo,
+/// one per repo over the window; with no repo at all, the segment's own
+/// target.
+#[allow(clippy::too_many_arguments)]
 fn session_target(
     s: &LiveSession,
     owned: &[AnchoredSpan],
@@ -1134,6 +1209,7 @@ fn session_target(
     fallback: &Target,
     profiles: &[Profile],
     projects: &HashMap<i64, Option<String>>,
+    sinks: &HashMap<String, i64>,
     opened: &mut Vec<(String, String)>,
 ) -> Target {
     let anchor = |kind: AnchorKind| -> Vec<&str> {
@@ -1162,11 +1238,6 @@ fn session_target(
             }),
         }
     };
-    if let Some(t) = verdict.and_then(|v| v.best)
-        && consistent(t)
-    {
-        return Target::Existing(t);
-    }
     // A task that holds the session's ticket owns it whatever the repo.
     let holds = |pr: &Profile| {
         items.iter().any(|i| {
@@ -1174,6 +1245,22 @@ fn session_target(
                 .contains_key(&Key::Anchor(AnchorKind::Item, (*i).to_owned()))
         })
     };
+    // The task the person declared in this repo is its sink (m35 fix 3):
+    // a derived task with more evidence never outranks it. Only a ticket
+    // the sink does not hold and another task does overrides it.
+    if let Some(place) = place
+        && let Some(&sink) = sinks.get(&place.to_ascii_lowercase())
+    {
+        let sink_holds = profiles.iter().any(|pr| pr.task_id == sink && holds(pr));
+        if sink_holds || !profiles.iter().any(|pr| pr.task_id != sink && holds(pr)) {
+            return Target::Existing(sink);
+        }
+    }
+    if let Some(t) = verdict.and_then(|v| v.best)
+        && consistent(t)
+    {
+        return Target::Existing(t);
+    }
     if let Some(v) = verdict
         && let Some(c) = v.ranked.iter().find(|c| {
             profiles
@@ -1287,6 +1374,25 @@ fn ticket_re(config: &Config) -> Regex {
         .expect("default ticket regex compiles")
 }
 
+/// A freshly declared task's profile: its declared place and ticket rows
+/// land in the evidence cache now, so placement can score it before
+/// anything has been placed into it (m35 fix 1; the cache otherwise fills
+/// only for tasks a placement or correction touched).
+pub fn seed_task_evidence(
+    conn: &mut Connection,
+    config: &Config,
+    now: Timestamp,
+    task_id: i64,
+) -> Result<usize, StorageError> {
+    storage::refresh_task_evidence(
+        conn,
+        &ticket_re(config),
+        &params(config),
+        ts_to_ms(now),
+        &[task_id],
+    )
+}
+
 /// Scorer tunables: the defaults, with delta from the config when set
 /// (`chronicle bench --calibrate` says what the verdict log supports).
 pub fn params(config: &Config) -> Params {
@@ -1398,6 +1504,7 @@ pub fn reconcile(
 /// What [`reconcile`] would write for `[lo, hi)` against `profiles`,
 /// without writing it (`chronicle bench --window`, which builds them as of
 /// the window's start the way the replay does).
+#[allow(clippy::too_many_arguments)]
 pub fn place_dry(
     conn: &Connection,
     config: &Config,
@@ -1415,6 +1522,7 @@ pub fn place_dry(
     if spans.is_empty() {
         return Ok(Vec::new());
     }
+    let sinks = storage::declared_sinks(conn)?;
     let placements = decide(
         &spans,
         lo,
@@ -1422,6 +1530,7 @@ pub fn place_dry(
         profiles,
         labels,
         projects,
+        &sinks,
         distractions,
         &params,
         &sp,
@@ -1433,6 +1542,7 @@ pub fn place_dry(
         &sessions,
         profiles,
         projects,
+        &sinks,
         &params,
         &sp,
         distractions,
@@ -1456,8 +1566,15 @@ fn place_window(
         storage::store_segments(conn, lo, hi, batch_id, &[])?;
         return Ok(Vec::new());
     }
+    // A declared task the cache never saw (declared before seeding
+    // existed, or through a path that does not seed) gets its rows now.
+    let unseeded = storage::unseeded_user_tasks(conn)?;
+    if !unseeded.is_empty() {
+        storage::refresh_task_evidence(conn, &ticket_re, &params, ts_to_ms(now), &unseeded)?;
+    }
     let (profiles, labels) = storage::live_profiles(conn)?;
     let projects = storage::task_projects(conn)?;
+    let sinks = storage::declared_sinks(conn)?;
     let placements = decide(
         &spans,
         lo,
@@ -1465,6 +1582,7 @@ fn place_window(
         &profiles,
         &labels,
         &projects,
+        &sinks,
         distractions,
         &params,
         &sp,
@@ -1476,6 +1594,7 @@ fn place_window(
         &sessions,
         &profiles,
         &projects,
+        &sinks,
         &params,
         &sp,
         distractions,
@@ -1681,6 +1800,7 @@ mod tests {
             &profiles,
             &HashMap::from([(7, "m33 work".to_owned())]),
             &HashMap::from([(7, Some("chronicle".to_owned()))]),
+            &HashMap::new(),
             &[],
             &Params::default(),
             &SegParams {
@@ -1878,6 +1998,7 @@ mod tests {
             &profiles,
             &labels,
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -1901,6 +2022,7 @@ mod tests {
             40 * M,
             &profiles,
             &labels,
+            &HashMap::new(),
             &HashMap::new(),
             &[],
             &Params::default(),
@@ -2005,6 +2127,7 @@ mod tests {
             &profiles,
             &labels,
             &HashMap::new(),
+            &HashMap::new(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -2056,6 +2179,7 @@ mod tests {
                 profiles,
                 &labels,
                 projects,
+                &HashMap::new(),
                 &[],
                 &Params::default(),
                 &SegParams::default(),
@@ -2176,6 +2300,7 @@ mod tests {
             &sessions,
             &profiles,
             &HashMap::new(),
+            &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2217,6 +2342,7 @@ mod tests {
             &sessions,
             &profiles,
             &HashMap::new(),
+            &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2242,6 +2368,7 @@ mod tests {
             &spans,
             &sessions,
             &profiles,
+            &HashMap::new(),
             &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
@@ -2271,6 +2398,7 @@ mod tests {
             &far,
             &profiles,
             &HashMap::new(),
+            &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2288,6 +2416,7 @@ mod tests {
             &both,
             &profiles,
             &HashMap::new(),
+            &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2303,6 +2432,7 @@ mod tests {
             &same,
             &both,
             &profiles,
+            &HashMap::new(),
             &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
@@ -2354,6 +2484,7 @@ mod tests {
             &sessions,
             &profiles,
             &projects,
+            &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2422,6 +2553,7 @@ mod tests {
             &sliver,
             &profiles,
             &flipped,
+            &HashMap::new(),
             &Params::default(),
             &SegParams::default(),
             &[],

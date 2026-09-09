@@ -1802,6 +1802,12 @@ impl TimelineApp {
                         );
                         let _ = crate::send_ctrl(&self.sock_path, "derive");
                     }
+                    if let Some(cfg) = self.config.as_ref()
+                        && let Err(e) =
+                            chronicle_core::segmenter::seed_task_evidence(conn, cfg, now, task_id)
+                    {
+                        tracing::warn!("seeding declared task {task_id}: {e}");
+                    }
                 }
                 result.map(|_| ())
             }
