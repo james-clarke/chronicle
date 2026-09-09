@@ -82,11 +82,33 @@ section { padding: 72px 0; }
   padding-bottom: 40px;
   position: relative;
 }
+.hero { isolation: isolate; }
 .hero::before {
   content: "";
   position: absolute;
   inset: -80px -200px 0 30%;
-  background: radial-gradient(closest-side, rgba(94, 135, 234, 0.16), transparent 70%);
+  z-index: -1;
+  background:
+    radial-gradient(closest-side at 40% 40%, rgba(94, 135, 234, 0.18), transparent 70%),
+    radial-gradient(closest-side at 70% 70%, rgba(39, 169, 127, 0.1), transparent 70%);
+  pointer-events: none;
+  animation: mesh 40s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+@keyframes mesh {
+  0%   { transform: translate(0, 0) scale(1); opacity: 0.9; }
+  50%  { transform: translate(-6%, 5%) scale(1.12); opacity: 1; }
+  100% { transform: translate(5%, -4%) scale(0.96); opacity: 0.8; }
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  inset: -80px -24px -40px;
+  z-index: -1;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E") 0 0 / 160px 160px;
+  opacity: 0.08;
+  -webkit-mask-image: radial-gradient(ellipse at 60% 45%, #000 25%, transparent 72%);
+  mask-image: radial-gradient(ellipse at 60% 45%, #000 25%, transparent 72%);
   pointer-events: none;
 }
 .hero-text { position: relative; }
@@ -295,9 +317,6 @@ section { padding: 72px 0; }
   83%, 95%  { opacity: 1; }
   100%      { opacity: 0; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .hero-art .desk, .hero-art .app, .pulse-dot { animation: none; }
-}
 
 /* day band */
 .band-section { padding: 24px 0 56px; }
@@ -318,7 +337,30 @@ section { padding: 72px 0; }
   cursor: default;
   transition: opacity 0.15s, transform 0.15s;
   outline: none;
+  transform-origin: 0 50%;
 }
+/* the band fills in left to right once it scrolls into view; without the script it is simply finished */
+.band.in .blk { animation: grow 0.5s var(--ease) both; animation-delay: calc(var(--l, 0) * 6ms); }
+@keyframes grow { from { transform: scaleX(0); } }
+.track::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  left: 96.7%;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--text);
+  opacity: 0.8;
+  pointer-events: none;
+  z-index: 1;
+}
+.band.in .track::after { animation: play 60s linear forwards; }
+@keyframes play { from { left: 0; } }
+.band:has(.legend .a:hover) .blk:not(.a),
+.band:has(.legend .b:hover) .blk:not(.b),
+.band:has(.legend .c:hover) .blk:not(.c),
+.band:has(.legend .x:hover) .blk:not(.x) { opacity: 0.2; }
 .blk.a, .legend .a { background: var(--blue); }
 .blk.b, .legend .b { background: var(--amber); }
 .blk.c, .legend .c { background: var(--green); }
@@ -381,6 +423,7 @@ section { padding: 72px 0; }
   color: var(--soft);
 }
 .legend li { display: inline-flex; align-items: center; gap: 7px; }
+.legend li { cursor: default; }
 .legend i { width: 10px; height: 10px; border-radius: 3px; }
 .band-caption { margin: 18px 0 0; color: var(--soft); font-size: 0.95rem; }
 .band-caption b { color: var(--text); font-family: var(--mono); font-weight: 600; }
@@ -403,6 +446,69 @@ section { padding: 72px 0; }
   display: flex;
   justify-content: space-between;
   margin-top: 14px;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* before / after wipe */
+.wipe { margin: 0; --x: 0%; }
+.wipe-box {
+  position: relative;
+  aspect-ratio: 1478 / 1080;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--panel);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line);
+}
+.wipe-before {
+  position: absolute;
+  inset: 0;
+  padding: 2.2% 2.6%;
+  font-family: var(--mono);
+  font-size: clamp(0.5rem, 1.06vw, 0.8rem);
+  line-height: 1.75;
+  color: var(--soft);
+}
+.wipe-before pre { margin: 0; white-space: pre; overflow: hidden; }
+.wipe-after {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  clip-path: inset(0 0 0 var(--x));
+}
+.wipe-box::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--x);
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  opacity: 0.85;
+  pointer-events: none;
+}
+/* one sweep, raw titles to placed lanes, when it scrolls in; then the handle */
+.wipe.in .wipe-after { animation: sweep 2.4s var(--ease); }
+.wipe.in .wipe-box::after { animation: sweep-line 2.4s var(--ease); }
+@keyframes sweep { from { clip-path: inset(0 0 0 100%); } }
+@keyframes sweep-line { from { left: 100%; } }
+.wipe-handle {
+  display: block;
+  width: 100%;
+  margin: 12px 0 0;
+  accent-color: var(--blue);
+  cursor: ew-resize;
+}
+.wipe figcaption {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
   font-family: var(--mono);
   font-size: 0.75rem;
   letter-spacing: 0.06em;
@@ -540,9 +646,10 @@ section { padding: 72px 0; }
   section { padding: 44px 0; }
   .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 24px; }
   .hero::before { display: none; }
-  .wide-shot { margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .wide-shot img { width: 760px; max-width: none; }
-  .wide-shot figcaption { padding-right: 24px; }
+  .wide-shot, .wipe { margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .wide-shot img, .wipe-box, .wipe-handle { width: 760px; max-width: none; }
+  .wipe-before { font-size: 0.58rem; }
+  .wide-shot figcaption, .wipe figcaption { padding-right: 24px; }
   .stage { grid-template-columns: 1fr; gap: 20px; padding-left: 44px; }
   .stage::before { width: 26px; height: 26px; font-size: 0.75rem; }
   .stages::before { left: 12px; }
@@ -552,4 +659,10 @@ section { padding: 72px 0; }
 
 @media (max-width: 420px) {
   .btn small { white-space: normal; right: 0; }
+}
+
+/* last, so it wins over every animation above */
+@media (prefers-reduced-motion: reduce) {
+  .hero-art .desk, .hero-art .app, .hero::before, .pulse-dot,
+  .band.in .blk, .band.in .track::after, .wipe.in .wipe-after, .wipe.in .wipe-box::after { animation: none; }
 }
