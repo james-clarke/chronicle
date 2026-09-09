@@ -8,3 +8,6 @@ services:
       - path: /*
         name: X-Frame-Options
         value: DENY
+      - path: /img/*
+        name: Cache-Control
+        value: max-age=31536000, immutable

@@ -18,6 +18,9 @@
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
   <link rel="stylesheet" href="style.css">
+  <link rel="preload" as="image" href="img/home-wide.webp" fetchpriority="high">
+  <link rel="preload" as="image" href="img/desk-win.webp">
+  <link rel="preload" as="image" href="img/desk-mac.webp">
 </head>
 <body>
 
@@ -56,7 +59,7 @@
   <div class="hero-art">
     <img class="desk win" src="img/desk-win.webp" width="1200" height="675" alt="" aria-hidden="true">
     <img class="desk mac" src="img/desk-mac.webp" width="1600" height="900" alt="" aria-hidden="true">
-    <img class="app" src="img/home-wide.webp" width="1478" height="1080" alt="Chronicle home, dragged wide: the tasks being worked on with time today and next step on the left, the feed of the day's blocks on the right">
+    <img class="app" src="img/home-wide.webp" fetchpriority="high" width="1478" height="1080" alt="Chronicle home, dragged wide: the tasks being worked on with time today and next step on the left, the feed of the day's blocks on the right">
   </div>
 </section>
 
@@ -85,7 +88,7 @@
       <li><i class="x"></i>loose time</li>
     </ul>
   </div>
-  <p class="band-caption"><b>7h38m</b> focused · 45m loose · 40m away · 12 switches. One Thursday, sorted while it was still happening. Hover a block.</p>
+  <p class="band-caption"><b>7h38m</b> focused · 45m loose · 40m away · 12m not captured · 12 switches. One Thursday, sorted while it was still happening. Hover a block.</p>
 </section>
 
 <section class="showcase">
@@ -121,7 +124,7 @@
 16:40:45  focus    Terminator      m27-chunks-2-7-execution — Claude Code
 17:16:22  focus    Terminator      contoso (main) — zsh
 17:24:09  away</pre></div>
-      <img class="wipe-after" src="img/task-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across the day, a card per task underneath, and one task open on the right with its sessions, where the time went and the activity that touched it" loading="lazy">
+      <img class="wipe-after" src="img/task-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across the day, a card per task underneath, and one task open on the right with its sessions, where the time went and the activity that touched it" loading="lazy" decoding="async">
     </div>
     <input class="wipe-handle" type="range" min="0" max="100" value="0" aria-label="Drag to compare: raw window titles on the left, the placed timeline on the right" oninput="this.parentNode.style.setProperty('--x',this.value+'%')">
     <figcaption><span>what it saw</span><span>what it wrote down</span></figcaption>
@@ -134,7 +137,7 @@
     <p>Deep work, longest block, switches, the hour that fragments, and how it compares with last week. Every task grouped by project with its share of the hours. Nothing to fill in.</p>
   </div>
   <figure class="wide-shot">
-    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars, a project mix bar, a project legend with a bar, duration and share per row, six focus tiles including 17h55m of deep work and 87 switches, and tasks grouped by project" loading="lazy">
+    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars, a project mix bar, a project legend with a bar, duration and share per row, six focus tiles including 17h55m of deep work and 87 switches, and tasks grouped by project" loading="lazy" decoding="async">
     <figcaption><span>reports · this week</span><span>31 aug – 6 sep</span></figcaption>
   </figure>
 </section>
@@ -154,7 +157,7 @@
       <div class="stage-text">
         <h3>Sees</h3>
         <p>Which window is in front, and when you step away. App name and title; no keystrokes, no screenshots, no clipboard.</p>
-        <p>Calls, calendar, ticket keys, the folder a terminal is in: noted beside each stretch. Five minutes away closes the batch.</p>
+        <p>Calls, calendar, ticket keys, the folder a terminal is in: noted beside each stretch. Hands off the keyboard is quiet, not away: the stretch stays open until the screen locks, or ten minutes pass with nothing live, thirty with a page, a call or an agent in front of you.</p>
       </div>
       <figure class="panel">
         <figcaption>focus events · one batch</figcaption>
@@ -165,7 +168,8 @@
 10:12:22  focus    Chrome   LAUNCH-241 Landing page copy – Jira
           anchor   item LAUNCH-241
 10:40:10  focus    Figma    Landing page v2
-11:20:00  away     5m · batch closed · 5 spans</code></pre>
+11:20:00  quiet    no input · Figma still in front
+11:31:40  lock     away · batch closed · 5 spans</code></pre>
       </figure>
     </li>
 
@@ -174,7 +178,7 @@
         <h3>Places</h3>
         <p>Every minute, plain rules: a ticket key in a branch or a tab, the project folder, a window you filed before. Provisional, marked to confirm.</p>
         <p>When the batch closes, the local model reads a short digest and places the rest. Eight blocks at most, about two minutes on a laptop CPU.</p>
-        <p>Ten quiet minutes are reading, not away; thirty, while an agent is working for you. Two windows in turn over one stretch split the time by share, never counted twice.</p>
+        <p>Two windows in turn over one stretch split the time by share, never counted twice. A second placer that scores the evidence per window sits behind a switch in Settings. Minutes it was not running are written down as not captured, never guessed.</p>
       </div>
       <figure class="panel">
         <figcaption>rules, then the model</figcaption>
@@ -192,12 +196,12 @@ stored  3 blocks · replaces 1 provisional row</code></pre>
     <li class="stage">
       <div class="stage-text">
         <h3>Learns</h3>
-        <p>It will be wrong sometimes. Rename, move or throw out a block; the correction is kept with the window it was made in and read first next time. Thrown out is a hard no.</p>
+        <p>It will be wrong sometimes. Rename a task, its project with it; move or throw out a block; the correction is kept with the window it was made in and read first next time. Thrown out is a hard no.</p>
         <p>Loose time folds into runs you file in one go, task pre-filled. Once a day, slivers tidy into their neighbours; one undo.</p>
       </div>
       <figure class="panel shot">
         <figcaption>organize · unassigned time</figcaption>
-        <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy">
+        <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy" decoding="async">
       </figure>
     </li>
 
@@ -223,7 +227,7 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
       </div>
       <figure class="panel shot">
         <figcaption>settings › derivation</figcaption>
-        <img src="img/pipeline.webp" width="880" height="590" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, a placement switch for the evidence-scoring segmenter, background under 10 minutes; then the pipeline card with the model file, worker idle, 1 pending batch, the last derive as batch 89 at 13:54 in 76.9 seconds with its prompt and output token counts, and buttons to show the digest and the last output" loading="lazy">
+        <img src="img/pipeline.webp" width="880" height="590" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, a placement switch for the evidence-scoring segmenter, background under 10 minutes; then the pipeline card with the model file, worker idle, 1 pending batch, the last derive as batch 89 at 13:54 in 76.9 seconds with its prompt and output token counts, and buttons to show the digest and the last output" loading="lazy" decoding="async">
       </figure>
     </li>
 
@@ -235,7 +239,7 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
       </div>
       <figure class="panel shot">
         <figcaption>settings › model</figcaption>
-        <img src="img/model.webp" width="880" height="900" alt="Chronicle settings, model: the local model path, then cloud backends with one row, anthropic, claude-sonnet-5, tested in 1180 ms, a note that prompts routed there go to Anthropic under its commercial API terms, and the routing grid with chat, narrative, standup, journal, task description, checkpoint, suggest task and name new tasks set to anthropic, tidy day and derive batches set to local" loading="lazy">
+        <img src="img/model.webp" width="880" height="900" alt="Chronicle settings, model: the local model path, then cloud backends with one row, anthropic, claude-sonnet-5, tested in 1180 ms, a note that prompts routed there go to Anthropic under its commercial API terms, and the routing grid with chat, narrative, standup, journal, task description, checkpoint, suggest task and name new tasks set to anthropic, tidy day and derive batches set to local" loading="lazy" decoding="async">
       </figure>
     </li>
 
