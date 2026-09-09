@@ -49,16 +49,12 @@ if git log -1 >/dev/null 2>&1; then
   rel=$(git log -1 --format=%cr | sed 's/ ago$//; s/ hours\{0,1\}/ h/; s/ minutes\{0,1\}/ min/; s/ seconds\{0,1\}/ s/')
   abs=$(TZ=UTC git log -1 --date=format-local:'%Y-%m-%d %H:%M UTC' --format=%cd)
   hash=$(git log -1 --format=%h)
-  subject=$(git log -1 -E --grep='^(feat|fix|perf)(\(|:|!)' --format=%s)
   today=$(TZ=UTC git rev-list --count --since=midnight HEAD)
   week=$(git rev-list --count --since='7 days ago' HEAD)
 
-  # scope kept, milestone tag pulled out as a badge, subject cut at 80 chars
-  prefix=$(printf '%s' "$subject" | sed -n 's/^\([a-z]*\(([^)]*)\)\{0,1\}!\{0,1\}\):.*/\1/p')
-  rest=$(printf '%s' "$subject" | sed 's/^[a-z]*\(([^)]*)\)\{0,1\}!\{0,1\}: *//')
-  ms=$(printf '%s' "$rest" | grep -oE '(^| )m[0-9]+' | head -1 | tr -d ' ' || true)
-  [ -n "$ms" ] && rest=$(printf '%s' "$rest" | sed "s/^$ms //; s/ $ms / /")
-  if [ "${#rest}" -gt 80 ]; then rest=$(printf '%s' "$rest" | cut -c1-79 | sed 's/ *$//')…; fi
+  # the dot: quick and green within a day, steady within a week, amber after (the script re-checks on load)
+  age=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 3600 ))
+  if [ "$age" -lt 24 ]; then dot=" live"; elif [ "$age" -lt 168 ]; then dot=""; else dot=" quiet"; fi
 
   # 30-day commit-per-day strip as one SVG path, 4 px per day, newest on the right
   TZ=UTC git log --since='30 days ago' --format=%cd --date=format-local:%Y-%m-%d | sort | uniq -c > "$tmp/days"
@@ -83,48 +79,13 @@ if git log -1 >/dev/null 2>&1; then
   done < "$tmp/counts"
 
   {
-    printf '      <p class="pulse-line"><i class="pulse-dot"></i>pushed <time datetime="%s" title="%s">%s ago</time> · <code>%s</code></p>\n' \
-      "$(git log -1 --format=%cI)" "$abs" "$(printf '%s' "$rel" | esc)" "$hash"
-    printf '      <p class="pulse-subject">'
-    [ -n "$prefix" ] && printf '<code>%s</code> ' "$(printf '%s' "$prefix" | esc)"
-    [ -n "$ms" ] && printf '<b class="pulse-ms">%s</b> ' "$ms"
-    printf '%s</p>\n' "$(printf '%s' "$rest" | esc)"
-    printf '      <p class="pulse-counts"><span>%s commits today · %s this week</span><svg class="pulse-strip" width="119" height="14" viewBox="0 0 119 14" aria-label="Commits per day, last 30 days"><path d="%s"/></svg></p>\n' \
+    printf '      <p class="pulse-line"><i class="pulse-dot%s"></i>last update pushed <time datetime="%s" title="%s">%s ago</time></p>\n' \
+      "$dot" "$(git log -1 --format=%cI)" "$abs" "$(printf '%s' "$rel" | esc)"
+    printf '      <p class="pulse-counts"><span>%s changes today · %s this week</span><svg class="pulse-strip" width="119" height="14" viewBox="0 0 119 14" aria-label="Changes per day, last 30 days"><path d="%s"/></svg></p>\n' \
       "$today" "$week" "$path"
-    printf '      <ul class="pulse-recent" aria-label="Last five commits">\n'
-    git log -5 --format='%h%x09%s' | while IFS="$(printf '\t')" read -r h s; do
-      [ "${#s}" -gt 80 ] && s=$(printf '%s' "$s" | cut -c1-79 | sed 's/ *$//')…
-      printf '        <li><code>%s</code> %s</li>\n' "$h" "$(printf '%s' "$s" | esc)"
-    done
-    printf '      </ul>\n'
   } > "$tmp/pulse"
   splice pulse "$tmp/pulse"
-  echo "pulse: $hash, $rel ago, $today today, $week this week"
-
-  # last ten feat|fix|perf subjects grouped by milestone tag, newest group marked in progress
-  {
-    printf '      <ul class="log">\n'
-    group=""; first=1
-    git log -10 -E --grep='^(feat|fix|perf)(\(|:|!)' --format='%cs%x09%s' | while IFS="$(printf '\t')" read -r d subj; do
-      pre=$(printf '%s' "$subj" | sed -n 's/^\([a-z]*\(([^)]*)\)\{0,1\}!\{0,1\}\):.*/\1/p')
-      body=$(printf '%s' "$subj" | sed 's/^[a-z]*\(([^)]*)\)\{0,1\}!\{0,1\}: *//')
-      tag=$(printf '%s' "$body" | grep -oE '(^| )m[0-9]+' | head -1 | tr -d ' ' || true)
-      [ -n "$tag" ] && body=$(printf '%s' "$body" | sed "s/^$tag //; s/ $tag / /")
-      [ "${#body}" -gt 72 ] && body=$(printf '%s' "$body" | cut -c1-71 | sed 's/ *$//')…
-      if [ "${tag:-none}" != "$group" ]; then
-        group=${tag:-none}
-        if [ "$first" = 1 ]; then
-          printf '        <li class="log-ms"><b class="pulse-ms">%s</b> <em>in progress</em></li>\n' "${tag:-no milestone}"
-        else
-          printf '        <li class="log-ms"><b class="pulse-ms">%s</b></li>\n' "${tag:-no milestone}"
-        fi
-        first=0
-      fi
-      printf '        <li><time>%s</time><code>%s</code><span>%s</span></li>\n' "$d" "$(printf '%s' "$pre" | esc)" "$(printf '%s' "$body" | esc)"
-    done
-    printf '      </ul>\n'
-  } > "$tmp/log"
-  splice changelog "$tmp/log"
+  echo "pulse: $hash, $rel ago, $age h old, $today today, $week this week"
 else
   echo "pulse: no git history, placeholders kept" >&2
 fi
