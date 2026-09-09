@@ -105,6 +105,14 @@ fn run_routed(
                             if let Engine::Cloud { usage, .. } = &engine
                                 && let Some(c) = usage.borrow().as_ref()
                             {
+                                tracing::info!(
+                                    job_id = job.id,
+                                    backend = name,
+                                    input = c.input_tokens,
+                                    cache_read = c.cache_read_tokens,
+                                    output = c.output_tokens,
+                                    "cloud usage"
+                                );
                                 storage::record_ai_job_usage(
                                     conn,
                                     job.id,
@@ -113,6 +121,7 @@ fn run_routed(
                                     i64::from(c.output_tokens),
                                     cloud::cost_usd(&cfg.model, c),
                                 )?;
+                                note_redactions(conn, &c.redactions);
                             }
                             return Ok(result);
                         }
@@ -138,6 +147,23 @@ fn run_routed(
         (None, None) => Err(anyhow::anyhow!(
             "no model available; run `chronicle model pull` or add a cloud backend in Settings"
         )),
+    }
+}
+
+/// Record which redaction classes fired on a cloud request today (m36
+/// chunk 1), for the Settings egress line. Best effort: a meta write must
+/// never fail the job.
+pub(crate) fn note_redactions(
+    conn: &rusqlite::Connection,
+    classes: &[chronicle_derive::redact::Class],
+) {
+    if classes.is_empty() {
+        return;
+    }
+    let labels: Vec<&str> = classes.iter().map(|c| c.label()).collect();
+    let today = Zoned::now().date().to_string();
+    if let Err(e) = chronicle_core::storage::note_redactions(conn, &today, &labels) {
+        tracing::warn!("redaction note failed: {e}");
     }
 }
 
@@ -175,10 +201,14 @@ impl Engine {
                     }
                     _ => None,
                 };
+                // The frozen prefix rides in `system` so the provider
+                // caches it (m36 chunk 1); the digest is the user turn.
+                let prompt = strip_no_think(prompt);
+                let split = prompts::split_prefix(job, prompt);
                 let req = Request {
                     job,
-                    system: None,
-                    user: strip_no_think(prompt),
+                    system: split.as_ref().map(|s| s.system.as_str()),
+                    user: split.as_ref().map_or(prompt, |s| s.user.as_str()),
                     history: &[],
                     schema: schema.as_ref(),
                     max_output: 0,

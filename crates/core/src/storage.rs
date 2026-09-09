@@ -1969,6 +1969,38 @@ pub fn insert_done_ai_job(
 }
 
 /// Today's total spend across every job that ran on a cloud backend.
+/// Meta key for the redaction classes that fired on a day's cloud
+/// requests (m36 chunk 1); `day` is the local date, `YYYY-MM-DD`.
+pub fn redactions_key(day: &str) -> String {
+    format!("redactions:{day}")
+}
+
+/// Merge `classes` into the day's set (comma-joined, sorted, unique).
+pub fn note_redactions(conn: &Connection, day: &str, classes: &[&str]) -> Result<(), StorageError> {
+    if classes.is_empty() {
+        return Ok(());
+    }
+    let key = redactions_key(day);
+    let mut set: std::collections::BTreeSet<String> = get_meta(conn, &key)?
+        .map(|v| v.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
+    set.extend(classes.iter().map(|c| (*c).to_owned()));
+    let joined = set.into_iter().collect::<Vec<_>>().join(",");
+    set_meta(conn, &key, Some(&joined))
+}
+
+/// The day's redaction classes, sorted; empty when nothing fired.
+pub fn redactions_for(conn: &Connection, day: &str) -> Result<Vec<String>, StorageError> {
+    Ok(get_meta(conn, &redactions_key(day))?
+        .map(|v| {
+            v.split(',')
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 pub fn cost_today(conn: &Connection, day_start_ms: i64) -> Result<f64, StorageError> {
     Ok(conn.query_row(
         "SELECT COALESCE(SUM(cost_usd),0) FROM ai_jobs

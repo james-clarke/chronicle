@@ -8,25 +8,78 @@ pub mod sse;
 
 use chronicle_core::models_config::{BackendCfg, BackendKind};
 
-use crate::text::{Completion, JobKind, TextBackend};
+use crate::redact::redact;
+use crate::text::{Completion, JobKind, Request, TextBackend};
 
-/// The backend a `[backends.<name>]` entry describes.
+/// The backend a `[backends.<name>]` entry describes, behind the
+/// redaction pass: nothing built here sends a request unredacted.
 pub fn build(name: &str, cfg: &BackendCfg) -> anyhow::Result<Box<dyn TextBackend>> {
-    match cfg.kind {
-        BackendKind::Anthropic => Ok(Box::new(anthropic::AnthropicBackend::new(
+    let inner: Box<dyn TextBackend> = match cfg.kind {
+        BackendKind::Anthropic => Box::new(anthropic::AnthropicBackend::new(
             name,
             &cfg.model,
             &cfg.api_key,
             cfg.base_url.as_deref(),
-        ))),
+        )),
         BackendKind::OpenAiCompat => {
             anyhow::bail!("backend {name}: openai_compat arrives in m31 chunk 3")
         }
-        BackendKind::ClaudeCode => Ok(Box::new(claude_code::ClaudeCodeBackend::new(
+        BackendKind::ClaudeCode => Box::new(claude_code::ClaudeCodeBackend::new(
             name,
             &cfg.model,
             cfg.command.as_deref(),
-        ))),
+        )),
+    };
+    Ok(Box::new(Redacting(inner)))
+}
+
+/// Runs `redact::redact` over every text field of a request (system, user,
+/// both sides of the history) before the wrapped backend sees it, and
+/// reports the classes that fired on the completion (m36 chunk 1).
+pub struct Redacting(pub Box<dyn TextBackend>);
+
+impl TextBackend for Redacting {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn model(&self) -> &str {
+        self.0.model()
+    }
+
+    fn context_tokens(&self) -> usize {
+        self.0.context_tokens()
+    }
+
+    fn complete(
+        &self,
+        req: &Request<'_>,
+        on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<Completion> {
+        let mut classes = std::collections::BTreeSet::new();
+        let mut take = |text: &str| {
+            let r = redact(text);
+            classes.extend(r.classes);
+            r.text
+        };
+        let system = req.system.map(&mut take);
+        let user = take(req.user);
+        let history: Vec<(String, String)> = req
+            .history
+            .iter()
+            .map(|(q, a)| (take(q), take(a)))
+            .collect();
+        let clean = Request {
+            job: req.job,
+            system: system.as_deref(),
+            user: &user,
+            history: &history,
+            schema: req.schema,
+            max_output: req.max_output,
+        };
+        let mut c = self.0.complete(&clean, on_token)?;
+        c.redactions = classes.into_iter().collect();
+        Ok(c)
     }
 }
 
@@ -153,6 +206,74 @@ mod tests {
         let usd = cost_usd("claude-opus-5", &c).unwrap();
         assert!((usd - (2.5 + 0.25 + 2.5)).abs() < 1e-9, "{usd}");
         assert_eq!(cost_usd("mystery", &c), None);
+    }
+
+    /// A backend that records what it was asked.
+    struct Echo(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl TextBackend for Echo {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn model(&self) -> &str {
+            "claude-sonnet-5"
+        }
+        fn context_tokens(&self) -> usize {
+            1000
+        }
+        fn complete(
+            &self,
+            req: &Request<'_>,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<Completion> {
+            let mut seen = self.0.lock().unwrap();
+            seen.push(req.system.unwrap_or("").to_owned());
+            seen.push(req.user.to_owned());
+            seen.extend(req.history.iter().flat_map(|(q, a)| [q.clone(), a.clone()]));
+            Ok(Completion {
+                text: "ok".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn redacting_wrapper_cleans_every_field_and_reports_classes() {
+        use crate::redact::Class;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let echo = Redacting(Box::new(Echo(seen.clone())));
+        let history = vec![(
+            "was it https://a.io/x?k=1".to_owned(),
+            "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123".to_owned(),
+        )];
+        let req = Request {
+            job: JobKind::Chat,
+            system: Some("rules sk-abcdefghijklmnopqrst"),
+            user: "AKIAIOSFODNN7EXAMPLE now",
+            history: &history,
+            schema: None,
+            max_output: 0,
+        };
+        let c = echo.complete(&req, &mut |_| {}).unwrap();
+        assert_eq!(
+            c.redactions,
+            [
+                Class::AwsKey,
+                Class::ApiKey,
+                Class::GithubToken,
+                Class::UrlQuery
+            ]
+        );
+        assert_eq!(c.text, "ok");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                "rules [api key]",
+                "[aws key] now",
+                "was it https://a.io/x",
+                "token [github token]",
+            ]
+        );
     }
 
     #[test]

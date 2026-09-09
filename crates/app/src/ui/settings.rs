@@ -53,6 +53,8 @@ pub(super) struct SettingsPanel {
     /// Today's cloud job usage by kind/backend (m31 c7), for the same line;
     /// read once, when the panel opens.
     ai_usage_today: Vec<chronicle_core::storage::AiJobUsageRow>,
+    /// Redaction classes that fired on today's cloud requests (m36 chunk 1).
+    redactions_today: Vec<String>,
 }
 
 /// What the Pipeline card shows: the daemon's own view plus what the DB
@@ -255,6 +257,15 @@ impl SettingsPanel {
                     chronicle_core::storage::ai_jobs_today_by_backend(
                         c,
                         crate::ai_job::day_start_ms(),
+                    )
+                    .ok()
+                })
+                .unwrap_or_default(),
+            redactions_today: conn
+                .and_then(|c| {
+                    chronicle_core::storage::redactions_for(
+                        c,
+                        &jiff::Zoned::now().date().to_string(),
                     )
                     .ok()
                 })
@@ -488,13 +499,15 @@ fn opt_path(s: &str) -> Option<PathBuf> {
 
 /// "what leaves this machine today" (m31 c7): the model download mention,
 /// then today's cloud job usage grouped by backend ("14 journal + 3 chat to
-/// anthropic (claude-opus-5)"), then the existing MCP counts, then "nothing
+/// anthropic (claude-opus-5)") with the redaction classes those requests
+/// tripped (m36 chunk 1), then the existing MCP counts, then "nothing
 /// else" when no cloud rows.
 fn egress_line(
     usage: &[chronicle_core::storage::AiJobUsageRow],
     cfg: &chronicle_core::models_config::ModelsConfig,
     fetches_today: i64,
     posts_today: i64,
+    redactions: &[String],
 ) -> String {
     let mut by_backend: std::collections::BTreeMap<
         &str,
@@ -525,6 +538,14 @@ fn egress_line(
     for part in &parts {
         line.push_str(" \u{b7} ");
         line.push_str(part);
+    }
+    if !parts.is_empty() {
+        if redactions.is_empty() {
+            line.push_str(" \u{b7} nothing matched the redaction filters");
+        } else {
+            line.push_str(" \u{b7} redacted before sending: ");
+            line.push_str(&redactions.join(", "));
+        }
     }
     line.push_str(&format!(
         " \u{b7} MCP context fetches today {fetches_today} \u{b7} posts today {posts_today}"
@@ -802,6 +823,7 @@ impl TimelineApp {
                                         panel.cloud.config(),
                                         panel.fetches_today,
                                         panel.posts_today,
+                                        &panel.redactions_today,
                                     ))
                                     .text_style(theme::caption())
                                     .weak(),
@@ -904,5 +926,42 @@ impl TimelineApp {
         if start_dl {
             self.start_model_download(ui.ctx(), chronicle_derive::model::default_preset());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::egress_line;
+    use chronicle_core::models_config::ModelsConfig;
+    use chronicle_core::storage::AiJobUsageRow;
+
+    #[test]
+    fn egress_line_names_backends_and_redactions() {
+        let cfg = ModelsConfig::default();
+        let none = egress_line(&[], &cfg, 2, 0, &["API keys".to_owned()]);
+        assert!(
+            none.ends_with("MCP context fetches today 2 \u{b7} posts today 0 \u{b7} nothing else")
+        );
+        assert!(!none.contains("redact"));
+        let rows = [AiJobUsageRow {
+            kind: "journal".into(),
+            backend: "anthropic".into(),
+            count: 3,
+            prompt_tokens: 10,
+            gen_tokens: 5,
+            cost_usd: 0.01,
+        }];
+        let clean = egress_line(&rows, &cfg, 0, 0, &[]);
+        assert!(clean.contains("to anthropic (?) \u{b7} nothing matched the redaction filters"));
+        let hit = egress_line(
+            &rows,
+            &cfg,
+            0,
+            0,
+            &["API keys".into(), "URL query strings".into()],
+        );
+        assert!(
+            hit.contains("\u{b7} redacted before sending: API keys, URL query strings \u{b7} MCP")
+        );
     }
 }

@@ -8,6 +8,7 @@ pub mod describe;
 pub mod embed;
 pub mod model;
 pub mod prompts;
+pub mod redact;
 pub mod runner;
 pub mod text;
 

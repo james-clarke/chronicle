@@ -248,6 +248,7 @@ fn parse_output(
         cache_read_tokens: cache_read,
         wall_ms: 0,
         cost_usd: doc.get("total_cost_usd").and_then(Value::as_f64),
+        redactions: Vec::new(),
     })
 }
 

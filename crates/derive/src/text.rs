@@ -85,9 +85,11 @@ impl std::fmt::Display for JobKind {
     }
 }
 
-/// One completion request. `user` is the fully rendered prompt (template
-/// plus data); `system` is set only by chat, whose template is a system
-/// message already; `history` is chat's prior (question, answer) turns.
+/// One completion request. `system` is the frozen prefix of the prompt
+/// (instruction, schema rules, the open-task list; chat's template), the
+/// part the provider caches; `user` is the volatile digest
+/// (`prompts::split_prefix`); `history` is chat's prior (question, answer)
+/// turns.
 pub struct Request<'a> {
     pub job: JobKind,
     pub system: Option<&'a str>,
@@ -111,6 +113,9 @@ pub struct Completion {
     /// The provider's own cost figure when it reports one (Claude Code's
     /// `total_cost_usd`); `cloud::cost_usd` prefers it to the price table.
     pub cost_usd: Option<f64>,
+    /// Redaction classes that fired on the request (m36 chunk 1); set by
+    /// the `cloud::Redacting` wrapper, empty on the local path.
+    pub redactions: Vec<crate::redact::Class>,
 }
 
 pub trait TextBackend: Send + Sync {

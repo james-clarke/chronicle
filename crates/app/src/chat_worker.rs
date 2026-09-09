@@ -51,6 +51,14 @@ impl ChatEngine<'_> {
                     max_output: 0,
                 };
                 let c = backend.complete(&req, on_token)?;
+                tracing::info!(
+                    backend = name,
+                    input = c.input_tokens,
+                    cache_read = c.cache_read_tokens,
+                    output = c.output_tokens,
+                    "cloud usage"
+                );
+                crate::ai_job::note_redactions(conn, &c.redactions);
                 // Chat has no queued job; a done row keeps the egress line
                 // and the daily cap honest.
                 if let Err(e) = chronicle_core::storage::insert_done_ai_job(

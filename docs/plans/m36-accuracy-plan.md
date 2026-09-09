@@ -127,6 +127,29 @@ per-call floor of about a minute, which rules it out for the live tier.
   Anthropic backend the cache-read share is ≥ 85 %; the Settings egress
   line lists the redaction classes applied.
 
+**Shipped 2026-09-09.** `derive::redact` (crates/derive/src/redact.rs) with
+eight classes (JWTs, AWS keys, `sk-` API keys, GitHub tokens, bearer
+tokens, URL credentials, URL query strings and fragments, opaque path
+tokens: 20+ chars all hex, or mixed-case base64 with four digits and no
+hyphen so slugs and branch names stay); `cloud::build` returns every
+backend behind `cloud::Redacting`, which cleans system, user and both
+sides of the history and reports the classes on `Completion.redactions`.
+`prompts::split_prefix` cuts each rendered prompt at its template's data
+marker and moves the digest's `## Open tasks` section into the prefix
+(the list is already in `created_ts, id` order); `ai_job.rs`, the chat
+worker and the bench put the prefix in `system` (cache breakpoint on the
+Anthropic backend, `--system-prompt` on Claude Code) and the digest in
+`user`. Cloud jobs log `cache_read` per job and merge their redaction
+classes into meta `redactions:<date>`; the egress line reads "redacted
+before sending: …" or "nothing matched the redaction filters" after the
+backend counts. Shell command lines need nothing: only program names
+reach the digest. Gate: redaction and split tests pass (305 workspace);
+`claude -p --system-prompt … --json-schema …` returns `structured_output`
+(one call, $0.11 at list); the ≥ 85 % cache-read share on the Anthropic
+backend waits for a key, and the derive prefix is the only template long
+enough (≥ 1024 tokens) to be cached at all — naming and description
+prefixes are ~200 tokens, so their split is for shape, not savings.
+
 ### 2. Corrections as memory
 
 - Migration 032 (029 is M35's `spans.project`, 030 its `tasks.current`, 031 its self-score columns): `task_embeddings(task_id,

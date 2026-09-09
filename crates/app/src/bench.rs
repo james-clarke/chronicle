@@ -1099,10 +1099,12 @@ impl ReplayEngine<'_> {
             ReplayEngine::Cloud(b) => {
                 let rendered = Prompt::Batch.render(digest);
                 let schema: serde_json::Value = serde_json::from_str(Prompt::Batch.schema_json())?;
+                let prompt = chronicle_derive::prompts::strip_no_think(&rendered);
+                let split = chronicle_derive::prompts::split_prefix(JobKind::Derive, prompt);
                 let req = Request {
                     job: JobKind::Derive,
-                    system: None,
-                    user: chronicle_derive::prompts::strip_no_think(&rendered),
+                    system: split.as_ref().map(|s| s.system.as_str()),
+                    user: split.as_ref().map_or(prompt, |s| s.user.as_str()),
                     history: &[],
                     schema: Some(&schema),
                     max_output: 0,
