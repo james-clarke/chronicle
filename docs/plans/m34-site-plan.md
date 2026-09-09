@@ -1,8 +1,8 @@
 # M34 — the site, hyped and honest (draft)
 
-Status: drafted 2026-09-08; chunk 0 shipped the same evening (see
-"Shipped" at the end). Chunks 1–4 are next; chunk 5 waits for the M32/M33
-copy. Builds on `docs/plans/site-plan.md`
+Status: drafted 2026-09-08; chunks 0, 1 and 2 shipped the same evening
+(see "Shipped" at the end). Chunks 3 and 4 are next; chunk 5 waits for
+the M32/M33 copy. Builds on `docs/plans/site-plan.md`
 (principles still hold: every claim gets a mechanism or a number, the page
 itself is evidence).
 
@@ -254,3 +254,49 @@ chunk 0 above), that the page shows the head commit, and that the strip's
 day count matches `git log --since`. If `RENDER_EXTERNAL_URL` is unset
 for static sites the `og` block keeps the `onrender.com` placeholder;
 set the host by hand in the script then.
+
+## Shipped (2026-09-08, chunks 1 and 2)
+
+- **Hero mesh and grain.** `.hero::before` is now two radial gradients
+  (blue at 40/40, green at 70/70) drifting 40 s, `transform` and
+  `opacity` only, `alternate`; `.hero::after` is a 160 px `feTurbulence`
+  data URI at 8 % opacity behind a radial mask so its edges never show
+  (`isolation: isolate` on the hero, both pseudos at `z-index: -1`).
+- **Band fills in.** `.band.in .blk` grows from `scaleX(0)` at its left
+  edge, 0.5 s, staggered by `--l` (the block's `left` as a number, on the
+  inline style) × 6 ms; the playhead is `.track::after`, resting at
+  96.7 % (17:40 on a 08:00–18:00 track) and sweeping from 0 over 60 s
+  once `.in` lands. Legend hover dims every other task's blocks through
+  `:has()`. No `animation-timeline: view()`: the track is 28 px tall, so
+  a view-progress range would be one scroll notch; `.in` from a
+  seven-line `IntersectionObserver` (threshold 0.3) does both the band
+  and the wipe. Without the script nothing gets `.in` and the page shows
+  the finished band and the placed timeline — checked with the script
+  stripped.
+- **Before/after wipe** replaces the first wide showcase. `.wipe-box`
+  keeps the shot's 1478 / 1080 ratio; under it a mono column of window
+  titles written in the vocabulary the shot actually shows (Terminator,
+  Google-chrome, ACME-11381/11382, PR #9480/#9481, the two away gaps);
+  over it the timeline shot with `clip-path: inset(0 0 0 var(--x))` and
+  a 2 px divider at `left: var(--x)`. One `<input type=range>` under the
+  box writes `--x` in a one-line `oninput`. On scroll-in one 2.4 s sweep
+  from 100 % to 0 % (raw in, placed out), no fill mode, so the base
+  `--x: 0%` then holds until the hand moves it. Caption "what it saw ·
+  what it wrote down". Mobile keeps the 760 px horizontal scroll the
+  wide shots had.
+- **Reduced motion** block moved to the end of the stylesheet — it sat
+  before the band rules and lost on order; now every animation on the
+  page (hero loop, mesh, dot, band, playhead, sweep) is off under it,
+  checked by forcing the media query in a preview copy.
+- Budget after: inline JS 340 B, above the fold 189 KB, page 410 KB,
+  third-party 0.
+
+Deviations:
+
+- The reports caption keeps "31 aug – 6 sep": the shot is of that week,
+  so a build-time date would say the wrong thing under the right
+  numbers. Chunk 4's changelog is where the build date belongs.
+- Chunk 2 said the wipe autoplays "then waits for the hand"; it does,
+  but the handle starts at the left (divider at 0 = placed timeline
+  shown) and dragging right reveals the raw column, since the divider's
+  position is the value.
