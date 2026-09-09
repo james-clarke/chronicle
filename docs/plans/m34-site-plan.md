@@ -402,3 +402,27 @@ Deviations:
   domain. Render's static `routes` are path-based, and a script redirect
   would be the page's first non-decorative JS; the canonical tag covers
   search, and the old host is not linked anywhere.
+
+## Shipped (2026-09-08, first Render build)
+
+- First deploy log, at `b334c0d`: build.sh ran, budget passed (fold
+  197 KB, page 418 KB), the page is baked and live on chronicled.dev.
+  The clone is shallow and the unshallow failed silently: `pulse:
+  b334c0d, 18 min ago, 1 today, 1 this week` against 9 and 181 locally,
+  and the 30-day strip is one bar. Render's origin cannot fetch the
+  private repo from the build container.
+- Fix: when the clone is shallow and `GITHUB_TOKEN` is set, build.sh
+  fetches `--unshallow` (then `--deepen=500`) over
+  `https://x-access-token:$GITHUB_TOKEN@github.com/james-clarke/chronicle.git`
+  instead of origin; the token never reaches the log (git's stderr is
+  dropped on that path, only the plain-origin failure is echoed). One
+  `history: N commits, shallow=…` line always prints so the log says
+  which case ran. The plan's GitHub-Action-plus-deploy-hook fallback was
+  not needed: a token in the Render environment is the one secret either
+  way, and this keeps a single build path. Tested on depth-1 clones: file
+  origin unshallows to 260 commits; unreachable origin and a bad token
+  both fall through to the shallow counts with one line each.
+- To do in the Render dashboard: a fine-grained PAT, repository
+  `chronicle` only, Contents read, as `GITHUB_TOKEN` in the service's
+  environment, then redeploy and check the `history:` line reads
+  `shallow=false`.

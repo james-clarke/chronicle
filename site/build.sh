@@ -29,9 +29,21 @@ splice() {
 
 # --- git history ------------------------------------------------------------
 
+# Render's clone is shallow and its origin cannot fetch the private repo, so
+# the unshallow goes over a token when one is set (a fine-grained PAT with
+# read on Contents, GITHUB_TOKEN in the Render environment). The token never
+# reaches the log: git's errors are only echoed for the plain-origin attempt.
 if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-  git fetch --unshallow --quiet 2>/dev/null || git fetch --deepen=500 --quiet 2>/dev/null || true
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    src="https://x-access-token:$GITHUB_TOKEN@github.com/james-clarke/chronicle.git"
+    git fetch --unshallow --quiet "$src" HEAD 2>/dev/null || git fetch --deepen=500 --quiet "$src" HEAD 2>/dev/null \
+      || echo "history: the fetch over GITHUB_TOKEN failed" >&2
+  else
+    git fetch --unshallow --quiet origin 2>"$tmp/fetch" || git fetch --deepen=500 --quiet origin 2>>"$tmp/fetch" \
+      || echo "history: the fetch from origin failed: $(tail -1 "$tmp/fetch")" >&2
+  fi
 fi
+echo "history: $(git rev-list --count HEAD 2>/dev/null || echo 0) commits, shallow=$(git rev-parse --is-shallow-repository 2>/dev/null || echo none)"
 
 if git log -1 >/dev/null 2>&1; then
   rel=$(git log -1 --format=%cr | sed 's/ ago$//; s/ hours\{0,1\}/ h/; s/ minutes\{0,1\}/ min/; s/ seconds\{0,1\}/ s/')
