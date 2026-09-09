@@ -115,6 +115,7 @@ impl Describer {
         match job {
             JobKind::Checkpoint => Some(CHECKPOINT_GRAMMAR),
             JobKind::SuggestTask | JobKind::NameTask => Some(SUGGEST_GRAMMAR),
+            JobKind::Advise => Some(crate::prompts::ADVISE_GRAMMAR),
             _ => None,
         }
     }

@@ -241,6 +241,11 @@ enum Cmd {
         /// profiler and, if a model also runs, a combined verdict.
         #[arg(long)]
         scorer: bool,
+        /// Replay with `--scorer`: ask the pairwise advisor (m36 chunk 3) on
+        /// every unsure verdict — through `--backend`, else the local
+        /// model — and score with and without its answer.
+        #[arg(long, requires = "scorer")]
+        advisor: bool,
         /// Replay: which corrections become probes — `all` (merge probes
         /// span the target's intervals; the model's gate), `direct`
         /// (assign/reassign/eject only; the scorer's gate) or `source`
@@ -409,6 +414,7 @@ fn main() -> anyhow::Result<()> {
             since,
             out,
             scorer,
+            advisor,
             probes,
             segment,
             calibrate,
@@ -438,6 +444,7 @@ fn main() -> anyhow::Result<()> {
                     model.as_deref(),
                     backend.as_deref(),
                     scorer,
+                    advisor,
                     segment,
                     set,
                     out.as_deref(),

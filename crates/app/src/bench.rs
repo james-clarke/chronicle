@@ -1206,6 +1206,7 @@ pub(crate) fn replay_eval(
     model_filter: Option<&str>,
     backend: Option<&str>,
     scorer: bool,
+    advisor: bool,
     segment: bool,
     probe_set: chronicle_core::replay::ProbeSet,
     out: Option<&Path>,
@@ -1254,6 +1255,39 @@ pub(crate) fn replay_eval(
     let mut scorer_verdicts: Vec<(Option<i64>, f64, bool)> = Vec::new();
     let mut scorer_by_probe: HashMap<(i64, i64), (bool, Replayed)> = HashMap::new();
     let mut scorer_json: Option<serde_json::Value> = None;
+    // `--advisor` (m36 chunk 3): the engine the advisor answers on, and its
+    // tallies — how many unsure verdicts it changed, abstained on, or
+    // answered with rows outside the segment.
+    let advisor_engine: Option<crate::ai_job::Engine> = if advisor {
+        Some(match backend {
+            Some(name) => {
+                let mc = chronicle_core::models_config::ModelsConfig::load(data_dir)?;
+                let cfg = mc
+                    .backends
+                    .get(name)
+                    .with_context(|| format!("no [backends.{name}] in models.toml"))?;
+                crate::ai_job::Engine::Cloud {
+                    name: name.to_owned(),
+                    model: cfg.model.clone(),
+                    backend: chronicle_derive::cloud::build(name, cfg)?,
+                    usage: std::cell::RefCell::new(None),
+                }
+            }
+            None => {
+                let path = chronicle_derive::model::resolve(config.model_path.as_deref(), data_dir)
+                    .context(
+                        "no local model for the advisor; `chronicle model pull` or pass --backend",
+                    )?;
+                crate::ai_job::Engine::Local(chronicle_derive::describe::Describer::load(&path)?)
+            }
+        })
+    } else {
+        None
+    };
+    let mut advised = (0usize, 0usize, 0usize, 0usize); // asked, changed, unsure, invalid
+    let mut unadvised_pass = 0usize;
+    let examples =
+        chronicle_derive::examples::Examples::open(config.embed_model.as_deref(), data_dir);
     if scorer {
         let spans = storage::anchored_spans(&conn, 0, i64::MAX)?;
         let params = Params::default();
@@ -1310,6 +1344,91 @@ pub(crate) fn replay_eval(
                         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     {
                         v.best = *best;
+                    }
+                }
+                if let Some(engine) = &advisor_engine
+                    && !v.confident
+                    && v.ranked.len() >= 2
+                {
+                    use chronicle_derive::advise;
+                    let plain = Replayed {
+                        task_id: v.best,
+                        label: String::new(),
+                        start_offset_min: (p.range.0 - batch.start_ts) / 60_000,
+                        end_offset_min: (p.range.1 - batch.start_ts + 59_999) / 60_000,
+                    };
+                    if replay::score(p, batch.start_ts, std::slice::from_ref(&plain), &open_at).pass
+                    {
+                        unadvised_pass += 1;
+                    }
+                    let evidence = advise::evidence_rows(&spans, p.range.0, p.range.1);
+                    let cand = |id: i64| {
+                        let t = rows.tasks.iter().find(|t| t.id == id);
+                        let (label, project) = t
+                            .map(|t| replay::label_at(t, batch.end_ts, &rows.corrections))
+                            .unwrap_or_default();
+                        advise::candidate(
+                            id,
+                            &label,
+                            project.as_deref(),
+                            profiles.iter().find(|pr| pr.task_id == id),
+                            8,
+                        )
+                    };
+                    let (a_id, b_id) = (v.ranked[0].task_id, v.ranked[1].task_id);
+                    let text: String = evidence
+                        .iter()
+                        .map(|r| format!("{} {}\n", r.app, r.title))
+                        .collect();
+                    let ex = examples
+                        .nearest(&conn, chronicle_derive::text::JobKind::Advise, &text, 4)
+                        .map(|cs| chronicle_derive::examples::render_section(&cs))
+                        .unwrap_or_default();
+                    advised.0 += 1;
+                    match crate::ai_job::ask_advisor(
+                        engine,
+                        &evidence,
+                        &cand(a_id),
+                        &cand(b_id),
+                        &ex,
+                    ) {
+                        Ok(advice) => {
+                            let ids: Vec<i64> = evidence.iter().map(|r| r.id).collect();
+                            let d = advise::decide(&advice, &ids);
+                            println!(
+                                "  advisor c{}: {} {:?} (cited {:?})",
+                                p.correction_id,
+                                advice.answer.as_str(),
+                                d,
+                                advice.evidence_ids
+                            );
+                            match d {
+                                advise::Decision::Keep => {
+                                    if v.best != Some(a_id) {
+                                        advised.1 += 1;
+                                    }
+                                    v.best = Some(a_id);
+                                }
+                                advise::Decision::Move => {
+                                    if v.best != Some(b_id) {
+                                        advised.1 += 1;
+                                    }
+                                    v.best = Some(b_id);
+                                }
+                                advise::Decision::Mint => {
+                                    if v.best.is_some() {
+                                        advised.1 += 1;
+                                    }
+                                    v.best = None;
+                                }
+                                advise::Decision::Unsure => advised.2 += 1,
+                                advise::Decision::Invalid => advised.3 += 1,
+                            }
+                        }
+                        Err(e) => {
+                            advised.3 += 1;
+                            println!("  advisor c{}: failed: {e:#}", p.correction_id);
+                        }
                     }
                 }
                 let label = match v.best {
@@ -1376,6 +1495,34 @@ pub(crate) fn replay_eval(
             }
         }
         let mut scorer_totals = print_totals("scorer replay score", &scorer_results);
+        if advisor_engine.is_some() {
+            let advised_pass = scorer_results
+                .iter()
+                .zip(&scorer_verdicts)
+                .filter(|(r, (.., confident))| r.pass && !confident)
+                .count();
+            println!(
+                "advisor: asked {} · changed {} · unsure {} ({:.0}%) · invalid {} · unsure-verdict probes passing {} with the advisor vs {} without",
+                advised.0,
+                advised.1,
+                advised.2,
+                if advised.0 == 0 {
+                    0.0
+                } else {
+                    advised.2 as f64 / advised.0 as f64 * 100.0
+                },
+                advised.3,
+                advised_pass,
+                unadvised_pass
+            );
+            scorer_totals.insert(
+                "advisor".into(),
+                serde_json::json!({
+                    "asked": advised.0, "changed": advised.1, "unsure": advised.2, "invalid": advised.3,
+                    "unsure_pass_with": advised_pass, "unsure_pass_without": unadvised_pass
+                }),
+            );
+        }
         let n_conf = scorer_verdicts.iter().filter(|(.., c)| *c).count();
         let ok_conf = scorer_results
             .iter()

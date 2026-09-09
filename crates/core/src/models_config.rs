@@ -20,6 +20,7 @@ pub const WRITING_KINDS: &[&str] = &[
     "checkpoint",
     "suggest_task",
     "name_task",
+    "advise",
 ];
 
 /// Every job kind that can be routed, including the ones the "use for
@@ -37,6 +38,7 @@ pub const ALL_KINDS: &[&str] = &[
     "consolidate",
     "derive",
     "live",
+    "advise",
 ];
 
 fn default_max_usd() -> f64 {

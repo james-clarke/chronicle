@@ -843,10 +843,7 @@ pub fn decide(
         // The placeholder until the naming job runs (m35 chunk 5): the
         // project and "new work", never a window title — a title read as
         // a label was the m30 leak of raw screen text into task lists.
-        let label = match &project {
-            Some(p) => format!("{p} \u{b7} new work"),
-            None => "new work".to_owned(),
-        };
+        let label = placeholder_label(project.as_deref());
         for &i in members {
             let (seg, _, v) = &scored[i];
             placed[i] = Some(Placement {
@@ -1299,6 +1296,15 @@ pub fn run(
         storage::refresh_task_evidence(conn, &ticket_re(config), &params(config), hi, &corrected)?;
     }
     place_window(conn, config, lo, hi, None, now, distractions)
+}
+
+/// The label a minted task carries until its naming job runs (m35 chunk
+/// 5): the project and "new work", never a window title.
+pub fn placeholder_label(project: Option<&str>) -> String {
+    match project {
+        Some(p) => format!("{p} \u{b7} new work"),
+        None => "new work".to_owned(),
+    }
 }
 
 /// How far back the live tick looks for corrections to learn from: two

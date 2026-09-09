@@ -70,6 +70,7 @@ pub(super) fn route_kind_label(kind: &str) -> &'static str {
         "consolidate" => "tidy day",
         "derive" => "derive batches",
         "live" => "live tier",
+        "advise" => "advise placements",
         _ => "unknown",
     }
 }

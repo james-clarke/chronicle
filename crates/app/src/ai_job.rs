@@ -167,6 +167,18 @@ pub(crate) fn note_redactions(
     }
 }
 
+/// One advisor question on `engine` (m36 chunk 3), shared with the bench.
+pub(crate) fn ask_advisor(
+    engine: &Engine,
+    evidence: &[chronicle_derive::advise::EvidenceRow],
+    a: &chronicle_derive::advise::Candidate,
+    b: &chronicle_derive::advise::Candidate,
+    examples: &str,
+) -> anyhow::Result<chronicle_derive::advise::Advice> {
+    let prompt = chronicle_derive::advise::render(evidence, a, b, examples);
+    chronicle_derive::advise::parse(&engine.complete(JobKind::Advise, &prompt)?)
+}
+
 /// How many past corrections a naming prompt sees (m36 chunk 2).
 const EXAMPLES_K: usize = 4;
 
@@ -237,7 +249,7 @@ pub(crate) enum Engine {
 }
 
 impl Engine {
-    fn complete(&self, job: JobKind, prompt: &str) -> anyhow::Result<String> {
+    pub(crate) fn complete(&self, job: JobKind, prompt: &str) -> anyhow::Result<String> {
         match self {
             Engine::Local(d) => d.complete(job, prompt),
             Engine::Cloud { backend, usage, .. } => {
@@ -246,6 +258,7 @@ impl Engine {
                     JobKind::SuggestTask | JobKind::NameTask => {
                         Some(serde_json::from_str(prompts::SUGGEST_SCHEMA)?)
                     }
+                    JobKind::Advise => Some(serde_json::from_str(prompts::ADVISE_SCHEMA)?),
                     _ => None,
                 };
                 // The frozen prefix rides in `system` so the provider
@@ -545,6 +558,112 @@ pub(crate) fn run_ai_job(
             let desc = engine.describe_task(&label, project.as_deref(), &evidence)?;
             storage::set_task_description(conn, task_id, Some(&desc))?;
             Ok(desc)
+        }
+        "advise" => {
+            // The pairwise advisor (m36 chunk 3): a low-margin verdict
+            // between two tasks, settled from the segment's own rows.
+            use chronicle_derive::advise;
+            let verdict_id = payload["verdict_id"]
+                .as_i64()
+                .context("payload lacks verdict_id")?;
+            let Some(case) = storage::advice_case(conn, verdict_id)? else {
+                storage::mark_verdict_advice(conn, verdict_id, "stale")?;
+                return Err(SkipJob("the interval moved before the advisor ran".into()).into());
+            };
+            let spans = storage::anchored_spans(conn, case.start_ts, case.end_ts)?;
+            let rows = advise::evidence_rows(&spans, case.start_ts, case.end_ts);
+            if rows.is_empty() {
+                storage::mark_verdict_advice(conn, verdict_id, "invalid")?;
+                return Err(SkipJob("no focus rows under the interval".into()).into());
+            }
+            let (Some(a), Some(b)) = (
+                storage::task_label_project(conn, case.task_id)?,
+                storage::task_label_project(conn, case.runner_up)?,
+            ) else {
+                storage::mark_verdict_advice(conn, verdict_id, "stale")?;
+                return Err(SkipJob("a candidate task is gone".into()).into());
+            };
+            let (profiles, _) = storage::live_profiles(conn)?;
+            let profile = |id: i64| profiles.iter().find(|p| p.task_id == id);
+            let cand_a =
+                advise::candidate(case.task_id, &a.0, a.1.as_deref(), profile(case.task_id), 8);
+            let cand_b = advise::candidate(
+                case.runner_up,
+                &b.0,
+                b.1.as_deref(),
+                profile(case.runner_up),
+                8,
+            );
+            let text: String = rows
+                .iter()
+                .map(|r| format!("{} {}\n", r.app, r.title))
+                .collect();
+            let examples =
+                chronicle_derive::examples::Examples::open(config.embed_model.as_deref(), data_dir)
+                    .nearest(conn, JobKind::Advise, &text, 4)
+                    .map(|cs| chronicle_derive::examples::render_section(&cs))
+                    .unwrap_or_default();
+            let advice = ask_advisor(engine, &rows, &cand_a, &cand_b, &examples)?;
+            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+            let decision = advise::decide(&advice, &ids);
+            let reason = advise::reason(&advice);
+            // The move and the evidence refresh need a transaction: a
+            // second connection, since this one is shared read-only.
+            let mut w = storage::open(&data_dir.join("chronicle.db"))?;
+            let touched: Vec<i64> = match decision {
+                advise::Decision::Keep => {
+                    storage::mark_verdict_advice(conn, verdict_id, "A")?;
+                    Vec::new()
+                }
+                advise::Decision::Move => {
+                    storage::advisor_move_interval(&mut w, &case, case.runner_up, &reason)?;
+                    vec![case.task_id, case.runner_up]
+                }
+                advise::Decision::Mint => {
+                    let project = a.1.as_deref();
+                    let label = chronicle_core::segmenter::placeholder_label(project);
+                    let id = storage::advisor_mint_task(&mut w, &case, &label, project, &reason)?;
+                    let payload = serde_json::json!({
+                        "task_id": id,
+                        "lo": case.start_ts,
+                        "hi": case.end_ts,
+                        "placeholder": label,
+                    })
+                    .to_string();
+                    storage::enqueue_ai_job(conn, Timestamp::now(), "name_task", 0, &payload)?;
+                    vec![case.task_id, id]
+                }
+                advise::Decision::Unsure => {
+                    storage::mark_verdict_advice(conn, verdict_id, "unsure")?;
+                    Vec::new()
+                }
+                advise::Decision::Invalid => {
+                    storage::mark_verdict_advice(conn, verdict_id, "invalid")?;
+                    Vec::new()
+                }
+            };
+            for id in touched {
+                if let Err(e) = chronicle_core::segmenter::seed_task_evidence(
+                    &mut w,
+                    config,
+                    Timestamp::now(),
+                    id,
+                ) {
+                    tracing::warn!(task_id = id, "evidence refresh after advice failed: {e}");
+                }
+            }
+            tracing::info!(
+                verdict_id,
+                answer = advice.answer.as_str(),
+                ?decision,
+                "advised"
+            );
+            Ok(serde_json::json!({
+                "answer": advice.answer.as_str(),
+                "evidence_ids": advice.evidence_ids,
+                "decision": format!("{decision:?}"),
+            })
+            .to_string())
         }
         "suggest_task" => {
             // A proposal names its own cluster (explicit bounds); the Home

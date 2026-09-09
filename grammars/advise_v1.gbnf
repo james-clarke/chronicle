@@ -1,0 +1,9 @@
+# Constrains the advisor's answer (m36 chunk 3): one of four words and the
+# evidence ids it rests on.
+
+root ::= "{" ws "\"answer\"" ws ":" ws answer ws "," ws "\"evidence_ids\"" ws ":" ws ids ws "}"
+
+answer ::= "\"A\"" | "\"B\"" | "\"new\"" | "\"unsure\""
+ids ::= "[" ws int (ws "," ws int){0,15} ws "]"
+int ::= [0-9]{1,12}
+ws ::= [ \n\t]{0,4}

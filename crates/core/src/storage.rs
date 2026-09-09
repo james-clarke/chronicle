@@ -58,6 +58,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/030_task_current.sql")),
         M::up(include_str!("../migrations/031_self_score_project.sql")),
         M::up(include_str!("../migrations/032_example_embeddings.sql")),
+        M::up(include_str!("../migrations/033_verdict_advice.sql")),
     ])
 });
 
@@ -3990,6 +3991,151 @@ pub fn nearest_corrections(
     Ok(out)
 }
 
+/// Low-margin verdicts the advisor has not seen (m36 chunk 3): unsure,
+/// with a runner-up, still open, their interval still there, newest
+/// first. `(verdict_id, interval_id)`.
+pub fn unadvised_verdicts(
+    conn: &Connection,
+    since_ms: i64,
+    limit: usize,
+) -> Result<Vec<(i64, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT v.id, v.interval_id FROM verdict_log v JOIN intervals i ON i.id = v.interval_id
+         WHERE v.confident = 0 AND v.runner_up IS NOT NULL AND v.advice IS NULL
+           AND v.outcome IS NULL AND v.ts >= ?1 AND i.task_id = v.task_id
+         ORDER BY v.ts DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ms, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn mark_verdict_advice(
+    conn: &Connection,
+    verdict_id: i64,
+    advice: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE verdict_log SET advice=?2 WHERE id=?1",
+        params![verdict_id, advice],
+    )?;
+    Ok(())
+}
+
+/// One verdict the advisor is asked about, with its interval as it stands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdviceCase {
+    pub verdict_id: i64,
+    pub interval_id: i64,
+    pub task_id: i64,
+    pub runner_up: i64,
+    pub start_ts: i64,
+    pub end_ts: i64,
+}
+
+/// `None` when the interval moved since (a correction, a re-reconcile) —
+/// the question is stale.
+pub fn advice_case(conn: &Connection, verdict_id: i64) -> Result<Option<AdviceCase>, StorageError> {
+    conn.query_row(
+        "SELECT v.id, i.id, i.task_id, v.runner_up, i.start_ts, i.end_ts
+         FROM verdict_log v JOIN intervals i ON i.id = v.interval_id
+         WHERE v.id = ?1 AND i.task_id = v.task_id AND v.runner_up IS NOT NULL",
+        [verdict_id],
+        |r| {
+            Ok(AdviceCase {
+                verdict_id: r.get(0)?,
+                interval_id: r.get(1)?,
+                task_id: r.get(2)?,
+                runner_up: r.get(3)?,
+                start_ts: r.get(4)?,
+                end_ts: r.get(5)?,
+            })
+        },
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(e.into()),
+    })
+}
+
+/// `(label, project)` of a task, `None` when it is gone.
+pub fn task_label_project(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<(String, Option<String>)>, StorageError> {
+    conn.query_row("SELECT label, project FROM tasks WHERE id=?1", [id], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(e.into()),
+    })
+}
+
+/// The advisor's B: the interval moves to the runner-up with the reason on
+/// it; the verdict row keeps the original verdict and records the advice.
+/// Not a correction: the user did not say so, so the scorer must not learn
+/// from it as truth.
+pub fn advisor_move_interval(
+    conn: &mut Connection,
+    case: &AdviceCase,
+    to_task: i64,
+    reason: &str,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE intervals SET task_id=?2, reason=?3, confident=1 WHERE id=?1 AND task_id=?4",
+        params![case.interval_id, to_task, reason, case.task_id],
+    )?;
+    tx.execute(
+        "UPDATE tasks SET status='open', closed_ts=NULL, closed_by=NULL
+         WHERE id=?1 AND status='closed' AND closed_by='auto'",
+        [to_task],
+    )?;
+    tx.execute(
+        "UPDATE verdict_log SET advice='B' WHERE id=?1",
+        [case.verdict_id],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The advisor's "new": a derived task under the placeholder label takes
+/// the interval, as the scorer's own mint would have; the caller queues
+/// the naming job. Returns the new task id.
+pub fn advisor_mint_task(
+    conn: &mut Connection,
+    case: &AdviceCase,
+    label: &str,
+    project: Option<&str>,
+    reason: &str,
+) -> Result<i64, StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO tasks (label, project, status, source, created_ts)
+         VALUES (?1, ?2, 'open', 'derived', ?3)",
+        params![label, project, case.start_ts],
+    )?;
+    let id = tx.last_insert_rowid();
+    tx.execute(
+        "UPDATE intervals SET task_id=?2, reason=?3, confident=1 WHERE id=?1 AND task_id=?4",
+        params![case.interval_id, id, reason, case.task_id],
+    )?;
+    tx.execute(
+        "UPDATE verdict_log SET advice='new' WHERE id=?1",
+        [case.verdict_id],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    Ok(id)
+}
+
 /// Close the verdict-log entries of `interval_ids` with `outcome`
 /// ('right' | 'wrong') where still open.
 fn mark_verdicts(
@@ -5688,6 +5834,88 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         assert!(super::MIGRATIONS.validate().is_ok());
+    }
+
+    // m36 chunk 3: an unsure verdict with a runner-up is a case until it is
+    // advised; B moves the interval, "new" mints, the verdict row records it.
+    #[test]
+    fn advisor_cases_move_and_mint() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, project, status, source, created_ts) VALUES (1, 'a', 'shop', 'open', 'derived', 1), (2, 'b', 'shop', 'closed', 'derived', 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE tasks SET closed_by='auto' WHERE id=2", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO intervals (id, task_id, start_ts, end_ts, confidence, source) VALUES (10, 1, 100, 200, 0.5, 'segment'), (11, 1, 200, 300, 0.9, 'segment')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO verdict_log (id, interval_id, ts, task_id, runner_up, margin, confident) VALUES (5, 10, 100, 1, 2, 0.1, 0), (6, 11, 200, 1, NULL, 0.1, 0), (7, 10, 100, 1, 2, 0.5, 1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(super::unadvised_verdicts(&conn, 0, 10).unwrap(), [(5, 10)]);
+        super::mark_verdict_advice(&conn, 5, "pending").unwrap();
+        assert!(super::unadvised_verdicts(&conn, 0, 10).unwrap().is_empty());
+        let case = super::advice_case(&conn, 5).unwrap().unwrap();
+        assert_eq!((case.interval_id, case.task_id, case.runner_up), (10, 1, 2));
+        assert_eq!(
+            super::task_label_project(&conn, 2).unwrap(),
+            Some(("b".into(), Some("shop".into())))
+        );
+        super::advisor_move_interval(&mut conn, &case, 2, "advisor: B").unwrap();
+        let (task, reason, status): (i64, String, String) = conn
+            .query_row(
+                "SELECT i.task_id, i.reason, t.status FROM intervals i JOIN tasks t ON t.id=i.task_id WHERE i.id=10",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (task, reason.as_str(), status.as_str()),
+            (2, "advisor: B", "open")
+        );
+        let advice: String = conn
+            .query_row("SELECT advice FROM verdict_log WHERE id=5", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(advice, "B");
+        // The interval moved, so the case is stale for a second asker.
+        assert!(super::advice_case(&conn, 5).unwrap().is_none());
+        // Mint from the other interval's verdict.
+        conn.execute(
+            "INSERT INTO verdict_log (id, interval_id, ts, task_id, runner_up, margin, confident) VALUES (8, 11, 200, 1, 2, 0.1, 0)",
+            [],
+        )
+        .unwrap();
+        let case = super::advice_case(&conn, 8).unwrap().unwrap();
+        let id = super::advisor_mint_task(
+            &mut conn,
+            &case,
+            "shop · new work",
+            Some("shop"),
+            "advisor: new",
+        )
+        .unwrap();
+        let (task, label): (i64, String) = conn
+            .query_row(
+                "SELECT i.task_id, t.label FROM intervals i JOIN tasks t ON t.id=i.task_id WHERE i.id=11",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((task, label.as_str()), (id, "shop · new work"));
+        // Task 1 lost both intervals and has no correction: swept.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     // m36 chunk 2: label vectors follow renames, correction vectors skip

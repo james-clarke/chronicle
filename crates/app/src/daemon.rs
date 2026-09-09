@@ -534,6 +534,7 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                 }
                 if segmenter {
                     reconcile_due(&mut conn, &config, &distractions);
+                    advise_due(&conn);
                     if let Err(e) = chronicle_core::segmenter::daily(&mut conn, &config, now) {
                         tracing::error!("segmenter daily housekeeping failed: {e}");
                     }
@@ -1717,6 +1718,53 @@ fn reconcile_due(conn: &mut rusqlite::Connection, config: &Config, distractions:
                 return;
             }
         }
+    }
+}
+
+/// Advisor questions a day (m36 chunk 3): the online cap; the nightly
+/// pass has none.
+const ADVISE_PER_DAY: usize = 60;
+/// How far back a low-margin verdict is still worth asking about.
+const ADVISE_LOOKBACK_MS: i64 = 2 * 24 * 3_600_000;
+/// Queue an `advise` job per unsure reconciled verdict with a runner-up
+/// (m36 chunk 3), up to the day's cap; the row is marked pending so the
+/// next tick does not queue it twice.
+fn advise_due(conn: &rusqlite::Connection) {
+    use chronicle_core::storage;
+    let used = storage::get_meta(conn, &day_counter_key("advise"))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    if used >= ADVISE_PER_DAY {
+        return;
+    }
+    let now = Timestamp::now();
+    let due = match storage::unadvised_verdicts(
+        conn,
+        now.as_millisecond() - ADVISE_LOOKBACK_MS,
+        ADVISE_PER_DAY - used,
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("unadvised verdict query failed: {e}");
+            return;
+        }
+    };
+    let mut queued = 0;
+    for (verdict_id, _) in due {
+        let payload = serde_json::json!({ "verdict_id": verdict_id }).to_string();
+        if let Err(e) = storage::mark_verdict_advice(conn, verdict_id, "pending")
+            .and_then(|_| storage::enqueue_ai_job(conn, now, "advise", 0, &payload))
+        {
+            tracing::error!(verdict_id, "advise enqueue failed: {e}");
+            break;
+        }
+        queued += 1;
+    }
+    bump_day_counter_by(conn, "advise", queued);
+    if queued > 0 {
+        tracing::info!(queued, "advisor questions queued");
     }
 }
 
