@@ -828,6 +828,7 @@ dependencies = [
  "llama-cpp-2",
  "num_cpus",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

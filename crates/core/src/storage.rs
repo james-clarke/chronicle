@@ -57,6 +57,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/029_spans_project.sql")),
         M::up(include_str!("../migrations/030_task_current.sql")),
         M::up(include_str!("../migrations/031_self_score_project.sql")),
+        M::up(include_str!("../migrations/032_example_embeddings.sql")),
     ])
 });
 
@@ -3844,6 +3845,151 @@ pub fn rebuild_task_embeddings(
     Ok(n)
 }
 
+/// Tasks whose label has no vector yet, or whose vector was made from an
+/// earlier label (m36 chunk 2): `(id, label, project)`.
+pub fn tasks_missing_label_embeddings(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(i64, String, Option<String>)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.label, t.project FROM tasks t
+         LEFT JOIN task_label_embeddings e ON e.task_id = t.id
+         WHERE e.task_id IS NULL OR e.label <> t.label
+         ORDER BY t.id DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn store_task_label_embeddings(
+    conn: &mut Connection,
+    now_ms: i64,
+    rows: &[(i64, String, Vec<f32>)],
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    {
+        let mut ins = tx.prepare(
+            "INSERT OR REPLACE INTO task_label_embeddings (task_id, label, vec, ts) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for (id, label, v) in rows {
+            ins.execute(params![id, label, vec_to_blob(v), now_ms])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// The correction kinds that are examples of naming and placing work:
+/// the journal, checkpoint, rescore and consolidate rows are bookkeeping.
+pub const EXAMPLE_KINDS: &str = "('rename', 'assign', 'reassign', 'merge', 'eject')";
+
+/// Corrections with no vector yet: `(id, text)`, the text being what the
+/// work looked like (the stored app/title context, else the old label).
+pub fn corrections_missing_embeddings(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<(i64, String)>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.id, c.ctx, c.old_label FROM corrections c
+         LEFT JOIN correction_embeddings e ON e.correction_id = c.id
+         WHERE e.correction_id IS NULL AND c.kind IN {EXAMPLE_KINDS}
+         ORDER BY c.id DESC LIMIT ?1"
+    ))?;
+    let rows = stmt
+        .query_map([limit as i64], |r| {
+            let id: i64 = r.get(0)?;
+            let ctx: String = r.get(1)?;
+            let old: String = r.get(2)?;
+            Ok((id, correction_text(&ctx, &old)))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// What a correction is embedded from: its span context (app and title
+/// lines, the same shape the naming digest's query text has), or the old
+/// label when a pre-m5 row carries no context.
+pub fn correction_text(ctx: &str, old_label: &str) -> String {
+    let ctx = ctx.trim();
+    if ctx.is_empty() {
+        old_label.to_owned()
+    } else {
+        ctx.chars().take(1500).collect()
+    }
+}
+
+pub fn store_correction_embeddings(
+    conn: &mut Connection,
+    rows: &[(i64, Vec<f32>)],
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    {
+        let mut ins = tx.prepare(
+            "INSERT OR REPLACE INTO correction_embeddings (correction_id, vec) VALUES (?1, ?2)",
+        )?;
+        for (id, v) in rows {
+            ins.execute(params![id, vec_to_blob(v)])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn correction_embeddings_count(conn: &Connection) -> Result<i64, StorageError> {
+    Ok(
+        conn.query_row("SELECT COUNT(*) FROM correction_embeddings", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
+/// The `k` corrections whose context is nearest `query` by cosine, among
+/// `kinds` (SQL list literal, e.g. [`EXAMPLE_KINDS`]), deduped by outcome
+/// like the FTS path, newest first among equals. A scan: the corpus is a
+/// few thousand rows at most.
+pub fn nearest_corrections(
+    conn: &Connection,
+    query: &[f32],
+    kinds: &str,
+    k: usize,
+) -> Result<Vec<(Correction, f32)>, StorageError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.old_label, c.new_label, c.old_project, c.new_project, c.kind, c.ctx, e.vec
+         FROM correction_embeddings e JOIN corrections c ON c.id = e.correction_id
+         WHERE c.kind IN {kinds} ORDER BY c.id DESC"
+    ))?;
+    let mut scored: Vec<(Correction, f32)> = stmt
+        .query_map([], |r| {
+            let c = Correction {
+                old_label: r.get(0)?,
+                new_label: r.get(1)?,
+                old_project: r.get(2)?,
+                new_project: r.get(3)?,
+                kind: r.get(4)?,
+                ctx: r.get(5)?,
+            };
+            let v = blob_to_vec(&r.get::<_, Vec<u8>>(6)?);
+            Ok((c, profile::cosine(query, &v)))
+        })?
+        .collect::<Result<_, _>>()?;
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut out: Vec<(Correction, f32)> = Vec::new();
+    for (c, sim) in scored {
+        if out.iter().any(|(o, _)| {
+            o.kind == c.kind && o.new_label == c.new_label && o.new_project == c.new_project
+        }) {
+            continue;
+        }
+        out.push((c, sim));
+        if out.len() >= k {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 /// Close the verdict-log entries of `interval_ids` with `outcome`
 /// ('right' | 'wrong') where still open.
 fn mark_verdicts(
@@ -5542,6 +5688,104 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         assert!(super::MIGRATIONS.validate().is_ok());
+    }
+
+    // m36 chunk 2: label vectors follow renames, correction vectors skip
+    // the bookkeeping kinds, and the nearest scan ranks by cosine and
+    // dedupes by outcome.
+    #[test]
+    fn example_embeddings_round_trip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, status, source, created_ts) VALUES (1, 'a', 'open', 'derived', 1), (2, 'b', 'open', 'user', 2)",
+            [],
+        )
+        .unwrap();
+        let pending = super::tasks_missing_label_embeddings(&conn, 10).unwrap();
+        assert_eq!(pending.len(), 2);
+        super::store_task_label_embeddings(
+            &mut conn,
+            5,
+            &[
+                (1, "a".into(), vec![1.0, 0.0]),
+                (2, "b".into(), vec![0.0, 1.0]),
+            ],
+        )
+        .unwrap();
+        assert!(
+            super::tasks_missing_label_embeddings(&conn, 10)
+                .unwrap()
+                .is_empty()
+        );
+        conn.execute("UPDATE tasks SET label='a2' WHERE id=1", [])
+            .unwrap();
+        let pending = super::tasks_missing_label_embeddings(&conn, 10).unwrap();
+        assert_eq!(pending, [(1, "a2".to_owned(), None)]);
+
+        for (id, kind, ctx, old, new) in [
+            (
+                1,
+                "rename",
+                "Code cart.py\n",
+                "shop work",
+                "fixing checkout",
+            ),
+            (2, "journal", "", "x", "y"),
+            (
+                3,
+                "eject",
+                "Slack #payments\n",
+                "fixing checkout",
+                "(unassigned)",
+            ),
+            (
+                4,
+                "rename",
+                "Code cart.py\n",
+                "shop stuff",
+                "fixing checkout",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO corrections (id, ts, task_id, old_label, new_label, ctx, kind) VALUES (?1, 1, 1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, old, new, ctx, kind],
+            )
+            .unwrap();
+        }
+        let pending = super::corrections_missing_embeddings(&conn, 10).unwrap();
+        assert_eq!(
+            pending,
+            [
+                (4, "Code cart.py".to_owned()),
+                (3, "Slack #payments".to_owned()),
+                (1, "Code cart.py".to_owned()),
+            ]
+        );
+        super::store_correction_embeddings(
+            &mut conn,
+            &[
+                (1, vec![1.0, 0.0]),
+                (3, vec![0.0, 1.0]),
+                (4, vec![0.9, 0.1]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(super::correction_embeddings_count(&conn).unwrap(), 3);
+        let near = super::nearest_corrections(&conn, &[1.0, 0.0], super::EXAMPLE_KINDS, 5).unwrap();
+        // 4 and 1 share an outcome: one survives (the nearer), then the eject.
+        let labels: Vec<(&str, &str)> = near
+            .iter()
+            .map(|(c, _)| (c.kind.as_str(), c.old_label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [("rename", "shop work"), ("eject", "fixing checkout")]
+        );
+        assert!(near[0].1 > 0.99);
+        let renames = super::nearest_corrections(&conn, &[0.0, 1.0], "('rename')", 5).unwrap();
+        assert_eq!(renames.len(), 1);
+        assert_eq!(renames[0].0.old_label, "shop stuff");
     }
 
     // m27 chunk 6: a consolidation run moves intervals and renames in one

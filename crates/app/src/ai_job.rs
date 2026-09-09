@@ -167,6 +167,53 @@ pub(crate) fn note_redactions(
     }
 }
 
+/// How many past corrections a naming prompt sees (m36 chunk 2).
+const EXAMPLES_K: usize = 4;
+
+/// The past corrections nearest these spans' work (m36 chunk 2), for the
+/// digest's "Past corrections" section. Best effort: a lookup failure is
+/// a prompt without examples, never a failed job.
+pub(crate) fn nearest_examples(
+    conn: &rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    job: JobKind,
+    spans: &[SpanDraft],
+) -> Vec<chronicle_core::types::Correction> {
+    let text = span_query_text(spans);
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let examples =
+        chronicle_derive::examples::Examples::open(config.embed_model.as_deref(), data_dir);
+    match examples.nearest(conn, job, &text, EXAMPLES_K) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("example lookup failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// The distinct "app: title" lines of the focus spans, in first-seen
+/// order: the same shape a correction's stored context has.
+pub(crate) fn span_query_text(spans: &[SpanDraft]) -> String {
+    use chronicle_core::sessionizer::SpanKind;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = String::new();
+    for s in spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Focus && !s.title.is_empty())
+    {
+        let line = format!("{} {}", s.app, s.title);
+        if seen.insert(line.clone()) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Local midnight, epoch ms: the daily cap's window.
 pub(crate) fn day_start_ms() -> i64 {
     Zoned::now()
@@ -515,11 +562,12 @@ pub(crate) fn run_ai_job(
                 bail!("no recent focus activity to suggest from");
             }
             let tz = TimeZone::system();
+            let examples = nearest_examples(conn, config, data_dir, JobKind::SuggestTask, &spans);
             let digest = chronicle_core::digest::build_digest(
                 &spans,
                 &tz,
                 &[],
-                &[],
+                &examples,
                 &[],
                 &[],
                 None,
@@ -552,11 +600,12 @@ pub(crate) fn run_ai_job(
                 bail!("no focus activity to name task {task_id} from");
             }
             let tz = TimeZone::system();
+            let examples = nearest_examples(conn, config, data_dir, JobKind::NameTask, &spans);
             let digest = chronicle_core::digest::build_digest(
                 &spans,
                 &tz,
                 &[],
-                &[],
+                &examples,
                 &[],
                 &[],
                 None,

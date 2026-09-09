@@ -68,6 +68,16 @@ pub fn resolve_embed(embed_model: Option<&str>, data_dir: &Path) -> Option<PathB
     p.exists().then_some(p)
 }
 
+/// `resolve_embed`, else the downloaded default embedding preset (m36
+/// chunk 2): the example memory needs vectors whether or not the user
+/// opted the soft tier in; span embeddings stay behind `embed_model`.
+pub fn resolve_embed_or_default(embed_model: Option<&str>, data_dir: &Path) -> Option<PathBuf> {
+    resolve_embed(embed_model, data_dir).or_else(|| {
+        let p = models_dir(data_dir).join(EMBED_PRESETS[0].file);
+        p.exists().then_some(p)
+    })
+}
+
 pub fn preset(name: &str) -> Option<&'static ModelSpec> {
     PRESETS
         .iter()

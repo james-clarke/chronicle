@@ -651,15 +651,60 @@ fn print_totals(
     totals
 }
 
-/// `chronicle backfill-embeddings` (m30 chunk 6): every focus span without
-/// a vector, in batches, then the task centroids.
+/// `chronicle backfill-embeddings`: the example memory's task labels and
+/// corrections (m36 chunk 2, with the configured model or the downloaded
+/// preset), then, when `embed_model` is set (m30 chunk 6), every focus
+/// span without a vector in batches and the task centroids.
 pub(crate) fn backfill_embeddings(data_dir: &Path) -> anyhow::Result<()> {
     use chronicle_core::storage;
     let config = Config::load(&data_dir.join("config.toml"))?;
-    let path = chronicle_derive::model::resolve_embed(config.embed_model.as_deref(), data_dir)
-        .context("set `embed_model` in config.toml (e.g. `chronicle model pull bge-small` then `embed_model = \"bge-small\"`)")?;
-    let embedder = chronicle_derive::embed::Embedder::load(&path)?;
+    let any =
+        chronicle_derive::model::resolve_embed_or_default(config.embed_model.as_deref(), data_dir)
+            .context("no embedding model on disk: `chronicle model pull bge-small`")?;
+    let embedder = chronicle_derive::embed::Embedder::load(&any)?;
     let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let labels = storage::tasks_missing_label_embeddings(&conn, usize::MAX)?;
+    let t0 = std::time::Instant::now();
+    if !labels.is_empty() {
+        let texts: Vec<String> = labels
+            .iter()
+            .map(|(_, label, project)| match project {
+                Some(p) => format!("{label} [{p}]"),
+                None => label.clone(),
+            })
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vecs = embedder.embed(&refs)?;
+        let rows: Vec<(i64, String, Vec<f32>)> = labels
+            .iter()
+            .zip(vecs)
+            .map(|((id, label, _), v)| (*id, label.clone(), v))
+            .collect();
+        storage::store_task_label_embeddings(&mut conn, Timestamp::now().as_millisecond(), &rows)?;
+    }
+    let label_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let corrections = storage::corrections_missing_embeddings(&conn, usize::MAX)?;
+    let t1 = std::time::Instant::now();
+    if !corrections.is_empty() {
+        let refs: Vec<&str> = corrections.iter().map(|(_, t)| t.as_str()).collect();
+        let vecs = embedder.embed(&refs)?;
+        let rows: Vec<(i64, Vec<f32>)> = corrections.iter().map(|(id, _)| *id).zip(vecs).collect();
+        storage::store_correction_embeddings(&mut conn, &rows)?;
+    }
+    let corr_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "{} task labels embedded ({:.1} ms each), {} corrections embedded ({:.1} ms each)",
+        labels.len(),
+        label_ms / labels.len().max(1) as f64,
+        corrections.len(),
+        corr_ms / corrections.len().max(1) as f64
+    );
+    if chronicle_derive::model::resolve_embed(config.embed_model.as_deref(), data_dir).is_none() {
+        println!(
+            "spans not embedded: set `embed_model = \"bge-small\"` in config.toml for the soft tier"
+        );
+        return Ok(());
+    }
     let mut total = 0;
     loop {
         let pending = storage::spans_missing_embeddings(&conn, 500)?;
@@ -679,6 +724,33 @@ pub(crate) fn backfill_embeddings(data_dir: &Path) -> anyhow::Result<()> {
     }
     let n = storage::rebuild_task_embeddings(&mut conn, &[])?;
     println!("{total} spans embedded; {n} task centroids");
+    Ok(())
+}
+
+/// `chronicle bench --examples <text>` (m36 chunk 2): what the example
+/// memory returns for one piece of work, by cosine and by FTS, so the two
+/// can be compared on real corrections.
+pub(crate) fn examples(data_dir: &Path, text: &str) -> anyhow::Result<()> {
+    use chronicle_derive::examples::Examples;
+    use chronicle_derive::text::JobKind;
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
+    let t0 = std::time::Instant::now();
+    let ex = Examples::open(config.embed_model.as_deref(), data_dir);
+    let load_ms = t0.elapsed().as_millis();
+    let t1 = std::time::Instant::now();
+    let near = ex.nearest(&conn, JobKind::NameTask, text, 4)?;
+    let near_ms = t1.elapsed().as_millis();
+    println!(
+        "nearest by cosine (model load {load_ms} ms, lookup {near_ms} ms, {} embedded):{}",
+        chronicle_core::storage::correction_embeddings_count(&conn)?,
+        chronicle_derive::examples::render_section(&near)
+    );
+    let fts = Examples::none().nearest(&conn, JobKind::NameTask, text, 4)?;
+    println!(
+        "by FTS:{}",
+        chronicle_derive::examples::render_section(&fts)
+    );
     Ok(())
 }
 

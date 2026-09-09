@@ -168,6 +168,37 @@ prefixes are ~200 tokens, so their split is for shape, not savings.
   with examples versus without; the embedding pass adds under 50 ms per
   correction.
 
+**Shipped 2026-09-09.** Migration 032 adds `task_label_embeddings(task_id,
+label, vec, ts)` (the m30 `task_embeddings` table is the span centroid and
+keeps its name; `label` is the text the row was made from, so a rename
+re-embeds without a hook) and `correction_embeddings(correction_id, vec)`
+over the example kinds (rename, assign, reassign, merge, eject; journal,
+checkpoint, rescore and consolidate rows are bookkeeping). The daemon tick
+embeds new labels and corrections beside the span pass (`embed_new_examples`,
+50 rows a tick) with `embed_model` or, unset, the downloaded bge-small
+preset (`model::resolve_embed_or_default`; span vectors stay opt-in);
+`chronicle backfill-embeddings` does the same in one go and prints the
+per-row cost. `derive::examples::Examples::nearest(conn, job, text, k)`
+embeds the work's "app title" lines, scans `correction_embeddings` by
+cosine (kinds per job: naming sees rename/assign/reassign/merge,
+consolidate sees rename/merge, the advisor sees all five), keeps matches
+above 0.6 and dedupes by outcome; without a model it filters
+`storage::correction_hints` (FTS) the same way. `name_task` and
+`suggest_task` pass the four nearest into `build_digest` so the digest's
+own "Past corrections" section renders them; consolidate appends
+`examples::render_section` ("evidence → wrong → right", `✗` for ejects) to
+its input, and both templates say what the section is. `chronicle bench
+--examples "<app title>"` prints the cosine and FTS answers side by side.
+The scorer already learns from corrections: `refresh_task_evidence` writes
+`Source::Correction` rows at `correction_min` minutes (profile.rs:480),
+M30 chunk 2's design, so nothing new was needed there. Gate on the live
+DB's copy: 112 labels at 3.5 ms and 87 corrections at 21.4 ms each
+(under the 50 ms bound), lookups 9–11 ms after a 32 ms model load; on
+"Firefox Jira ACME-11533 Export Selected modal" cosine returns the
+ACME-11533 assign first where FTS returns it first too but fills the rest
+with monetization and UI rows; the pairwise naming gate waits for chunk
+5's judge.
+
 ### 3. The pairwise advisor
 
 - New job kind `advise` (JSON). Trigger: a `Verdict` with `confident =

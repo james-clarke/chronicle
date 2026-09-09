@@ -142,6 +142,7 @@ pub(crate) fn ref_label(
 pub(crate) fn consolidate_day(
     conn: &mut rusqlite::Connection,
     config: &Config,
+    data_dir: &Path,
     model: &chronicle_derive::DeriveModel,
     lo: i64,
     hi: i64,
@@ -166,7 +167,22 @@ pub(crate) fn consolidate_day(
         .cloned()
         .collect();
     if remaining.iter().filter(|t| !t.locked).count() >= 2 {
-        let input = consolidate::render_input(&remaining);
+        let mut input = consolidate::render_input(&remaining);
+        // The user's own merges and renames of similar work (m36 chunk 2).
+        {
+            let text: String = remaining
+                .iter()
+                .filter(|t| !t.locked)
+                .flat_map(|t| t.evidence.iter().take(3))
+                .map(|(app, title, _)| format!("{app} {title}\n"))
+                .collect();
+            let examples =
+                chronicle_derive::examples::Examples::open(config.embed_model.as_deref(), data_dir);
+            match examples.nearest(conn, chronicle_derive::text::JobKind::Consolidate, &text, 4) {
+                Ok(cs) => input.push_str(&chronicle_derive::examples::render_section(&cs)),
+                Err(e) => tracing::warn!("consolidate examples failed: {e}"),
+            }
+        }
         // The heavy model, when configured, is loaded for this run only.
         let heavy = config
             .model_path_heavy
@@ -515,11 +531,12 @@ pub(crate) fn derive_resident(data_dir: &Path) -> anyhow::Result<()> {
                 }
             }
             Request::Consolidate { lo, hi } => {
-                let result = consolidate_day(&mut conn, &config, &model, lo, hi, &mut |label| {
-                    send(&Reply::Progress {
-                        label: label.into(),
-                    })
-                });
+                let result =
+                    consolidate_day(&mut conn, &config, data_dir, &model, lo, hi, &mut |label| {
+                        send(&Reply::Progress {
+                            label: label.into(),
+                        })
+                    });
                 match result {
                     Ok(changes) => send(&Reply::Done {
                         batch_id: None,

@@ -94,8 +94,9 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Embed every focus span that has no vector yet with the configured
-    /// `embed_model` (m30 chunk 6), then rebuild the task centroids.
+    /// Embed task labels and corrections for the example memory (m36 chunk
+    /// 2), then, with `embed_model` set, every focus span that has no vector
+    /// yet (m30 chunk 6) and the task centroids.
     BackfillEmbeddings,
     /// Internal: re-read AI session transcripts modified since a local day
     /// and replace their rows (m32 chunk 2: prompt minutes and titles for
@@ -274,6 +275,11 @@ enum Cmd {
         /// p95 under 20 ms per title on this CPU).
         #[arg(long)]
         embed: Option<PathBuf>,
+        /// Print the past corrections a naming prompt would see for this
+        /// "app title" text (m36 chunk 2): the cosine path when vectors
+        /// exist, the FTS path beside it.
+        #[arg(long)]
+        examples: Option<String>,
     },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
@@ -410,9 +416,12 @@ fn main() -> anyhow::Result<()> {
             window,
             live,
             embed,
+            examples,
             backend,
         } => {
-            if let Some(path) = embed {
+            if let Some(text) = examples {
+                bench::examples(&data_dir, &text)
+            } else if let Some(path) = embed {
                 bench::embed_bench(&data_dir, &path)
             } else if let Some(spec) = window {
                 bench::window(&data_dir, &spec, live)

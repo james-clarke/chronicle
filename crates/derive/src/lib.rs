@@ -6,6 +6,7 @@ pub mod chat;
 pub mod cloud;
 pub mod describe;
 pub mod embed;
+pub mod examples;
 pub mod model;
 pub mod prompts;
 pub mod redact;

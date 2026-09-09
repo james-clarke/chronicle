@@ -500,6 +500,7 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                     tracing::error!("sessionize refresh failed: {e}");
                 }
                 embed_new_spans(&mut conn, &config, data_dir, &mut embedder);
+                embed_new_examples(&mut conn, &config, data_dir, &mut embedder);
                 let segmenter = config.derive_mode == "segmenter";
                 if config.prepass_secs > 0
                     && last_prepass.elapsed() >= Duration::from_secs(u64::from(config.prepass_secs))
@@ -1555,14 +1556,9 @@ fn embed_new_spans(
     else {
         return;
     };
-    let e = embedder.get_or_insert_with(|| match chronicle_derive::embed::Embedder::load(&path) {
-        Ok(e) => Some(e),
-        Err(err) => {
-            tracing::error!("embedding model failed to load: {err}");
-            None
-        }
-    });
-    let Some(e) = e else { return };
+    let Some(e) = load_embedder(&path, embedder) else {
+        return;
+    };
     let pending = match storage::spans_missing_embeddings(conn, EMBED_PER_TICK) {
         Ok(p) => p,
         Err(err) => {
@@ -1589,6 +1585,106 @@ fn embed_new_spans(
         }
         Err(err) => tracing::error!("embedding failed: {err}"),
     }
+}
+
+/// The tick's one embedding model, loaded on first use; a failed load is
+/// remembered so the tick does not retry every 30 s.
+fn load_embedder<'a>(
+    path: &Path,
+    cache: &'a mut Option<Option<chronicle_derive::embed::Embedder>>,
+) -> Option<&'a chronicle_derive::embed::Embedder> {
+    cache
+        .get_or_insert_with(|| match chronicle_derive::embed::Embedder::load(path) {
+            Ok(e) => Some(e),
+            Err(err) => {
+                tracing::error!("embedding model failed to load: {err}");
+                None
+            }
+        })
+        .as_ref()
+}
+
+/// Rows per tick for the example memory (m36 chunk 2): a rename or a
+/// correction is one row, so the backlog is the first tick's only.
+const EXAMPLES_PER_TICK: usize = 50;
+/// Embed task labels that changed and corrections that are new (m36 chunk
+/// 2), with the configured model or the downloaded preset.
+fn embed_new_examples(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    data_dir: &Path,
+    embedder: &mut Option<Option<chronicle_derive::embed::Embedder>>,
+) {
+    use chronicle_core::storage;
+    let Some(path) =
+        chronicle_derive::model::resolve_embed_or_default(config.embed_model.as_deref(), data_dir)
+    else {
+        return;
+    };
+    let (labels, corrections) = match (
+        storage::tasks_missing_label_embeddings(conn, EXAMPLES_PER_TICK),
+        storage::corrections_missing_embeddings(conn, EXAMPLES_PER_TICK),
+    ) {
+        (Ok(l), Ok(c)) => (l, c),
+        (Err(err), _) | (_, Err(err)) => {
+            tracing::error!("example embedding query failed: {err}");
+            return;
+        }
+    };
+    if labels.is_empty() && corrections.is_empty() {
+        return;
+    }
+    let Some(e) = load_embedder(&path, embedder) else {
+        return;
+    };
+    let t0 = Instant::now();
+    if !labels.is_empty() {
+        let texts: Vec<String> = labels
+            .iter()
+            .map(|(_, label, project)| match project {
+                Some(p) => format!("{label} [{p}]"),
+                None => label.clone(),
+            })
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        match e.embed(&refs) {
+            Ok(vecs) => {
+                let rows: Vec<(i64, String, Vec<f32>)> = labels
+                    .iter()
+                    .zip(vecs)
+                    .map(|((id, label, _), v)| (*id, label.clone(), v))
+                    .collect();
+                if let Err(err) = storage::store_task_label_embeddings(
+                    conn,
+                    jiff::Timestamp::now().as_millisecond(),
+                    &rows,
+                ) {
+                    tracing::error!("storing label embeddings failed: {err}");
+                }
+            }
+            Err(err) => tracing::error!("label embedding failed: {err}"),
+        }
+    }
+    if !corrections.is_empty() {
+        let refs: Vec<&str> = corrections.iter().map(|(_, t)| t.as_str()).collect();
+        match e.embed(&refs) {
+            Ok(vecs) => {
+                let rows: Vec<(i64, Vec<f32>)> =
+                    corrections.iter().map(|(id, _)| *id).zip(vecs).collect();
+                if let Err(err) = storage::store_correction_embeddings(conn, &rows) {
+                    tracing::error!("storing correction embeddings failed: {err}");
+                }
+            }
+            Err(err) => tracing::error!("correction embedding failed: {err}"),
+        }
+    }
+    let n = labels.len() + corrections.len();
+    tracing::debug!(
+        labels = labels.len(),
+        corrections = corrections.len(),
+        ms_per_row = t0.elapsed().as_millis() as f64 / n.max(1) as f64,
+        "examples embedded"
+    );
 }
 
 /// The segmenter's batch tier (m30 chunk 3): every batch the model would

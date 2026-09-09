@@ -11,6 +11,7 @@ encoding_rs.workspace = true
 llama-cpp-2.workspace = true
 num_cpus.workspace = true
 regex.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
