@@ -237,3 +237,32 @@ exists.
 
 Threads finer than a project (M33 direction A stays shelved), multiple
 users, tickets as projects, and any change to capture.
+
+## Amendments (2026-09-09, from `dev-tools-direction.md`)
+
+Proposed answers to the open questions: two silos by ticket prefix (ACME:
+contoso, mailer, admin-api; ACAI: acme-ai-agent-backend); `derive =
+true` by default; the general task is not shown as a task — the project
+line carries "40 m not on a task" and reports say "<project>: other work".
+
+Six changes to the chunks, argued in the direction doc:
+
+- Chunk 0: project identity is the git remote (`host/org/repo`), with
+  paths and `git worktree list` entries as instances; a path basename is
+  what a place is today (`extract::place_from_path`,
+  crates/core/src/extract.rs:1023; worktrees split at
+  crates/capture/src/git.rs:47). Repos are discovered from every place
+  source (AI session cwd, port cwd, editor heartbeat project, titles) and
+  proposed in Home, not only pre-filled from `git_repos`. The matcher takes
+  a path, not a basename. `localhost:<port>` leaves `domains` and resolves
+  through the ports collector. Ticket keys add repo-scoped `#123` and match
+  branch names case-insensitively.
+- Chunk 1: replay the mint of task 152 (`chronicle@main · 94020a60…`,
+  minted beside declared 145 after the sink fix) and say why the sink lost
+  before the gate is called.
+- Chunk 3: a Sources row per project (which collectors fed it this week).
+- Chunk 5: "unfiled minutes" and "cross-project placements: 0" go on the
+  site's proof block.
+
+The milestones after this one are M36 (`m36-accuracy-plan.md`) and M37
+(sources and connections, in the direction doc).
