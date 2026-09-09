@@ -74,12 +74,6 @@ pub struct SegParams {
     /// A cluster of "new" stretches needs this many focus minutes before
     /// a task is created for it; less stays unassigned.
     pub new_task_min: f64,
-    /// Count foreign minutes per strand across the whole segment, not
-    /// only in one unbroken run (m33 chunk B, `segment_switch_mode =
-    /// accumulated`): a strand reaching `switch_min` in all becomes its
-    /// own row over the segment's range. Off by default: the cut rule
-    /// alone, as before.
-    pub accumulate: bool,
 }
 
 impl SegParams {
@@ -87,7 +81,6 @@ impl SegParams {
         SegParams {
             switch_min: f64::from(c.segment_switch_min.max(1)),
             new_task_min: f64::from(c.segment_new_task_min),
-            accumulate: c.segment_switch_mode != "contiguous",
         }
     }
 }
@@ -97,7 +90,6 @@ impl Default for SegParams {
         SegParams {
             switch_min: 3.0,
             new_task_min: 10.0,
-            accumulate: false,
         }
     }
 }
@@ -130,20 +122,12 @@ pub struct Seg {
     pub minutes: f64,
     /// `false` for the last segment, still growing at the window's end.
     pub closed: bool,
-    /// The spans counted on this segment, by id: what its evidence is
-    /// built from when it shares its range (m33 chunk B).
+    /// The spans counted on this segment, by id.
     pub ids: Vec<i64>,
-    /// This segment's share of its range: 1 for a whole segment, less for
-    /// a strand or the incumbent it was unravelled from; the rows over
-    /// one range sum to 1.
+    /// This segment's share of its range (m35 chunk 2): 1 when its project
+    /// alone was on screen, less when other projects' spans interleave
+    /// with it — its focus minutes over every span's inside the range.
     pub share: f64,
-    /// A strand unravelled from a segment (m33 chunk B), as opposed to
-    /// the incumbent that kept the rest of the range.
-    pub strand: bool,
-    /// Foreign work that folded back in, by what it shares (m33 chunk B):
-    /// each strand's own keys, ties, minutes and spans. Unravelled into
-    /// rows of their own once the segment closes.
-    strands: Vec<Seg>,
 }
 
 impl Seg {
@@ -157,8 +141,6 @@ impl Seg {
             closed: true,
             ids: Vec::new(),
             share: 1.0,
-            strand: false,
-            strands: Vec::new(),
         }
     }
 
@@ -193,83 +175,6 @@ impl Seg {
         self.lo = self.lo.min(other.lo);
         self.hi = self.hi.max(other.hi);
         self.ids.extend(other.ids.iter().copied());
-        self.strands.extend(other.strands.iter().cloned());
-    }
-
-    /// A foreign run that folded back (m33 chunk B): its spans were
-    /// counted on the segment as time; what each is about goes to the
-    /// strand it shares an anchor or a leading word with, else a strand
-    /// of its own. The run carries its spans one by one in `strands`, so
-    /// a run that mixed two repos parts again here.
-    fn fold_run(&mut self, run: Seg) {
-        for piece in run.strands {
-            let hit = self
-                .strands
-                .iter_mut()
-                .find(|st| st.akin(&piece) || piece.keys.keys().any(|k| st.keys.contains_key(k)));
-            match hit {
-                Some(st) => st.absorb(&piece),
-                None => self.strands.push(piece),
-            }
-        }
-    }
-
-    /// The segment as rows over its range (m33 chunk B): every strand
-    /// that reached `switch_min` becomes one, with its share of the time,
-    /// and the incumbent keeps the rest — unless the incumbent itself is
-    /// under `switch_min`, when the largest strand takes it. A segment
-    /// with no strand over the bar stays whole, its strands' minutes still
-    /// counted on it.
-    fn unravel(mut self, p: &SegParams) -> Vec<Seg> {
-        let strands = std::mem::take(&mut self.strands);
-        if !p.accumulate || strands.is_empty() {
-            return vec![self];
-        }
-        // Strands from absorbed segments may be about the same thing.
-        let mut merged: Vec<Seg> = Vec::new();
-        for st in strands {
-            match merged.iter_mut().find(|m| m.akin(&st)) {
-                Some(m) => m.absorb(&st),
-                None => merged.push(st),
-            }
-        }
-        let mut rows: Vec<Seg> = merged
-            .into_iter()
-            .filter(|st| st.minutes >= p.switch_min)
-            .collect();
-        if rows.is_empty() {
-            return vec![self];
-        }
-        rows.sort_by(|a, b| {
-            b.minutes
-                .partial_cmp(&a.minutes)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let total = self.minutes;
-        let taken: f64 = rows.iter().map(|r| r.minutes).sum();
-        let (lo, hi, closed) = (self.lo, self.hi, self.closed);
-        let mut incumbent = self;
-        incumbent.minutes = (incumbent.minutes - taken).max(0.0);
-        let strand_ids: BTreeSet<i64> = rows.iter().flat_map(|r| r.ids.iter().copied()).collect();
-        incumbent.ids.retain(|id| !strand_ids.contains(id));
-        if incumbent.minutes < p.switch_min {
-            rows[0].absorb(&incumbent);
-        } else {
-            rows.insert(0, incumbent);
-        }
-        for r in &mut rows {
-            r.lo = lo;
-            r.hi = hi;
-            r.closed = closed;
-            r.strand = true;
-            r.share = if total > 0.0 {
-                (r.minutes / total).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-        }
-        rows[0].strand = false;
-        rows
     }
 
     /// Whether a span continues this segment: a shared anchor, or a shared
@@ -352,7 +257,8 @@ fn strong_kind(k: &Key) -> Option<AnchorKind> {
     }
 }
 
-/// Cut `spans` (focus, sorted by start) into segments.
+/// Cut `spans` (focus, sorted by start; one project's, m35 chunk 2) into
+/// segments.
 ///
 /// A span joins the open segment when it shares an anchor or a leading
 /// word with it. A span that swaps a strong anchor the segment holds for
@@ -378,11 +284,7 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
         if let Some(c) = cur.as_mut()
             && s.start_ts - c.hi >= AFK_GAP_MS
         {
-            if let Some(r) = run.take()
-                && p.accumulate
-            {
-                c.fold_run(r);
-            }
+            run = None;
             out.push(cur.take().expect("checked"));
         }
         let Some(c) = cur.as_mut() else {
@@ -413,13 +315,8 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
             .any(|k| strong_kind(k).is_some() && c.keys.contains_key(k));
         if shares_strong || (!swaps_strong && c.shares(&sig)) {
             c.add(s.id, &sig, dur, s.end_ts);
-            // The excursion folded back: its time stays on the segment;
-            // what it was about becomes a strand (accumulated mode).
-            if let Some(r) = run.take()
-                && p.accumulate
-            {
-                c.fold_run(r);
-            }
+            // The excursion folded back: its time stays on the segment.
+            run = None;
             continue;
         }
         if swaps_strong && c.minutes >= p.switch_min && run.is_none() {
@@ -430,19 +327,12 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
             out.push(done);
             continue;
         }
-        // Foreign to the segment: the run grows until it earns a cut. It
-        // keeps each span apart too, for the strands it may fold into.
+        // Foreign to the segment: the run grows until it earns a cut.
         let r = run.get_or_insert_with(|| Seg::empty(s.start_ts));
         r.add(s.id, &sig, dur, s.end_ts);
-        if p.accumulate {
-            let mut piece = Seg::empty(s.start_ts);
-            piece.add(s.id, &sig, dur, s.end_ts);
-            r.strands.push(piece);
-        }
         if r.minutes >= p.switch_min {
             let start = r.lo;
-            let mut next = run.take().expect("just inserted");
-            next.strands.clear();
+            let next = run.take().expect("just inserted");
             let mut done = std::mem::replace(c, next);
             done.hi = done.hi.min(start);
             // The run's own minutes were counted on the open segment while
@@ -458,19 +348,11 @@ pub fn segment(spans: &[AnchoredSpan], distractions: &[Regex], p: &SegParams) ->
         }
     }
     if let Some(mut c) = cur.take() {
-        if let Some(r) = run.take()
-            && p.accumulate
-        {
-            c.fold_run(r);
-        }
         c.closed = false;
         out.push(c);
     }
     out.retain(|s| s.hi > s.lo);
     fold_excursions(out, p)
-        .into_iter()
-        .flat_map(|s| s.unravel(p))
-        .collect()
 }
 
 /// A short segment between two about the same thing joins them.
@@ -486,17 +368,6 @@ fn fold_excursions(segs: Vec<Seg>, p: &SegParams) -> Vec<Seg> {
             if prev.akin(next) && next.lo - prev.hi < AFK_GAP_MS {
                 let mut merged = out.pop().expect("non-empty");
                 merged.absorb(s);
-                if p.accumulate {
-                    // What the excursion was about is also a strand, so a
-                    // repo that keeps cutting in and folding back adds up
-                    // to a row of its own; the cut itself is unchanged.
-                    let mut piece = s.clone();
-                    piece.strands.clear();
-                    merged.fold_run(Seg {
-                        strands: vec![piece],
-                        ..Seg::empty(s.lo)
-                    });
-                }
                 merged.absorb(next);
                 merged.closed = next.closed;
                 out.push(merged);
@@ -543,13 +414,9 @@ pub struct Placement {
     /// The kind of work: see [`kind_of`].
     pub kind: String,
     /// The fraction of `[lo, hi)` that is this target's: 1 for a whole
-    /// segment, less when concurrent AI sessions split it (m32 chunk 3);
-    /// the rows over one range sum to 1.
+    /// segment, less when other projects interleave with it (m35 chunk
+    /// 2) or concurrent AI sessions split it (m32 chunk 3).
     pub share: f64,
-    /// A strand the segmenter unravelled (m33 chunk B): one repo's own
-    /// spans, not split again by the sessions live around it; the
-    /// incumbent it left is split as any whole row, its shares scaled.
-    pub strand: bool,
 }
 
 /// The kinds of work a segment can be, general across roles.
@@ -646,7 +513,6 @@ fn label_of(labels: &HashMap<i64, String>, id: i64) -> String {
 fn place_existing(
     seg: &Segment,
     share: f64,
-    strand: bool,
     v: &Verdict,
     labels: &HashMap<i64, String>,
 ) -> Option<Placement> {
@@ -681,7 +547,6 @@ fn place_existing(
         runner_up: v.runner_up().flatten(),
         kind: String::new(),
         share,
-        strand,
     })
 }
 
@@ -735,34 +600,6 @@ impl Sinks {
     pub fn derives(&self, project: &str) -> bool {
         !self.no_derive.contains(&project.to_ascii_lowercase())
     }
-}
-
-/// The project of `[lo, hi)` (m35 chunk 1): the one its spans — those in
-/// `ids` when given — spent the most time in, Chronicle's own window and
-/// distractions aside. Unfiled when unfiled time leads; filed on a tie.
-fn project_of(
-    spans: &[AnchoredSpan],
-    lo: i64,
-    hi: i64,
-    ids: Option<&[i64]>,
-    distractions: &[Regex],
-) -> Option<String> {
-    let mut ms: HashMap<Option<&str>, i64> = HashMap::new();
-    for s in spans.iter().filter(|s| s.end_ts > lo && s.start_ts < hi) {
-        if ids.is_some_and(|ids| !ids.contains(&s.id))
-            || crate::evidence::is_self_window(&s.app)
-            || crate::evidence::is_distraction(&s.app, &s.title, distractions)
-        {
-            continue;
-        }
-        let ov = s.end_ts.min(hi) - s.start_ts.max(lo);
-        if ov > 0 {
-            *ms.entry(s.project.as_deref()).or_insert(0) += ov;
-        }
-    }
-    ms.into_iter()
-        .max_by_key(|(p, m)| (*m, p.is_some(), std::cmp::Reverse(*p)))
-        .and_then(|(p, _)| p.map(str::to_owned))
 }
 
 /// The candidates per project (m35 chunk 1): a segment scores against the
@@ -863,13 +700,53 @@ fn sink_order(
     Some(format!("holds {key}"))
 }
 
-/// Decide every segment in `spans` over `[lo, hi)`: score each against the
-/// tasks of its own project (m35 chunk 1) under the sink order; the "new"
-/// stretches cluster by what they share inside one project, and a cluster
-/// with `new_task_min` focus minutes becomes one new task there; a short
-/// "new" stretch left over between two placements on one task joins that
-/// task (unsure); what is still new inside a project is the project's
-/// other work. Contiguous placements on one target merge into one row.
+/// Spans grouped by project (m35 chunk 2), each group in time order, so
+/// every project is cut and scored on its own spans. Chronicle's own
+/// window and a distraction belong to the project of the span before
+/// them (else after): time on whatever they interrupted, as a glance
+/// always was. Groups come in order of first span.
+fn partition(
+    spans: &[AnchoredSpan],
+    distractions: &[Regex],
+) -> Vec<(Option<String>, Vec<AnchoredSpan>)> {
+    let mut owner: Vec<Option<String>> = Vec::with_capacity(spans.len());
+    let mut last: Option<Option<String>> = None;
+    let mut leading: Vec<usize> = Vec::new();
+    for (i, s) in spans.iter().enumerate() {
+        if crate::evidence::is_furniture(&s.app, &s.title, distractions) {
+            owner.push(last.clone().unwrap_or_default());
+            if last.is_none() {
+                leading.push(i);
+            }
+        } else {
+            last = Some(s.project.clone());
+            owner.push(s.project.clone());
+            for j in leading.drain(..) {
+                owner[j] = s.project.clone();
+            }
+        }
+    }
+    let mut out: Vec<(Option<String>, Vec<AnchoredSpan>)> = Vec::new();
+    for (s, p) in spans.iter().zip(owner) {
+        match out.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, v)) => v.push(s.clone()),
+            None => out.push((p, vec![s.clone()])),
+        }
+    }
+    out
+}
+
+/// Decide every segment in `spans` over `[lo, hi)`. Each project's spans
+/// are cut and scored on their own (m35 chunk 2), against the tasks of
+/// that project under the sink order; a segment's `share` is its focus
+/// minutes over every span's inside its range, so projects interleaved
+/// minute by minute are each their own rows over the same stretch. The
+/// "new" stretches cluster by what they share inside one project, and a
+/// cluster with `new_task_min` focus minutes becomes one new task there;
+/// a short "new" stretch left over between two placements on one task
+/// joins that task (unsure); what is still new inside a project is the
+/// project's other work. Contiguous whole placements on one target merge
+/// into one row. Rows come out in time order.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
     spans: &[AnchoredSpan],
@@ -885,45 +762,51 @@ pub fn decide(
 ) -> Vec<Placement> {
     let buckets = by_project(profiles, projects);
     let none: Vec<Profile> = Vec::new();
-    // 1. Score, inside the segment's project.
+    let focus = |ss: &[AnchoredSpan], a: i64, b: i64| -> f64 {
+        ss.iter()
+            .filter(|s| s.end_ts > a && s.start_ts < b)
+            .map(|s| minutes(s.end_ts.min(b) - s.start_ts.max(a)))
+            .sum()
+    };
+    let parts = partition(spans, distractions);
+    // 1. Cut and score each project's spans on their own.
     let mut scored: Vec<(Seg, Segment, Verdict)> = Vec::new();
-    // Per scored segment: its project and the reason a sink rule gave.
+    // Per scored segment: its project and the reason a sink rule gave,
+    // and its partition, so the rules that look at neighbours stay
+    // inside one project.
     let mut about: Vec<(Option<String>, Option<String>)> = Vec::new();
-    for mut seg in segment(spans, distractions, sp) {
-        seg.lo = seg.lo.max(lo);
-        seg.hi = seg.hi.min(hi);
-        if seg.hi <= seg.lo {
-            continue;
+    let mut part: Vec<usize> = Vec::new();
+    for (pi, (project, own)) in parts.iter().enumerate() {
+        let candidates = buckets.get(project).unwrap_or(&none);
+        for mut seg in segment(own, distractions, sp) {
+            seg.lo = seg.lo.max(lo);
+            seg.hi = seg.hi.min(hi);
+            if seg.hi <= seg.lo {
+                continue;
+            }
+            let evidence = Segment::from_spans_skipping(own, seg.lo, seg.hi, distractions);
+            if evidence.keys.is_empty() {
+                continue;
+            }
+            let (mine, all) = (focus(own, seg.lo, seg.hi), focus(spans, seg.lo, seg.hi));
+            seg.share = if all <= 0.0 || all - mine < 1e-9 {
+                1.0
+            } else {
+                (mine / all).clamp(0.0, 1.0)
+            };
+            let mut v = profile::score(&evidence, candidates, params);
+            let reason = sink_order(&mut v, &evidence, candidates, project.as_deref(), sinks);
+            about.push((project.clone(), reason));
+            part.push(pi);
+            scored.push((seg, evidence, v));
         }
-        // A row sharing its range (m33 chunk B) is scored on its own
-        // spans, not everything in the range.
-        let ids = (seg.share < 1.0).then_some(seg.ids.as_slice());
-        let evidence = if let Some(ids) = ids {
-            let own: Vec<AnchoredSpan> = spans
-                .iter()
-                .filter(|s| ids.contains(&s.id))
-                .cloned()
-                .collect();
-            Segment::from_spans_skipping(&own, seg.lo, seg.hi, distractions)
-        } else {
-            Segment::from_spans_skipping(spans, seg.lo, seg.hi, distractions)
-        };
-        if evidence.keys.is_empty() {
-            continue;
-        }
-        let project = project_of(spans, seg.lo, seg.hi, ids, distractions);
-        let candidates = buckets.get(&project).unwrap_or(&none);
-        let mut v = profile::score(&evidence, candidates, params);
-        let reason = sink_order(&mut v, &evidence, candidates, project.as_deref(), sinks);
-        about.push((project, reason));
-        scored.push((seg, evidence, v));
     }
     // 2. Place on existing tasks.
     let mut placed: Vec<Option<Placement>> = scored
         .iter()
         .zip(&about)
         .map(|((seg, ev, v), (_, reason))| {
-            let mut p = place_existing(ev, seg.share, seg.strand, v, labels)?;
+            let mut p = place_existing(ev, seg.share, v, labels)?;
             if let Some(reason) = reason {
                 p.reason = reason.clone();
             }
@@ -996,21 +879,19 @@ pub fn decide(
                 runner_up: v.ranked.first().map(|c| c.task_id),
                 kind: String::new(),
                 share: seg.share,
-                strand: seg.strand,
             });
         }
     }
-    // 3b. A short new stretch still unplaced, sandwiched by one task, goes
-    //     to that task as an excursion (unsure). A strand cleared its own
-    //     bar to stand apart; it does not fold into a neighbour.
+    // 3b. A short new stretch still unplaced, sandwiched by one task in
+    //     its own project, goes to that task as an excursion (unsure).
     for i in 0..scored.len() {
-        if placed[i].is_some() || scored[i].0.minutes >= sp.new_task_min || scored[i].0.share < 1.0
-        {
+        if placed[i].is_some() || scored[i].0.minutes >= sp.new_task_min {
             continue;
         }
+        let beside = |j: usize| (part[j] == part[i]).then(|| placed[j].as_ref()).flatten();
         let (Some(prev), Some(next)) = (
-            i.checked_sub(1).and_then(|j| placed[j].as_ref()),
-            placed.get(i + 1).and_then(|p| p.as_ref()),
+            i.checked_sub(1).and_then(beside),
+            (i + 1 < scored.len()).then(|| beside(i + 1)).flatten(),
         ) else {
             continue;
         };
@@ -1034,8 +915,7 @@ pub fn decide(
             margin: 0.0,
             runner_up: None,
             kind: String::new(),
-            share: 1.0,
-            strand: false,
+            share: seg.share,
         });
     }
     // 3c. What is still new inside a project is the project's other work
@@ -1059,58 +939,36 @@ pub fn decide(
             runner_up: v.ranked.first().map(|c| c.task_id),
             kind: String::new(),
             share: seg.share,
-            strand: seg.strand,
         });
     }
-    // A row sharing its range has the kind of its own spans.
-    for (i, p) in placed.iter_mut().enumerate() {
-        if let Some(p) = p
-            && p.share < 1.0
-        {
-            let own: Vec<AnchoredSpan> = spans
-                .iter()
-                .filter(|s| scored[i].0.ids.contains(&s.id))
-                .cloned()
-                .collect();
-            p.kind = kind_of(&own, p.lo, p.hi, distractions).to_owned();
-        }
-    }
-    // 4. Contiguous whole rows on one target become one; rows sharing one
-    //    range on one target add their shares.
-    let mut out: Vec<Placement> = Vec::new();
-    for p in placed.into_iter().flatten() {
-        if let Some(last) = out.last_mut()
+    // 4. Inside one project, contiguous whole rows on one target become
+    //    one; every row takes the kind of its own project's spans; then
+    //    time order.
+    let mut out: Vec<(usize, Placement)> = Vec::new();
+    for (i, p) in placed.into_iter().enumerate() {
+        let Some(p) = p else {
+            continue;
+        };
+        if let Some((pj, last)) = out.last_mut()
+            && *pj == part[i]
             && last.target == p.target
+            && last.share >= 1.0
+            && p.share >= 1.0
+            && p.lo - last.hi < AFK_GAP_MS
         {
-            let same_range = last.lo == p.lo && last.hi == p.hi;
-            let whole = last.share >= 1.0 && p.share >= 1.0;
-            if same_range && !whole {
-                if p.share > last.share {
-                    last.kind = p.kind.clone();
-                    last.reason = p.reason.clone();
-                }
-                last.share = (last.share + p.share).min(1.0);
-                last.confident = last.confident && p.confident;
-                last.confidence = last.confidence.min(p.confidence);
-                last.margin = last.margin.min(p.margin);
-                continue;
-            }
-            if whole && p.lo - last.hi < AFK_GAP_MS {
-                last.hi = last.hi.max(p.hi);
-                last.confident = last.confident && p.confident;
-                last.confidence = last.confidence.min(p.confidence);
-                last.margin = last.margin.min(p.margin);
-                continue;
-            }
+            last.hi = last.hi.max(p.hi);
+            last.confident = last.confident && p.confident;
+            last.confidence = last.confidence.min(p.confidence);
+            last.margin = last.margin.min(p.margin);
+            continue;
         }
-        out.push(p);
+        out.push((part[i], p));
     }
-    for p in &mut out {
-        if p.share >= 1.0 {
-            p.kind = kind_of(spans, p.lo, p.hi, distractions).to_owned();
-        }
+    for (pi, p) in &mut out {
+        p.kind = kind_of(&parts[*pi].1, p.lo, p.hi, distractions).to_owned();
     }
-    out
+    out.sort_by_key(|(pi, p)| (p.lo, p.hi, *pi));
+    out.into_iter().map(|(_, p)| p).collect()
 }
 
 /// An AI session live around the window (m32 chunk 3): its transcript
@@ -1131,12 +989,13 @@ pub const CONCURRENT_MS: i64 = 2 * 60_000;
 const SPLIT_CLUSTER_BASE: usize = 1 << 20;
 
 /// Concurrency = supervision (m32 chunk 3): an `agent` or `supervise`
-/// placement with two or more sessions writing within [`CONCURRENT_MS`]
-/// of it becomes one row per task, each over the whole range with a
-/// `share` by the prompts typed into that task's sessions (their focus
-/// time when no prompt was kept). A session's task follows the sink order
-/// of its own project (m35 chunk 1: the project its spans on screen are
-/// filed into, else what the rules make of its scope): the current
+/// placement with two or more sessions of its own project writing within
+/// [`CONCURRENT_MS`] of it (m35 chunk 2: a row is one project's, and a
+/// session's project is the one its spans on screen are filed into, else
+/// what the rules make of its scope) becomes one row per task, each over
+/// the whole range with the row's `share` divided by the prompts typed
+/// into that task's sessions (their focus time when no prompt was kept).
+/// A session's task follows the sink order of its project: the current
 /// declared task, a ticket holder, what its own spans score to among the
 /// project's tasks, else a new task there (one per project across the
 /// window, given `new_task_min` of shared time; less stays with the
@@ -1164,37 +1023,42 @@ pub fn split_concurrent(
     // order: the cluster id.
     let mut opened: Vec<(String, String)> = Vec::new();
     for p in placements {
-        // A row the segmenter already unravelled by strand (m33 chunk B)
-        // is one repo's work; the sessions of the others are not its.
-        if sessions.len() < 2 || p.strand || !matches!(p.kind.as_str(), "agent" | "supervise") {
+        if sessions.len() < 2 || !matches!(p.kind.as_str(), "agent" | "supervise") {
             out.push(p);
             continue;
         }
+        // The row is one project's (m35 chunk 2); only that project's
+        // sessions share it.
+        let project: Option<String> = match &p.target {
+            Target::Existing(id) => projects.get(id).cloned().flatten(),
+            Target::General(pr) => Some(pr.clone()),
+            Target::New { project, .. } => project.clone(),
+        };
         let (lo, hi) = (p.lo - CONCURRENT_MS, p.hi + CONCURRENT_MS);
         let within = |t: &i64| (lo..=hi).contains(t);
-        let live: Vec<&LiveSession> = sessions
-            .iter()
-            .filter(|s| s.writes.iter().any(within))
-            .collect();
+        let mut live: Vec<&LiveSession> = Vec::new();
+        let mut owned: Vec<Vec<AnchoredSpan>> = Vec::new();
+        for s in sessions.iter().filter(|s| s.writes.iter().any(within)) {
+            let own: Vec<AnchoredSpan> = spans
+                .iter()
+                .filter(|sp| sp.end_ts > p.lo && sp.start_ts < p.hi)
+                .filter(|sp| {
+                    sp.anchors
+                        .iter()
+                        .any(|a| a.kind == AnchorKind::Session && a.value == s.id)
+                })
+                .cloned()
+                .collect();
+            if session_project(s, &own, matcher) == project {
+                live.push(s);
+                owned.push(own);
+            }
+        }
         if live.len() < 2 {
             out.push(p);
             continue;
         }
-        let owned: Vec<Vec<AnchoredSpan>> = live
-            .iter()
-            .map(|s| {
-                spans
-                    .iter()
-                    .filter(|sp| sp.end_ts > p.lo && sp.start_ts < p.hi)
-                    .filter(|sp| {
-                        sp.anchors
-                            .iter()
-                            .any(|a| a.kind == AnchorKind::Session && a.value == s.id)
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .collect();
+        let candidates = buckets.get(&project).unwrap_or(&none);
         let mut weights: Vec<f64> = live
             .iter()
             .map(|s| s.prompts.iter().filter(|t| within(t)).count() as f64)
@@ -1221,8 +1085,6 @@ pub fn split_concurrent(
             if weights[i] <= 0.0 {
                 continue;
             }
-            let project = session_project(s, &owned[i], matcher);
-            let candidates = buckets.get(&project).unwrap_or(&none);
             let verdict =
                 session_verdict(s, &owned[i], p.lo, p.hi, candidates, params, distractions);
             let target = session_target(
@@ -1827,12 +1689,15 @@ mod tests {
         assert!(!segs[0].keys.contains_key(&roadmap));
     }
 
-    /// Interleaved foreign work never runs three minutes unbroken, but
-    /// adds up (m33 chunk B): the strand that clears the bar becomes its
-    /// own row over the range with its share, the one under it stays with
-    /// the incumbent, and the contiguous rule alone keeps it all whole.
+    /// Projects interleaved minute by minute are each their own rows
+    /// (m35 chunk 2): every project's spans are cut on their own, and a
+    /// row's share is its focus minutes over every span's in its range.
+    /// chronicle 12 min stays whole on its task; contoso's 4 × 1 min clear
+    /// `new_task_min` and mint inside contoso; fabrikam-web's 2 × 1 min do not
+    /// and are fabrikam-web's other work, one row each since five minutes
+    /// apart is an AFK gap inside fabrikam-web. Rows come out in time order.
     #[test]
-    fn interleaved_foreign_work_unravels_into_strands() {
+    fn interleaved_projects_are_each_their_own_rows() {
         let contoso = |id: i64, lo: i64, hi: i64| {
             span(
                 id,
@@ -1853,7 +1718,6 @@ mod tests {
                 &[(AnchorKind::Place, "fabrikam-web")],
             )
         };
-        // chronicle 12 min, contoso 4 × 1 min, fabrikam-web 2 × 1 min.
         let mut spans = vec![
             code(1, 0, 3, "m33"),
             contoso(2, 3, 4),
@@ -1867,33 +1731,6 @@ mod tests {
             contoso(10, 17, 18),
         ];
         file_by_place(&mut spans);
-        let accumulated = SegParams {
-            accumulate: true,
-            ..SegParams::default()
-        };
-        let segs = segment(&spans, &[], &accumulated);
-        assert_eq!(ranges(&segs), [(0, 18), (0, 18)], "{segs:?}");
-        let inc = &segs[0];
-        let strand = &segs[1];
-        let nyc = Key::Anchor(AnchorKind::Place, "contoso".into());
-        assert!(
-            inc.keys
-                .contains_key(&Key::Anchor(AnchorKind::Branch, "m33".into()))
-        );
-        assert!(!inc.keys.contains_key(&nyc));
-        assert!(strand.keys.contains_key(&nyc));
-        assert_eq!(strand.ids, [2, 5, 7, 10]);
-        assert!((strand.minutes - 4.0).abs() < 1e-9);
-        assert!((strand.share - 4.0 / 18.0).abs() < 1e-9, "{}", strand.share);
-        // The incumbent keeps the fabrikam-web minutes (under the bar) as time.
-        assert!((inc.minutes - 14.0).abs() < 1e-9, "{}", inc.minutes);
-        assert!((inc.share + strand.share - 1.0).abs() < 1e-9);
-        assert!(inc.ids.contains(&4) && inc.ids.contains(&8));
-        let segs = segment(&spans, &[], &SegParams::default());
-        assert_eq!(ranges(&segs), [(0, 18)]);
-        assert_eq!(segs[0].share, 1.0);
-        // Scored: the strand is its own row with its own evidence; the
-        // incumbent lands on the m33 task without the contoso anchors.
         let mut minutes = HashMap::new();
         minutes.insert(Key::Anchor(AnchorKind::Branch, "m33".into()), 30.0);
         minutes.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 30.0);
@@ -1916,20 +1753,52 @@ mod tests {
             &Params::default(),
             &SegParams {
                 new_task_min: 4.0,
-                ..accumulated
+                ..SegParams::default()
             },
         );
-        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out.len(), 4, "{out:?}");
         assert_eq!(out[0].target, Target::Existing(7));
-        assert!((out[0].share - 14.0 / 18.0).abs() < 1e-9);
+        assert_eq!((out[0].lo, out[0].hi), (0, 17 * M));
+        assert!(
+            (out[0].share - 12.0 / 17.0).abs() < 1e-9,
+            "{}",
+            out[0].share
+        );
         assert_eq!(out[0].kind, "author");
         assert!(
             matches!(&out[1].target, Target::New { project: Some(p), .. } if p == "contoso"),
             "{:?}",
             out[1].target
         );
-        assert!((out[1].share - 4.0 / 18.0).abs() < 1e-9);
-        assert_eq!((out[1].lo, out[1].hi), (0, 18 * M));
+        assert_eq!((out[1].lo, out[1].hi), (3 * M, 18 * M));
+        assert!((out[1].share - 4.0 / 15.0).abs() < 1e-9, "{}", out[1].share);
+        // The two fabrikam-web glances are five minutes apart, an AFK gap in
+        // their own partition: each a whole row of fabrikam-web's other work.
+        for (p, lo) in out[2..].iter().zip([7, 13]) {
+            assert_eq!(p.target, Target::General("fabrikam-web".into()), "{p:?}");
+            assert_eq!((p.lo, p.hi), (lo * M, (lo + 1) * M));
+            assert_eq!(p.share, 1.0);
+        }
+        // One project alone: a whole row, as before.
+        let alone: Vec<AnchoredSpan> = spans
+            .iter()
+            .filter(|s| s.project.as_deref() == Some("chronicle"))
+            .cloned()
+            .collect();
+        let out = decide(
+            &alone,
+            0,
+            18 * M,
+            &profiles,
+            &HashMap::from([(7, "m33 work".to_owned())]),
+            &HashMap::from([(7, Some("chronicle".to_owned()))]),
+            &Sinks::default(),
+            &[],
+            &Params::default(),
+            &SegParams::default(),
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].share, 1.0);
     }
 
     #[test]
@@ -2321,7 +2190,6 @@ mod tests {
             runner_up: None,
             kind: kind.into(),
             share: 1.0,
-            strand: false,
         }
     }
 
@@ -2732,13 +2600,25 @@ mod tests {
         assert!(sinks.derives("sprog"));
     }
 
-    /// Sessions follow their own project's sink order (m35 chunk 1): task
-    /// 85 is chronicle work that also holds ACME-1, yet a contoso session
-    /// on that ticket never joins it — it becomes a new task in contoso,
-    /// one per project across the window, unless it is a sliver, which
-    /// folds back; with a current declared task in contoso it goes there.
+    /// Sessions share only rows of their own project (m35 chunk 2): a
+    /// contoso session never splits a chronicle row, whatever ticket it
+    /// carries; two chronicle sessions divide one by their own tickets
+    /// and evidence, then by the project's current declared task.
     #[test]
     fn a_session_stays_inside_its_own_project() {
+        use crate::config::ProjectCfg;
+        let matcher = Matcher::new(&[
+            ProjectCfg {
+                name: "chronicle".into(),
+                repos: vec!["/no/such/chronicle".into()],
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "contoso".into(),
+                repos: vec!["/no/such/contoso".into()],
+                ..ProjectCfg::default()
+            },
+        ]);
         let mut a = HashMap::new();
         a.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 60.0);
         a.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
@@ -2746,46 +2626,65 @@ mod tests {
             Key::Anchor(AnchorKind::Branch, "chronicle@main".into()),
             60.0,
         );
-        let profiles = vec![Profile {
-            task_id: 85,
-            minutes: a,
-            declared: Default::default(),
-            last_ts: Some(0),
-            vec: None,
-        }];
-        let projects = HashMap::from([(85, Some("chronicle".to_owned()))]);
+        let mut b = HashMap::new();
+        b.insert(Key::Anchor(AnchorKind::Item, "ACME-2".into()), 60.0);
+        b.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
+        let profiles = vec![
+            Profile {
+                task_id: 85,
+                minutes: a,
+                declared: Default::default(),
+                last_ts: Some(0),
+                vec: None,
+            },
+            Profile {
+                task_id: 86,
+                minutes: b,
+                declared: Default::default(),
+                last_ts: Some(0),
+                vec: None,
+            },
+        ];
+        let projects = HashMap::from([
+            (85, Some("chronicle".to_owned())),
+            (86, Some("chronicle".to_owned())),
+        ]);
         let mut spans = vec![
             agent_span(1, 0, 30, "s1", "chronicle"),
             agent_span(2, 30, 40, "s2", "contoso"),
-            agent_span(3, 40, 80, "s3", "chronicle"),
         ];
+        spans[0].anchors.push(Anchor {
+            kind: AnchorKind::Branch,
+            value: "chronicle@main".into(),
+        });
         file_by_place(&mut spans);
-        // Off screen in the second segment, the contoso session's project
-        // comes from its own scope through the rules.
-        let matcher = Matcher::new(&[crate::config::ProjectCfg {
-            name: "contoso".into(),
-            repos: vec!["/no/such/contoso".into()],
-            ..crate::config::ProjectCfg::default()
-        }]);
-        let mut nyc = live("s2", &[32, 38, 42], &[31, 35, 41], &[]);
-        nyc.anchors.push(Anchor {
-            kind: AnchorKind::Item,
-            value: "ACME-1".into(),
-        });
-        nyc.anchors.push(Anchor {
-            kind: AnchorKind::Place,
-            value: "contoso".into(),
-        });
-        let sessions = vec![
-            live("s1", &[5, 15, 25], &[1, 10], &[]),
-            nyc,
-            live("s3", &[45, 70], &[41, 60], &[]),
-        ];
-        let split = |sinks: &Sinks| {
+        let s1 = live("s1", &[5, 15, 25], &[1, 10], &[]);
+        let nyc = live(
+            "s2",
+            &[32, 38],
+            &[31, 35],
+            &[
+                (AnchorKind::Session, "s2"),
+                (AnchorKind::Place, "contoso"),
+                (AnchorKind::Item, "ACME-1"),
+            ],
+        );
+        // Never on screen: its project comes from its own scope.
+        let s3 = live(
+            "s3",
+            &[12, 22],
+            &[8, 20],
+            &[
+                (AnchorKind::Session, "s3"),
+                (AnchorKind::Place, "chronicle"),
+                (AnchorKind::Item, "ACME-2"),
+            ],
+        );
+        let split = |sessions: &[LiveSession], sinks: &Sinks| {
             split_concurrent(
-                vec![whole(0, 40, 85, "agent"), whole(40, 80, 85, "agent")],
+                vec![whole(0, 40, 85, "agent")],
                 &spans,
-                &sessions,
+                sessions,
                 &profiles,
                 &projects,
                 sinks,
@@ -2795,82 +2694,32 @@ mod tests {
                 &[],
             )
         };
-        let out = split(&Sinks::default());
-        assert_eq!(out.len(), 4, "{out:?}");
-        assert_eq!(out[0].target, Target::Existing(85));
-        assert_eq!(out[0].share, 0.4);
-        let Target::New {
-            label,
-            project,
-            cluster,
-        } = &out[1].target
-        else {
-            panic!("{out:?}")
-        };
-        assert_eq!(
-            (label.as_str(), project.as_deref()),
-            ("contoso session", Some("contoso"))
-        );
-        assert_eq!(out[1].share, 0.6);
-        // The second segment's contoso session joins the same new task.
-        assert_eq!(out[2].target, Target::Existing(85));
-        assert!((out[2].share - 2.0 / 3.0).abs() < 1e-9, "{out:?}");
-        assert_eq!(
-            out[3].target,
-            Target::New {
-                label: label.clone(),
-                project: project.clone(),
-                cluster: *cluster
-            }
-        );
-        // A current declared task in contoso is where its sessions go.
-        let sinks = Sinks {
-            current: HashMap::from([("contoso".to_owned(), 9)]),
-            ..Sinks::default()
-        };
-        let out = split(&sinks);
-        assert_eq!(out.len(), 4, "{out:?}");
-        assert_eq!(out[1].target, Target::Existing(9));
-        assert_eq!(out[3].target, Target::Existing(9));
-        // A project that does not derive: its session is its other work.
-        let quiet = Sinks {
-            no_derive: HashSet::from(["contoso".to_owned()]),
-            ..Sinks::default()
-        };
-        let out = split(&quiet);
-        assert_eq!(out[1].target, Target::General("contoso".into()), "{out:?}");
-        // A sliver of a project (2 of 20 prompts over 40 min = 4 min) folds back.
-        let sliver = vec![
-            live(
-                "s1",
-                &[5, 15, 25],
-                &[
-                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                ],
-                &[],
-            ),
-            {
-                let mut s = live("s2", &[32, 38], &[31, 35], &[]);
-                s.anchors.push(Anchor {
-                    kind: AnchorKind::Item,
-                    value: "ACME-1".into(),
-                });
-                s
-            },
-        ];
-        let out = split_concurrent(
-            vec![whole(0, 40, 85, "agent")],
-            &spans[..2],
-            &sliver,
-            &profiles,
-            &projects,
-            &Sinks::default(),
-            &matcher,
-            &Params::default(),
-            &SegParams::default(),
-            &[],
-        );
+        let out = split(&[s1.clone(), nyc.clone()], &Sinks::default());
         assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(85));
         assert_eq!(out[0].share, 1.0);
+        let out = split(&[s1.clone(), nyc.clone(), s3.clone()], &Sinks::default());
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(85));
+        assert_eq!(out[0].share, 0.5);
+        assert_eq!(out[1].target, Target::Existing(86));
+        assert_eq!(out[1].share, 0.5);
+        assert_eq!(out[1].kind, "supervise");
+        // The current declared task takes the session with no ticket; the
+        // one on a ticket it does not hold stays with the holder.
+        let sinks = Sinks {
+            current: HashMap::from([("chronicle".to_owned(), 9)]),
+            ..Sinks::default()
+        };
+        let out = split(&[s1, nyc, s3], &sinks);
+        let mut ids: Vec<i64> = out
+            .iter()
+            .filter_map(|p| match p.target {
+                Target::Existing(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [9, 86], "{out:?}");
     }
 }

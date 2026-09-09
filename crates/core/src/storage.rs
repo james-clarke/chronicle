@@ -6712,7 +6712,6 @@ mod tests {
             runner_up: None,
             kind: "read".into(),
             share: 1.0,
-            strand: false,
         };
         let (touched, created) = super::store_segments(
             &mut conn,

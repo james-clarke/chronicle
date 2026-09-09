@@ -63,13 +63,6 @@ pub struct Config {
     /// Segmenter: minutes a run of unrelated spans must last before it
     /// becomes a segment of its own (shorter excursions fold in).
     pub segment_switch_min: u32,
-    /// Segmenter (m33 chunk B): `contiguous` = only an unbroken foreign
-    /// run of `segment_switch_min` cuts; `accumulated` = foreign work that
-    /// keeps coming back inside one segment is also counted per strand
-    /// (what it shares), and a strand reaching `segment_switch_min` in all
-    /// becomes its own row over the segment's range with its share of
-    /// the time.
-    pub segment_switch_mode: String,
     /// Segmenter: minutes a stretch the scorer calls new must last before
     /// a task is created for it.
     pub segment_new_task_min: u32,
@@ -167,7 +160,6 @@ impl Default for Config {
             task_autoclose_days: 3,
             derive_mode: "model".into(),
             segment_switch_min: 3,
-            segment_switch_mode: "contiguous".into(),
             segment_new_task_min: 10,
             scorer_delta: None,
             embed_model: None,

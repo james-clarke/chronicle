@@ -363,6 +363,12 @@ stays on the shelf: on these windows the report's remaining error is the
 placeless time (41–51 % of each window: browser tabs, the Chronicle
 window, terminals without a cwd), not the cut.
 
+Superseded 2026-09-09 by M35 chunk 2: every project's spans are cut and
+scored on their own (`segmenter::partition` in `decide`), so interleaved
+projects are each their own rows over the same stretch with a share by
+focus minutes — what B tried to recover after the fact. The strands,
+`Seg::unravel`, `Placement.strand` and `segment_switch_mode` are gone.
+
 Open: a strand under `new_task_min` that the scorer calls new is dropped
 (unplaced) rather than folded, so a range's rows can sum to less than 1;
 labels of a segment with strands still come from all its keys (the

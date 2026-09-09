@@ -340,6 +340,44 @@ exists.
   control in the UI (chunk 3; the CLI has it), the declared seed rows,
   which still write the project name as a `place` key.
 
+## Shipped: chunk 2 (2026-09-09 afternoon)
+
+- `decide` partitions the window's spans by `spans.project`
+  (`segmenter::partition`; Chronicle's own window and a distraction go
+  with the span before them, else after — time on what they interrupted,
+  as a glance always was), cuts each project's spans with `segment` on
+  their own, scores each segment against its project's tasks, and gives
+  every row a `share`: its focus minutes over every span's inside its
+  range, exactly 1 when the project was alone on screen. Interleaved
+  projects are each their own rows over the same stretch. Clustering, the
+  excursion fold (3b) and the whole-row merge stay inside one partition;
+  rows come out in time order.
+- The concurrency split is per project: a row is its target's project,
+  and only the sessions of that project (their spans' filing, else their
+  scope through the rules) divide it; a contoso session never touches a
+  chronicle row. The four-step search was already gone in chunk 1.
+- Chunk B removed: `Seg.strands`, `fold_run`, `unravel`,
+  `SegParams.accumulate`, `Placement.strand` and the config key
+  `segment_switch_mode` (not set in James's config; `Config` denies
+  unknown fields, so a config that still carries it would need the line
+  removed). `segmenter::project_of` went with it — a segment's project is
+  its partition.
+- Gate (sandbox copy, `bench --window --live`, chunk 1 binary vs this):
+  09-08 10:30–12:49 on screen acme 52 % / fabrikam-web 25 % / chronicle
+  15 % (self window 6 %, unfiled 2 %); placed acme 47.5 / fabrikam-web
+  23.7 / chronicle 15.5 (chunk 1: 47.6 / 23.3 / 17.1), 121 of 139 min
+  (chunk 1: 122), 0 of 7 whole rows cross-project. The M33 chunk B gate's
+  "≥ 20 % chronicle" was never reachable on this window (chronicle is 15 %
+  of the screen); the placements now follow the screen within 4 points.
+  09-09 09:00–09:40 on screen acme 39 / portfolio 29 / chronicle 20;
+  placed 41.0 / 32.6 / 22.9 (chunk 1: 33.5 / 33.9 / 30.8), 39 of 40 min.
+  Single-project hour 09-03 07:00–08:00: identical before and after (34 of
+  60 min, one whole row, share 1). Weekly totals were not replayed; the
+  three windows place the same minutes as before within 1 min.
+- Not in this chunk: the report's and timeline's reading of overlapping
+  rows with shares (they already multiply by `share`, as the split rows
+  needed since m32 chunk 3; the timeline draws them as the split rows).
+
 ## Open questions for James
 
 - One silo or four for contoso, mailer, admin-api and
