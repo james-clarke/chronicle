@@ -55,6 +55,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/027_self_score.sql")),
         M::up(include_str!("../migrations/028_task_closed_by.sql")),
         M::up(include_str!("../migrations/029_spans_project.sql")),
+        M::up(include_str!("../migrations/030_task_current.sql")),
     ])
 });
 
@@ -883,7 +884,8 @@ pub fn anchored_spans(
 ) -> Result<Vec<profile::AnchoredSpan>, StorageError> {
     use crate::extract::{Anchor, AnchorKind};
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value, e.vec, s.quiet_ms
+        "SELECT s.id, s.start_ts, s.end_ts, s.app, s.title, a.kind, a.value, e.vec, s.quiet_ms,
+                s.project
          FROM spans s LEFT JOIN span_anchors a ON a.span_id = s.id
                       LEFT JOIN span_embeddings e ON e.span_id = s.id
          WHERE s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
@@ -900,11 +902,12 @@ pub fn anchored_spans(
             r.get::<_, Option<String>>(6)?,
             r.get::<_, Option<Vec<u8>>>(7)?,
             r.get::<_, i64>(8)?,
+            r.get::<_, Option<String>>(9)?,
         ))
     })?;
     let mut out: Vec<profile::AnchoredSpan> = Vec::new();
     for row in rows {
-        let (id, start_ts, end_ts, app, title, kind, value, vec, quiet_ms) = row?;
+        let (id, start_ts, end_ts, app, title, kind, value, vec, quiet_ms, project) = row?;
         if out.last().is_none_or(|s| s.id != id) {
             out.push(profile::AnchoredSpan {
                 id,
@@ -916,6 +919,7 @@ pub fn anchored_spans(
                 vec: vec.as_deref().map(blob_to_vec),
                 quiet_ms,
                 wrote: false,
+                project,
             });
         }
         if let (Some(kind), Some(value)) = (kind, value)
@@ -1003,23 +1007,116 @@ pub fn task_projects(
         .collect::<Result<_, _>>()?)
 }
 
-/// The newest open declared task per project, keyed by the project
-/// lowercased: the concurrency split's sink for a session in that repo
-/// (m35 fix 3).
-pub fn declared_sinks(
-    conn: &Connection,
-) -> Result<std::collections::HashMap<String, i64>, StorageError> {
-    let mut out = std::collections::HashMap::new();
+/// An open declared task, for the project sinks (m35 chunk 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredTask {
+    pub id: i64,
+    pub project: Option<String>,
+    /// The person marked it current in its project.
+    pub current: bool,
+}
+
+/// Every open declared task, oldest first.
+pub fn open_declared(conn: &Connection) -> Result<Vec<DeclaredTask>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT project, id FROM tasks
-         WHERE status='open' AND source='user' AND project IS NOT NULL
+        "SELECT id, project, current FROM tasks
+         WHERE status='open' AND source='user'
          ORDER BY created_ts, id",
     )?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-        let (project, id) = row?;
-        out.insert(project.to_ascii_lowercase(), id);
+    let rows = stmt.query_map([], |r| {
+        Ok(DeclaredTask {
+            id: r.get(0)?,
+            project: r.get(1)?,
+            current: r.get::<_, i64>(2)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Mark an open declared task current in its project (m35 chunk 1): the
+/// project's sink from now on, over any newer declared task. Clears the
+/// flag on the project's other tasks. `Ok(false)` when there is no such
+/// open declared task.
+pub fn set_current_task(conn: &mut Connection, task_id: i64) -> Result<bool, StorageError> {
+    let tx = conn.transaction()?;
+    let project: Option<Option<String>> = {
+        use rusqlite::OptionalExtension;
+        tx.query_row(
+            "SELECT project FROM tasks WHERE id=?1 AND status='open' AND source='user'",
+            [task_id],
+            |r| r.get(0),
+        )
+        .optional()?
+    };
+    let Some(project) = project else {
+        return Ok(false);
+    };
+    tx.execute(
+        "UPDATE tasks SET current=0 WHERE current<>0 AND project IS ?1",
+        params![project],
+    )?;
+    tx.execute("UPDATE tasks SET current=1 WHERE id=?1", [task_id])?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// The project's general task (m35 chunk 1): where the project's time
+/// goes when no task of it claims it. `source = 'project'`, one per
+/// project, created on first use, never closed, never scored, kept out of
+/// the task lists; reports read it as "<project>: other work".
+pub fn general_task(conn: &Connection, project: &str, now_ms: i64) -> Result<i64, StorageError> {
+    use rusqlite::OptionalExtension;
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM tasks WHERE source='project' AND project=?1 ORDER BY id LIMIT 1",
+            [project],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
     }
-    Ok(out)
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, source, created_ts)
+         VALUES (?1 || ': other work', ?1, 'open', 'project', ?2)",
+        params![project, now_ms],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Rewrite every task's project to the configured name it resolves to
+/// (m35 chunk 1: `contoso` from before the config existed becomes
+/// `acme`). Returns the rows changed as `(id, from, to)` and the open
+/// tasks whose project no configured project claims, `(id, label,
+/// project)`, for the person to map or leave.
+#[allow(clippy::type_complexity)]
+pub fn normalize_task_projects(
+    conn: &mut Connection,
+    matcher: &crate::project::Matcher,
+) -> Result<(Vec<(i64, String, String)>, Vec<(i64, String, String)>), StorageError> {
+    let rows: Vec<(i64, String, String, bool)> = conn
+        .prepare(
+            "SELECT id, label, project, status='open' FROM tasks
+             WHERE project IS NOT NULL AND TRIM(project) <> '' ORDER BY id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut changed = Vec::new();
+    let mut unknown = Vec::new();
+    let tx = conn.transaction()?;
+    for (id, label, project, open) in rows {
+        match matcher.resolve(&project) {
+            Some(name) if name != project => {
+                tx.execute("UPDATE tasks SET project=?2 WHERE id=?1", params![id, name])?;
+                changed.push((id, project, name.to_owned()));
+            }
+            Some(_) => {}
+            None if open => unknown.push((id, label, project)),
+            None => {}
+        }
+    }
+    tx.commit()?;
+    Ok((changed, unknown))
 }
 
 /// Open declared tasks with no row in the evidence cache: declared before
@@ -2053,7 +2150,8 @@ pub fn close_task(
     task_id: i64,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user' WHERE id=?2",
+        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user'
+         WHERE id=?2 AND source <> 'project'",
         params![ts_to_ms(ts), task_id],
     )?;
     Ok(())
@@ -3309,6 +3407,7 @@ pub fn store_segments(
     for p in placements {
         let task_id = match &p.target {
             Target::Existing(id) => *id,
+            Target::General(project) => general_task(&tx, project, p.lo)?,
             Target::New {
                 label,
                 project,
@@ -3382,7 +3481,8 @@ pub fn store_segments(
                 [task_id],
             )?;
         }
-        if wrote && !touched.contains(&task_id) {
+        // A general task never scores, so its evidence is never refreshed.
+        if wrote && !touched.contains(&task_id) && !matches!(p.target, Target::General(_)) {
             touched.push(task_id);
         }
     }
@@ -3412,8 +3512,9 @@ pub fn live_profiles(
     let mut stmt = conn.prepare(
         "SELECT e.task_id, e.kind, e.value, e.source, e.minutes, e.first_ts, e.last_ts
          FROM task_evidence e JOIN tasks t ON t.id = e.task_id
-         WHERE t.status = 'open'
-            OR (t.closed_by = 'auto' AND e.kind IN ('item', 'change', 'event'))",
+         WHERE t.source <> 'project'
+           AND (t.status = 'open'
+                OR (t.closed_by = 'auto' AND e.kind IN ('item', 'change', 'event')))",
     )?;
     let mut rows = Vec::new();
     for row in stmt.query_map([], |r| {
@@ -6482,5 +6583,163 @@ mod tests {
         }
         assert_eq!(super::self_window_ms(&conn, 0, 300).unwrap(), 150);
         assert_eq!(super::self_window_ms(&conn, 50, 175).unwrap(), 75);
+    }
+
+    // m35 chunk 1: a project's general task is one row, created on first
+    // use and never closed by hand.
+    #[test]
+    fn general_task_is_one_per_project_and_never_closes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let a = super::general_task(&conn, "chronicle", 1_000).unwrap();
+        let again = super::general_task(&conn, "chronicle", 2_000).unwrap();
+        let b = super::general_task(&conn, "acme", 3_000).unwrap();
+        assert_eq!(a, again);
+        assert_ne!(a, b);
+        let (label, source): (String, String) = conn
+            .query_row("SELECT label, source FROM tasks WHERE id=?1", [a], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            (label.as_str(), source.as_str()),
+            ("chronicle: other work", "project")
+        );
+        super::close_task(&conn, jiff::Timestamp::from_millisecond(5_000).unwrap(), a).unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE id=?1", [a], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "open");
+        // Out of the task lists and the scorer's profiles.
+        assert!(super::open_tasks(&conn, 10).unwrap().is_empty());
+        conn.execute(
+            "INSERT INTO task_evidence (task_id, kind, value, source, minutes, first_ts, last_ts)
+             VALUES (?1, 'place', 'chronicle', 'interval', 9.0, 0, 0)",
+            [a],
+        )
+        .unwrap();
+        assert!(super::live_profiles(&conn).unwrap().0.is_empty());
+    }
+
+    // m35 chunk 1: the current flag is one per project and only an open
+    // declared task can carry it.
+    #[test]
+    fn set_current_task_is_one_per_project() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = |ms: i64| jiff::Timestamp::from_millisecond(ms).unwrap();
+        let a = super::insert_user_task(&conn, ts(1), "a", Some("acme")).unwrap();
+        let b = super::insert_user_task(&conn, ts(2), "b", Some("acme")).unwrap();
+        let c = super::insert_user_task(&conn, ts(3), "c", Some("chronicle")).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, project, status, source, created_ts)
+             VALUES (50, 'derived', 'acme', 'open', 'derived', 4)",
+            [],
+        )
+        .unwrap();
+        assert!(super::set_current_task(&mut conn, a).unwrap());
+        assert!(super::set_current_task(&mut conn, c).unwrap());
+        assert!(super::set_current_task(&mut conn, b).unwrap());
+        assert!(!super::set_current_task(&mut conn, 50).unwrap());
+        assert!(!super::set_current_task(&mut conn, 999).unwrap());
+        let declared = super::open_declared(&conn).unwrap();
+        let flags: Vec<(i64, bool)> = declared.iter().map(|d| (d.id, d.current)).collect();
+        assert_eq!(flags, [(a, false), (b, true), (c, true)]);
+        assert_eq!(declared[0].project.as_deref(), Some("acme"));
+    }
+
+    // m35 chunk 1: tasks from before the config named a repo folder; the
+    // rebuild renames them to the configured project and lists the rest.
+    #[test]
+    fn normalize_task_projects_renames_by_folder_and_lists_the_unknown() {
+        use crate::config::ProjectCfg;
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        for (id, label, project, status) in [
+            (1, "old", "contoso", "open"),
+            (2, "cased", "Contoso", "open"),
+            (3, "odd", "ai server", "open"),
+            (4, "gone", "mailer", "closed"),
+            (5, "old odd", "harrypotter.com", "closed"),
+        ] {
+            conn.execute(
+                "INSERT INTO tasks (id, label, project, status, source, created_ts)
+                 VALUES (?1, ?2, ?3, ?4, 'user', ?1)",
+                rusqlite::params![id, label, project, status],
+            )
+            .unwrap();
+        }
+        let matcher = crate::project::Matcher::new(&[ProjectCfg {
+            name: "acme".into(),
+            repos: vec!["/no/such/contoso".into(), "/no/such/mailer".into()],
+            ..ProjectCfg::default()
+        }]);
+        let (changed, unknown) = super::normalize_task_projects(&mut conn, &matcher).unwrap();
+        assert_eq!(
+            changed,
+            [
+                (1, "contoso".to_owned(), "acme".to_owned()),
+                (2, "Contoso".to_owned(), "acme".to_owned()),
+                (4, "mailer".to_owned(), "acme".to_owned()),
+            ]
+        );
+        assert_eq!(unknown, [(3, "odd".to_owned(), "ai server".to_owned())]);
+        let projects = super::task_projects(&conn).unwrap();
+        assert_eq!(projects[&1].as_deref(), Some("acme"));
+        assert_eq!(projects[&3].as_deref(), Some("ai server"));
+        // Placement treats the unknown as unfiled.
+        let mut norm = projects.clone();
+        crate::project::normalize_projects(&mut norm, &matcher);
+        assert_eq!(norm[&3], None);
+        assert_eq!(norm[&5], None);
+    }
+
+    // m35 chunk 1: the window write resolves a general target to the
+    // project's general task, once.
+    #[test]
+    fn store_segments_writes_general_work_to_the_projects_task() {
+        use crate::segmenter::{Placement, Target};
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let row = |lo: i64, hi: i64| Placement {
+            lo,
+            hi,
+            target: Target::General("chronicle".into()),
+            confidence: 0.3,
+            confident: false,
+            reason: "other work in chronicle".into(),
+            margin: 0.0,
+            runner_up: None,
+            kind: "read".into(),
+            share: 1.0,
+            strand: false,
+        };
+        let (touched, created) = super::store_segments(
+            &mut conn,
+            0,
+            1_000_000,
+            None,
+            &[row(0, 100_000), row(500_000, 600_000)],
+        )
+        .unwrap();
+        assert!(
+            touched.is_empty(),
+            "a general task never refreshes: {touched:?}"
+        );
+        assert!(created.is_empty());
+        let (n_tasks, n_rows): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM tasks WHERE source='project'),
+                        (SELECT COUNT(*) FROM intervals)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((n_tasks, n_rows), (1, 2));
+        let id = super::general_task(&conn, "chronicle", 0).unwrap();
+        let owner: i64 = conn
+            .query_row("SELECT DISTINCT task_id FROM intervals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(owner, id);
     }
 }

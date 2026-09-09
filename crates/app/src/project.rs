@@ -82,6 +82,26 @@ pub(crate) fn rebuild(data_dir: &Path, days: Option<u32>) -> anyhow::Result<()> 
         "filed {n} focus spans{}",
         days.map_or(String::new(), |d| format!(" over the last {d} days"))
     );
+    // Tasks live inside configured projects (m35 chunk 1): a project named
+    // by a repo folder from before the config takes the project's name;
+    // one no rule knows is listed for the person to map (`task rename
+    // --project`) or leave, and counts as unfiled until then.
+    let (changed, unknown) = storage::normalize_task_projects(&mut conn, &matcher)?;
+    if !changed.is_empty() {
+        println!("renamed the project on {} tasks:", changed.len());
+        for (id, from, to) in &changed {
+            println!("  {id:>5}  {from} \u{2192} {to}");
+        }
+    }
+    if !unknown.is_empty() {
+        println!(
+            "{} open tasks in a project no rule knows (unfiled until mapped):",
+            unknown.len()
+        );
+        for (id, label, project) in &unknown {
+            println!("  {id:>5}  {project:<16}  {label}");
+        }
+    }
     Ok(())
 }
 

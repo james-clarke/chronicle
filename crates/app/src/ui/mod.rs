@@ -1777,8 +1777,17 @@ impl TimelineApp {
                     });
                     return;
                 }
-                let project = self.new_project.trim();
-                let project = (!project.is_empty()).then_some(project);
+                // The typed project resolves to a configured one when it
+                // names one or its repo folder (m35 chunk 1); anything else
+                // is kept as typed and counts as unfiled until mapped.
+                let typed = self.new_project.trim().to_owned();
+                let project = self
+                    .config
+                    .as_ref()
+                    .map(chronicle_core::project::Matcher::from_config)
+                    .and_then(|m| m.resolve(&typed).map(str::to_owned))
+                    .unwrap_or(typed);
+                let project = (!project.is_empty()).then_some(project.as_str());
                 let result = chronicle_core::storage::insert_user_task(conn, now, &label, project);
                 if let Ok(task_id) = result {
                     self.new_label.clear();

@@ -228,6 +228,7 @@ fn fixture_anchored_spans(
             vec: None,
             quiet_ms: s.quiet_ms,
             wrote: false,
+            project: None,
         })
         .collect();
     out.sort_by_key(|s| s.start_ts);
@@ -282,12 +283,31 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
         let projects: HashMap<i64, Option<String>> =
             tasks.iter().map(|t| (t.id, t.project.clone())).collect();
         let profiles = profile::build_profiles(&tasks, &[], &aspans, &[], &re, origin, &params);
-        // The newest declared task per project is its sink, as in the daemon.
-        let sinks: HashMap<String, i64> = tasks
+        // Spans filed and tasks normalized the daemon's way (m35 chunk 1);
+        // the newest declared task per project is its sink.
+        let matcher = chronicle_core::project::Matcher::from_config(config);
+        let filed =
+            chronicle_core::storage::filed_spans(&aspans, &matcher, config.project_join_min);
+        let aspans: Vec<_> = aspans
+            .into_iter()
+            .zip(filed)
+            .map(|(mut s, p)| {
+                s.project = p;
+                s
+            })
+            .collect();
+        let mut projects = projects;
+        chronicle_core::project::normalize_projects(&mut projects, &matcher);
+        let declared: Vec<chronicle_core::storage::DeclaredTask> = tasks
             .iter()
             .filter(|t| t.declared)
-            .filter_map(|t| t.project.as_ref().map(|p| (p.to_ascii_lowercase(), t.id)))
+            .map(|t| chronicle_core::storage::DeclaredTask {
+                id: t.id,
+                project: t.project.clone(),
+                current: false,
+            })
             .collect();
+        let sinks = segmenter::Sinks::build(&declared, &projects, &matcher);
         let segs = segmenter::segment(&aspans, &distractions, &sp);
         let placements = segmenter::decide(
             &aspans,
@@ -318,6 +338,12 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 Target::New { label, cluster, .. } => {
                     created.insert(*cluster, label.clone());
                     (base + *cluster as i64, format!("new: {label}"))
+                }
+                // Fixture groups are the only tasks; general work is
+                // numbered past the clusters, one per project.
+                Target::General(project) => {
+                    let n = created.len() + 1 << 16;
+                    (base + n as i64, format!("{project}: other work"))
                 }
             };
             placed.push((p.lo, p.hi, task_id));
@@ -443,6 +469,7 @@ fn scorer_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 vec: None,
                 quiet_ms: s.quiet_ms,
                 wrote: false,
+                project: None,
             })
             .collect();
         aspans.sort_by_key(|s| s.start_ts);
@@ -813,6 +840,7 @@ pub(crate) fn window(data_dir: &Path, spec: &str, live: bool) -> anyhow::Result<
                 .map(|(l, pr)| (format!("{l} [{id}]"), pr.clone()))
                 .unwrap_or_else(|| (format!("task {id}"), None)),
             Target::New { label, project, .. } => (format!("new: {label}"), project.clone()),
+            Target::General(project) => (format!("{project}: other work"), Some(project.clone())),
         };
         let ms = (p.hi.min(hi) - p.lo.max(lo)).max(0) as f64 * p.share;
         placed += ms;
@@ -835,6 +863,52 @@ pub(crate) fn window(data_dir: &Path, spec: &str, live: bool) -> anyhow::Result<
     }
     // The sessions the split saw, and where each one's own evidence lands.
     let spans = storage::anchored_spans(&conn, lo, hi)?;
+    // Whole rows whose task lives in another project than the spans under
+    // them (m35 chunk 1 gate: zero). Each row's spans by filed project,
+    // the task's project as the config resolves it. A row sharing its
+    // range is one session's, placed inside that session's own project;
+    // the spans under the range are every session's, so it is not judged.
+    let matcher = chronicle_core::project::Matcher::from_config(&config);
+    let mut crossed = 0usize;
+    let mut checked = 0usize;
+    for p in placements.iter().filter(|p| p.share >= 1.0) {
+        let task_project = match &p.target {
+            Target::Existing(id) => tasks
+                .get(id)
+                .and_then(|(_, pr)| pr.as_deref())
+                .and_then(|pr| matcher.resolve(pr))
+                .map(str::to_owned),
+            Target::New { project, .. } => project.clone(),
+            Target::General(project) => Some(project.clone()),
+        };
+        let mut ms: HashMap<Option<&str>, i64> = HashMap::new();
+        for s in spans
+            .iter()
+            .filter(|s| s.end_ts > p.lo && s.start_ts < p.hi)
+        {
+            if chronicle_core::evidence::is_self_window(&s.app) {
+                continue;
+            }
+            *ms.entry(s.project.as_deref()).or_insert(0) +=
+                s.end_ts.min(p.hi) - s.start_ts.max(p.lo);
+        }
+        let span_project = ms
+            .into_iter()
+            .max_by_key(|(pr, m)| (*m, pr.is_some()))
+            .and_then(|(pr, _)| pr);
+        if let (Some(t), Some(s)) = (task_project.as_deref(), span_project) {
+            checked += 1;
+            if !t.eq_ignore_ascii_case(s) {
+                crossed += 1;
+                println!(
+                    "  cross-project: {}–{} task in {t}, spans in {s}",
+                    hm(p.lo),
+                    hm(p.hi)
+                );
+            }
+        }
+    }
+    println!("cross-project whole rows: {crossed} of {checked} with a project on both sides");
     let sessions = storage::live_sessions(&conn, lo, hi, &re)?;
     println!("sessions live around the window ({}):", sessions.len());
     for s in &sessions {

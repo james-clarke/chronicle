@@ -107,6 +107,56 @@ impl Matcher {
         self.projects.is_empty()
     }
 
+    /// The configured name `name` stands for: a project named so in any
+    /// case, else the one whose instance folder it names (a task's project
+    /// from before m35 was a place; `contoso` resolves to `acme`).
+    /// `None` for a name no project claims.
+    pub fn resolve(&self, name: &str) -> Option<&str> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(p) = self
+            .projects
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        {
+            return Some(&p.name);
+        }
+        let lower = name.to_ascii_lowercase();
+        self.projects
+            .iter()
+            .find(|p| p.places.contains(&lower))
+            .map(|p| p.name.as_str())
+    }
+
+    /// Whether `name` mints derived tasks: as configured, and yes for a
+    /// project no rule knows (unfiled time keeps deriving).
+    pub fn derives(&self, name: &str) -> bool {
+        self.projects
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .is_none_or(|p| p.derive)
+    }
+}
+
+/// Rewrite every task's project to the configured name it resolves to
+/// (m35 chunk 1: a task lives inside a configured project or is unfiled);
+/// one no project claims becomes `None` for placement, so its task is a
+/// candidate nowhere but the unfiled runs.
+pub fn normalize_projects(
+    projects: &mut std::collections::HashMap<i64, Option<String>>,
+    matcher: &Matcher,
+) {
+    for p in projects.values_mut() {
+        *p = p
+            .as_deref()
+            .and_then(|name| matcher.resolve(name))
+            .map(str::to_owned);
+    }
+}
+
+impl Matcher {
     /// The project a span files into, by the first rule that matches:
     /// a path the title shows under an instance path, a place or branch
     /// anchor naming an instance folder, an item key with a listed ticket
@@ -536,5 +586,39 @@ mod tests {
             Some("gitlab.example.com/org/repo")
         );
         assert_eq!(remote_id("/srv/git/repo.git"), None);
+    }
+
+    // m35 chunk 1: a task's project resolves to a configured name by name
+    // in any case, or by a repo folder the project has; derive defaults on
+    // for a project no rule knows.
+    #[test]
+    fn resolve_by_name_or_instance_folder() {
+        let m = Matcher::new(&[
+            ProjectCfg {
+                name: "acme".into(),
+                repos: vec!["/no/such/contoso".into(), "/no/such/mailer".into()],
+                derive: false,
+                ..ProjectCfg::default()
+            },
+            cfg("chronicle"),
+        ]);
+        assert_eq!(m.resolve("Contoso"), Some("acme"));
+        assert_eq!(m.resolve("CONTOSO"), Some("acme"));
+        assert_eq!(m.resolve("mailer"), Some("acme"));
+        assert_eq!(m.resolve("chronicle"), Some("chronicle"));
+        assert_eq!(m.resolve("sprog"), None);
+        assert_eq!(m.resolve("  "), None);
+        assert!(!m.derives("acme"));
+        assert!(m.derives("chronicle"));
+        assert!(m.derives("sprog"));
+        let mut projects = std::collections::HashMap::from([
+            (1, Some("contoso".to_owned())),
+            (2, Some("sprog".to_owned())),
+            (3, None),
+        ]);
+        normalize_projects(&mut projects, &m);
+        assert_eq!(projects[&1].as_deref(), Some("acme"));
+        assert_eq!(projects[&2], None);
+        assert_eq!(projects[&3], None);
     }
 }

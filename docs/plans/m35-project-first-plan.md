@@ -269,6 +269,77 @@ exists.
   `org/repo#n` from anchors already), and the Settings chips (fields
   instead).
 
+## Shipped: chunk 1 (2026-09-09 afternoon)
+
+- Spans carry their project into placement: `AnchoredSpan.project` reads
+  `spans.project`; a segment's project is the one its spans spent the most
+  time in (Chronicle's own window and distractions aside, filed wins a
+  tie), `segmenter::project_of`.
+- Candidates are the segment project's tasks only (`by_project`; an
+  unfiled segment scores against the tasks with no project). The scorer's
+  shared-key discount is therefore per project. `place_veto` and
+  `declared_sink` are gone; the m33 chunk C evidence rules
+  (`profile::keys_in_owned`, `Profile.declared`) stay until chunk 5.
+- Tasks resolve to configured names: `Matcher::resolve` maps a name in any
+  case, or a repo folder the project has, to the project
+  (`contoso → acme`); `project::normalize_projects` does it for the
+  task map every window, `storage::normalize_task_projects` rewrites the
+  rows from `chronicle project rebuild` and the daily tick (after
+  `infer_projects`). A project no rule knows counts as unfiled for
+  placement; `rebuild` lists those open tasks (142 "ai server" and one
+  derived row at install) for James to map with `task rename --project`,
+  which now accepts configured names or their repo folders only.
+- Sink order (`segmenter::Sinks`, `sink_order`, and the same in
+  `session_target`): the current declared task of the project (migration
+  030 `tasks.current`, `chronicle task current <id>`; else the newest open
+  declared one) unless the segment carries a ticket it does not hold and
+  another task of the project does → that ticket holder → the scorer's
+  best among the project's tasks → a new task inside the project (with
+  the project's name, never a place key; clusters never cross projects;
+  only when the project derives) → the project's general task
+  (`Target::General`, `storage::general_task`: `source = 'project'`,
+  label "<project>: other work", created on first use, never closed by
+  `close_task`, out of `open_tasks` and `live_profiles`, its evidence never
+  refreshed; reason "other work in <project>"). Unfiled new work stays
+  unplaced as before.
+- The concurrency split: a session's project is the one its own spans are
+  filed into, else what the rules make of its scope anchors and title
+  (`session_project`); it scores against that project's tasks and follows
+  the same sink order; the four-step search is gone. A session with no
+  project scores against the tasks with none and, called new, stays with
+  the segment's target.
+- `bench --window` prints "cross-project whole rows: N of M" (a row
+  sharing its range is one session's, placed inside that session's
+  project, so it is not judged against the range's mixed spans) and shows
+  a general target as "<project>: other work".
+- Why task 152 minted beside declared 145 (the amendment): batch 119
+  (09:30:57–10:00:59, reconciled 10:01) cut 09:30:57–09:34:15 as one
+  segment — portfolio 87 s, chronicle 57 s, contoso 40 s. Its dominant
+  place was portfolio, whose sink 144 existed, but the 40-second glance at
+  the contoso terminal carried `ACME-11032`, which 144 did not hold and
+  143, 145, 149 and 150 did: the one override fired and the sink was
+  dropped. The scorer then called the segment new (126 had just been
+  closed by hand, so 09:49–09:57 was new as well and akin), the cluster
+  cleared `new_task_min`, and its top place key — chronicle, because the
+  portfolio spans before 09:30:57 carried `place=contoso` from a
+  mis-resolved session cwd — became the project. Under chunk 1 the
+  segment's project is portfolio, the ticket rule looks inside portfolio
+  only, and the replay of batch 119 reads 09:30–09:34 "declared in
+  portfolio" [144].
+- Gate, on a sandbox copy of the live DB after `project rebuild` (26 tasks
+  renamed to configured projects, 4662 spans filed), `bench --window
+  --live`: 2026-09-08 10:30–12:49 places 122 of 139 min on 143, 120 and
+  145 with **0 of 10** whole rows cross-project; 2026-09-09 09:00–09:40
+  places 39 of 40 min, **0 of 2**, the chronicle sessions on 145, the
+  contoso ones on 143, the portfolio one on 144, and 09:25–09:29 reads
+  "declared in acme" [143] where 149 and 150 were minted.
+- Not in this chunk: partitioning the window by project (chunk 2; the
+  split rows still divide a mixed range among the sessions live in it),
+  the general task's rendering in Home and reports (chunks 3 and 4 —
+  today it is a task row named "<project>: other work"), a "set current"
+  control in the UI (chunk 3; the CLI has it), the declared seed rows,
+  which still write the project name as a `place` key.
+
 ## Open questions for James
 
 - One silo or four for contoso, mailer, admin-api and

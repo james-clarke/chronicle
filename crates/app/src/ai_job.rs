@@ -965,6 +965,7 @@ mod tests {
             vec: None,
             quiet_ms: 0,
             wrote: false,
+            project: None,
         }
     }
 

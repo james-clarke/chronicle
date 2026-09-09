@@ -342,6 +342,12 @@ enum TaskCmd {
         #[arg(long)]
         description: Option<String>,
     },
+    /// Make an open declared task its project's sink (m35): time in the
+    /// project goes to it over any newer declared task.
+    Current {
+        /// Task id, from `task list` or the UI.
+        id: i64,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -479,9 +485,24 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
             if new_label.is_empty() {
                 bail!("the label cannot be empty");
             }
+            // A task lives inside a configured project or is unfiled (m35
+            // chunk 1); a repo folder resolves to its project.
+            let matcher = chronicle_core::project::Matcher::from_config(&Config::load(
+                &data_dir.join("config.toml"),
+            )?);
             let new_project = match project.as_deref().map(str::trim) {
                 Some("") => None,
-                Some(p) => Some(p),
+                Some(p) => Some(matcher.resolve(p).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no project {p:?}; configured: {}",
+                        matcher
+                            .projects
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?),
                 None => old_project.as_deref(),
             };
             if new_label != old_label || new_project != old_project.as_deref() {
@@ -505,6 +526,17 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
                     if d.is_empty() { "cleared" } else { "set" }
                 );
             }
+            Ok(())
+        }
+        TaskCmd::Current { id } => {
+            if !storage::set_current_task(&mut conn, id)? {
+                bail!("no open declared task {id}");
+            }
+            let (label, project, _) = storage::task_identity(&conn, id)?.unwrap_or_default();
+            println!(
+                "task {id}: {label} is current in {}",
+                project.as_deref().unwrap_or("(no project)")
+            );
             Ok(())
         }
     }

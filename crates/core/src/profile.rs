@@ -176,6 +176,9 @@ pub struct AnchoredSpan {
     /// The attached AI session wrote its transcript while the span was open
     /// (m32 chunk 1): quiet time was watching an agent, not reading.
     pub wrote: bool,
+    /// The project the span is filed into (`spans.project`, m35): what its
+    /// segment's candidates are limited to. `None` is unfiled.
+    pub project: Option<String>,
 }
 
 /// Minute-weighted mean of `parts`, L2-normalised; `None` with nothing to
@@ -1007,6 +1010,7 @@ mod tests {
             vec: None,
             quiet_ms: 0,
             wrote: false,
+            project: None,
         }
     }
 

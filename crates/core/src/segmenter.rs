@@ -9,7 +9,7 @@
 //! Behind `Config::derive_mode = "segmenter"`; the default stays the m27
 //! model path until the replay gate says otherwise.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use jiff::Timestamp;
 use regex::Regex;
@@ -18,6 +18,7 @@ use rusqlite::Connection;
 use crate::config::Config;
 use crate::extract::{Anchor, AnchorKind, Family, Strength};
 use crate::profile::{self, AnchoredSpan, Key, Params, Profile, Segment, Verdict};
+use crate::project::Matcher;
 use crate::storage::{self, StorageError};
 use crate::types::ts_to_ms;
 
@@ -513,6 +514,9 @@ fn fold_excursions(segs: Vec<Seg>, p: &SegParams) -> Vec<Seg> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     Existing(i64),
+    /// The project's general task (m35 chunk 1): its time no task of it
+    /// claims. Created on first use by the window write.
+    General(String),
     /// A task to create: label, project, and the cluster it belongs to —
     /// every placement with the same cluster shares one new task.
     New {
@@ -681,119 +685,191 @@ fn place_existing(
     })
 }
 
-/// The place veto (m33 chunk C): a task declared in one project cannot
-/// take a segment whose dominant place is another repo, whatever its
-/// profile has learned — unless the segment carries a ticket the task's
-/// own label names (a ticket spanning repos is one task). A task with no
-/// project, a segment with no place, or a task whose project ties for
-/// the segment's top place are left alone. With the winner vetoed the
-/// verdict settles again on what remains, so the segment falls to the
-/// next task in its own repo or to a new one, not to the incumbent.
-fn place_veto(
-    v: &mut Verdict,
-    seg: &Segment,
-    profiles: &[Profile],
-    projects: &HashMap<i64, Option<String>>,
-    params: &Params,
-) {
-    let places = || {
-        seg.keys.iter().filter_map(|(k, m)| match k {
-            Key::Anchor(AnchorKind::Place, p) => Some((p.as_str(), *m)),
-            _ => None,
-        })
-    };
-    let Some((place, top)) = places().max_by(|a, b| {
-        a.1.partial_cmp(&b.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(b.0.cmp(a.0))
-    }) else {
-        return;
-    };
-    v.retain(seg, params, |t| {
-        let Some(Some(project)) = projects.get(&t) else {
-            return true;
-        };
-        if project.eq_ignore_ascii_case(place) {
-            return true;
-        }
-        let own = places()
-            .filter(|(p, _)| p.eq_ignore_ascii_case(project))
-            .map(|(_, m)| m)
-            .fold(0.0, f64::max);
-        if own >= top {
-            return true;
-        }
-        profiles.iter().any(|pr| {
-            pr.task_id == t
-                && pr.declared.iter().any(|k| {
-                    matches!(k, Key::Anchor(AnchorKind::Item, _)) && seg.keys.contains_key(k)
-                })
-        })
-    });
+/// The project sinks (m35 chunk 1): per project, the declared task the
+/// person marked current, else the newest open declared one; and the
+/// projects that mint no derived tasks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Sinks {
+    /// The sink per project, keyed by the project lowercased.
+    pub current: HashMap<String, i64>,
+    /// Lowercased projects configured `derive = false`.
+    pub no_derive: HashSet<String>,
 }
 
-/// The declared sink (m35 fix 3): a segment whose dominant place has a
-/// task the person declared goes to the newest such task, whatever the
-/// scorer preferred, unless the segment carries a ticket the sink does
-/// not hold and another task does. The scorer's ranking stays underneath
-/// (confidence and margin still describe its view, so the row reads as
-/// uncertain when it disagreed and the runner-up stays one click away).
-/// Returns the place the rule fired on.
-fn declared_sink(
-    v: &mut Verdict,
-    seg: &Segment,
-    profiles: &[Profile],
-    sinks: &HashMap<String, i64>,
-) -> Option<String> {
-    let (place, _) = seg
-        .keys
-        .iter()
-        .filter_map(|(k, m)| match k {
-            Key::Anchor(AnchorKind::Place, p) => Some((p.as_str(), *m)),
-            _ => None,
-        })
-        .max_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.0.cmp(a.0))
-        })?;
-    let &sink = sinks.get(&place.to_ascii_lowercase())?;
-    let items: Vec<&Key> = seg
-        .keys
-        .keys()
-        .filter(|k| matches!(k, Key::Anchor(AnchorKind::Item, _)))
-        .collect();
-    let holds = |pr: &Profile| items.iter().any(|k| pr.minutes.contains_key(*k));
-    let sink_holds = profiles.iter().any(|pr| pr.task_id == sink && holds(pr));
-    if !sink_holds && profiles.iter().any(|pr| pr.task_id != sink && holds(pr)) {
-        return None;
+impl Sinks {
+    /// `declared` oldest first; `projects` is every task's project as
+    /// [`crate::project::normalize_projects`] leaves it.
+    pub fn build(
+        declared: &[storage::DeclaredTask],
+        projects: &HashMap<i64, Option<String>>,
+        matcher: &Matcher,
+    ) -> Sinks {
+        let mut current = HashMap::new();
+        let mut flagged: HashSet<String> = HashSet::new();
+        for d in declared {
+            let Some(Some(project)) = projects.get(&d.id) else {
+                continue;
+            };
+            let key = project.to_ascii_lowercase();
+            if flagged.contains(&key) {
+                continue;
+            }
+            current.insert(key.clone(), d.id);
+            if d.current {
+                flagged.insert(key);
+            }
+        }
+        let no_derive = matcher
+            .projects
+            .iter()
+            .filter(|p| !p.derive)
+            .map(|p| p.name.to_ascii_lowercase())
+            .collect();
+        Sinks { current, no_derive }
     }
+
+    pub fn current_in(&self, project: &str) -> Option<i64> {
+        self.current.get(&project.to_ascii_lowercase()).copied()
+    }
+
+    pub fn derives(&self, project: &str) -> bool {
+        !self.no_derive.contains(&project.to_ascii_lowercase())
+    }
+}
+
+/// The project of `[lo, hi)` (m35 chunk 1): the one its spans — those in
+/// `ids` when given — spent the most time in, Chronicle's own window and
+/// distractions aside. Unfiled when unfiled time leads; filed on a tie.
+fn project_of(
+    spans: &[AnchoredSpan],
+    lo: i64,
+    hi: i64,
+    ids: Option<&[i64]>,
+    distractions: &[Regex],
+) -> Option<String> {
+    let mut ms: HashMap<Option<&str>, i64> = HashMap::new();
+    for s in spans.iter().filter(|s| s.end_ts > lo && s.start_ts < hi) {
+        if ids.is_some_and(|ids| !ids.contains(&s.id))
+            || crate::evidence::is_self_window(&s.app)
+            || crate::evidence::is_distraction(&s.app, &s.title, distractions)
+        {
+            continue;
+        }
+        let ov = s.end_ts.min(hi) - s.start_ts.max(lo);
+        if ov > 0 {
+            *ms.entry(s.project.as_deref()).or_insert(0) += ov;
+        }
+    }
+    ms.into_iter()
+        .max_by_key(|(p, m)| (*m, p.is_some(), std::cmp::Reverse(*p)))
+        .and_then(|(p, _)| p.map(str::to_owned))
+}
+
+/// The candidates per project (m35 chunk 1): a segment scores against the
+/// tasks of its own project only, an unfiled one against the tasks with
+/// none. The scorer's shared-key discount is then per project, so a place
+/// every task in a repo carries decides nothing while a ticket one holds
+/// does.
+fn by_project(
+    profiles: &[Profile],
+    projects: &HashMap<i64, Option<String>>,
+) -> HashMap<Option<String>, Vec<Profile>> {
+    let mut out: HashMap<Option<String>, Vec<Profile>> = HashMap::new();
+    for pr in profiles {
+        let project = projects.get(&pr.task_id).cloned().flatten();
+        out.entry(project).or_default().push(pr.clone());
+    }
+    out
+}
+
+/// Put `task` at the top of the verdict, whatever the scorer preferred.
+/// The scorer's ranking stays underneath (confidence and margin still
+/// describe its view, so the row reads as uncertain when it disagreed and
+/// the runner-up stays one click away).
+fn crown(v: &mut Verdict, task: i64) {
     let score = v
         .ranked
         .iter()
-        .find(|c| c.task_id == sink)
+        .find(|c| c.task_id == task)
         .map_or(0.0, |c| c.score);
-    v.ranked.retain(|c| c.task_id != sink);
+    v.ranked.retain(|c| c.task_id != task);
     v.ranked.insert(
         0,
         profile::Candidate {
-            task_id: sink,
+            task_id: task,
             score,
         },
     );
     let runner = v.ranked.get(1).map_or(0.0, |c| c.score).max(v.new_task);
-    v.confident = v.best == Some(sink) && v.confident;
-    v.best = Some(sink);
+    v.confident = v.best == Some(task) && v.confident;
+    v.best = Some(task);
     v.margin = score - runner;
-    Some(place.to_owned())
+}
+
+/// The task of `candidates` holding one of `items`: the best-ranked such
+/// task, else any. `(task, the key it holds)`.
+fn holder(v: &Verdict, candidates: &[Profile], items: &[Key]) -> Option<(i64, String)> {
+    let held = |pr: &Profile| {
+        items
+            .iter()
+            .find(|k| pr.minutes.contains_key(*k))
+            .map(|k| k.value().to_owned())
+    };
+    v.ranked
+        .iter()
+        .map(|c| c.task_id)
+        .chain(candidates.iter().map(|pr| pr.task_id))
+        .find_map(|t| {
+            candidates
+                .iter()
+                .find(|pr| pr.task_id == t)
+                .and_then(held)
+                .map(|k| (t, k))
+        })
+}
+
+/// The sink order inside a project (m35 chunk 1): the current declared
+/// task, unless the segment carries a ticket it does not hold and another
+/// task of the project does; else the task holding that ticket; else
+/// whatever the scorer ranked first among the project's tasks — and when
+/// it ranked none, a new task, then the project's other work (the caller).
+/// Returns the reason when a rule overrode the scorer.
+fn sink_order(
+    v: &mut Verdict,
+    seg: &Segment,
+    candidates: &[Profile],
+    project: Option<&str>,
+    sinks: &Sinks,
+) -> Option<String> {
+    let project = project?;
+    let items: Vec<Key> = seg
+        .keys
+        .keys()
+        .filter(|k| matches!(k, Key::Anchor(AnchorKind::Item, _)))
+        .cloned()
+        .collect();
+    let holder = holder(v, candidates, &items);
+    if let Some(cur) = sinks.current_in(project) {
+        let cur_holds = candidates
+            .iter()
+            .any(|pr| pr.task_id == cur && items.iter().any(|k| pr.minutes.contains_key(k)));
+        if cur_holds || holder.is_none() {
+            crown(v, cur);
+            return Some(format!("declared in {project}"));
+        }
+    }
+    let (task, key) = holder?;
+    crown(v, task);
+    Some(format!("holds {key}"))
 }
 
 /// Decide every segment in `spans` over `[lo, hi)`: score each against the
-/// profiles under the place veto; the "new" stretches cluster by what
-/// they share, and a cluster with `new_task_min` focus minutes becomes one
-/// new task; a short "new" stretch left over between two placements on
-/// one task joins that task (unsure). Contiguous placements on one target
-/// merge into one row.
+/// tasks of its own project (m35 chunk 1) under the sink order; the "new"
+/// stretches cluster by what they share inside one project, and a cluster
+/// with `new_task_min` focus minutes becomes one new task there; a short
+/// "new" stretch left over between two placements on one task joins that
+/// task (unsure); what is still new inside a project is the project's
+/// other work. Contiguous placements on one target merge into one row.
 #[allow(clippy::too_many_arguments)]
 pub fn decide(
     spans: &[AnchoredSpan],
@@ -802,14 +878,17 @@ pub fn decide(
     profiles: &[Profile],
     labels: &HashMap<i64, String>,
     projects: &HashMap<i64, Option<String>>,
-    sinks: &HashMap<String, i64>,
+    sinks: &Sinks,
     distractions: &[Regex],
     params: &Params,
     sp: &SegParams,
 ) -> Vec<Placement> {
-    // 1. Score.
+    let buckets = by_project(profiles, projects);
+    let none: Vec<Profile> = Vec::new();
+    // 1. Score, inside the segment's project.
     let mut scored: Vec<(Seg, Segment, Verdict)> = Vec::new();
-    let mut sunk: Vec<Option<String>> = Vec::new();
+    // Per scored segment: its project and the reason a sink rule gave.
+    let mut about: Vec<(Option<String>, Option<String>)> = Vec::new();
     for mut seg in segment(spans, distractions, sp) {
         seg.lo = seg.lo.max(lo);
         seg.hi = seg.hi.min(hi);
@@ -818,10 +897,11 @@ pub fn decide(
         }
         // A row sharing its range (m33 chunk B) is scored on its own
         // spans, not everything in the range.
-        let evidence = if seg.share < 1.0 {
+        let ids = (seg.share < 1.0).then_some(seg.ids.as_slice());
+        let evidence = if let Some(ids) = ids {
             let own: Vec<AnchoredSpan> = spans
                 .iter()
-                .filter(|s| seg.ids.contains(&s.id))
+                .filter(|s| ids.contains(&s.id))
                 .cloned()
                 .collect();
             Segment::from_spans_skipping(&own, seg.lo, seg.hi, distractions)
@@ -831,39 +911,49 @@ pub fn decide(
         if evidence.keys.is_empty() {
             continue;
         }
-        let mut v = profile::score(&evidence, profiles, params);
-        place_veto(&mut v, &evidence, profiles, projects, params);
-        sunk.push(declared_sink(&mut v, &evidence, profiles, sinks));
+        let project = project_of(spans, seg.lo, seg.hi, ids, distractions);
+        let candidates = buckets.get(&project).unwrap_or(&none);
+        let mut v = profile::score(&evidence, candidates, params);
+        let reason = sink_order(&mut v, &evidence, candidates, project.as_deref(), sinks);
+        about.push((project, reason));
         scored.push((seg, evidence, v));
     }
     // 2. Place on existing tasks.
     let mut placed: Vec<Option<Placement>> = scored
         .iter()
-        .zip(&sunk)
-        .map(|((seg, ev, v), sunk)| {
+        .zip(&about)
+        .map(|((seg, ev, v), (_, reason))| {
             let mut p = place_existing(ev, seg.share, seg.strand, v, labels)?;
-            if let Some(place) = sunk {
-                p.reason = format!("declared in {place}");
+            if let Some(reason) = reason {
+                p.reason = reason.clone();
             }
             Some(p)
         })
         .collect();
-    // 3. Cluster what is new by what it shares; a cluster with enough
-    //    minutes is one new task, however scattered its stretches.
-    let mut clusters: Vec<(Seg, Vec<usize>)> = Vec::new();
+    // 3. Cluster what is new by what it shares, inside one project; a
+    //    cluster with enough minutes is one new task, however scattered
+    //    its stretches. A project that does not derive mints nothing.
+    let mut clusters: Vec<(Seg, Vec<usize>, Option<String>)> = Vec::new();
     for (i, (seg, ..)) in scored.iter().enumerate() {
         if placed[i].is_some() {
             continue;
         }
-        match clusters.iter_mut().find(|(c, _)| c.akin(seg)) {
-            Some((c, members)) => {
+        let project = &about[i].0;
+        if project.as_deref().is_some_and(|p| !sinks.derives(p)) {
+            continue;
+        }
+        match clusters
+            .iter_mut()
+            .find(|(c, _, cp)| cp == project && c.akin(seg))
+        {
+            Some((c, members, _)) => {
                 c.absorb(seg);
                 members.push(i);
             }
-            None => clusters.push((seg.clone(), vec![i])),
+            None => clusters.push((seg.clone(), vec![i], project.clone())),
         }
     }
-    for (ci, (c, members)) in clusters.iter().enumerate() {
+    for (ci, (c, members, project)) in clusters.iter().enumerate() {
         if c.minutes < sp.new_task_min {
             continue;
         }
@@ -889,12 +979,6 @@ pub fn decide(
         if label.is_empty() {
             label = "new work".to_owned();
         }
-        let project = c
-            .keys
-            .iter()
-            .filter(|(k, _)| matches!(k, Key::Anchor(AnchorKind::Place, _)))
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(k, _)| k.value().to_owned());
         for &i in members {
             let (seg, _, v) = &scored[i];
             placed[i] = Some(Placement {
@@ -952,6 +1036,30 @@ pub fn decide(
             kind: String::new(),
             share: 1.0,
             strand: false,
+        });
+    }
+    // 3c. What is still new inside a project is the project's other work
+    //     (m35 chunk 1). Unfiled new work stays unplaced, as before.
+    for i in 0..scored.len() {
+        if placed[i].is_some() {
+            continue;
+        }
+        let Some(project) = about[i].0.clone() else {
+            continue;
+        };
+        let (seg, _, v) = &scored[i];
+        placed[i] = Some(Placement {
+            lo: seg.lo,
+            hi: seg.hi,
+            target: Target::General(project.clone()),
+            confidence: v.new_task,
+            confident: false,
+            reason: format!("other work in {project}"),
+            margin: 0.0,
+            runner_up: v.ranked.first().map(|c| c.task_id),
+            kind: String::new(),
+            share: seg.share,
+            strand: seg.strand,
         });
     }
     // A row sharing its range has the kind of its own spans.
@@ -1026,17 +1134,16 @@ const SPLIT_CLUSTER_BASE: usize = 1 << 20;
 /// placement with two or more sessions writing within [`CONCURRENT_MS`]
 /// of it becomes one row per task, each over the whole range with a
 /// `share` by the prompts typed into that task's sessions (their focus
-/// time when no prompt was kept). A session's task is what its own spans
-/// in the range score to — or, with none on screen, its own scope (repo,
-/// branch, item). A session in a repo that is not its verdict's project
-/// (and whose item that task does not hold) is foreign to it: it goes to
-/// the best-ranked task in its own repo, else becomes a new task there
-/// (one per repo across the window, given `new_task_min` of shared time;
-/// less stays with the segment's target), because a catch-all that once
-/// absorbed a repo must not keep every session from it. A session the
-/// scorer calls new with no repo stays with the segment's target. The
-/// row's kind is its own sessions' (`supervise` for one never on screen).
-/// Every other placement passes through whole.
+/// time when no prompt was kept). A session's task follows the sink order
+/// of its own project (m35 chunk 1: the project its spans on screen are
+/// filed into, else what the rules make of its scope): the current
+/// declared task, a ticket holder, what its own spans score to among the
+/// project's tasks, else a new task there (one per project across the
+/// window, given `new_task_min` of shared time; less stays with the
+/// segment's target) or the project's other work when it does not
+/// derive. A session with no project stays with the segment's target.
+/// The row's kind is its own sessions' (`supervise` for one never on
+/// screen). Every other placement passes through whole.
 #[allow(clippy::too_many_arguments)]
 pub fn split_concurrent(
     placements: Vec<Placement>,
@@ -1044,14 +1151,17 @@ pub fn split_concurrent(
     sessions: &[LiveSession],
     profiles: &[Profile],
     projects: &HashMap<i64, Option<String>>,
-    sinks: &HashMap<String, i64>,
+    sinks: &Sinks,
+    matcher: &Matcher,
     params: &Params,
     sp: &SegParams,
     distractions: &[Regex],
 ) -> Vec<Placement> {
+    let buckets = by_project(profiles, projects);
+    let none: Vec<Profile> = Vec::new();
     let mut out = Vec::with_capacity(placements.len());
-    // Repos the split has opened a new task for, with its label, in order:
-    // the cluster id.
+    // Projects the split has opened a new task for, with its label, in
+    // order: the cluster id.
     let mut opened: Vec<(String, String)> = Vec::new();
     for p in placements {
         // A row the segmenter already unravelled by strand (m33 chunk B)
@@ -1111,14 +1221,17 @@ pub fn split_concurrent(
             if weights[i] <= 0.0 {
                 continue;
             }
-            let verdict = session_verdict(s, &owned[i], p.lo, p.hi, profiles, params, distractions);
+            let project = session_project(s, &owned[i], matcher);
+            let candidates = buckets.get(&project).unwrap_or(&none);
+            let verdict =
+                session_verdict(s, &owned[i], p.lo, p.hi, candidates, params, distractions);
             let target = session_target(
                 s,
                 &owned[i],
                 verdict.as_ref(),
                 &p.target,
-                profiles,
-                projects,
+                candidates,
+                project.as_deref(),
                 sinks,
                 &mut opened,
             );
@@ -1131,8 +1244,8 @@ pub fn split_concurrent(
                 None => groups.push((target, weights[i], 1, owned[i].clone())),
             }
         }
-        // A repo's new task needs its share of the range to be worth one;
-        // a sliver stays with the segment's target.
+        // A project's new task needs its share of the range to be worth
+        // one; a sliver stays with the segment's target.
         let minutes = (p.hi - p.lo) as f64 / 60_000.0;
         let mut slivers: Vec<(f64, usize, Vec<AnchoredSpan>)> = Vec::new();
         groups.retain_mut(|g| {
@@ -1189,101 +1302,82 @@ pub fn split_concurrent(
     out
 }
 
-/// Where one live session goes given its verdict: the newest task the
-/// person declared in the session's repo, unless another task holds the
-/// session's item; else its best task when that task is in the session's
-/// repo, has no project, or holds the session's item; else any task
-/// holding the item (a ticket spanning repos is one task); else the
-/// best-ranked task in the session's repo; else a new task in that repo,
-/// one per repo over the window; with no repo at all, the segment's own
-/// target.
+/// A live session's project (m35 chunk 1): the one its own spans on
+/// screen are filed into, else what the rules make of its scope anchors
+/// and title.
+fn session_project(s: &LiveSession, owned: &[AnchoredSpan], matcher: &Matcher) -> Option<String> {
+    let mut ms: HashMap<Option<&str>, i64> = HashMap::new();
+    for sp in owned {
+        *ms.entry(sp.project.as_deref()).or_insert(0) += sp.end_ts - sp.start_ts;
+    }
+    if let Some((Some(p), _)) = ms
+        .into_iter()
+        .max_by_key(|(p, m)| (*m, p.is_some(), std::cmp::Reverse(*p)))
+    {
+        return Some(p.to_owned());
+    }
+    matcher
+        .file("", s.title.as_deref().unwrap_or(""), &s.anchors)
+        .map(str::to_owned)
+}
+
+/// Where one live session goes given its verdict among its project's
+/// tasks (m35 chunk 1): the current declared task, unless another task
+/// of the project holds the session's ticket and it does not; else the
+/// task holding that ticket; else the scorer's best; else a new task in
+/// the project, one per project over the window, or the project's other
+/// work when it does not derive. A session with no project scores
+/// against the tasks with none and, called new, stays with the segment's
+/// own target.
 #[allow(clippy::too_many_arguments)]
 fn session_target(
     s: &LiveSession,
     owned: &[AnchoredSpan],
     verdict: Option<&Verdict>,
     fallback: &Target,
-    profiles: &[Profile],
-    projects: &HashMap<i64, Option<String>>,
-    sinks: &HashMap<String, i64>,
+    candidates: &[Profile],
+    project: Option<&str>,
+    sinks: &Sinks,
     opened: &mut Vec<(String, String)>,
 ) -> Target {
-    let anchor = |kind: AnchorKind| -> Vec<&str> {
-        s.anchors
-            .iter()
-            .chain(owned.iter().flat_map(|sp| sp.anchors.iter()))
-            .filter(|a| a.kind == kind)
-            .map(|a| a.value.as_str())
-            .collect()
+    let items: Vec<Key> = s
+        .anchors
+        .iter()
+        .chain(owned.iter().flat_map(|sp| sp.anchors.iter()))
+        .filter(|a| a.kind == AnchorKind::Item)
+        .map(|a| Key::Anchor(AnchorKind::Item, a.value.clone()))
+        .collect();
+    let empty = Verdict {
+        ranked: Vec::new(),
+        new_task: 0.0,
+        best: None,
+        margin: 0.0,
+        confident: false,
     };
-    let place = anchor(AnchorKind::Place).first().copied();
-    let items = anchor(AnchorKind::Item);
-    let consistent = |t: i64| -> bool {
-        let Some(place) = place else {
-            return true;
-        };
-        match projects.get(&t) {
-            None | Some(None) => true,
-            Some(Some(project)) if project.eq_ignore_ascii_case(place) => true,
-            Some(Some(_)) => profiles.iter().any(|pr| {
-                pr.task_id == t
-                    && items.iter().any(|i| {
-                        pr.minutes
-                            .contains_key(&Key::Anchor(AnchorKind::Item, (*i).to_owned()))
-                    })
-            }),
-        }
-    };
-    // A task that holds the session's ticket owns it whatever the repo.
-    let holds = |pr: &Profile| {
-        items.iter().any(|i| {
-            pr.minutes
-                .contains_key(&Key::Anchor(AnchorKind::Item, (*i).to_owned()))
-        })
-    };
-    // The task the person declared in this repo is its sink (m35 fix 3):
-    // a derived task with more evidence never outranks it. Only a ticket
-    // the sink does not hold and another task does overrides it.
-    if let Some(place) = place
-        && let Some(&sink) = sinks.get(&place.to_ascii_lowercase())
+    let holder = holder(verdict.unwrap_or(&empty), candidates, &items);
+    if let Some(project) = project
+        && let Some(cur) = sinks.current_in(project)
     {
-        let sink_holds = profiles.iter().any(|pr| pr.task_id == sink && holds(pr));
-        if sink_holds || !profiles.iter().any(|pr| pr.task_id != sink && holds(pr)) {
-            return Target::Existing(sink);
+        let cur_holds = candidates
+            .iter()
+            .any(|pr| pr.task_id == cur && items.iter().any(|k| pr.minutes.contains_key(k)));
+        if cur_holds || holder.is_none() {
+            return Target::Existing(cur);
         }
     }
-    if let Some(t) = verdict.and_then(|v| v.best)
-        && consistent(t)
-    {
+    if let Some((t, _)) = holder {
         return Target::Existing(t);
     }
-    if let Some(v) = verdict
-        && let Some(c) = v.ranked.iter().find(|c| {
-            profiles
-                .iter()
-                .any(|pr| pr.task_id == c.task_id && holds(pr))
-        })
-    {
-        return Target::Existing(c.task_id);
+    if let Some(t) = verdict.and_then(|v| v.best) {
+        return Target::Existing(t);
     }
-    if let Some(pr) = profiles.iter().find(|pr| holds(pr)) {
-        return Target::Existing(pr.task_id);
-    }
-    let Some(place) = place else {
+    let Some(project) = project else {
         return fallback.clone();
     };
-    if let Some(v) = verdict
-        && let Some(c) = v.ranked.iter().find(|c| {
-            c.score > 0.0
-                && projects.get(&c.task_id).is_some_and(|pr| {
-                    pr.as_deref()
-                        .is_some_and(|pr| pr.eq_ignore_ascii_case(place))
-                })
-        })
-    {
-        return Target::Existing(c.task_id);
+    if !sinks.derives(project) {
+        return Target::General(project.to_owned());
     }
-    let cluster = match opened.iter().position(|(o, _)| o == place) {
+    let cluster = match opened.iter().position(|(o, _)| o == project) {
         Some(i) => i,
         None => {
             let label = s
@@ -1292,14 +1386,14 @@ fn session_target(
                 .map(crate::evidence::strip_glyphs)
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .map_or_else(|| format!("{place} session"), str::to_owned);
-            opened.push((place.to_owned(), label));
+                .map_or_else(|| format!("{project} session"), str::to_owned);
+            opened.push((project.to_owned(), label));
             opened.len() - 1
         }
     };
     Target::New {
         label: opened[cluster].1.clone(),
-        project: Some(place.to_owned()),
+        project: Some(project.to_owned()),
         cluster: SPLIT_CLUSTER_BASE + cluster,
     }
 }
@@ -1474,6 +1568,7 @@ pub fn daily(conn: &mut Connection, config: &Config, now: Timestamp) -> Result<(
     storage::passive_accept(conn, now)?;
     storage::rebuild_task_evidence(conn, &ticket_re(config), &p, now_ms)?;
     storage::infer_projects(conn, p.saturate_min)?;
+    storage::normalize_task_projects(conn, &Matcher::from_config(config))?;
     storage::set_meta(conn, "segmenter_daily_ts", Some(&now_ms.to_string()))?;
     Ok(())
 }
@@ -1518,14 +1613,17 @@ pub fn place_dry(
     if spans.is_empty() {
         return Ok(Vec::new());
     }
-    let sinks = storage::declared_sinks(conn)?;
+    let matcher = Matcher::from_config(config);
+    let mut projects = projects.clone();
+    crate::project::normalize_projects(&mut projects, &matcher);
+    let sinks = Sinks::build(&storage::open_declared(conn)?, &projects, &matcher);
     let placements = decide(
         &spans,
         lo,
         hi,
         profiles,
         labels,
-        projects,
+        &projects,
         &sinks,
         distractions,
         &params,
@@ -1537,8 +1635,9 @@ pub fn place_dry(
         &spans,
         &sessions,
         profiles,
-        projects,
+        &projects,
         &sinks,
+        &matcher,
         &params,
         &sp,
         distractions,
@@ -1569,8 +1668,10 @@ fn place_window(
         storage::refresh_task_evidence(conn, &ticket_re, &params, ts_to_ms(now), &unseeded)?;
     }
     let (profiles, labels) = storage::live_profiles(conn)?;
-    let projects = storage::task_projects(conn)?;
-    let sinks = storage::declared_sinks(conn)?;
+    let matcher = Matcher::from_config(config);
+    let mut projects = storage::task_projects(conn)?;
+    crate::project::normalize_projects(&mut projects, &matcher);
+    let sinks = Sinks::build(&storage::open_declared(conn)?, &projects, &matcher);
     let placements = decide(
         &spans,
         lo,
@@ -1591,6 +1692,7 @@ fn place_window(
         &profiles,
         &projects,
         &sinks,
+        &matcher,
         &params,
         &sp,
         distractions,
@@ -1643,6 +1745,18 @@ mod tests {
             vec: None,
             quiet_ms: 0,
             wrote: false,
+            project: None,
+        }
+    }
+
+    /// File each span into the project its place anchor names (m35).
+    fn file_by_place(spans: &mut [AnchoredSpan]) {
+        for s in spans {
+            s.project = s
+                .anchors
+                .iter()
+                .find(|a| a.kind == AnchorKind::Place)
+                .map(|a| a.value.clone());
         }
     }
 
@@ -1740,7 +1854,7 @@ mod tests {
             )
         };
         // chronicle 12 min, contoso 4 × 1 min, fabrikam-web 2 × 1 min.
-        let spans = vec![
+        let mut spans = vec![
             code(1, 0, 3, "m33"),
             contoso(2, 3, 4),
             code(3, 4, 7, "m33"),
@@ -1752,6 +1866,7 @@ mod tests {
             code(9, 14, 17, "m33"),
             contoso(10, 17, 18),
         ];
+        file_by_place(&mut spans);
         let accumulated = SegParams {
             accumulate: true,
             ..SegParams::default()
@@ -1796,7 +1911,7 @@ mod tests {
             &profiles,
             &HashMap::from([(7, "m33 work".to_owned())]),
             &HashMap::from([(7, Some("chronicle".to_owned()))]),
-            &HashMap::new(),
+            &Sinks::default(),
             &[],
             &Params::default(),
             &SegParams {
@@ -1994,7 +2109,7 @@ mod tests {
             &profiles,
             &labels,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -2019,7 +2134,7 @@ mod tests {
             &profiles,
             &labels,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -2123,7 +2238,7 @@ mod tests {
             &profiles,
             &labels,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
             &[],
             &Params::default(),
             &SegParams::default(),
@@ -2131,75 +2246,6 @@ mod tests {
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!((out[0].lo, out[0].hi), (0, 40 * M));
         assert!(!out[0].confident, "the folded stretch makes the row unsure");
-    }
-
-    /// A chronicle task that absorbed a morning of contoso work cannot take
-    /// the next contoso stretch (m33 chunk C), unless its own label names
-    /// the ticket on screen or it has no project at all.
-    #[test]
-    fn decide_vetoes_a_task_outside_the_segment_place() {
-        let contoso = |id: i64, lo: i64, hi: i64| {
-            span(
-                id,
-                lo,
-                hi,
-                "Code",
-                "tasks.py - contoso",
-                &[
-                    (AnchorKind::Place, "contoso"),
-                    (AnchorKind::Branch, "ACME-1"),
-                    (AnchorKind::Item, "ACME-1"),
-                ],
-            )
-        };
-        let spans = vec![contoso(1, 0, 12), contoso(2, 12, 24)];
-        let mut minutes = HashMap::new();
-        minutes.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 30.0);
-        minutes.insert(Key::Anchor(AnchorKind::Branch, "m30".into()), 30.0);
-        minutes.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 30.0);
-        minutes.insert(Key::Anchor(AnchorKind::Branch, "ACME-1".into()), 30.0);
-        minutes.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 30.0);
-        let profile = Profile {
-            task_id: 7,
-            minutes,
-            declared: Default::default(),
-            last_ts: Some(0),
-            vec: None,
-        };
-        let labels = HashMap::from([(7, "m30 work".to_owned())]);
-        let run = |profiles: &[Profile], projects: &HashMap<i64, Option<String>>| {
-            decide(
-                &spans,
-                0,
-                24 * M,
-                profiles,
-                &labels,
-                projects,
-                &HashMap::new(),
-                &[],
-                &Params::default(),
-                &SegParams::default(),
-            )
-        };
-        let chronicle = HashMap::from([(7, Some("chronicle".to_owned()))]);
-        let out = run(std::slice::from_ref(&profile), &chronicle);
-        assert_eq!(out.len(), 1, "{out:?}");
-        assert!(
-            matches!(&out[0].target, Target::New { project: Some(p), .. } if p == "contoso"),
-            "{:?}",
-            out[0].target
-        );
-        assert_eq!(out[0].runner_up, None, "the vetoed task is no runner-up");
-        // The label names the ticket: one task across repos.
-        let mut declared = profile.clone();
-        declared
-            .declared
-            .insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()));
-        let out = run(std::slice::from_ref(&declared), &chronicle);
-        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
-        // No project: nothing to veto.
-        let out = run(std::slice::from_ref(&profile), &HashMap::from([(7, None)]));
-        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
     }
 
     /// Task 7 is chronicle work on `m30`, task 9 is contoso work on
@@ -2296,7 +2342,8 @@ mod tests {
             &sessions,
             &profiles,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
+            &Matcher::default(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2338,7 +2385,8 @@ mod tests {
             &sessions,
             &profiles,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
+            &Matcher::default(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2365,7 +2413,8 @@ mod tests {
             &sessions,
             &profiles,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
+            &Matcher::default(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2394,7 +2443,8 @@ mod tests {
             &far,
             &profiles,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
+            &Matcher::default(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2412,7 +2462,8 @@ mod tests {
             &both,
             &profiles,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
+            &Matcher::default(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2429,7 +2480,8 @@ mod tests {
             &both,
             &profiles,
             &HashMap::new(),
-            &HashMap::new(),
+            &Sinks::default(),
+            &Matcher::default(),
             &Params::default(),
             &SegParams::default(),
             &[],
@@ -2438,16 +2490,257 @@ mod tests {
         assert_eq!(out[0].share, 1.0);
     }
 
-    /// A catch-all that absorbed a repo does not keep that repo's sessions:
-    /// they go to the best task in their own repo, else a new one there
-    /// (one per repo across the window); a ticket the task holds keeps a
-    /// session from another repo; a sliver of a repo folds back.
+    /// Candidates are the segment project's tasks (m35 chunk 1): a task in
+    /// another project never takes a segment, whatever it learned; the
+    /// segment mints inside its own project, under the project's name; a
+    /// project that does not derive sends it to its other work; an unfiled
+    /// segment scores against the tasks with no project only.
     #[test]
-    fn a_session_foreign_to_its_verdicts_project_goes_to_its_own_repo() {
-        // Task 85 is a mailer task that has learned chronicle too.
+    fn decide_keeps_candidates_inside_the_segment_project() {
+        let contoso = |id: i64, lo: i64, hi: i64| {
+            let mut s = span(
+                id,
+                lo,
+                hi,
+                "Code",
+                "tasks.py - contoso",
+                &[
+                    (AnchorKind::Place, "contoso"),
+                    (AnchorKind::Branch, "ACME-1"),
+                    (AnchorKind::Item, "ACME-1"),
+                ],
+            );
+            s.project = Some("acme".into());
+            s
+        };
+        let spans = vec![contoso(1, 0, 12), contoso(2, 12, 24)];
+        let mut minutes = HashMap::new();
+        minutes.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Branch, "m30".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Branch, "ACME-1".into()), 30.0);
+        minutes.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 30.0);
+        let profile = Profile {
+            task_id: 7,
+            minutes,
+            declared: Default::default(),
+            last_ts: Some(0),
+            vec: None,
+        };
+        let labels = HashMap::from([(7, "m30 work".to_owned())]);
+        let run =
+            |spans: &[AnchoredSpan], projects: &HashMap<i64, Option<String>>, sinks: &Sinks| {
+                decide(
+                    spans,
+                    0,
+                    24 * M,
+                    std::slice::from_ref(&profile),
+                    &labels,
+                    projects,
+                    sinks,
+                    &[],
+                    &Params::default(),
+                    &SegParams::default(),
+                )
+            };
+        let chronicle = HashMap::from([(7, Some("chronicle".to_owned()))]);
+        let out = run(&spans, &chronicle, &Sinks::default());
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            matches!(&out[0].target, Target::New { project: Some(p), .. } if p == "acme"),
+            "{:?}",
+            out[0].target
+        );
+        assert_eq!(
+            out[0].runner_up, None,
+            "a task of another project is no runner-up"
+        );
+        // Inside its own project it wins as before.
+        let acme = HashMap::from([(7, Some("acme".to_owned()))]);
+        let out = run(&spans, &acme, &Sinks::default());
+        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
+        // A project that does not derive: the new stretch is its other work.
+        let quiet = Sinks {
+            no_derive: HashSet::from(["acme".to_owned()]),
+            ..Sinks::default()
+        };
+        let out = run(&spans, &chronicle, &quiet);
+        assert_eq!(out[0].target, Target::General("acme".into()), "{out:?}");
+        assert_eq!(out[0].reason, "other work in acme");
+        assert!(!out[0].confident);
+        // Unfiled spans: the tasks with no project are the candidates, and
+        // new work there carries no project.
+        let mut unfiled = spans.clone();
+        for s in &mut unfiled {
+            s.project = None;
+        }
+        let out = run(&unfiled, &HashMap::from([(7, None)]), &Sinks::default());
+        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
+        let out = run(&unfiled, &acme, &Sinks::default());
+        assert!(
+            matches!(&out[0].target, Target::New { project: None, .. }),
+            "{:?}",
+            out[0].target
+        );
+    }
+
+    /// The sink order inside a project (m35 chunk 1): the current declared
+    /// task takes the project's segments over a derived task with more
+    /// evidence — unless the segment carries a ticket it does not hold
+    /// and another task of the project does, which takes it then.
+    #[test]
+    fn decide_sinks_a_project_into_its_current_task() {
+        let contoso = |id: i64, lo: i64, hi: i64, ticket: bool| {
+            let mut anchors = vec![
+                (AnchorKind::Place, "contoso"),
+                (AnchorKind::Branch, "contoso@main"),
+            ];
+            if ticket {
+                anchors.push((AnchorKind::Item, "ACME-1"));
+            }
+            let mut s = span(id, lo, hi, "Code", "tasks.py - contoso", &anchors);
+            s.project = Some("acme".into());
+            s
+        };
+        let mut learned = HashMap::new();
+        learned.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 60.0);
+        learned.insert(Key::Anchor(AnchorKind::Branch, "contoso@main".into()), 60.0);
+        learned.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 60.0);
+        let mut seeded = HashMap::new();
+        seeded.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 10.0);
+        let profiles = vec![
+            Profile {
+                task_id: 7,
+                minutes: learned,
+                declared: Default::default(),
+                last_ts: Some(0),
+                vec: None,
+            },
+            Profile {
+                task_id: 9,
+                minutes: seeded,
+                declared: Default::default(),
+                last_ts: None,
+                vec: None,
+            },
+        ];
+        let labels = HashMap::from([(7, "derived".to_owned()), (9, "declared".to_owned())]);
+        let projects = HashMap::from([
+            (7, Some("acme".to_owned())),
+            (9, Some("acme".to_owned())),
+        ]);
+        let sinks = Sinks {
+            current: HashMap::from([("acme".to_owned(), 9)]),
+            ..Sinks::default()
+        };
+        let run = |spans: &[AnchoredSpan]| {
+            decide(
+                spans,
+                0,
+                24 * M,
+                &profiles,
+                &labels,
+                &projects,
+                &sinks,
+                &[],
+                &Params::default(),
+                &SegParams::default(),
+            )
+        };
+        // No ticket on screen: the declared task, whatever the scorer says.
+        let out = run(&[contoso(1, 0, 12, false), contoso(2, 12, 24, false)]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(9));
+        assert_eq!(out[0].reason, "declared in acme");
+        assert_eq!(
+            out[0].runner_up,
+            Some(7),
+            "the scorer's view stays one click away"
+        );
+        // A ticket the sink does not hold and the derived task does.
+        let out = run(&[contoso(1, 0, 12, true), contoso(2, 12, 24, true)]);
+        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
+        assert_eq!(out[0].reason, "holds ACME-1");
+        // No current task: the ticket holder still wins over the scorer.
+        let out = decide(
+            &[contoso(1, 0, 12, true), contoso(2, 12, 24, true)],
+            0,
+            24 * M,
+            &profiles,
+            &labels,
+            &projects,
+            &Sinks::default(),
+            &[],
+            &Params::default(),
+            &SegParams::default(),
+        );
+        assert_eq!(out[0].target, Target::Existing(7), "{out:?}");
+    }
+
+    /// The sinks (m35 chunk 1): per project the task flagged current,
+    /// else the newest declared; tasks resolve to configured names first;
+    /// derive follows the config and defaults on for a project no rule
+    /// knows.
+    #[test]
+    fn sinks_take_the_flagged_task_over_the_newest() {
+        use crate::config::ProjectCfg;
+        use storage::DeclaredTask;
+        let declared = |id: i64, project: &str, current: bool| DeclaredTask {
+            id,
+            project: Some(project.to_owned()),
+            current,
+        };
+        let rows = vec![
+            declared(1, "contoso", false),
+            declared(2, "contoso", true),
+            declared(3, "contoso", false),
+            declared(4, "chronicle", false),
+            declared(5, "chronicle", false),
+            DeclaredTask {
+                id: 6,
+                project: None,
+                current: true,
+            },
+        ];
+        let matcher = Matcher::new(&[
+            ProjectCfg {
+                name: "acme".into(),
+                derive: false,
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "chronicle".into(),
+                ..ProjectCfg::default()
+            },
+        ]);
+        let mut projects: HashMap<i64, Option<String>> =
+            rows.iter().map(|d| (d.id, d.project.clone())).collect();
+        // `contoso` is no configured name: as a place it would resolve to
+        // acme through a repo path; without one it is unfiled.
+        crate::project::normalize_projects(&mut projects, &matcher);
+        assert_eq!(projects[&1], None);
+        assert_eq!(projects[&4].as_deref(), Some("chronicle"));
+        projects.insert(1, Some("acme".into()));
+        projects.insert(2, Some("acme".into()));
+        projects.insert(3, Some("acme".into()));
+        let sinks = Sinks::build(&rows, &projects, &matcher);
+        assert_eq!(sinks.current_in("acme"), Some(2));
+        assert_eq!(sinks.current_in("Chronicle"), Some(5));
+        assert_eq!(sinks.current_in("sprog"), None);
+        assert!(!sinks.derives("acme"));
+        assert!(sinks.derives("chronicle"));
+        assert!(sinks.derives("sprog"));
+    }
+
+    /// Sessions follow their own project's sink order (m35 chunk 1): task
+    /// 85 is chronicle work that also holds ACME-1, yet a contoso session
+    /// on that ticket never joins it — it becomes a new task in contoso,
+    /// one per project across the window, unless it is a sliver, which
+    /// folds back; with a current declared task in contoso it goes there.
+    #[test]
+    fn a_session_stays_inside_its_own_project() {
         let mut a = HashMap::new();
         a.insert(Key::Anchor(AnchorKind::Item, "ACME-1".into()), 60.0);
-        a.insert(Key::Anchor(AnchorKind::Place, "mailer".into()), 60.0);
         a.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
         a.insert(
             Key::Anchor(AnchorKind::Branch, "chronicle@main".into()),
@@ -2460,35 +2753,52 @@ mod tests {
             last_ts: Some(0),
             vec: None,
         }];
-        let projects = HashMap::from([(85, Some("mailer".to_owned()))]);
-        let spans = vec![
+        let projects = HashMap::from([(85, Some("chronicle".to_owned()))]);
+        let mut spans = vec![
             agent_span(1, 0, 30, "s1", "chronicle"),
             agent_span(2, 30, 40, "s2", "contoso"),
             agent_span(3, 40, 80, "s3", "chronicle"),
         ];
+        file_by_place(&mut spans);
+        // Off screen in the second segment, the contoso session's project
+        // comes from its own scope through the rules.
+        let matcher = Matcher::new(&[crate::config::ProjectCfg {
+            name: "contoso".into(),
+            repos: vec!["/no/such/contoso".into()],
+            ..crate::config::ProjectCfg::default()
+        }]);
         let mut nyc = live("s2", &[32, 38, 42], &[31, 35, 41], &[]);
         nyc.anchors.push(Anchor {
             kind: AnchorKind::Item,
             value: "ACME-1".into(),
         });
-        let mut s1 = live("s1", &[5, 15, 25], &[1, 10], &[]);
-        s1.title = Some("✳ fix the segmenter".into());
-        let sessions = vec![s1, nyc, live("s3", &[45, 70], &[41, 60], &[])];
-        let out = split_concurrent(
-            vec![whole(0, 40, 85, "agent"), whole(40, 80, 85, "agent")],
-            &spans,
-            &sessions,
-            &profiles,
-            &projects,
-            &HashMap::new(),
-            &Params::default(),
-            &SegParams::default(),
-            &[],
-        );
+        nyc.anchors.push(Anchor {
+            kind: AnchorKind::Place,
+            value: "contoso".into(),
+        });
+        let sessions = vec![
+            live("s1", &[5, 15, 25], &[1, 10], &[]),
+            nyc,
+            live("s3", &[45, 70], &[41, 60], &[]),
+        ];
+        let split = |sinks: &Sinks| {
+            split_concurrent(
+                vec![whole(0, 40, 85, "agent"), whole(40, 80, 85, "agent")],
+                &spans,
+                &sessions,
+                &profiles,
+                &projects,
+                sinks,
+                &matcher,
+                &Params::default(),
+                &SegParams::default(),
+                &[],
+            )
+        };
+        let out = split(&Sinks::default());
         assert_eq!(out.len(), 4, "{out:?}");
-        // contoso session: task 85 holds its ticket, so it stays.
         assert_eq!(out[0].target, Target::Existing(85));
-        assert_eq!(out[0].share, 0.6);
+        assert_eq!(out[0].share, 0.4);
         let Target::New {
             label,
             project,
@@ -2499,11 +2809,12 @@ mod tests {
         };
         assert_eq!(
             (label.as_str(), project.as_deref()),
-            ("fix the segmenter", Some("chronicle"))
+            ("contoso session", Some("contoso"))
         );
-        assert_eq!(out[1].share, 0.4);
-        // The second segment's chronicle session joins the same new task.
+        assert_eq!(out[1].share, 0.6);
+        // The second segment's contoso session joins the same new task.
         assert_eq!(out[2].target, Target::Existing(85));
+        assert!((out[2].share - 2.0 / 3.0).abs() < 1e-9, "{out:?}");
         assert_eq!(
             out[3].target,
             Target::New {
@@ -2512,8 +2823,23 @@ mod tests {
                 cluster: *cluster
             }
         );
-        assert!((out[3].share - 2.0 / 3.0).abs() < 1e-9, "{out:?}");
-        // A sliver of a repo (2 of 20 prompts over 40 min = 4 min) folds back.
+        // A current declared task in contoso is where its sessions go.
+        let sinks = Sinks {
+            current: HashMap::from([("contoso".to_owned(), 9)]),
+            ..Sinks::default()
+        };
+        let out = split(&sinks);
+        assert_eq!(out.len(), 4, "{out:?}");
+        assert_eq!(out[1].target, Target::Existing(9));
+        assert_eq!(out[3].target, Target::Existing(9));
+        // A project that does not derive: its session is its other work.
+        let quiet = Sinks {
+            no_derive: HashSet::from(["contoso".to_owned()]),
+            ..Sinks::default()
+        };
+        let out = split(&quiet);
+        assert_eq!(out[1].target, Target::General("contoso".into()), "{out:?}");
+        // A sliver of a project (2 of 20 prompts over 40 min = 4 min) folds back.
         let sliver = vec![
             live(
                 "s1",
@@ -2532,24 +2858,14 @@ mod tests {
                 s
             },
         ];
-        let flipped = HashMap::from([(85, Some("chronicle".to_owned()))]);
-        let mut a = HashMap::new();
-        a.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
-        a.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 60.0);
-        let profiles = vec![Profile {
-            task_id: 85,
-            minutes: a,
-            declared: Default::default(),
-            last_ts: Some(0),
-            vec: None,
-        }];
         let out = split_concurrent(
             vec![whole(0, 40, 85, "agent")],
             &spans[..2],
             &sliver,
             &profiles,
-            &flipped,
-            &HashMap::new(),
+            &projects,
+            &Sinks::default(),
+            &matcher,
             &Params::default(),
             &SegParams::default(),
             &[],
