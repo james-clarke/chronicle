@@ -88,9 +88,49 @@ if git log -1 >/dev/null 2>&1; then
   } > "$tmp/pulse"
   splice pulse "$tmp/pulse"
   echo "pulse: $hash, $rel ago, $today today, $week this week"
+
+  # last ten feat|fix|perf subjects grouped by milestone tag, newest group marked in progress
+  {
+    printf '      <ul class="log">\n'
+    group=""; first=1
+    git log -10 -E --grep='^(feat|fix|perf)(\(|:|!)' --format='%cs%x09%s' | while IFS="$(printf '\t')" read -r d subj; do
+      pre=$(printf '%s' "$subj" | sed -n 's/^\([a-z]*\(([^)]*)\)\{0,1\}!\{0,1\}\):.*/\1/p')
+      body=$(printf '%s' "$subj" | sed 's/^[a-z]*\(([^)]*)\)\{0,1\}!\{0,1\}: *//')
+      tag=$(printf '%s' "$body" | grep -oE '(^| )m[0-9]+' | head -1 | tr -d ' ' || true)
+      [ -n "$tag" ] && body=$(printf '%s' "$body" | sed "s/^$tag //; s/ $tag / /")
+      [ "${#body}" -gt 72 ] && body=$(printf '%s' "$body" | cut -c1-71 | sed 's/ *$//')…
+      if [ "${tag:-none}" != "$group" ]; then
+        group=${tag:-none}
+        if [ "$first" = 1 ]; then
+          printf '        <li class="log-ms"><b class="pulse-ms">%s</b> <em>in progress</em></li>\n' "${tag:-no milestone}"
+        else
+          printf '        <li class="log-ms"><b class="pulse-ms">%s</b></li>\n' "${tag:-no milestone}"
+        fi
+        first=0
+      fi
+      printf '        <li><time>%s</time><code>%s</code><span>%s</span></li>\n' "$d" "$(printf '%s' "$pre" | esc)" "$(printf '%s' "$body" | esc)"
+    done
+    printf '      </ul>\n'
+  } > "$tmp/log"
+  splice changelog "$tmp/log"
 else
   echo "pulse: no git history, placeholders kept" >&2
 fi
+
+# --- panel lines: one span per line so the stylesheet can land them one by one ----
+
+awk '
+  /<pre><code>/ && !/--i:/ { inpre = 1; i = 0; sub(/<pre><code>/, "<pre><code>\001") }
+  inpre {
+    line = $0; head = ""; tail = ""
+    if (line ~ /\001/) { head = substr(line, 1, index(line, "\001") - 1); line = substr(line, index(line, "\001") + 1) }
+    if (line ~ /<\/code><\/pre>/) { tail = "</code></pre>"; sub(/<\/code><\/pre>.*/, "", line); inpre = 0 }
+    cls = (line ~ /^stored /) ? " class=\"hit\"" : ""
+    printf "%s<span style=\"--i:%d\"%s>%s</span>%s\n", head, i++, cls, line, tail
+    next
+  }
+  { print }
+' "$html" > "$tmp/wrapped" && cat "$tmp/wrapped" > "$html"
 
 # --- sharing: absolute URLs from Render, a placeholder host otherwise --------
 
@@ -120,6 +160,8 @@ third=$(grep -cE '<(link|script|img|iframe|source|video|audio|object)[^>]*(src|h
 third=$((third + $(grep -cE '(url\(["'"'"']?|@import[^;]*)https?://' "$site/style.css" || true)))
 js=$(awk 'BEGIN { RS = "</script>" } /<script/ { sub(/.*<script[^>]*>/, ""); n += length($0) } END { print n + 0 }' "$html")
 js=$((js + $(grep -oE ' on[a-z]+="[^"]*"' "$html" | wc -c | tr -d ' ')))
+printf '  <p class="proof">This page: <b>%s</b> third-party requests, <b>%s B</b> of script, no cookies, no analytics. Counted by the build, from the file you are reading.</p>\n' "$third" "$js" > "$tmp/proof"
+splice proof "$tmp/proof"
 
 grep -o '<img[^>]*>' "$html" | grep -v 'loading="lazy"' | sed -n 's/.*src="\([^"]*\)".*/\1/p' > "$tmp/fold"
 sed -n 's/.*<link[^>]*href="\([^"]*\)".*/\1/p' "$html" >> "$tmp/fold"

@@ -621,7 +621,63 @@ section { padding: 72px 0; }
   color: var(--soft);
 }
 .panel code { font-size: inherit; }
+.panel code .dim { color: var(--muted); }
+/* the build wraps every panel line in a span; they land one after another once the stage scrolls in */
+.panel code:has(span[style]) { display: flex; flex-direction: column; min-width: max-content; }
+.panel code span[style] { display: block; min-height: 1.65em; }
+.stage.in .panel code span[style] { animation: line-in 0.35s var(--ease) both; animation-delay: calc(var(--i, 0) * 40ms); }
+.stage.in .panel code span.hit {
+  animation: line-in 0.35s var(--ease) both, flash 1.4s var(--ease) both;
+  animation-delay: calc(var(--i, 0) * 40ms), calc(var(--i, 0) * 40ms + 0.25s);
+}
+@keyframes line-in { from { opacity: 0; transform: translateX(-6px); } }
+@keyframes flash { from { color: var(--green); background: rgba(39, 169, 127, 0.16); } }
+/* the rail draws itself as the stages scroll through; browsers without scroll timelines keep the static line */
+@supports (animation-timeline: view()) {
+  .stages::before { transform-origin: 50% 0; animation: draw linear both; animation-timeline: view(); animation-range: cover 0% cover 75%; }
+}
+@keyframes draw { from { transform: scaleY(0); } }
 .panel.shot img { display: block; width: 100%; height: auto; }
+
+/* what leaves your machine */
+.egress-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 40px; align-items: start; }
+.leaves-wrap { overflow-x: auto; }
+.leaves {
+  width: 100%;
+  min-width: 34em;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  color: var(--soft);
+}
+.leaves th, .leaves td { text-align: left; vertical-align: top; padding: 10px 14px 10px 0; border-bottom: 1px solid var(--line); }
+.leaves th {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.leaves td:first-child { color: var(--text); }
+.leaves td:last-child, .leaves th:last-child { padding-right: 0; }
+.egress-side .fine { margin: 16px 0 0; }
+.egress-side code { color: var(--soft); }
+
+/* the build, in the open */
+.build-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 40px; align-items: start; }
+.log { list-style: none; margin: 0; padding: 12px 18px 14px; font-family: var(--mono); font-size: 0.76rem; line-height: 1.65; color: var(--soft); }
+.log li { display: flex; gap: 12px; min-width: 0; }
+.log li > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log time, .log code { color: var(--muted); flex: none; }
+.log .log-ms { margin-top: 8px; color: var(--text); }
+.log .log-ms:first-child { margin-top: 0; }
+.log .log-ms em { font-style: normal; color: var(--amber); }
+.log-empty { margin: 0; padding: 14px 18px; font-family: var(--mono); font-size: 0.76rem; color: var(--muted); }
+.build-side .numbers { margin: 0 0 8px; font-family: var(--mono); font-size: 0.85rem; color: var(--soft); }
+.build-side .numbers b { color: var(--text); font-weight: 600; }
+.build-side .numbers small { font-size: inherit; color: var(--muted); }
+.build-side .fine { margin: 14px 0 0; }
+.build-side .fine code { color: var(--soft); }
 
 /* footer */
 .foot {
@@ -634,11 +690,12 @@ section { padding: 72px 0; }
   color: var(--soft);
 }
 .foot p { margin: 0; }
-.foot .numbers { margin-top: 6px; color: var(--muted); font-size: 0.78rem; }
-.foot .numbers b { color: var(--soft); font-weight: 600; }
+.foot .proof { margin-top: 6px; color: var(--muted); font-size: 0.78rem; }
+.foot .proof b { color: var(--soft); font-weight: 600; }
 
 @media (max-width: 860px) {
-  .showcase-head { grid-template-columns: 1fr; gap: 10px; }
+  .showcase-head, .egress-grid, .build-grid { grid-template-columns: 1fr; gap: 10px; }
+  .egress-grid, .build-grid { gap: 28px; }
   .nos li { white-space: normal; }
 }
 
@@ -664,5 +721,6 @@ section { padding: 72px 0; }
 /* last, so it wins over every animation above */
 @media (prefers-reduced-motion: reduce) {
   .hero-art .desk, .hero-art .app, .hero::before, .pulse-dot,
-  .band.in .blk, .band.in .track::after, .wipe.in .wipe-after, .wipe.in .wipe-box::after { animation: none; }
+  .band.in .blk, .band.in .track::after, .wipe.in .wipe-after, .wipe.in .wipe-box::after,
+  .stage.in .panel code span[style], .stages::before { animation: none; }
 }

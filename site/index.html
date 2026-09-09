@@ -174,6 +174,7 @@
         <h3>Places</h3>
         <p>Every minute, plain rules: a ticket key in a branch or a tab, the project folder, a window you filed before. Provisional, marked to confirm.</p>
         <p>When the batch closes, the local model reads a short digest and places the rest. Eight blocks at most, about two minutes on a laptop CPU.</p>
+        <p>Ten quiet minutes are reading, not away; thirty, while an agent is working for you. Two windows in turn over one stretch split the time by share, never counted twice.</p>
       </div>
       <figure class="panel">
         <figcaption>rules, then the model</figcaption>
@@ -241,20 +242,73 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
   </ol>
 </section>
 
+<section class="egress" id="leaves">
+  <h2>What leaves your machine</h2>
+  <p class="section-lede">Every row is a fact from the code as of the build. The line on the right is the one Settings › Storage &amp; server shows, word for word.</p>
+  <div class="egress-grid">
+    <div class="leaves-wrap"><table class="leaves">
+      <thead><tr><th>what</th><th>without a key</th><th>with your key</th></tr></thead>
+      <tbody>
+        <tr><td>window titles, tasks, corrections, chat</td><td>one SQLite file in your home folder</td><td>same</td></tr>
+        <tr><td>the local model</td><td>one 1.1 GB download, first run</td><td>same</td></tr>
+        <tr><td>standup, narrative, chat answers</td><td>written on this machine</td><td>the jobs you route go to Anthropic, under its API terms</td></tr>
+        <tr><td>browser tab titles</td><td>your browser to 127.0.0.1:5600, loopback only</td><td>same</td></tr>
+        <tr><td>tickets, calendar, project folders</td><td>only the connections you add, only when asked</td><td>same</td></tr>
+      </tbody>
+    </table></div>
+    <div class="egress-side">
+      <figure class="panel">
+        <figcaption>settings › storage &amp; server</figcaption>
+        <pre><code><span class="dim">no key</span>
+what leaves this machine today: the model download
+(once, on demand) · MCP context fetches today 0 ·
+posts today 0 · nothing else
+
+<span class="dim">with a key, after a standup and a chat</span>
+what leaves this machine today: the model download
+(once, on demand) · 1 standup + 1 chat to anthropic
+(claude-sonnet-5) · MCP context fetches today 0 ·
+posts today 0</code></pre>
+      </figure>
+      <p class="fine">Check for yourself. <code>ss -tnp | grep chronicle</code> shows one listener, on 127.0.0.1. Pull the cable; everything keeps working.</p>
+    </div>
+  </div>
+</section>
+
+<section class="build" id="open">
+  <h2>The build, in the open.</h2>
+  <p class="section-lede">Read from the commit log and the source tree when the page is built. Nothing in this section is written by hand.</p>
+  <div class="build-grid">
+    <figure class="panel changelog">
+      <figcaption>last ten changes · by milestone</figcaption>
+      <!-- changelog -->
+      <p class="log-empty">the last ten feat, fix and perf commits, grouped by milestone, land here at build time</p>
+      <!-- /changelog -->
+    </figure>
+    <div class="build-side">
+      <!-- numbers -->
+      <p class="numbers">tests, crates and the migration number are read from the tree when the page is built</p>
+      <!-- /numbers -->
+      <p class="numbers"><b>41 MB</b> binary · <b>1</b> file, no runtime <small>· release build, 2026-09-08</small></p>
+      <p class="fine">Tests are a grep for <code>#[test]</code>, the migration is the highest file in the migrations folder, the binary size is typed in with its date because Render does not build Rust.</p>
+    </div>
+  </div>
+</section>
+
 </main>
 
 <footer class="foot">
   <p>built by: <a href="https://jclarke.sh">jclarke.sh</a></p>
-  <!-- numbers -->
-  <p class="numbers">tests, crates and the migration number are read from the tree when the page is built</p>
-  <!-- /numbers -->
+  <!-- proof -->
+  <p class="proof">This page: no third-party requests, a few hundred bytes of script, no cookies, no analytics. The exact numbers are written here by the build.</p>
+  <!-- /proof -->
 </footer>
 
 <script>
 var io = new IntersectionObserver(function (es) {
   es.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
 }, { threshold: 0.3 });
-document.querySelectorAll('.band, .wipe').forEach(function (el) { io.observe(el); });
+document.querySelectorAll('.band, .wipe, .stage').forEach(function (el) { io.observe(el); });
 </script>
 
 </body>
