@@ -162,7 +162,8 @@ pub fn status(repo: &Path) -> HookStatus {
 /// wrote, inside the repo's work dir.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HookPost {
-    /// Absolute work dir.
+    /// The repo's directory name (what the poller writes as `repo`); a
+    /// full path is reduced to its basename by `to_events`.
     pub repo: String,
     /// `post-checkout` | `post-commit` | `post-rewrite`.
     pub event: String,
@@ -234,6 +235,14 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
 /// `Commit` rows on `(kind, ext_id)` alone, dropping `ts` from the key) —
 /// out of scope here.
 pub fn to_events(post: &HookPost) -> Vec<ActivityEvent> {
+    let repo = std::path::Path::new(&post.repo)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| post.repo.clone());
+    let post = &HookPost {
+        repo,
+        ..post.clone()
+    };
     let ts = Timestamp::from_millisecond(post.ts_ms).unwrap_or_else(|_| Timestamp::now());
     match post.event.as_str() {
         "post-checkout" => vec![ActivityEvent {

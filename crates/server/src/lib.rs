@@ -797,6 +797,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_hook_posts_fold_into_a_shell_span() {
+        let (app, rx) = test_router();
+        let now = Timestamp::now().as_millisecond();
+        let post = json!({"cwd": "/tmp/nowhere-in-particular", "program": "cargo",
+                          "started_ms": now - 3000, "ended_ms": now});
+        let res = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chronicle/shell",
+                "127.0.0.1:5600",
+                Some(post),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let ev = rx.try_recv().expect("one shell span");
+        let CaptureEvent::Activity(ev) = ev else {
+            panic!("expected activity, got {ev:?}")
+        };
+        assert_eq!(ev.kind, chronicle_core::types::ActivityKind::Shell);
+        assert_eq!(ev.repo, "nowhere-in-particular");
+        assert!(
+            ev.ext_id
+                .as_deref()
+                .unwrap()
+                .starts_with("shellhook:nowhere-in-particular:")
+        );
+        assert_eq!(ev.summary.as_deref(), Some("cargo \u{d7}1"));
+        let res = app
+            .oneshot(req(
+                "POST",
+                "/api/chronicle/shell",
+                "127.0.0.1:5600",
+                Some(json!({"nope": 1})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn shell_hook_route_is_forbidden_when_off() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut config = Config::default();
+        config.shell_hook = false;
+        let state = app_state(&config, tx, None).unwrap();
+        let app = router(state);
+        let res = app
+            .oneshot(req(
+                "POST",
+                "/api/chronicle/shell",
+                "127.0.0.1:5600",
+                Some(json!({"cwd": "/x", "program": "ls", "started_ms": 1, "ended_ms": 2})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn git_hook_posts_become_checkout_and_commit_rows() {
+        let (app, rx) = test_router();
+        let post = json!({"repo": "/home/u/dev/chronicle", "event": "post-commit",
+                          "branch": "main", "commit": "abc123", "subject": "fix: x",
+                          "ts_ms": 1_700_000_000_000i64});
+        let res = app
+            .oneshot(req(
+                "POST",
+                "/api/chronicle/git",
+                "127.0.0.1:5600",
+                Some(post),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let CaptureEvent::Activity(ev) = rx.try_recv().expect("one commit row") else {
+            panic!("expected activity")
+        };
+        assert_eq!(ev.kind, chronicle_core::types::ActivityKind::Commit);
+        assert_eq!(ev.repo, "chronicle");
+        assert_eq!(ev.ext_id.as_deref(), Some("abc123"));
+        assert_eq!(ev.summary.as_deref(), Some("fix: x"));
+    }
+
+    #[tokio::test]
     async fn cors_allows_stock_extensions_only() {
         let (app, _rx) = test_router();
         let mut preflight = req(
