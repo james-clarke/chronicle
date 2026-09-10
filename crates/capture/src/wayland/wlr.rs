@@ -8,16 +8,13 @@
 //! probe stays quiet, leaving placement to the shell hook.
 
 use std::collections::HashMap;
-use std::io::ErrorKind;
-use std::os::fd::AsRawFd;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use chronicle_core::types::CaptureEvent;
 use crossbeam_channel::Sender;
-use wayland_client::backend::{ObjectId, WaylandError};
-use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
-use wayland_client::protocol::wl_registry::WlRegistry;
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, event_created_child};
+use wayland_client::backend::ObjectId;
+use wayland_client::globals::{GlobalList, registry_queue_init};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_handle_v1::{
     Event as HandleEvent, State as HandleState, ZwlrForeignToplevelHandleV1,
 };
@@ -57,24 +54,6 @@ fn has_toplevel_manager(globals: &GlobalList) -> bool {
 
 /// The registry-only state the protocol probe in `new` dispatches with.
 struct Probe;
-
-/// Globals arriving after `registry_queue_init` change nothing: the
-/// toplevel manager is bound once, at start, or the route is not this one.
-macro_rules! ignore_registry {
-    ($state:ty) => {
-        impl Dispatch<WlRegistry, GlobalListContents> for $state {
-            fn event(
-                _: &mut Self,
-                _: &WlRegistry,
-                _: <WlRegistry as Proxy>::Event,
-                _: &GlobalListContents,
-                _: &Connection,
-                _: &QueueHandle<Self>,
-            ) {
-            }
-        }
-    };
-}
 
 ignore_registry!(Probe);
 ignore_registry!(Wlr);
@@ -241,54 +220,9 @@ impl FocusProvider for WlrFocusProvider {
         loop {
             wlr.flush(Instant::now())?;
             let wait = wlr.focus.wait(Instant::now());
-            dispatch(&mut queue, &mut wlr, wait)?;
+            super::dispatch_until(&mut queue, &mut wlr, wait)?;
         }
     }
-}
-
-/// One dispatch pass, waiting at most `wait` so a pending title change is
-/// emitted once its burst settles.
-fn dispatch(
-    queue: &mut EventQueue<Wlr>,
-    wlr: &mut Wlr,
-    wait: Option<Duration>,
-) -> Result<(), BoxError> {
-    queue.dispatch_pending(wlr)?;
-    let Some(guard) = queue.prepare_read() else {
-        return Ok(());
-    };
-    queue.flush()?;
-    let fd = guard.connection_fd().as_raw_fd();
-    let timeout = match wait {
-        Some(d) => i32::try_from(d.as_millis()).unwrap_or(i32::MAX),
-        None => -1,
-    };
-    let mut poll_fd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one initialized pollfd, a count that matches, and a fd the
-    // guard keeps alive for the call.
-    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
-    if ready < 0 {
-        let e = std::io::Error::last_os_error();
-        if e.kind() == ErrorKind::Interrupted {
-            return Ok(());
-        }
-        return Err(e.into());
-    }
-    if ready == 0 {
-        return Ok(());
-    }
-    match guard.read() {
-        Ok(_) => {}
-        // Another queue drained the socket first.
-        Err(WaylandError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
-        Err(e) => return Err(e.into()),
-    }
-    queue.dispatch_pending(wlr)?;
-    Ok(())
 }
 
 #[cfg(test)]

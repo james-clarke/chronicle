@@ -5,10 +5,99 @@
 //! stays logind, which is display-server independent. Presence counts have
 //! no Wayland protocol and stay off.
 
+/// Globals arriving after `registry_queue_init` change nothing: what each
+/// route needs is bound once, at start, or the route is not available.
+macro_rules! ignore_registry {
+    ($state:ty) => {
+        impl wayland_client::Dispatch<wayland_client::protocol::wl_registry::WlRegistry, wayland_client::globals::GlobalListContents> for $state {
+            fn event(
+                _: &mut Self,
+                _: &wayland_client::protocol::wl_registry::WlRegistry,
+                _: <wayland_client::protocol::wl_registry::WlRegistry as wayland_client::Proxy>::Event,
+                _: &wayland_client::globals::GlobalListContents,
+                _: &wayland_client::Connection,
+                _: &wayland_client::QueueHandle<Self>,
+            ) {
+            }
+        }
+    };
+}
+
+/// An object whose events carry nothing this crate reads.
+macro_rules! ignore_events {
+    ($state:ty, $iface:ty) => {
+        impl wayland_client::Dispatch<$iface, ()> for $state {
+            fn event(
+                _: &mut Self,
+                _: &$iface,
+                _: <$iface as wayland_client::Proxy>::Event,
+                _: &(),
+                _: &wayland_client::Connection,
+                _: &wayland_client::QueueHandle<Self>,
+            ) {
+            }
+        }
+    };
+}
+
 pub mod focus;
+pub mod idle;
 pub mod wlr;
 
+use std::io::ErrorKind;
+use std::os::fd::AsRawFd;
+use std::time::Duration;
+
+use wayland_client::EventQueue;
+use wayland_client::backend::WaylandError;
+
 use crate::BoxError;
+
+/// One dispatch pass over `queue`, waiting at most `wait` for the socket
+/// (`None` blocks, `Some(ZERO)` only drains what has already arrived).
+pub(crate) fn dispatch_until<S: 'static>(
+    queue: &mut EventQueue<S>,
+    state: &mut S,
+    wait: Option<Duration>,
+) -> Result<(), BoxError> {
+    queue.dispatch_pending(state)?;
+    let Some(guard) = queue.prepare_read() else {
+        // Events were still buffered, so the caller has work already.
+        return Ok(());
+    };
+    queue.flush()?;
+    let fd = guard.connection_fd().as_raw_fd();
+    let timeout = match wait {
+        Some(d) => i32::try_from(d.as_millis()).unwrap_or(i32::MAX),
+        None => -1,
+    };
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialized pollfd, a count that matches it, and a fd the
+    // guard keeps open for the call.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout) };
+    if ready < 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() == ErrorKind::Interrupted {
+            return Ok(());
+        }
+        return Err(e.into());
+    }
+    if ready == 0 {
+        return Ok(());
+    }
+    match guard.read() {
+        Ok(_) => {}
+        // Another queue drained the socket first.
+        Err(WaylandError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+        Err(e) => return Err(e.into()),
+    }
+    queue.dispatch_pending(state)?;
+    Ok(())
+}
 
 /// Which focus provider the daemon runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

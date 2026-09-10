@@ -44,6 +44,8 @@ ureq = "3"
 x11rb = { version = "0.14", features = ["screensaver", "xinput"] }
 # Wayland (m39): the pure-Rust backend, so no libwayland at build time.
 wayland-client = { version = "0.31", default-features = false }
+wayland-protocols = { version = "0.32", default-features = false, features = ["client", "staging"] }
+wayland-protocols-plasma = { version = "0.3", default-features = false, features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2"

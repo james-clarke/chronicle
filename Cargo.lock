@@ -910,6 +910,8 @@ dependencies = [
  "tracing",
  "ureq",
  "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-plasma",
  "wayland-protocols-wlr",
  "x11rb 0.14.0",
  "zbus",

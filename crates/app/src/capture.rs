@@ -42,12 +42,29 @@ pub(crate) fn spawn_capture(
 
             let focus = WlrFocusProvider::new().map_err(|e| anyhow::anyhow!("{e}"))?;
             spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+            spawn_wayland_afk(config, tx.clone())?;
         }
         Route::Kwin => anyhow::bail!("the KWin focus route lands in m39 chunk 3"),
     }
     spawn_lock_capture(tx.clone(), ctrl)?;
     spawn_presence_capture(config, route, tx.clone())?;
     spawn_common(config, data_dir, tx)
+}
+
+/// Idle is optional on Wayland the way MIT-SCREEN-SAVER is on X11: a
+/// compositor with neither idle protocol keeps every span open until the
+/// lock or the next focus change, but still captures.
+#[cfg(target_os = "linux")]
+fn spawn_wayland_afk(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::wayland::idle::WaylandAfkProvider;
+
+    match WaylandAfkProvider::new() {
+        Ok(afk) => spawn_afk_thread(config, afk, tx),
+        Err(e) => {
+            tracing::warn!("idle signal unavailable: {e}");
+            Ok(())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
