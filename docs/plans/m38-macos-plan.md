@@ -208,7 +208,51 @@ unchanged (same tests, same install).
 - Signing: an ad-hoc signature loses the AX grant on every rebuild; the
   Developer ID path through `dist` is the fix.
 
-## Shipped notes (in progress)
+## Shipped (2026-09-10, main 88c61e9 → 212798e)
+
+Written and executed in one sitting on the standing "grab next task and
+execute" instruction: five chunk agents built against the interfaces set
+here, an Opus review pass over every macOS file produced one BUG-grade
+and a dozen LIKELY-BUG findings, all applied in the follow-up commit. No
+Mac on this box: verification is the cross-check, the Linux tests (394)
+and clippy, and the CI job — the "Owed on a Mac" list above stands.
+
+### Chunks 0–4
+
+- `scripts/mac-check.sh` cross-checks capture, core, server and mcp for
+  `x86_64-apple-darwin` with a fake `clang` (empty objects satisfy the C
+  build scripts); `cargo clippy --target x86_64-apple-darwin -p
+  chronicle-capture --all-targets` is clean with the same env. The app and
+  derive crates need llama.cpp's cmake and a real SDK: the `check-macos`
+  CI job is their gate, and it has not run yet (main is unpushed).
+- Focus polls `NSWorkspace.frontmostApplication` and the AX focused
+  window's title once a second inside an autorelease pool with a 250 ms AX
+  messaging timeout; the trust prompt fires once at provider start and
+  again from the Home card's button (that is what makes TCC list an
+  unbundled binary). Idle and presence come from `CGEventSource`
+  (counters that go backwards are a session restart and fold as zero);
+  the lock flag from `CGSSessionScreenIsLocked` every 2 s.
+- Terminal cwd through libproc, stepping through every `login` wrapper
+  and taking the newest shell; ports through `lsof -F` with pure parsers
+  tested on Linux; mic through CoreAudio's `DeviceIsRunningSomewhere`
+  behind the new `MicSource` trait (`PwDump` keeps Linux unchanged).
+- Tray: `tray-icon` on the main thread with `NSApplication` (Accessory
+  policy, 44 px template icon), the daemon loop on a `daemon-main` thread
+  whose exit or panic exits the process; no GUI session (ssh, LaunchDaemon)
+  runs the loop on the main thread without a tray.
+- `chronicle service install|remove|status` on both platforms (systemd unit
+  or the LaunchAgent from `packaging/dev.chronicled.chronicle.plist`,
+  `launchctl enable` + `bootstrap` verified by `print`, `disable` on
+  remove so the daemon is not killed from its own UI); `service status`
+  on this box reports the systemd unit enabled and active.
+- Browser history and editor workspaces also look under
+  `~/Library/Application Support` (Chrome, Chromium, Brave, Edge, Vivaldi,
+  Arc, Firefox; Code family, JetBrains, Zed) — without this the macOS gate
+  ("projects populated") would have had no browser or editor evidence.
+- Not done, from the review: iTerm2 with session restoration parents
+  shells under `iTermServer`, so its tabs get no cwd rows; the Settings
+  pane URL is the pre-Ventura anchor (still redirected); `RunAtLoad` on
+  install toggles the running daemon's UI once.
 
 ### Chunk 5 notes
 
