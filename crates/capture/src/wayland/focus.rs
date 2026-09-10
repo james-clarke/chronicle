@@ -114,6 +114,12 @@ impl FocusState {
         Ok(())
     }
 
+    /// The pid the routes compare against when deciding whether the window
+    /// under the focus changed.
+    pub fn current_pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// The app the routes compare against when deciding whether a window's
     /// identity changed under the same handle.
     pub fn current_app(&self) -> &str {

@@ -44,7 +44,13 @@ pub(crate) fn spawn_capture(
             spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
             spawn_wayland_afk(config, tx.clone())?;
         }
-        Route::Kwin => anyhow::bail!("the KWin focus route lands in m39 chunk 3"),
+        Route::Kwin => {
+            use chronicle_capture::wayland::kwin::KwinFocusProvider;
+
+            let focus = KwinFocusProvider::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+            spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+            spawn_wayland_afk(config, tx.clone())?;
+        }
     }
     spawn_lock_capture(tx.clone(), ctrl)?;
     spawn_presence_capture(config, route, tx.clone())?;

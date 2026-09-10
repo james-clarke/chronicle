@@ -42,6 +42,7 @@ macro_rules! ignore_events {
 
 pub mod focus;
 pub mod idle;
+pub mod kwin;
 pub mod wlr;
 
 use std::io::ErrorKind;

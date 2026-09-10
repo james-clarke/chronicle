@@ -37,7 +37,9 @@ fn run(configured: &str) -> Result<(), chronicle_capture::BoxError> {
             Route::Wlr => {
                 chronicle_capture::wayland::wlr::WlrFocusProvider::new().map(|p| p.run(tx))
             }
-            Route::Kwin => Err("the KWin focus route lands in m39 chunk 3".into()),
+            Route::Kwin => {
+                chronicle_capture::wayland::kwin::KwinFocusProvider::new().map(|p| p.run(tx))
+            }
         };
         match result {
             Ok(Ok(())) => eprintln!("focus-probe: provider stopped"),
