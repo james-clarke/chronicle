@@ -23,6 +23,7 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_m
 };
 
 use super::focus::FocusState;
+use super::ipc::Ipc;
 use crate::{BoxError, FocusProvider};
 
 const TOPLEVEL_INTERFACE: &str = "zwlr_foreign_toplevel_manager_v1";
@@ -73,6 +74,9 @@ struct Wlr {
     tops: HashMap<ObjectId, Toplevel>,
     active: Option<ObjectId>,
     focus: FocusState,
+    /// The compositor's own socket, which is where the pid comes from: the
+    /// toplevel protocol has none (m39 chunk 4).
+    ipc: Ipc,
     /// `Dispatch::event` cannot fail, so a closed channel or a compositor
     /// that stopped the protocol is stashed and raised by the run loop.
     err: Option<String>,
@@ -85,6 +89,7 @@ impl Wlr {
             tops: HashMap::new(),
             active: None,
             focus: FocusState::new(),
+            ipc: Ipc::detect(),
             err: None,
         }
     }
@@ -121,7 +126,8 @@ impl Wlr {
             return;
         }
         self.active = Some(active);
-        if let Err(e) = self.focus.focus(top.app_id, top.title, None, &self.tx) {
+        let pid = self.ipc.focused_pid(&top.app_id);
+        if let Err(e) = self.focus.focus(top.app_id, top.title, pid, &self.tx) {
             self.err = Some(e.to_string());
         }
     }
