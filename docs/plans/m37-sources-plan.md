@@ -235,3 +235,138 @@ through the page URL.
 macOS and Windows collectors (M38, M40), the GNOME extension, OAuth 2.1
 for MCP, webhooks, native shell history (command text is a secrets trap),
 kubectl/k9s/Tilt, Graphite, the Windows Visual Studio MRU.
+
+## Shipped (2026-09-09 evening, main 13373a0 → 0b08c4a)
+
+Written and executed in one sitting on the standing "grab next task and
+execute" instruction; six collector agents built the modules against
+interfaces set here, the wiring, matcher, anchors, routes, CLI, status and
+Settings were done in the main thread. 384 tests, clippy clean, daemon
+installed 21:24 and again 21:31 with two follow-up fixes.
+
+### Chunk 0
+
+- `crates/capture/src/sessions/`: `SessionFormat` (`name`, `roots`,
+  `scan`, `read(source, cursor)` → `Rec { ts, cwd, branch, prompt, paths,
+  write, title, session_id }`), Claude Code behind it unchanged, and Codex,
+  Gemini (chat JSONL and the legacy JSON; the cwd is recovered by hashing
+  every project path and worktree against the `~/.gemini/tmp/<sha256>`
+  dir, with a from-scratch sha256 since no hashing crate is in the tree),
+  Copilot CLI, Aider (the repo-root history at every candidate path; the
+  file has one timestamp per session), Cline (`taskHistory.json` +
+  `ui_messages.json`), OpenCode (SQLite, copied first) and Cursor
+  (`cursorDiskKV`, copied first). Amp is dropped: its local thread path
+  could not be verified (threads live server-side).
+- `AiSessionProvider::new(claude_dirs, formats, home, cwd_candidates)`
+  folds every format's `Rec`s through the existing `Segment` logic;
+  `ext_id` is `<format>:<session>[#n]` for the new formats and unchanged
+  for Claude (nothing re-minted); `detail.tool` names the format.
+  `ai_session_formats` pins the list; empty = every format with a root.
+- Gate: one fixture per format under `fixtures/sessions/` with a test
+  asserting cwd, session id, first prompt and its time; the formats were
+  written from public source and docs, not captured files — Cursor,
+  Copilot and Codex carry a note that their layouts churn. On this box
+  only Claude exists; Settings › Connections "Other agents' sessions" says
+  so ("none found · looks for codex, gemini, …").
+
+### Chunk 1
+
+- `chronicle shell-init zsh|bash|fish|pwsh` prints the hook
+  (`crates/capture/src/shell_hook.rs`); the daemon's
+  `/api/chronicle/shell` folds posts into `shell` spans per place through
+  `HookFold` (place = git root basename, else cwd basename), gated by
+  `shell_hook` (default on; 403 when off). Verified against the installed
+  daemon: a post answered 204 and produced
+  `shellhook:chronicle:<start> · cargo ×1` in `activity_events`; a bad
+  body answered 400. James's rc line is not added (his dotfiles repo):
+  `eval "$(chronicle shell-init zsh)"`.
+- tmux (`tmux.rs`) and Docker Compose (`docker.rs`) providers spawn when
+  the tool is on PATH: no tmux here; Docker produced its first `cwd` row
+  (`docker:<container>:<place>`) within four minutes.
+
+### Chunk 2
+
+- Discovery lives in core (`project::discover_repos`, `parents_of`):
+  `Matcher::from_config` appends every git repo one level under a
+  configured repo's parent as a discovered project (`Project.discovered`,
+  `derive` on, the amber "not configured" chip on Home, "(discovered)" in
+  `chronicle project list`, off with `discover_repos = false`). Gate:
+  `chronicle project test` over 7 days went from 84.9 % filed to 90.0 %
+  with no config edit — continental 97 min, dotfiles 9 min,
+  brotherhood-tooling 7 min now file. The remaining 194 min is the
+  markdown-viewer tab, New Tab, Meet and a session-titled terminal.
+- Git hooks (`hooks.rs`, `chronicle hooks install|remove|status|backfill`,
+  a "hooks" button per repo in Settings › Connections): one appended,
+  marked line per hook that runs `chronicle hook <name>` which posts to
+  `/api/chronicle/git`. Installed on this repo; the next commit's row
+  landed 1.5 s after `git commit` (the 20 s poll would have been up to
+  20 s). `Dedupe::Once` for commits so the poller's later sight of the
+  same sha is not a second row.
+- Reflog backfill (`reflog.rs`) on daemon start and `hooks backfill`: 123
+  checkout rows over 30 days on the six repos; `LatestCheckout` dedupe now
+  lets a row older than the latest stored checkout in, and the two
+  newest-per-repo queries pick by time, not row id (the backfill inserts
+  old rows late; Settings showed "checkout 5d ago" on chronicle until the
+  fix).
+- Link files (`crates/core/src/links.rs`, `repo_links` table, hourly
+  refresh in the daemon): read at each project path; url patterns become
+  `Project.links` and a page's `Link` anchor
+  (`host/seg/seg[/seg[/seg]]`, only for the dashboard hosts) files into
+  the project. On this box: acme-ai gets
+  `vercel.com/*/acme-ai-agent-backend` and
+  `supabase.com/dashboard/project/…`, every repo its build system, the
+  render blueprints their service names (after the fix that stopped
+  header names counting).
+- `glab` MRs (`gitlab.rs`, `gitlab_mrs`): no GitLab remote here; parser
+  tested on a fixture.
+
+### Chunk 3
+
+- `workspaces.rs` reads VS Code family recent lists and
+  `workspaceStorage`, JetBrains `recentProjects.xml`, Zed's db into
+  `editor_workspaces` hourly; Settings shows the count and editors. None
+  of the editors is on this box (0 rows); fixture tests cover the three.
+  Not done: the editor-title resolver — a bare folder name already
+  resolves by place, so the remote-URI case waits for a machine that has
+  one.
+
+### Chunk 4
+
+- Browser history (`browser.rs`): Chrome and Firefox here; 324 `browse`
+  rows in the first 24 h backfill; `extract::browse_url` gives a browser
+  span its real URL by title match within a 10-minute lookback, so after
+  `backfill-anchors` the markdown-viewer tab carries a
+  `markdownviewer.org` domain anchor (8 spans) and the Vite tab
+  `localhost:5173` (4 spans) with no extension installed.
+- `mode` anchor (`AnchorKind::Mode`, Weak) from URL families and apps:
+  over the last week deploying 55 spans, infra 13, mail 3. `storage::
+  mode_ms` feeds `RangeReport.modes` ("_of which deploying 40m_" under a
+  project's subtotal row in the markdown report) and a "Kinds of work"
+  section in the standup digest.
+- ICS (`ics.rs`, `calendars`): parser with DAILY/WEEKLY RRULE, EXDATE,
+  TZID and DURATION, fixture-tested; no feed configured here.
+
+### Chunk 5
+
+- Settings › Connections regrouped: MCP servers, Git repos (with the hooks
+  button), Files on this machine, Local servers and sockets, Your CLIs
+  (gh, glab), Accounts (Google Calendar); detected-only rows (other
+  agents' sessions, link files, editor workspaces, tmux, docker) draw no
+  toggle. Verified on a sandbox copy of the live DB at zoom 0.55.
+- `chronicle status` (and `--json`) gains a sources block: rows this week
+  and last seen per kind.
+- Not done: the remote MCP client (`url` + bearer from a CLI) — rmcp's
+  HTTP transport is a separate feature and OAuth 2.1 is its own chunk;
+  it stays on the M37 list.
+- Gate: `project test` unfiled is 10.0 % of focus (194 of 1943 min) —
+  at the line, not under it; the self-score's unfiled (10 %, 19:00
+  compute) reads again tomorrow. Sources row words: `browser` added; tmux
+  and docker are `cwd` (anchors only) and show through Settings.
+
+### Follow-ups
+
+- James: `eval "$(chronicle shell-init zsh)"` in `.zshrc`; `chronicle
+  hooks install` on the other five repos (installed on chronicle only);
+  a `calendars` feed URL.
+- Remote MCP client; the editor-title resolver for remote URIs; GitLab
+  and the seven session formats against real files.
