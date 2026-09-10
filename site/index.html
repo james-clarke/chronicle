@@ -43,7 +43,7 @@
       <li>no cloud</li>
     </ul>
     <div class="cta">
-      <span class="btn primary"><i></i>Download · coming soon</span>
+      <a class="btn primary" href="#download"><i></i>Download</a>
       <a class="btn" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Get in touch</a>
     </div>
     <div class="pulse" id="build" aria-label="When the last update was pushed, read from the repository when the page is built">
@@ -283,6 +283,28 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
       </div>
     </figure>
   </div>
+</section>
+
+<section class="download" id="download">
+  <h2>Get it.</h2>
+  <p class="section-lede">One binary, no runtime, no account. The language model downloads on first use, once, and never leaves the machine.</p>
+  <div class="grab">
+    <div class="grab-row">
+      <h3>Linux <small>x86-64</small></h3>
+      <p class="cmd"><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-installer.sh | sh</code></p>
+      <p class="fine">Puts the binary in <code>~/.local/bin</code>. Prefer to place it yourself? Take the <a href="https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-x86_64-unknown-linux-gnu.tar.xz">tarball</a>. Then <code>chronicle service install</code> starts it with your session. X11 and Wayland both, on wlroots compositors and KDE.</p>
+    </div>
+    <div class="grab-row">
+      <h3>macOS <small>Apple silicon and Intel</small></h3>
+      <p class="cmd"><code>brew install james-clarke/tap/chronicle</code></p>
+      <p class="fine">Not signed by Apple yet, so this is the developer route until that lands. Chronicle reads the focused window&rsquo;s title through Accessibility and asks for that permission once, on the first run.</p>
+    </div>
+    <div class="grab-row quiet">
+      <h3>Windows</h3>
+      <p class="fine">Not yet. The capture layer is being written now, and this line changes when it ships.</p>
+    </div>
+  </div>
+  <p class="fine">Every build, with its checksum, is on the <a href="https://github.com/james-clarke/chronicle/releases">releases page</a>.</p>
 </section>
 
 <section class="build" id="open">

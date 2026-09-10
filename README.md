@@ -222,15 +222,28 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 ## Installing
 
 ```sh
-# macOS or Linux, via Homebrew (once a release is tagged)
-brew install james-clarke/tap/chronicle
-
-# macOS or Linux, via the shell installer cargo-dist generates
+# Linux, via the shell installer cargo-dist generates (also works on macOS)
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-installer.sh | sh
+
+# macOS or Linux, via Homebrew
+brew install james-clarke/tap/chronicle
 
 # from source, any platform
 cargo install --path crates/app
 ```
+
+The shell installer puts the binary in `~/.local/bin`, not `CARGO_HOME`:
+most people downloading a built binary do not have Rust, and `~/.local/bin`
+is already on `PATH` on current distros. Homebrew ignores that and uses its
+own prefix. The release also carries a plain `.tar.xz` per target for anyone
+who would rather place the binary themselves.
+
+Both routes need a tagged release, which needs `main` pushed and the
+`james-clarke/homebrew-tap` repo to exist. macOS builds are unsigned until
+the Developer ID certificate is in the repo secrets (`macos-sign = false` in
+`dist-workspace.toml` until then, since turning it on without
+`CODESIGN_CERTIFICATE`/`_PASSWORD`/`_IDENTITY` fails the release build).
+Windows has no target yet; it lands in M40.
 
 ## Running as a service
 

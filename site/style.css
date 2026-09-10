@@ -758,6 +758,18 @@ section { padding: 72px 0; }
   .tip { min-width: 12em; white-space: normal; }
 }
 
+/* download */
+.download { padding: 96px 0 40px; }
+.grab { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin: 28px 0 22px; }
+.grab-row { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 18px 20px 16px; }
+.grab-row h3 { margin: 0 0 12px; font-size: 1rem; font-weight: 600; }
+.grab-row h3 small { margin-left: 8px; color: var(--muted); font-size: 0.78rem; font-weight: 400; }
+.grab-row .fine { margin: 12px 0 0; }
+.grab-row.quiet { opacity: 0.62; }
+.cmd { margin: 0; overflow-x: auto; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); padding: 10px 12px; }
+.cmd code { display: block; white-space: pre; font-size: 0.8rem; color: var(--soft); }
+a.btn { cursor: pointer; }
+
 /* last, so it wins over every animation above */
 @media (prefers-reduced-motion: reduce) {
   .hero-art .screen, .hero-art .desk, .hero-art .app, .hero::before, .pulse-dot, .pulse-dot::after,

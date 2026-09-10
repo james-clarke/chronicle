@@ -17,9 +17,13 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 hosting = "github"
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
-# Path that installers should place binaries in
-install-path = "CARGO_HOME"
+# Path that installers should place binaries in. Not CARGO_HOME: most people
+# downloading a built binary do not have Rust, and ~/.local/bin is already on
+# PATH on current distros. Homebrew ignores this and uses its own prefix.
+install-path = "~/.local/bin"
 # Whether to run the build in the pull request in a plan-only mode
 pr-run-mode = "plan"
-# Whether to sign macOS builds
-macos-sign = true
+# macOS signing waits for the Developer ID certificate: turning it on without
+# CODESIGN_CERTIFICATE / _PASSWORD / _IDENTITY in the repo secrets fails the
+# release build. Flip it back on with the cert and add a notarization step.
+macos-sign = false
