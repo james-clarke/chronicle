@@ -355,7 +355,7 @@ pub(crate) fn spawn_provider_thread(
 /// Mic-in-use watcher via `pw-dump`: optional, never load-bearing.
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn_mic_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
-    use chronicle_capture::mic::MicProvider;
+    use chronicle_capture::mic::{MicProvider, PwDump};
 
     if !config.mic_capture {
         return Ok(());
@@ -365,7 +365,20 @@ pub(crate) fn spawn_mic_capture(config: &Config, tx: Sender<CaptureEvent>) -> an
         tracing::warn!("mic_capture = true but `pw-dump` is not on PATH");
         return Ok(());
     }
-    let provider = MicProvider::new(PathBuf::from(pw_dump));
+    let provider = MicProvider::new(PwDump::new(PathBuf::from(pw_dump)));
+    spawn_provider_thread("mic", "mic provider", provider, tx)
+}
+
+/// Mic-in-use watcher via CoreAudio (m38): optional, never load-bearing.
+#[cfg(target_os = "macos")]
+pub(crate) fn spawn_mic_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::macos::mic::CoreAudioMic;
+    use chronicle_capture::mic::MicProvider;
+
+    if !config.mic_capture {
+        return Ok(());
+    }
+    let provider = MicProvider::new(CoreAudioMic);
     spawn_provider_thread("mic", "mic provider", provider, tx)
 }
 

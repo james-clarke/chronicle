@@ -4,9 +4,10 @@
 //! listener whose cwd names a place is emitted as a `Cwd` row keyed
 //! `port:<port>:<place>` with `port` in its detail, refreshed while it
 //! lives. The anchors turn a browser span on `localhost:<port>` into that
-//! place. Linux `/proc` only; elsewhere the provider emits nothing.
+//! place. Linux `/proc` and macOS `lsof` (`macos/lsof.rs`); elsewhere the
+//! provider emits nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chronicle_core::extract;
@@ -112,11 +113,17 @@ fn listeners() -> Vec<(u16, String)> {
     v
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn listeners() -> Vec<(u16, String)> {
+    crate::macos::lsof::listeners()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn listeners() -> Vec<(u16, String)> {
     Vec::new()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Linux `/proc` shape, tested everywhere
 /// `(inode, port)` of every LISTEN row (`st` 0A) in a `/proc/net/tcp` table.
 fn parse_listeners(text: &str) -> Vec<(u64, u16)> {
     text.lines()
@@ -133,12 +140,57 @@ fn parse_listeners(text: &str) -> Vec<(u64, u16)> {
         .collect()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// `socket:[12345]` → 12345.
 fn socket_inode(link: &str) -> Option<u64> {
     link.strip_prefix("socket:[")?
         .strip_suffix(']')?
         .parse()
         .ok()
+}
+
+/// `(pid, port)` per listener from `lsof -nP -iTCP -sTCP:LISTEN -Fpn`: a
+/// `p<pid>` line sets the current pid, each following `n<addr>:<port>`
+/// line is one socket under it. IPv4 and IPv6 rows duplicate the same
+/// port; deduped by `(pid, port)`. Platform-neutral so it can be tested
+/// here; only `macos/lsof.rs` runs the actual command.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only called from macos::lsof
+pub(crate) fn parse_listen(out: &str) -> Vec<(u32, u16)> {
+    let mut pid: Option<u32> = None;
+    let mut seen: HashSet<(u32, u16)> = HashSet::new();
+    let mut result = Vec::new();
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            pid = rest.parse().ok();
+        } else if let Some(rest) = line.strip_prefix('n') {
+            let Some(p) = pid else { continue };
+            let Some(port) = rest.rsplit(':').next().and_then(|s| s.parse::<u16>().ok()) else {
+                continue;
+            };
+            if seen.insert((p, port)) {
+                result.push((p, port));
+            }
+        }
+    }
+    result
+}
+
+/// `pid -> cwd` from `lsof -a -p <pids> -d cwd -Fpn`: a `p<pid>` line sets
+/// the current pid, the following `n<path>` line is its cwd.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only called from macos::lsof
+pub(crate) fn parse_cwd(out: &str) -> HashMap<u32, String> {
+    let mut pid: Option<u32> = None;
+    let mut map = HashMap::new();
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            pid = rest.parse().ok();
+        } else if let Some(rest) = line.strip_prefix('n')
+            && let Some(p) = pid
+        {
+            map.insert(p, rest.to_owned());
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -154,5 +206,31 @@ mod tests {
         assert_eq!(parse_listeners(table), vec![(41234, 8001), (52000, 3000)]);
         assert_eq!(socket_inode("socket:[41234]"), Some(41234));
         assert_eq!(socket_inode("/dev/null"), None);
+    }
+
+    #[test]
+    fn parse_listen_dedupes_v4_and_v6_rows() {
+        let out = "p1234\nn*:8080\nn[::1]:8080\np5678\nn127.0.0.1:5432\n";
+        assert_eq!(parse_listen(out), vec![(1234, 8080), (5678, 5432)]);
+    }
+
+    #[test]
+    fn parse_listen_ignores_n_lines_before_any_pid() {
+        assert!(parse_listen("n*:8080\n").is_empty());
+    }
+
+    #[test]
+    fn parse_cwd_maps_pid_to_path() {
+        let out = "p1234\nn/home/james/dev/chronicle\np5678\nn/home/james/dev/otherapp\n";
+        let map = parse_cwd(out);
+        assert_eq!(
+            map.get(&1234).map(String::as_str),
+            Some("/home/james/dev/chronicle")
+        );
+        assert_eq!(
+            map.get(&5678).map(String::as_str),
+            Some("/home/james/dev/otherapp")
+        );
+        assert_eq!(map.len(), 2);
     }
 }

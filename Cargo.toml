@@ -6,6 +6,8 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 publish = false
+repository = "https://github.com/james-clarke/chronicle"
+license = "Proprietary"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -17,7 +19,7 @@ ksni = "0.3"
 # a menu-bar icon.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSDictionary", "NSRunLoop", "NSThread", "NSDate", "NSObject"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "NSApplication", "NSResponder"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "NSApplication", "NSResponder", "libc"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFString", "CFDictionary", "CFNumber", "CFArray"] }
 libc = "0.2"
 tray-icon = "0.24"
@@ -69,3 +71,8 @@ debug = false
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

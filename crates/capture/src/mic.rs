@@ -1,9 +1,11 @@
-//! Mic-in-use watcher (m22, Linux/PipeWire): polls `pw-dump` for running
-//! `Stream/Input/Audio` nodes — an app capturing the microphone — and emits
-//! one `call` span from the first capture to the last release. Explains AFK
-//! gaps without a calendar. Only the capturing app's name is kept.
+//! Mic-in-use watcher (m22, Linux/PipeWire; m38, macOS/CoreAudio): polls a
+//! `MicSource` for the apps capturing the microphone right now and emits
+//! one `call` span from the first capture to the last release. Explains
+//! AFK gaps without a calendar.
 
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::time::Duration;
 
@@ -15,52 +17,49 @@ use crate::{BoxError, FocusProvider};
 
 const POLL: Duration = Duration::from_secs(20);
 
-pub struct MicProvider {
-    pw_dump: PathBuf,
+/// One poll of "what's using the mic right now": `pw-dump` on Linux,
+/// CoreAudio on macOS. `Err` is a transient failure (a PipeWire hiccup, a
+/// brief permission blip): `MicProvider` warns once and reports no
+/// events, leaving an open call span untouched rather than closing it on
+/// bad data.
+pub trait MicSource: Send {
+    fn active_inputs(&mut self) -> Result<Vec<String>, String>;
+}
+
+pub struct MicProvider<S: MicSource> {
+    source: S,
     /// Call in progress: start and the app that opened it.
     current: Option<(Timestamp, String)>,
     /// Last error warned about; repeats stay quiet.
     last_err: Option<String>,
 }
 
-impl MicProvider {
-    pub fn new(pw_dump: PathBuf) -> Self {
+impl<S: MicSource> MicProvider<S> {
+    pub fn new(source: S) -> Self {
         Self {
-            pw_dump,
+            source,
             current: None,
             last_err: None,
         }
     }
 
-    /// A failed `pw-dump` is transient (PipeWire hiccup, brief permission
-    /// blip): warn once per failure streak and report no events, leaving an
-    /// open call span untouched rather than closing it on bad data.
     fn poll(&mut self) -> Vec<ActivityEvent> {
-        let out = match Command::new(&self.pw_dump).output() {
-            Ok(o) if o.status.success() => o,
-            Ok(o) => {
-                self.warn_once(
-                    String::from_utf8_lossy(&o.stderr)
-                        .lines()
-                        .next()
-                        .unwrap_or("pw-dump failed")
-                        .to_owned(),
-                );
-                return Vec::new();
+        let apps = match self.source.active_inputs() {
+            Ok(apps) => {
+                self.last_err = None;
+                apps
             }
             Err(e) => {
-                self.warn_once(e.to_string());
+                self.warn_once(e);
                 return Vec::new();
             }
         };
-        self.last_err = None;
-        let apps = active_inputs(&String::from_utf8_lossy(&out.stdout));
         self.step(&apps, Timestamp::now()).into_iter().collect()
     }
 
     fn warn_once(&mut self, err: String) {
         if self.last_err.as_deref() != Some(err.as_str()) {
-            tracing::warn!("pw-dump poll: {err}");
+            tracing::warn!("mic source poll: {err}");
             self.last_err = Some(err);
         }
     }
@@ -97,16 +96,47 @@ fn call_event(start: Timestamp, end: Option<Timestamp>, app: &str) -> ActivityEv
     }
 }
 
-impl FocusProvider for MicProvider {
+impl<S: MicSource> FocusProvider for MicProvider<S> {
     fn run(mut self, tx: Sender<CaptureEvent>) -> Result<(), BoxError> {
         crate::poll_loop(&tx, POLL, move || self.poll())
+    }
+}
+
+/// `pw-dump` polling (Linux/PipeWire).
+#[cfg(target_os = "linux")]
+pub struct PwDump {
+    path: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl PwDump {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MicSource for PwDump {
+    fn active_inputs(&mut self) -> Result<Vec<String>, String> {
+        let out = Command::new(&self.path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("pw-dump failed")
+                .to_owned());
+        }
+        Ok(parse_pw_dump(&String::from_utf8_lossy(&out.stdout)))
     }
 }
 
 /// Names of apps with a running mic capture stream, sorted and deduped.
 /// Exact class match: `Stream/Input/Audio/Internal` (bluez loopbacks) and
 /// suspended/idle streams (a parked tab) are not calls.
-fn active_inputs(json: &str) -> Vec<String> {
+#[cfg(target_os = "linux")]
+fn parse_pw_dump(json: &str) -> Vec<String> {
     let Ok(objects) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
         return Vec::new();
     };
@@ -134,7 +164,7 @@ fn active_inputs(json: &str) -> Vec<String> {
     apps
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -149,14 +179,14 @@ mod tests {
 
     #[test]
     fn only_running_exact_input_streams_count() {
-        assert_eq!(active_inputs(DUMP), vec!["Firefox".to_owned()]);
-        assert!(active_inputs("[]").is_empty());
-        assert!(active_inputs("nope").is_empty());
+        assert_eq!(parse_pw_dump(DUMP), vec!["Firefox".to_owned()]);
+        assert!(parse_pw_dump("[]").is_empty());
+        assert!(parse_pw_dump("nope").is_empty());
     }
 
     #[test]
     fn call_opens_and_closes_on_the_same_ext_id() {
-        let mut p = MicProvider::new(PathBuf::from("pw-dump"));
+        let mut p = MicProvider::new(PwDump::new(PathBuf::from("pw-dump")));
         let t0: Timestamp = "2026-09-02T15:00:00Z".parse().unwrap();
         let t1: Timestamp = "2026-09-02T15:20:00Z".parse().unwrap();
         let t2: Timestamp = "2026-09-02T15:32:00Z".parse().unwrap();

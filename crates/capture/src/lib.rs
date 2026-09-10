@@ -16,7 +16,6 @@ pub mod ics;
 pub mod lock;
 #[cfg(target_os = "macos")]
 pub mod macos;
-#[cfg(target_os = "linux")]
 pub mod mic;
 pub mod notes;
 pub mod ports;
