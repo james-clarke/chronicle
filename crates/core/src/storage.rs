@@ -7523,11 +7523,7 @@ mod tests {
                 .unwrap()
                 .map(|t| t.id)
         };
-        assert_eq!(
-            by(&["mailer"]),
-            Some(85),
-            "the span's repo names the task"
-        );
+        assert_eq!(by(&["mailer"]), Some(85), "the span's repo names the task");
         assert_eq!(by(&["Chronicle"]), Some(100), "repo match is case-blind");
         assert_eq!(by(&[]), Some(100), "no repo signal: most recently touched");
         assert_eq!(by(&["contoso"]), Some(100), "unrelated repo: same fallback");

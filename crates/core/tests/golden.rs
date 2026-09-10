@@ -357,7 +357,13 @@ fn prepass_title_key_recency_gate_and_distractions() {
         "derived",
         None,
     );
-    let fresh = task(&conn, "Fresh contoso work", Some("contoso"), "derived", None);
+    let fresh = task(
+        &conn,
+        "Fresh contoso work",
+        Some("contoso"),
+        "derived",
+        None,
+    );
     // The ticket task and the stale repo task last saw work 3 h before their
     // runs; the fresh repo task 1 h before.
     for (t, end) in [(ticket, 12 * h), (stale, 12 * h), (fresh, 17 * h)] {
@@ -505,7 +511,12 @@ fn digest_keys_seen_section() {
         Some(&re),
         None,
     );
-    assert!(with.contains("## Keys seen\nACME-11382 9m00s (chrome), ACME-11374 1m00s (chrome)\ncwd mailer 3m00s\n"), "{with}");
+    assert!(
+        with.contains(
+            "## Keys seen\nACME-11382 9m00s (chrome), ACME-11374 1m00s (chrome)\ncwd mailer 3m00s\n"
+        ),
+        "{with}"
+    );
     let without = build_digest(&spans, &TimeZone::UTC, &[], &[], &[], &[], None, None, None);
     assert!(
         without.contains("## Keys seen\ncwd mailer 3m00s\n"),
@@ -2139,10 +2150,7 @@ fn eject_splits_interval_and_blocks_suggestion() {
             Some(interval)
         )
     );
-    assert_eq!(
-        ctx, "Firefox Jira ACME-7 board\n",
-        "only the block's spans"
-    );
+    assert_eq!(ctx, "Firefox Jira ACME-7 board\n", "only the block's spans");
 
     // The eject is a negative: even after the user assigns similar work to
     // the task elsewhere, that text no longer suggests it, and the digest's

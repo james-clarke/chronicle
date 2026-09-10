@@ -2255,15 +2255,7 @@ mod tests {
                 None,
             ),
             ev(ActivityKind::Checkout, 0, 0, "chronicle", "m30", "", None),
-            ev(
-                ActivityKind::Checkout,
-                0,
-                0,
-                "mailer",
-                "ACME-1-x",
-                "",
-                None,
-            ),
+            ev(ActivityKind::Checkout, 0, 0, "mailer", "ACME-1-x", "", None),
         ];
         // Both rows overlap [10, 20); the shell was last seen in mailer.
         let a = from_activity("Terminator", "", 10 * m, 20 * m, &[], &events, &r);

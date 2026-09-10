@@ -25,19 +25,21 @@ designed ones, and would mean doing the rewrite twice.
 
 ## What the repository holds today
 
-Counted with `git grep` over `HEAD`; the same strings are present through
-the history.
+Counted with `git grep` over `HEAD`; the same strings run through the
+history. The identifiers themselves are deliberately not written down here,
+since this plan is published with the repository and naming them would put
+back exactly what the milestone removes. The replacement map lives outside
+the repository for the same reason.
 
-| Identifier | Occurrences | What it is |
-|---|---|---|
-| `contoso` | 239 | a repository name, with its own `contoso.atlassian.net` |
-| `ACME-*` | 211 | employer Jira keys, some with real titles |
-| `mailer` | 180 | an employer repository name |
-| `workstation` | 86 | the author's machine name, in shell prompts |
-| `northwind*` | 119 | reads as a customer or tenant: `-memberships`, `-qa`, `-test` |
-| `acmeapi.example` | 45 | employer hostnames, including a staging host |
-| `mailerdb-staging` | 10 | an AWS RDS instance identifier |
-| `acme.atlassian.net` | 8 | the employer Jira tenant |
+| Kind | Occurrences |
+|---|---|
+| two repository names, one with its own Jira host | 419 |
+| an employer Jira project prefix, some keys with real titles | 211 |
+| the author's machine name, in shell prompts | 86 |
+| a brand, in three environment variants | 119 |
+| employer hostnames, including a staging host | 45 |
+| an AWS RDS instance identifier | 10 |
+| the employer Jira tenant | 8 |
 
 Where they live:
 
@@ -73,7 +75,7 @@ Two facts that shape the work:
   text, `Cargo.toml:10` carries the SPDX identifier. Verbatim matters, so
   the copyright line lives in the README rather than at the top of
   `LICENSE`, where it would confuse licence detectors.
-- **One designed scenario, not a search and replace.** Mapping `contoso` to
+- **One designed scenario, not a search and replace.** Mapping each name to
   a random word leaves fixtures that read like noise. The replacement is a
   coherent invented developer working invented tickets in invented repos,
   extending the Acme and Contoso cast already in the corpus. The golden
@@ -106,18 +108,25 @@ Two facts that shape the work:
 - A cast document (`fixtures/README.md`): the invented developer, their
   repositories, ticket prefix, hosts and customers, extending Acme and
   Contoso.
-- The replacement map as data (`scripts/scrub-map.txt`), one `old==>new`
-  per line, so the tree edit and the history rewrite read the same file and
-  cannot drift.
-- Gate: every identifier in the table above appears in the map.
+- The replacement map as data, one `old==>new` per line, so the tree edit
+  and the history rewrite read the same file and cannot drift. It is kept
+  outside the repository on purpose: a committed map is a published index
+  of everything this milestone set out to remove.
+- Case variants are separate literal rules rather than a case-insensitive
+  match. Several exist because a test is exercising case-insensitive
+  matching, and folding them together would delete the thing under test.
+- No replacement carries a hyphen. These names are Rust variables in the
+  test code as well as strings in the fixtures, and a hyphen there parses
+  as a subtraction.
+- Gate: every kind in the table above appears in the map.
 
 ### 1. Scrub the working tree
 
 - Apply the map across `fixtures/`, `crates/`, `docs/`, `site/`.
 - Re-read the golden files by eye: substitution keeps tests passing but can
   leave prose that no longer parses as English.
-- Gate: `cargo test --workspace` green; `git grep` for every identifier in
-  the table returns nothing outside `LICENSE` and this plan.
+- Gate: `cargo test --workspace` green, and a case-insensitive `git grep`
+  for every identifier finds nothing anywhere in the tree.
 
 ### 2. Site text and the screenshot debt
 
@@ -130,8 +139,8 @@ Two facts that shape the work:
 
 ### 3. Rewrite history
 
-- `git filter-repo --replace-text scripts/scrub-map.txt`, then a second
-  pass stripping `site/img` history.
+- `git filter-repo --replace-text` with the same map the tree edit used,
+  then a second pass stripping `site/img` history.
 - Force-push to the private remote. Re-clone into a scratch directory and
   run the suite there, because a rewrite that passes in the rewritten
   working copy can still have broken the tree.
@@ -152,8 +161,8 @@ Two facts that shape the work:
 
 ## Owed
 
-- Whether `contoso` is the author's own project or a client's changes
-  nothing mechanically, but James should confirm before it is described
-  anywhere as an example.
+- One of the two repository names may be the author's own project rather
+  than an employer's. It changes nothing mechanically, but James should
+  confirm before it is described anywhere as an example.
 - The visibility flip, the force-push and the tag are all James's actions.
 - The screenshot regeneration is real work and lives in M43.

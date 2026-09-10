@@ -325,18 +325,8 @@ mod tests {
     fn near_dup_proposals_collapse_to_earliest() {
         let (slots, intervals) = link_intervals(
             &[
-                draft(
-                    None,
-                    Some("debugging SMS send script"),
-                    Some("mailer"),
-                    10,
-                ),
-                draft(
-                    None,
-                    Some("debugging sms send script."),
-                    Some("mailer"),
-                    0,
-                ),
+                draft(None, Some("debugging SMS send script"), Some("mailer"), 10),
+                draft(None, Some("debugging sms send script."), Some("mailer"), 0),
                 draft(
                     None,
                     Some("reviewing digest grouping"),
