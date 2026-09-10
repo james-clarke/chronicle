@@ -67,6 +67,10 @@ pub enum ActivityKind {
     /// person or their tool wrote down at that time, the branch it was on.
     /// Ground truth for narratives; never focus time.
     Note,
+    /// One browser history visit (m37 chunk 4): `summary` is the page
+    /// title, `detail` is `{"url"}` with the query and fragment dropped,
+    /// `ext_id` is `<browser>:<visit id>`. Anchors only; never focus time.
+    Browse,
 }
 
 /// How a repeated observation of the same `ext_id` is stored.
@@ -84,7 +88,7 @@ pub enum Dedupe {
 }
 
 impl ActivityKind {
-    pub const ALL: [ActivityKind; 11] = [
+    pub const ALL: [ActivityKind; 12] = [
         ActivityKind::Checkout,
         ActivityKind::Commit,
         ActivityKind::AiSession,
@@ -96,6 +100,7 @@ impl ActivityKind {
         ActivityKind::Shell,
         ActivityKind::Cwd,
         ActivityKind::Note,
+        ActivityKind::Browse,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -111,6 +116,7 @@ impl ActivityKind {
             ActivityKind::Shell => "shell",
             ActivityKind::Cwd => "cwd",
             ActivityKind::Note => "note",
+            ActivityKind::Browse => "browse",
         }
     }
 
@@ -139,6 +145,7 @@ impl ActivityKind {
             | ActivityKind::Shell
             | ActivityKind::Cwd
             | ActivityKind::Note => Dedupe::Upsert,
+            ActivityKind::Browse => Dedupe::Ignore,
             ActivityKind::PrAuthored | ActivityKind::PrReviewed => Dedupe::Ignore,
         }
     }

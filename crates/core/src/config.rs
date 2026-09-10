@@ -108,9 +108,16 @@ pub struct Config {
     /// evidence (`<dir>/<project>/*.jsonl`, Claude Code layout; `~`
     /// expanded). Empty = off.
     pub ai_session_dirs: Vec<String>,
+    /// Session formats to read besides the Claude Code dirs above (m37
+    /// chunk 0): `codex`, `gemini`, `copilot`, `aider`, `cline`, `amp`,
+    /// `opencode`, `cursor`. Empty = every format whose directory exists.
+    pub ai_session_formats: Vec<String>,
     /// Poll `gh search prs` for the user's authored/reviewed PRs (needs
     /// `gh auth login`; off by default).
     pub github_prs: bool,
+    /// Poll `glab mr list` for the user's assigned/reviewed MRs (needs
+    /// `glab auth login`; off by default).
+    pub gitlab_mrs: bool,
     /// Watch for apps capturing the microphone (PipeWire, Linux) and store
     /// each stretch as a `call`.
     pub mic_capture: bool,
@@ -123,6 +130,20 @@ pub struct Config {
     /// Accept WakaTime heartbeats from editor plugins on the local endpoint
     /// and fold them into `edit` spans. Off = the routes answer 403.
     pub editor_heartbeats: bool,
+    /// Accept the `chronicle shell-init` precmd hook's posts (cwd, program,
+    /// duration; never the command line) on the local endpoint and fold
+    /// them into `shell` spans (m37 chunk 1). Off = the route answers 403.
+    pub shell_hook: bool,
+    /// Scan the parents of `git_repos` entries for git repos no project
+    /// claims and file them as discovered projects (m37 chunk 2).
+    pub discover_repos: bool,
+    /// Read the browsers' history databases (copied, read-only; query
+    /// strings dropped) into `browse` rows so a tab's real URL anchors the
+    /// span (m37 chunk 4).
+    pub browser_history: bool,
+    /// ICS calendars (URLs or paths) polled for `meeting` spans, no OAuth
+    /// (m37 chunk 4).
+    pub calendars: Vec<String>,
     /// Full-match-anywhere regex extracting a ticket key from branch names,
     /// used to anchor derived tasks (`tasks.external_ref`).
     pub ticket_regex: String,
@@ -188,11 +209,17 @@ impl Default for Config {
             projects: Vec::new(),
             project_join_min: 2,
             ai_session_dirs: vec!["~/.claude/projects".into()],
+            ai_session_formats: Vec::new(),
             github_prs: false,
+            gitlab_mrs: false,
             mic_capture: true,
             google_calendar: false,
             shell_history: false,
             editor_heartbeats: true,
+            shell_hook: true,
+            discover_repos: true,
+            browser_history: true,
+            calendars: Vec::new(),
             ticket_regex: "[A-Z][A-Z0-9]+-[0-9]+".into(),
             checkpoint_afk_secs: 1800,
             task_stuck_days: 3,

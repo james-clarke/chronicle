@@ -1905,6 +1905,7 @@ fn activity_glyph(kind: chronicle_core::types::ActivityKind) -> &'static str {
         K::Edit => theme::icon::CODE,
         K::Shell | K::Cwd => theme::icon::TERMINAL,
         K::Note => theme::icon::NOTE_PENCIL,
+        K::Browse => theme::icon::APP_WINDOW,
     }
 }
 
@@ -1926,6 +1927,7 @@ fn activity_kind_name(kind: chronicle_core::types::ActivityKind) -> &'static str
         K::Shell => "shell commands",
         K::Cwd => "terminal working directory",
         K::Note => "note",
+        K::Browse => "page visit",
     }
 }
 

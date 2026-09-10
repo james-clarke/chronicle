@@ -174,8 +174,9 @@ fn aggregate<'a>(
     let win_hi = last.end.as_millisecond();
     let in_window: Vec<&ActivityEvent> = vcs
         .iter()
-        // Cwd probes are anchor evidence, not activity worth a line.
-        .filter(|v| v.kind != ActivityKind::Cwd)
+        // Cwd probes and browse visits are anchor evidence, not activity
+        // worth a line.
+        .filter(|v| !matches!(v.kind, ActivityKind::Cwd | ActivityKind::Browse))
         .filter(|v| {
             let ms = v.ts.as_millisecond();
             ms >= win_lo && ms < win_hi
@@ -596,6 +597,7 @@ pub fn activity_line(v: &ActivityEvent, tz: &TimeZone, title_chars: usize) -> St
         | ActivityKind::Edit
         | ActivityKind::Shell
         | ActivityKind::Cwd
+        | ActivityKind::Browse
         | ActivityKind::Note => {
             let mut line = format!("- {hm} {}", v.kind.as_str());
             if !v.repo.is_empty() {
@@ -766,7 +768,8 @@ fn truth_block(v: &ActivityEvent, tz: &TimeZone) -> Option<TruthBlock> {
         | ActivityKind::Call
         | ActivityKind::Edit
         | ActivityKind::Shell
-        | ActivityKind::Cwd => return None,
+        | ActivityKind::Cwd
+        | ActivityKind::Browse => return None,
     };
     Some(TruthBlock {
         priority,

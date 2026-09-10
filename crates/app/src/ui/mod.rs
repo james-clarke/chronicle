@@ -2849,8 +2849,8 @@ impl TimelineApp {
 const LIVE_MS: i64 = 2 * 60_000;
 
 /// Display order of the Home sources row.
-const SOURCE_ORDER: [&str; 9] = [
-    "screen", "git", "ai", "prs", "editor", "shell", "calls", "calendar", "notes",
+const SOURCE_ORDER: [&str; 10] = [
+    "screen", "git", "ai", "prs", "editor", "shell", "browser", "calls", "calendar", "notes",
 ];
 
 /// The sources-row word for a collector's activity kind; `None` for kinds
@@ -2866,6 +2866,7 @@ fn source_word(kind: chronicle_core::types::ActivityKind) -> Option<&'static str
         K::Call => "calls",
         K::Meeting => "calendar",
         K::Note => "notes",
+        K::Browse => "browser",
         K::Cwd => return None,
     })
 }
