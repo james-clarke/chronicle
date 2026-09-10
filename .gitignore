@@ -1,2 +1,5 @@
 /target
 site/img/src/
+
+# Build logs from `cargo install` runs (m39).
+install-*.log
