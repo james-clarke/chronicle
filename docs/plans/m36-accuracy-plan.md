@@ -364,6 +364,23 @@ digests) and the verdicts are the baseline's, 4 / 3 / 3 — the floor is
 not the lever either; both constants stay as they were. The losses (168,
 153, 131) are all "examples name a neighbouring project's work": the next
 try is restricting examples to the task's own project, not a knob.
+Examples scoped to the task's own project, tried 2026-09-10 10:30 on the
+same ten tasks with the claude-sonnet-5 referee: the filter has to go
+through the correction's *task* (`c.task_id IN (SELECT id FROM tasks WHERE
+project = ?)`) because the stored `old_project`/`new_project` strings are
+pre-M35 names ("ACAI", "mailer", "core server") that no current task
+carries. Result: examples win 1, lose 1, tie 8 of 10. Six of the ten
+tasks (continental, brotherhood-tooling, sprog, acme-ai ×2, one
+chronicle) have no own-project correction near enough, so they tie by
+construction — that takes the two cross-project losses (168, 153) but
+also three of the baseline's four wins; 131 still loses on its own
+project's four examples, 128 still wins. Net +1 → 0: scoping is not the
+lever either, and a fall-back to unscoped when the project has nothing
+would only reproduce the baseline. Reverted. What the three runs say
+together is that the examples signal is small in both directions on this
+corpus (87 embedded corrections, 36 in one project); the next thing to
+try is not a selection rule but the corpus — re-judge once the daily
+self-score has a month of corrections behind it.
 
 Order 0 → 1 → 2 → 3 → 4 → 5. Chunk 0 is a day and unblocks the decision;
 1 is a prerequisite for any user other than James; 2–3 are the accuracy
