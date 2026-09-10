@@ -111,20 +111,36 @@ fn render(root: &Path) -> Vec<RepoLink> {
     };
     let mut out = Vec::new();
     let mut in_services = false;
+    // Only a service's own `name:` counts — the one at the list item's key
+    // indent (`  - type: web` / `    name: site`), not a header's or a
+    // route's deeper down.
+    let mut key_indent: Option<usize> = None;
     for line in text.lines() {
         if line.trim_end() == "services:" {
             in_services = true;
+            key_indent = None;
             continue;
         }
         if !in_services {
             continue;
         }
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         if !line.starts_with(' ') && !line.starts_with('\t') {
             in_services = false;
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if trimmed.starts_with("- ") && key_indent.is_none() {
+            // `  - name: x` puts the key two past the dash; nested lists
+            // (headers, routes) sit deeper and never reset it.
+            key_indent = Some(indent + 2);
+        }
+        if key_indent != Some(indent)
+            && !(trimmed.starts_with("- ") && key_indent == Some(indent + 2))
+        {
             continue;
         }
         if let Some(name) = parse_name_line(trimmed) {
@@ -377,7 +393,7 @@ mod tests {
         write(
             tmp.path(),
             "render.yaml",
-            "services:\n  - type: web\n    name: api\n  - type: worker\n    name: jobs\nenvVarGroups: []\n",
+            "services:\n  - type: web\n    name: api\n    headers:\n      - path: /*\n        name: X-Frame-Options\n        value: DENY\n  - type: worker\n    name: jobs\nenvVarGroups: []\n",
         );
         let links = read_links(tmp.path());
         let render: Vec<_> = links.iter().filter(|l| l.kind == "render").collect();
