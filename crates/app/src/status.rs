@@ -126,6 +126,37 @@ pub(crate) struct DbStatus {
     /// replay and drift notes per backend from meta.
     pub(crate) backend_score: Vec<chronicle_core::storage::BackendScore>,
     pub(crate) bench_notes: BenchNotes,
+    /// Per source kind (m37 chunk 5): rows this week and the last one seen.
+    pub(crate) sources: Vec<SourceStatus>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct SourceStatus {
+    pub(crate) kind: String,
+    pub(crate) week_rows: i64,
+    pub(crate) last_ts: i64,
+}
+
+/// One line per activity kind that ever wrote a row: this week's count and
+/// how long ago the last one landed.
+pub(crate) fn source_status(
+    conn: &rusqlite::Connection,
+    now_ms: i64,
+) -> anyhow::Result<Vec<SourceStatus>> {
+    let week_lo = now_ms - 7 * 86_400_000;
+    let mut stmt = conn.prepare(
+        "SELECT kind, SUM(CASE WHEN COALESCE(end_ts, ts) >= ?1 THEN 1 ELSE 0 END),
+                MAX(COALESCE(end_ts, ts))
+         FROM activity_events GROUP BY kind ORDER BY kind",
+    )?;
+    let rows = stmt.query_map([week_lo], |r| {
+        Ok(SourceStatus {
+            kind: r.get(0)?,
+            week_rows: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            last_ts: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Per backend: the bench's last replay note and drift note.
@@ -162,6 +193,7 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         self_score,
         backend_score,
         bench_notes,
+        sources: _,
     } = db;
     let mut out = String::new();
     match liveness {
@@ -255,6 +287,17 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
             out.push_str(&format!("    {}\n", b.line(replay, drift)));
         }
     }
+    if !db.sources.is_empty() {
+        out.push_str("  sources, this week:\n");
+        let now_ms = Timestamp::now().as_millisecond();
+        for s in &db.sources {
+            let ago = fmt_secs(((now_ms - s.last_ts).max(0) / 1000) as u64);
+            out.push_str(&format!(
+                "    {:<12} {:>6} rows, last {ago} ago\n",
+                s.kind, s.week_rows
+            ));
+        }
+    }
     out.push_str(&format!(
         "  model: {}\n",
         model_file.as_deref().unwrap_or("not downloaded")
@@ -318,6 +361,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             chronicle_core::self_score::DAYS,
         )?,
         bench_notes: bench_notes(&conn)?,
+        sources: source_status(&conn, now_ms)?,
     };
 
     if json {
@@ -341,6 +385,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             "underived_today_ms": db.underived_today_ms,
             "self_score": db.self_score,
             "backend_score": db.backend_score,
+            "sources": db.sources,
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
@@ -393,6 +438,7 @@ pub(crate) fn report(
     r.gaps = chronicle_core::report::capture_gaps(&runs, ledger_start, lo, hi.min(now));
     r.underived_ms = chronicle_core::storage::underived_ms(&conn, lo, hi)?;
     r.self_ms = chronicle_core::storage::self_window_ms(&conn, lo, hi)?;
+    r.modes = chronicle_core::storage::mode_ms(&conn, lo, hi)?;
     match format {
         ReportFormat::Csv => print!("{}", chronicle_core::report::to_csv(&r)),
         ReportFormat::Md => print!("{}", chronicle_core::report::to_md(&r)),

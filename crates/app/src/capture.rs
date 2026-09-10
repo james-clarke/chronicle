@@ -62,9 +62,102 @@ pub(crate) fn spawn_capture(
         tx.clone(),
     )?;
     spawn_github_capture(config, tx.clone())?;
+    spawn_gitlab_capture(config, tx.clone())?;
     spawn_shell_capture(config, tx.clone())?;
     spawn_mic_capture(config, tx.clone())?;
+    spawn_local_cwd_capture(tx.clone())?;
+    spawn_browser_capture(config, tx.clone())?;
+    spawn_ics_capture(config, tx.clone())?;
     spawn_gcal_capture(config, data_dir, tx)
+}
+
+/// Browser history reader (m37 chunk 4): the real URL behind a tab title,
+/// from the browsers' own history databases; on by default, off when no
+/// profile exists.
+pub(crate) fn spawn_browser_capture(
+    config: &Config,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::browser::{BrowserProvider, profiles};
+
+    if !config.browser_history {
+        return Ok(());
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(());
+    };
+    if profiles(&home).is_empty() {
+        tracing::info!("browser_history = true but no history database found");
+        return Ok(());
+    }
+    spawn_provider_thread(
+        "browser",
+        "browser history provider",
+        BrowserProvider::new(&home),
+        tx,
+    )
+}
+
+/// ICS calendar feeds (m37 chunk 4): `calendars` URLs or paths, no OAuth.
+pub(crate) fn spawn_ics_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    use chronicle_capture::ics::IcsProvider;
+
+    if config.calendars.is_empty() {
+        return Ok(());
+    }
+    let sources: Vec<String> = config
+        .calendars
+        .iter()
+        .map(|c| {
+            if c.starts_with("http://") || c.starts_with("https://") {
+                c.clone()
+            } else {
+                chronicle_core::config::expand_home(c).display().to_string()
+            }
+        })
+        .collect();
+    let provider = IcsProvider::new(sources, jiff::tz::TimeZone::system());
+    spawn_provider_thread("ics", "ics calendar provider", provider, tx)
+}
+
+/// tmux panes and Docker Compose stacks (m37 chunk 1): a live cwd per
+/// attached pane and per running stack, when the tool is on PATH.
+pub(crate) fn spawn_local_cwd_capture(tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
+    if let Some(p) = chronicle_capture::tmux::TmuxProvider::detect() {
+        spawn_provider_thread("tmux", "tmux provider", p, tx.clone())?;
+    }
+    if let Some(p) = chronicle_capture::docker::DockerProvider::detect() {
+        spawn_provider_thread("docker", "docker provider", p, tx)?;
+    }
+    Ok(())
+}
+
+/// MR poller via the user's `glab` (m37 chunk 2): opt-in, never
+/// load-bearing.
+pub(crate) fn spawn_gitlab_capture(
+    config: &Config,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::gitlab::GitlabProvider;
+
+    if !config.gitlab_mrs {
+        return Ok(());
+    }
+    let Some(glab) = GitlabProvider::detect() else {
+        tracing::warn!("gitlab_mrs = true but `glab` is not on PATH");
+        return Ok(());
+    };
+    let repos: Vec<PathBuf> = config
+        .git_repos
+        .iter()
+        .map(|p| chronicle_core::config::expand_home(p))
+        .collect();
+    let provider = GitlabProvider::new(glab, &repos);
+    if provider.is_empty() {
+        tracing::warn!("gitlab_mrs = true but no configured repo has a GitLab remote");
+        return Ok(());
+    }
+    spawn_provider_thread("gitlab", "gitlab provider", provider, tx)
 }
 
 /// logind lock edges (m32 chunk 0): a lock is AFK from that moment and ends
@@ -197,6 +290,18 @@ pub(crate) fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> an
         }
         return Ok(());
     }
+    // Reflog backfill (m37 chunk 2): the branch switches of the last 30
+    // days the poll never saw, once per start; repeats dedupe on
+    // `reflog:<sha>@<ts>`.
+    let now_ms = Timestamp::now().as_millisecond();
+    for repo in &repos {
+        for e in chronicle_capture::reflog::reflog_checkouts(repo, now_ms - 30 * 86_400_000, now_ms)
+        {
+            if tx.send(CaptureEvent::Activity(e)).is_err() {
+                return Ok(());
+            }
+        }
+    }
     spawn_provider_thread("git", "git provider", git, tx)
 }
 
@@ -224,18 +329,54 @@ pub(crate) fn spawn_ai_sessions_capture(
     tx: Sender<CaptureEvent>,
 ) -> anyhow::Result<()> {
     use chronicle_capture::ai_sessions::AiSessionProvider;
+    use chronicle_capture::sessions::{self, SessionFormat};
 
     let dirs: Vec<PathBuf> = config
         .ai_session_dirs
         .iter()
         .map(|p| chronicle_core::config::expand_home(p))
         .collect();
-    let watcher = AiSessionProvider::new(&dirs);
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(());
+    };
+    // Every format with a directory on this machine (m37 chunk 0), or the
+    // configured names; Claude Code's own dirs come from `ai_session_dirs`.
+    let formats: Vec<Box<dyn SessionFormat>> = if config.ai_session_formats.is_empty() {
+        sessions::all()
+            .into_iter()
+            .filter(|f| f.name() != "claude" && !f.roots(&home).is_empty())
+            .collect()
+    } else {
+        config
+            .ai_session_formats
+            .iter()
+            .filter(|n| n.as_str() != "claude")
+            .filter_map(|n| {
+                let f = sessions::by_name(n);
+                if f.is_none() {
+                    tracing::warn!("ai_session_formats: unknown format {n:?}");
+                }
+                f
+            })
+            .collect()
+    };
+    // Repos and worktrees: what Gemini's hashed cwd and Aider's
+    // repo-root history are matched against.
+    let candidates: Vec<PathBuf> = chronicle_core::project::Matcher::from_config(config)
+        .projects
+        .iter()
+        .flat_map(|p| p.paths.clone())
+        .collect();
+    let names: Vec<&str> = formats.iter().map(|f| f.name()).collect();
+    let watcher = AiSessionProvider::new(dirs.clone(), formats, home, candidates);
     if watcher.is_empty() {
         if !dirs.is_empty() {
             tracing::warn!("ai_session_dirs configured but none is a directory");
         }
         return Ok(());
+    }
+    if !names.is_empty() {
+        tracing::info!("session formats besides claude: {}", names.join(", "));
     }
     spawn_provider_thread("ai-sessions", "ai session provider", watcher, tx)
 }

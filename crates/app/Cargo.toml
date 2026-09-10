@@ -12,6 +12,7 @@ chronicle-derive.workspace = true
 chronicle-mcp.workspace = true
 chronicle-server.workspace = true
 clap.workspace = true
+ureq.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 jiff.workspace = true

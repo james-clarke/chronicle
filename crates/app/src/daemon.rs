@@ -412,6 +412,7 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     // queued checkpoints, cleared when the user comes back.
     let mut checkpointed_idle: Option<i64> = None;
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
+    let mut next_sources = Instant::now();
     let mut last_prepass = Instant::now();
     // A tick more than the interval plus the idle threshold late on the wall
     // clock is a suspend: the ledger row ends there (the AFK poller marks
@@ -545,6 +546,10 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
                     Ok(true) => tracing::info!("self-score refreshed"),
                     Ok(false) => {}
                     Err(e) => tracing::error!("self-score failed: {e}"),
+                }
+                if Instant::now() >= next_sources {
+                    refresh_sources(&mut conn, &config, now);
+                    next_sources = Instant::now() + SOURCES_EVERY;
                 }
                 scheduler.tick(&conn, &config, data_dir, idle_since, false);
                 maybe_enqueue_checkpoints(&conn, &config, idle_since, &mut checkpointed_idle, now);
@@ -1833,4 +1838,51 @@ pub(crate) fn on_low_battery() -> bool {
 
 // 15 s tick + 10 s UI wake bounds timeline staleness at ~25 s worst case
 // (was 60+30 ≈ 90 s); the tail rewrite is a handful of rows, cost negligible.
+/// Link files and editor workspace lists are re-read this often (m37).
+const SOURCES_EVERY: Duration = Duration::from_secs(60 * 60);
 pub(crate) const SESSIONIZE_EVERY: Duration = Duration::from_secs(15);
+
+/// What the repos' link files and the editors' recent lists say, refreshed
+/// hourly (m37 chunks 2 and 3): `repo_links` per project path and
+/// `editor_workspaces` from VS Code, JetBrains and Zed. Names, ids and
+/// paths only.
+fn refresh_sources(conn: &mut rusqlite::Connection, config: &Config, now: Timestamp) {
+    let now_ms = now.as_millisecond();
+    let matcher = chronicle_core::project::Matcher::from_config(config);
+    for path in matcher.projects.iter().flat_map(|p| p.paths.iter()) {
+        let links: Vec<chronicle_core::storage::RepoLinkRow> =
+            chronicle_core::links::read_links(path)
+                .into_iter()
+                .map(|l| chronicle_core::storage::RepoLinkRow {
+                    repo: path.display().to_string(),
+                    kind: l.kind.to_owned(),
+                    name: l.name,
+                    url_pattern: l.url_pattern,
+                })
+                .collect();
+        if let Err(e) = chronicle_core::storage::replace_repo_links(
+            conn,
+            &path.display().to_string(),
+            &links,
+            now_ms,
+        ) {
+            tracing::error!("repo links refresh failed: {e}");
+        }
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let rows: Vec<chronicle_core::storage::WorkspaceRow> =
+        chronicle_capture::workspaces::read_all(&home)
+            .into_iter()
+            .map(|w| chronicle_core::storage::WorkspaceRow {
+                editor: w.editor.to_owned(),
+                path: w.path,
+                remote: w.remote.unwrap_or_default(),
+                last_ts: w.last_ts_ms,
+            })
+            .collect();
+    if let Err(e) = chronicle_core::storage::upsert_workspaces(conn, &rows, now_ms) {
+        tracing::error!("editor workspaces refresh failed: {e}");
+    }
+}

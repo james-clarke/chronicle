@@ -6,6 +6,7 @@ mod daemon;
 mod derive;
 mod project;
 mod rotate;
+mod sources;
 mod status;
 mod ui;
 
@@ -297,6 +298,24 @@ enum Cmd {
         #[arg(long)]
         drift: bool,
     },
+    /// Print the shell hook for zsh, bash, fish or pwsh (m37): add
+    /// `eval "$(chronicle shell-init zsh)"` to your rc file. It posts each
+    /// command's cwd, program name and duration to the local endpoint —
+    /// never the command line.
+    ShellInit { shell: String },
+    /// Chronicle's git hooks (m37): exact-second checkouts and commits,
+    /// appended after any existing hook, opt-in per repo.
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCmd,
+    },
+    /// Internal: run by an installed git hook.
+    #[command(hide = true)]
+    Hook {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Sign in to Google Calendar (loopback OAuth) and store the refresh
     /// token in `<data dir>/google.toml`.
     GcalLogin {
@@ -324,6 +343,23 @@ enum ModelCmd {
     },
     /// List presets and their download state.
     List,
+}
+
+#[derive(Subcommand)]
+enum HooksCmd {
+    /// Append the chronicle line to post-checkout, post-commit and
+    /// post-rewrite (every configured repo, or one).
+    Install { repo: Option<String> },
+    /// Strip the chronicle line again.
+    Remove { repo: Option<String> },
+    /// Which repos have the hooks.
+    Status { repo: Option<String> },
+    /// Checkouts from each repo's reflog the 20 s poll never saw.
+    Backfill {
+        repo: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -409,6 +445,16 @@ fn main() -> anyhow::Result<()> {
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Task { cmd } => task_cmd(&data_dir, cmd),
+        Cmd::ShellInit { shell } => sources::shell_init(&data_dir, &shell),
+        Cmd::Hooks { cmd } => match cmd {
+            HooksCmd::Install { repo } => sources::hooks_install(&data_dir, repo.as_deref()),
+            HooksCmd::Remove { repo } => sources::hooks_remove(&data_dir, repo.as_deref()),
+            HooksCmd::Status { repo } => sources::hooks_status(&data_dir, repo.as_deref()),
+            HooksCmd::Backfill { repo, days } => {
+                sources::hooks_backfill(&data_dir, repo.as_deref(), days)
+            }
+        },
+        Cmd::Hook { name, args } => sources::hook(&data_dir, &name, &args),
         Cmd::Project { cmd } => match cmd {
             ProjectCmd::List => project::list(&data_dir),
             ProjectCmd::Test { days, top } => project::test(&data_dir, days, top),

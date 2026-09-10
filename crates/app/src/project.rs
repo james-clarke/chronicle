@@ -22,17 +22,18 @@ pub(crate) fn list(data_dir: &Path) -> anyhow::Result<()> {
     if config.projects.is_empty() {
         println!("(defaults: one project per git_repos entry; none written to config.toml)");
     }
-    let matcher = Matcher::new(&cfgs);
-    for (cfg, p) in cfgs.iter().zip(&matcher.projects) {
-        let remotes: Vec<String> = cfg
-            .repos
+    let matcher = Matcher::from_config(&config);
+    for p in &matcher.projects {
+        let remotes: Vec<String> = p
+            .paths
             .iter()
-            .filter_map(|r| project::remote_of(&chronicle_core::config::expand_home(r)))
+            .filter_map(|r| project::remote_of(r))
             .collect();
         println!(
-            "{}{}  {}",
+            "{}{}{}  {}",
             p.name,
             if p.derive { "" } else { "  (derive off)" },
+            if p.discovered { "  (discovered)" } else { "" },
             if remotes.is_empty() {
                 "no remote".to_owned()
             } else {
@@ -49,8 +50,10 @@ pub(crate) fn list(data_dir: &Path) -> anyhow::Result<()> {
         };
         rule("tickets", &p.tickets);
         rule("domains", &p.domains);
-        rule("titles", &cfg.titles);
+        let titles: Vec<String> = p.titles.iter().map(|t| t.as_str().to_owned()).collect();
+        rule("titles", &titles);
         rule("apps", &p.apps);
+        rule("links", &p.links);
     }
     Ok(())
 }

@@ -1229,7 +1229,30 @@ pub(crate) fn run_ai_job(
                 fallback
             } else {
                 let plan = chronicle_core::intent::plan_body(conn, day)?;
-                let digest = standup_digest_text(&rows, &tz, plan.as_deref(), &truth);
+                let mut digest = standup_digest_text(&rows, &tz, plan.as_deref(), &truth);
+                // Minutes by kind of work per project (m37 chunk 4): the
+                // standup can say "of which 40m deploying" with a source.
+                let modes = storage::mode_ms(conn, lo, hi)?;
+                let mut lines = Vec::new();
+                for project in rows.iter().filter_map(|r| r.project.clone()).fold(
+                    Vec::<String>::new(),
+                    |mut v, p| {
+                        if !v.contains(&p) {
+                            v.push(p);
+                        }
+                        v
+                    },
+                ) {
+                    let line = chronicle_core::report::modes_line(&modes, &project);
+                    if !line.is_empty() {
+                        lines.push(format!("- {project}: {line}"));
+                    }
+                }
+                if !lines.is_empty() {
+                    digest.push_str("\n## Kinds of work (from page and app evidence)\n");
+                    digest.push_str(&lines.join("\n"));
+                    digest.push('\n');
+                }
                 tracing::debug!(job_id = job.id, "standup digest:\n{digest}");
                 let draft = engine.standup(&digest)?;
                 // A claim without a source is not a claim (m32 chunk 5).

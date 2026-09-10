@@ -1366,6 +1366,7 @@ impl TimelineApp {
         let tasks = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
         let mut r = chronicle_core::report::build(&tasks, days, &self.tz)?;
         r.self_ms = chronicle_core::storage::self_window_ms(conn, lo, hi)?;
+        r.modes = chronicle_core::storage::mode_ms(conn, lo, hi)?;
         Ok(r)
     }
 
@@ -1810,10 +1811,12 @@ impl TimelineApp {
             .filter(|t| t.current)
             .filter_map(|t| t.project.map(|p| (p, t.id)))
             .collect();
+        // A discovered project (m37 chunk 2) wears the "not configured"
+        // chip: it files time, but a `[[projects]]` entry would name it.
         let mut order: Vec<(Option<String>, bool)> = matcher
             .projects
             .iter()
-            .map(|p| (Some(p.name.clone()), true))
+            .map(|p| (Some(p.name.clone()), !p.discovered))
             .collect();
         for t in &self.open_tasks {
             let key = t.project.clone().filter(|p| !p.trim().is_empty());
