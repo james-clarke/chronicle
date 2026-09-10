@@ -301,6 +301,13 @@ enum Cmd {
         #[arg(long)]
         drift: bool,
     },
+    /// Every tool Chronicle can read, what it does with it, and what it
+    /// would take to connect it here (m41). `--json` is the same table the
+    /// site's tools page reads.
+    Connections {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the shell hook for zsh, bash, fish or pwsh (m37): add
     /// `eval "$(chronicle shell-init zsh)"` to your rc file. It posts each
     /// command's cwd, program name and duration to the local endpoint —
@@ -465,6 +472,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Task { cmd } => task_cmd(&data_dir, cmd),
+        Cmd::Connections { json } => sources::connections(&data_dir, json),
         Cmd::ShellInit { shell } => sources::shell_init(&data_dir, &shell),
         Cmd::Hooks { cmd } => match cmd {
             HooksCmd::Install { repo } => sources::hooks_install(&data_dir, repo.as_deref()),

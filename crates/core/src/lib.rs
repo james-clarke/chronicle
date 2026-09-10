@@ -1,6 +1,7 @@
 pub mod anchor;
 pub mod chat;
 pub mod config;
+pub mod connectors;
 pub mod consolidate;
 pub mod digest;
 pub mod eval;

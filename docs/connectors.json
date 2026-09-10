@@ -1,0 +1,831 @@
+[
+  {
+    "id": "git_repos",
+    "name": "Git repos",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "branch switches and commits, polled every 60 s per watched repo",
+    "probes": [
+      {
+        "probe": "config",
+        "field": "git_repos",
+        "platforms": []
+      },
+      {
+        "probe": "command",
+        "cmd": "git",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "checkout",
+      "commit"
+    ],
+    "setup": [
+      {
+        "step": "field",
+        "field": "git_repos",
+        "hint": "repo paths, ~ expanded; repo discovery fills this in for you"
+      }
+    ],
+    "docs": "git"
+  },
+  {
+    "id": "git_hooks",
+    "name": "Git hooks",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "post-checkout, post-commit and post-rewrite record the exact time a 60 s poll misses",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "git",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "checkout",
+      "commit"
+    ],
+    "setup": [
+      {
+        "step": "command",
+        "run": "chronicle hooks install"
+      }
+    ],
+    "docs": "git-hooks"
+  },
+  {
+    "id": "claude_code_sessions",
+    "name": "Claude Code sessions",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "each transcript's working directory, first prompt and touched paths — never the transcript",
+    "probes": [
+      {
+        "probe": "config",
+        "field": "ai_session_dirs",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "~/.claude/projects",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "ai_session"
+    ],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "ai_session_dirs"
+      }
+    ],
+    "docs": "ai-sessions"
+  },
+  {
+    "id": "agent_sessions",
+    "name": "Other agents' sessions",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "codex, gemini, copilot, aider, cline, amp, opencode and cursor transcripts, read the same way, on whenever one is there",
+    "probes": [
+      {
+        "probe": "path",
+        "path": "~/.codex/sessions",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "~/.gemini/tmp",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "~/.copilot/session-state",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{data}/amp/threads",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{data}/opencode",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "ai_session"
+    ],
+    "setup": [],
+    "docs": "ai-sessions"
+  },
+  {
+    "id": "editor_workspaces",
+    "name": "Editor workspaces",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "recently-opened folders from VS Code, JetBrains and Zed on disk, so a window title resolves to a repo",
+    "probes": [
+      {
+        "probe": "path",
+        "path": "{config}/Code/User/workspaceStorage",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{config}/JetBrains",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{config}/Zed/db",
+        "platforms": []
+      }
+    ],
+    "produces": [],
+    "setup": [],
+    "docs": "editor-workspaces"
+  },
+  {
+    "id": "browser_history",
+    "name": "Browser history",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "the history database, copied and read-only, query strings dropped — the zero-install browser route",
+    "probes": [
+      {
+        "probe": "path",
+        "path": "~/.config/google-chrome",
+        "platforms": [
+          "linux"
+        ]
+      },
+      {
+        "probe": "path",
+        "path": "~/.mozilla/firefox",
+        "platforms": [
+          "linux"
+        ]
+      },
+      {
+        "probe": "path",
+        "path": "~/Library/Application Support/Google/Chrome",
+        "platforms": [
+          "macos"
+        ]
+      },
+      {
+        "probe": "path",
+        "path": "~/Library/Safari/History.db",
+        "platforms": [
+          "macos"
+        ]
+      },
+      {
+        "probe": "path",
+        "path": "{data}/Google/Chrome/User Data",
+        "platforms": [
+          "windows"
+        ]
+      }
+    ],
+    "produces": [
+      "browse"
+    ],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "browser_history"
+      }
+    ],
+    "docs": "browser-history"
+  },
+  {
+    "id": "repo_discovery",
+    "name": "Repo discovery",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "git repos next to the ones you watch, filed as discovered projects instead of unfiled time",
+    "probes": [
+      {
+        "probe": "config",
+        "field": "discover_repos",
+        "platforms": []
+      }
+    ],
+    "produces": [],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "discover_repos"
+      }
+    ],
+    "docs": "discovery"
+  },
+  {
+    "id": "link_files",
+    "name": "Link files",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": ".vercel, fly.toml, render.yaml, .sentryclirc and friends name the service a repo deploys to",
+    "probes": [],
+    "produces": [],
+    "setup": [],
+    "docs": "link-files"
+  },
+  {
+    "id": "repo_notes",
+    "name": "Repo notes",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "each repo's .remember/today-*.md entries: what you or your tools wrote down, and when",
+    "probes": [],
+    "produces": [
+      "note"
+    ],
+    "setup": [],
+    "docs": "notes"
+  },
+  {
+    "id": "shell_history_atuin",
+    "name": "Shell history (atuin)",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "atuin's history.db every 60 s: working directory, program name and duration, never the command line",
+    "probes": [
+      {
+        "probe": "path",
+        "path": "{data}/atuin/history.db",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "shell"
+    ],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "shell_history"
+      }
+    ],
+    "docs": "shell"
+  },
+  {
+    "id": "calendars_ics",
+    "name": "Calendars (ICS)",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "a subscription URL from any calendar, polled every 15 min, ±7 days — no OAuth",
+    "probes": [
+      {
+        "probe": "config",
+        "field": "calendars",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "meeting"
+    ],
+    "setup": [
+      {
+        "step": "field",
+        "field": "calendars",
+        "hint": "your calendar's secret iCal address, or a path to an .ics file"
+      }
+    ],
+    "docs": "calendars"
+  },
+  {
+    "id": "native_shell_history",
+    "name": "Native shell history (zsh, bash, fish)",
+    "kind": "files",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "wont_do",
+    "reason": "the file is command lines, which carry secrets; the shell hook reports cwd and program name instead",
+    "blurb": "read the shell hook's row instead: same coverage, none of the command text",
+    "probes": [],
+    "produces": [],
+    "setup": [],
+    "docs": "shell"
+  },
+  {
+    "id": "editor_heartbeats",
+    "name": "Editor heartbeats (WakaTime plugins)",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "vim-wakatime and its siblings post to this machine once ~/.wakatime.cfg points api_url here; folded into edit spans per project",
+    "probes": [
+      {
+        "probe": "endpoint",
+        "route": "/api/heartbeat",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "edit"
+    ],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "editor_heartbeats"
+      }
+    ],
+    "docs": "heartbeats"
+  },
+  {
+    "id": "shell_hook",
+    "name": "Shell hook",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "a precmd hook posts working directory, program name and duration per command — never the command line",
+    "probes": [
+      {
+        "probe": "endpoint",
+        "route": "/api/chronicle/shell",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "shell"
+    ],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "shell_hook"
+      },
+      {
+        "step": "command",
+        "run": "chronicle shell-init zsh"
+      }
+    ],
+    "docs": "shell"
+  },
+  {
+    "id": "browser_extension",
+    "name": "Browser extension (ActivityWatch)",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "aw-watcher-web posts the URL and title of the focused tab: the precise route, where history is the easy one",
+    "probes": [
+      {
+        "probe": "endpoint",
+        "route": "/api/0/buckets",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "browse"
+    ],
+    "setup": [
+      {
+        "step": "install",
+        "url": "https://activitywatch.net/downloads/"
+      }
+    ],
+    "docs": "browser-extension"
+  },
+  {
+    "id": "tmux",
+    "name": "tmux panes",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos"
+    ],
+    "state": "supported",
+    "blurb": "the attached panes' working directories every 60 s",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "tmux",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "cwd"
+    ],
+    "setup": [
+      {
+        "step": "install",
+        "url": "https://github.com/tmux/tmux"
+      }
+    ],
+    "docs": "terminal"
+  },
+  {
+    "id": "docker_compose",
+    "name": "Docker Compose stacks",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "each running stack's working_dir label every 60 s, which is the repo it belongs to",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "docker",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "cwd"
+    ],
+    "setup": [
+      {
+        "step": "install",
+        "url": "https://docs.docker.com/get-started/"
+      }
+    ],
+    "docs": "docker"
+  },
+  {
+    "id": "listening_ports",
+    "name": "Listening ports",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "partial",
+    "note": "Linux reads /proc; macOS needs lsof and Windows GetExtendedTcpTable",
+    "blurb": "the repo behind every local dev server, so a localhost tab lands on the right project",
+    "probes": [
+      {
+        "probe": "path",
+        "path": "/proc/net/tcp",
+        "platforms": [
+          "linux"
+        ]
+      },
+      {
+        "probe": "command",
+        "cmd": "lsof",
+        "platforms": [
+          "macos"
+        ]
+      }
+    ],
+    "produces": [
+      "cwd"
+    ],
+    "setup": [],
+    "docs": "ports"
+  },
+  {
+    "id": "mic_capture",
+    "name": "Calls (microphone in use)",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "partial",
+    "note": "PipeWire on Linux; macOS CoreAudio and the Windows capability registry are not written",
+    "blurb": "the only cross-app call signal: each stretch of microphone use becomes a call",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "pw-dump",
+        "platforms": [
+          "linux"
+        ]
+      }
+    ],
+    "produces": [
+      "call"
+    ],
+    "setup": [
+      {
+        "step": "toggle",
+        "field": "mic_capture"
+      }
+    ],
+    "docs": "calls"
+  },
+  {
+    "id": "ngrok",
+    "name": "ngrok tunnels",
+    "kind": "local-server",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "planned",
+    "blurb": "the local API says which service is exposed, and so which repo the tunnel belongs to",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "ngrok",
+        "platforms": []
+      }
+    ],
+    "produces": [],
+    "setup": [],
+    "docs": "ngrok"
+  },
+  {
+    "id": "github_prs",
+    "name": "GitHub pull requests (gh)",
+    "kind": "cli",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "gh search prs, authored and reviewed, every 5 min · your existing login, read only",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "gh",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "pr_authored",
+      "pr_reviewed"
+    ],
+    "setup": [
+      {
+        "step": "command",
+        "run": "gh auth login"
+      },
+      {
+        "step": "toggle",
+        "field": "github_prs"
+      }
+    ],
+    "docs": "github"
+  },
+  {
+    "id": "gitlab_mrs",
+    "name": "GitLab merge requests (glab)",
+    "kind": "cli",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "glab mr list, assigned and reviewing, every 5 min per GitLab repo · your existing login",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "glab",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "pr_authored",
+      "pr_reviewed"
+    ],
+    "setup": [
+      {
+        "step": "command",
+        "run": "glab auth login"
+      },
+      {
+        "step": "toggle",
+        "field": "gitlab_mrs"
+      }
+    ],
+    "docs": "gitlab"
+  },
+  {
+    "id": "tailscale",
+    "name": "Tailscale",
+    "kind": "cli",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "planned",
+    "blurb": "which network you are on, which is how prod work tells itself apart from local work",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "tailscale",
+        "platforms": []
+      }
+    ],
+    "produces": [],
+    "setup": [],
+    "docs": "tailscale"
+  },
+  {
+    "id": "google_calendar",
+    "name": "Google Calendar",
+    "kind": "account",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "partial",
+    "note": "needs a Google Cloud OAuth client of your own; the ICS route is the easier one",
+    "blurb": "the primary calendar's events as meeting spans, with attendees",
+    "probes": [
+      {
+        "probe": "config",
+        "field": "google_calendar",
+        "platforms": []
+      }
+    ],
+    "produces": [
+      "meeting"
+    ],
+    "setup": [
+      {
+        "step": "account",
+        "flow": "gcal-login"
+      },
+      {
+        "step": "toggle",
+        "field": "google_calendar"
+      }
+    ],
+    "docs": "calendars"
+  },
+  {
+    "id": "mcp_servers",
+    "name": "MCP servers",
+    "kind": "mcp",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "local and remote MCP servers answer the chat's context calls; nothing is called unless you ask",
+    "probes": [],
+    "produces": [],
+    "setup": [],
+    "docs": "mcp"
+  },
+  {
+    "id": "jira",
+    "name": "Jira",
+    "kind": "mcp",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "supported",
+    "blurb": "PROJ-123 in a branch anchors the task; the Atlassian MCP server fetches the issue on demand",
+    "probes": [
+      {
+        "probe": "command",
+        "cmd": "uvx",
+        "platforms": []
+      }
+    ],
+    "produces": [],
+    "setup": [
+      {
+        "step": "command",
+        "run": "uvx mcp-atlassian"
+      }
+    ],
+    "docs": "mcp"
+  },
+  {
+    "id": "linear",
+    "name": "Linear",
+    "kind": "mcp",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "planned",
+    "blurb": "ENG-123 keys, lowercase in branches, and the official remote server for the issue itself",
+    "probes": [],
+    "produces": [],
+    "setup": [],
+    "docs": "mcp"
+  },
+  {
+    "id": "sentry",
+    "name": "Sentry",
+    "kind": "mcp",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "planned",
+    "blurb": ".sentryclirc names the project; the issue id says which fire you were putting out",
+    "probes": [
+      {
+        "probe": "path",
+        "path": ".sentryclirc",
+        "platforms": []
+      }
+    ],
+    "produces": [],
+    "setup": [],
+    "docs": "mcp"
+  },
+  {
+    "id": "slack",
+    "name": "Slack",
+    "kind": "mcp",
+    "platforms": [
+      "linux",
+      "macos",
+      "windows"
+    ],
+    "state": "planned",
+    "blurb": "channel names come from the window title today; the official server would give the thread",
+    "probes": [],
+    "produces": [],
+    "setup": [],
+    "docs": "mcp"
+  }
+]

@@ -6,6 +6,46 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use chronicle_capture::hooks;
 use chronicle_core::config::Config;
+use chronicle_core::connectors::{self, ConnectKind, Platform, Support};
+
+/// `chronicle connections [--json]` (m41 chunk 0): the connector registry,
+/// grouped the way Settings groups it, with what the config says about each
+/// row on this machine. `--json` prints `docs/connectors.json` verbatim —
+/// the same table the site's tools page reads.
+pub(crate) fn connections(data_dir: &Path, json: bool) -> anyhow::Result<()> {
+    if json {
+        print!("{}", connectors::to_json());
+        return Ok(());
+    }
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    for kind in ConnectKind::ORDER {
+        let rows: Vec<_> = connectors::for_platform(Platform::HOST)
+            .filter(|c| c.kind == kind)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        println!("{}", kind.label());
+        for c in rows {
+            let state = match (c.state, connectors::enabled(&config, c)) {
+                (Support::Supported | Support::Partial { .. }, Some(false)) => "off",
+                (Support::Supported, Some(true)) => "on",
+                (Support::Supported, None) => "auto",
+                (Support::Partial { .. }, _) => "partial",
+                (Support::Planned, _) => "planned",
+                (Support::Detected, _) => "unsupported",
+                (Support::WontDo { .. }, _) => "not planned",
+            };
+            println!("    {state:<12} {:<38} {}", c.name, c.blurb);
+            match c.state {
+                Support::Partial { note } => println!("{:<56}{note}", ""),
+                Support::WontDo { reason } => println!("{:<56}{reason}", ""),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
 
 /// `chronicle shell-init <shell>`: print the precmd hook for the shell to
 /// `eval` from its rc file. Posts cwd, program name and duration to the
