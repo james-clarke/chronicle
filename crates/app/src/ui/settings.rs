@@ -17,6 +17,9 @@ pub(super) struct SettingsPanel {
     quiet_secs: u32,
     away_secs: u32,
     capture_presence: bool,
+    /// Which focus provider the Linux daemon runs (m39).
+    #[cfg(target_os = "linux")]
+    focus_route: String,
     derive_idle_secs: u32,
     /// `derive_mode == "segmenter"` (m30 chunk 3).
     segmenter: bool,
@@ -230,6 +233,8 @@ impl SettingsPanel {
             quiet_secs: config.quiet_secs,
             away_secs: config.away_secs,
             capture_presence: config.capture_presence,
+            #[cfg(target_os = "linux")]
+            focus_route: config.focus_route.clone(),
             derive_idle_secs: config.derive_idle_secs,
             segmenter: config.derive_mode == "segmenter",
             retention_days: config.retention_days,
@@ -282,6 +287,10 @@ impl SettingsPanel {
         config.quiet_secs = self.quiet_secs;
         config.away_secs = self.away_secs;
         config.capture_presence = self.capture_presence;
+        #[cfg(target_os = "linux")]
+        {
+            config.focus_route = self.focus_route.clone();
+        }
         config.derive_idle_secs = self.derive_idle_secs;
         config.derive_mode = if self.segmenter { "segmenter" } else { "model" }.to_owned();
         config.retention_days = self.retention_days;
@@ -717,8 +726,31 @@ impl TimelineApp {
                                     ui.end_row();
                                     ui.label("presence counts");
                                     ui.checkbox(&mut panel.capture_presence, "");
-                                    ui.weak("keys, buttons, motion per minute; never which");
+                                    ui.weak(
+                                        "keys, buttons, motion per minute; never which \
+                                         (X11 and macOS only)",
+                                    );
                                     ui.end_row();
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        ui.label("focus route");
+                                        egui::ComboBox::from_id_salt("settings_focus_route")
+                                            .selected_text(panel.focus_route.clone())
+                                            .show_ui(ui, |ui| {
+                                                for route in ["auto", "x11", "wlr", "kwin"] {
+                                                    ui.selectable_value(
+                                                        &mut panel.focus_route,
+                                                        route.to_owned(),
+                                                        route,
+                                                    );
+                                                }
+                                            });
+                                        ui.weak(
+                                            "auto reads the session; x11 also captures X \
+                                             clients through Xwayland",
+                                        );
+                                        ui.end_row();
+                                    }
                                 });
                             ui.label("excluded apps (one regex per line, never stored)");
                             ui.add(

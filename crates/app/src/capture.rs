@@ -57,6 +57,21 @@ pub(crate) fn spawn_capture(
     spawn_common(config, data_dir, tx)
 }
 
+/// The route this session chose, for `status`. Unset until `spawn_capture`
+/// runs, and never set outside Linux, where there is only one route.
+#[cfg(target_os = "linux")]
+static FOCUS_ROUTE: std::sync::OnceLock<Route> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+pub(crate) fn focus_route_name() -> Option<&'static str> {
+    FOCUS_ROUTE.get().map(|route| route.as_str())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn focus_route_name() -> Option<&'static str> {
+    None
+}
+
 /// Idle is optional on Wayland the way MIT-SCREEN-SAVER is on X11: a
 /// compositor with neither idle protocol keeps every span open until the
 /// lock or the next focus change, but still captures.

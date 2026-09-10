@@ -862,6 +862,10 @@ pub(crate) struct DaemonStatus {
     pub(crate) model_resident: bool,
     pub(crate) idle_secs: Option<u64>,
     pub(crate) ui_open: bool,
+    /// Which focus provider capture is running (m39): `x11`, `wlr` or
+    /// `kwin`. Absent on macOS, which has one.
+    #[serde(default)]
+    pub(crate) focus_route: Option<String>,
 }
 
 pub(crate) fn status_json(
@@ -887,6 +891,7 @@ pub(crate) fn status_json(
         ui_open: ui_child
             .as_mut()
             .is_some_and(|c| matches!(c.try_wait(), Ok(None))),
+        focus_route: crate::capture::focus_route_name().map(str::to_owned),
     };
     serde_json::to_string(&status).unwrap_or_default()
 }

@@ -19,31 +19,33 @@ Everything below is the current plan, not hard rules.
 | Model | Qwen3-1.7B Q4_K_M GGUF, non-thinking mode (`/no_think`) |
 | HTTP | `axum`, `127.0.0.1` only |
 | MCP | `rmcp` (official SDK, pin version), stdio only |
-| Linux capture | `x11rb` (X11 only) |
+| Linux capture | `x11rb` (X11); `wayland-client` + `wayland-protocols-wlr`/`-plasma` and a KWin script over `zbus` (Wayland, m39) |
 | Windows capture | `windows` crate |
 | macOS capture | `objc2`/`objc2-app-kit` (`NSWorkspace`), `objc2-core-foundation`; `AX*`/`CGEventSource*`/`CGSessionCopyCurrentDictionary`/`AudioObjectGetPropertyData` as hand-written `extern "C"` in `ffi.rs` (m38) |
 | Concurrency | sync threads + `crossbeam-channel`; tokio confined to `server` + `mcp` |
 
 ## Platform matrix
 
-| | Linux (X11 only) | macOS | Windows |
-|---|---|---|---|
-| Focus events | `_NET_ACTIVE_WINDOW` + per-window `PropertyChangeMask` | `NSWorkspace.didActivateApplicationNotification` + AXObserver | `SetWinEventHook` (FOREGROUND + NAMECHANGE) |
-| Titles | `_NET_WM_NAME` → `WM_NAME`; app = `WM_CLASS` | AX `kAXTitle` | `GetWindowTextW`; app = `QueryFullProcessImageNameW` |
-| AFK | XScreenSaver `QueryInfo` | `CGEventSourceSecondsSinceLastEventType` | `GetLastInputInfo` |
-| Presence counts | XI2 raw events, counted per minute | `CGEventSourceCounterForEventType` | `GetLastInputInfo` + low-level hook |
-| Screen lock | logind D-Bus `LockedHint` | `com.apple.screenIsLocked` notification | WTS session notifications |
-| Tray | `ksni` StatusNotifierItem (m19) | `tray-icon` status item (m38) | yes |
-| Open UI | app icon / `chronicle toggle` | tray click | tray click |
-| Autostart | `systemd --user` unit | LaunchAgent plist | HKCU `Run` key |
-| LLM accel | CPU (Vulkan opt) | Metal | CPU (Vulkan opt) |
-| Battery guard | `/sys/class/power_supply` | IOKit (or skip v1) | `GetSystemPowerStatus` |
+| | Linux X11 | Linux Wayland (m39) | macOS | Windows |
+|---|---|---|---|---|
+| Focus events | `_NET_ACTIVE_WINDOW` + per-window `PropertyChangeMask` | `zwlr_foreign_toplevel_manager_v1`; KWin script over D-Bus on KDE | `NSWorkspace.didActivateApplicationNotification` + AXObserver | `SetWinEventHook` (FOREGROUND + NAMECHANGE) |
+| Titles | `_NET_WM_NAME` → `WM_NAME`; app = `WM_CLASS` | toplevel `title`; app = `app_id` (KWin: `caption` / `resourceClass`) | AX `kAXTitle` | `GetWindowTextW`; app = `QueryFullProcessImageNameW` |
+| Focused pid | `_NET_WM_PID` | compositor IPC (sway, Hyprland, Niri); KWin reports it | `NSRunningApplication` | process of the window |
+| AFK | XScreenSaver `QueryInfo` | `ext-idle-notify-v1`, else `org_kde_kwin_idle` | `CGEventSourceSecondsSinceLastEventType` | `GetLastInputInfo` |
+| Presence counts | XI2 raw events, counted per minute | none (no protocol reports input) | `CGEventSourceCounterForEventType` | `GetLastInputInfo` + low-level hook |
+| Screen lock | logind D-Bus `LockedHint` | logind D-Bus `LockedHint` | `com.apple.screenIsLocked` notification | WTS session notifications |
+| Tray | `ksni` StatusNotifierItem (m19) | `ksni` StatusNotifierItem (m19) | `tray-icon` status item (m38) | yes |
+| Open UI | app icon / `chronicle toggle` | app icon / `chronicle toggle` | tray click | tray click |
+| Autostart | `systemd --user` unit | `systemd --user` unit | LaunchAgent plist | HKCU `Run` key |
+| LLM accel | CPU (Vulkan opt) | CPU (Vulkan opt) | Metal | CPU (Vulkan opt) |
+| Battery guard | `/sys/class/power_supply` | `/sys/class/power_supply` | IOKit (or skip v1) | `GetSystemPowerStatus` |
 
 Platform notes:
 - **Linux launch UX:** daemon holds a unix socket. Any second invocation (`chronicle` or `chronicle toggle`) sends toggle and exits; daemon spawns the UI child, or forwards a raise if it's already alive. No tray.
-- **Linux autostart (m11):** `systemd --user` unit (`packaging/chronicle.service`) is the sole Linux autostart mechanism — a supervised lifecycle (SIGTERM on `stop`, `Restart=on-failure`) is what makes the clean-shutdown path exercisable; a bare XDG `.desktop` entry has no stop contract. `WantedBy=graphical-session.target`, not `default.target`, since capture needs `DISPLAY`.
-- **Presence (m32):** the `presence` table holds per-minute counts only — how many keys, buttons, motion and scroll events — never which keys; `capture_presence = false` turns it off. Idle shorter than `quiet_secs` (10 min; `away_secs` 30 min with an agent writing, a call or a meeting on screen) stays inside the span as quiet time, so reading and watching an agent are not cut as absence.
+- **Linux autostart (m11):** `systemd --user` unit (`packaging/chronicle.service`) is the sole Linux autostart mechanism — a supervised lifecycle (SIGTERM on `stop`, `Restart=on-failure`) is what makes the clean-shutdown path exercisable; a bare XDG `.desktop` entry has no stop contract. `WantedBy=graphical-session.target`, not `default.target`, since capture needs `DISPLAY` (or `WAYLAND_DISPLAY`, plus `SWAYSOCK`/`NIRI_SOCKET`/`HYPRLAND_INSTANCE_SIGNATURE` for the pid lookup, m39).
+- **Presence (m32):** the `presence` table holds per-minute counts only — how many keys, buttons, motion and scroll events — never which keys; `capture_presence = false` turns it off. X11 and macOS only: no Wayland protocol reports input to an ordinary client, and evdev needs the `input` group no packaged install grants, so the Wayland routes skip it and log one line. Idle shorter than `quiet_secs` (10 min; `away_secs` 30 min with an agent writing, a call or a meeting on screen) stays inside the span as quiet time, so reading and watching an agent are not cut as absence.
 - **X11:** windows die racily, all property reads must tolerate `BadWindow`/`BadDrawable` as non-fatal. Subscribe `PropertyChangeMask` on each new active window (catches tab-title changes), unsubscribe previous. Debounce title changes 1 s.
+- **Linux Wayland (m39):** shipped — the route is chosen at start from `focus_route` (`auto | x11 | wlr | kwin`) and the session environment, and `chronicle status` prints it. wlroots compositors go through `zwlr_foreign_toplevel_manager_v1`, event-driven like X11 with the same 1 s title debounce; the protocol carries no pid, so sway's, Hyprland's and Niri's own sockets are asked for it and the terminal cwd probe works there. KDE goes through a KWin script that reports over the session bus (`dev.chronicled.Chronicle`), since KWin does not expose the window-management protocol to ordinary clients; every `callDBus` argument crosses as a string because KWin picks the D-Bus type of a JS number unpredictably and a mismatched signature is dropped silently. Idle is `ext-idle-notify-v1` with `org_kde_kwin_idle` as the older-compositor fallback; lock stays logind. GNOME needs a Shell extension and is not shipped: it gets one line naming itself and the `focus_route = "x11"` Xwayland fallback. Check either route from an X11 login with `scripts/wayland-check.sh sway|kwin`, which drives a nested compositor.
 - **macOS (m38):** shipped — 1 s poll of `NSWorkspace.frontmostApplication` + the AX focused window title (not event-driven: AX permission is a card, not a blocker — untrusted just means empty titles); `CGEventSourceSecondsSinceLastEventType` for idle and `CGEventSourceCounterForEventType` for presence counts; `CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]` polled every 2 s for the lock flag; `lsof -iTCP -sTCP:LISTEN` for ports; CoreAudio's `kAudioDevicePropertyDeviceIsRunningSomewhere` for mic-in-use (app is always "microphone" — no TCC-gated tap); autostart via a LaunchAgent installed by `chronicle service install` (same CLI/onboarding path as Linux's systemd unit); Homebrew formula via cargo-dist. Daemon owns the main-thread run loop for `NSApplication` (activation policy Accessory, no Dock icon) and hosts the `tray-icon` status item; the capture/server loop moves to a `daemon-main` thread. UI stays a child process. EventKit (Calendar/Reminders) is deferred — ICS subscriptions (m37) cover the calendar route on every platform without the extra entitlement and TCC prompt.
 - **Windows:** dedicated capture thread with `GetMessage` pump, `WINEVENT_OUTOFCONTEXT`; tray shares the daemon's message pump. UI stays a child process.
 
@@ -260,7 +262,7 @@ systemctl --user enable --now chronicle
 Verify with `systemctl --user status chronicle` and `chronicle status` (exit 0 + "healthy"). `systemctl --user stop chronicle` sends SIGTERM — the daemon kills its UI/derive children and exits cleanly.
 
 - `ExecStart` assumes `~/.cargo/bin/chronicle` (plain `cargo install`); `chronicle service install` points it at the running binary instead.
-- Some X11 session setups don't import `DISPLAY`/`XAUTHORITY` into `systemd --user`; check `systemctl --user show-environment | grep DISPLAY` if the unit fails at boot (modern display managers wire this via PAM).
+- Some X11 session setups don't import `DISPLAY`/`XAUTHORITY` into `systemd --user`; check `systemctl --user show-environment | grep DISPLAY` if the unit fails at boot (modern display managers wire this via PAM). The Wayland equivalent is `WAYLAND_DISPLAY`, which sway and KWin both export with `systemctl --user import-environment` or `dbus-update-activation-environment`.
 - Logs: `{data_dir}/logs/chronicle.log` (5 MB size-rotated, one `.log.1` backup); under systemd, stderr also lands in `journalctl --user -u chronicle -f`.
 
 ### macOS (LaunchAgent)
@@ -321,7 +323,8 @@ Get the $99 Apple Developer account **before M17** so notarization is a v1.1 con
 
 ## Deferred (v1.1+)
 
-- **Wayland**: awatcher-style provider matrix: `wlr-foreign-toplevel-management` (Sway/Hyprland/wlroots), KWin script (KDE), Focused-Window-D-Bus GNOME extension, `ext-idle-notify-v1` AFK; runtime provider selection on Linux.
+- **Wayland on GNOME**: a Focused-Window-D-Bus Shell extension the user installs — the only route needing user action, since GNOME adopted neither `wlr-foreign-toplevel-management` nor `ext-foreign-toplevel-list-v1`. wlroots and KDE shipped in m39.
+- **Presence counts on Wayland**: evdev where `/dev/input` is readable.
 - Global hotkey (X11 grab; GlobalShortcuts portal where sane).
 - Linux tray (`ksni`, best-effort, never load-bearing).
 - Task split UX (merge lands in M10).

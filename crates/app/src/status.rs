@@ -214,6 +214,9 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
                 "  ui: {}\n",
                 if s.ui_open { "open" } else { "closed" }
             ));
+            if let Some(route) = &s.focus_route {
+                out.push_str(&format!("  focus: {route}\n"));
+            }
             if let Some(idle) = s.idle_secs {
                 out.push_str(&format!("  user idle: {}\n", fmt_secs(idle)));
             }
@@ -373,6 +376,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
         let doc = serde_json::json!({
             "liveness": liveness_str,
             "daemon": daemon,
+            "focus_route": daemon.and_then(|d| d.focus_route.clone()),
             "last_event_age_secs": db.last_event_age_secs,
             "last_batch_end_ms": db.last_batch_end_ms,
             "model_present": db.model_file.is_some(),

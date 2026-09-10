@@ -804,6 +804,7 @@ mod tests {
                 model_resident: true,
                 idle_secs: Some(90),
                 ui_open: true,
+                focus_route: Some("wlr".into()),
             }),
             &DbStatus {
                 last_event_age_secs: Some(12),
@@ -823,6 +824,7 @@ mod tests {
         assert!(s.contains("healthy"));
         assert!(s.contains("uptime 2h 13m"));
         assert!(s.contains("derive worker: derive batch 71 (45s)"));
+        assert!(s.contains("focus: wlr"), "{s}");
         assert!(s.contains("user idle: 1m"));
         assert!(s.contains("last event: 12s ago"));
         assert!(s.contains("last derive: batch 70 at "), "{s}");

@@ -443,8 +443,8 @@ polling; Chronicle's own client does the polling.
 |---|---|---|---|---|
 | Windows | ~50 % (WSL ~17 % of all respondents) | `SetWinEventHook`, `GetLastInputInfo` | M | elevated windows invisible without a service (UIPI); WSL2 titles carry no cwd unless the shell emits OSC 9;9: the shell hook fixes that |
 | macOS | ~33 % | AX titles (no Screen Recording), `CGEventSource` idle | M | Developer ID signing + notarization ($99/yr) is mandatory: Homebrew 5 disables casks that fail Gatekeeper since 2026-09-01, and an ad-hoc signature loses the Accessibility grant on every rebuild |
-| Linux Wayland, wlroots (Sway, Hyprland, Niri) | Wayland is 60–80 % of Linux sessions | `wlr-foreign-toplevel-management`, `ext-idle-notify-v1` | S | older distro builds lack ext-idle-notify |
-| Linux Wayland, KDE | | KWin script over D-Bus (as `awatcher`, `kdotool`) | S–M | scripting surface, not a protocol |
+| Linux Wayland, wlroots (Sway, Hyprland, Niri) | Wayland is 60–80 % of Linux sessions | `wlr-foreign-toplevel-management`, `ext-idle-notify-v1` | done (m39) | no pid in the protocol: the compositor's IPC answers it |
+| Linux Wayland, KDE | | KWin script over D-Bus (as `awatcher`, `kdotool`) | done (m39) | scripting surface, not a protocol |
 | Linux Wayland, GNOME | largest Linux DE | a Shell extension the user installs | M | the only route needing user action; `ext-foreign-toplevel-list-v1` not adopted by GNOME or KDE yet |
 | Linux X11 | shrinking | done | | |
 
@@ -499,9 +499,15 @@ cross-project placements.
   CoreAudio mic, EventKit calendar, signing and notarization, Homebrew
   formula. Gate: a clean Mac reaches Home with projects populated from the
   repos under `~/dev` in under five minutes from `brew install`.
-- **M39 Wayland.** wlroots and KDE behind the `FocusProvider` trait,
-  `ext-idle-notify-v1`, logind lock as now. GNOME extension guided-install
-  later.
+- **M39 Wayland.** Shipped 2026-09-10: wlroots through
+  `wlr-foreign-toplevel-management` and KDE through a KWin script behind
+  the `FocusProvider` trait, `ext-idle-notify-v1` (with `org_kde_kwin_idle`
+  as fallback) for idle, logind lock unchanged, the route chosen from
+  `focus_route` and the session environment. The focused pid comes from
+  sway's, Hyprland's and Niri's own sockets, since the protocol has none.
+  Presence counts stay off on Wayland. GNOME extension guided-install
+  later. Both routes verified against nested compositors
+  (`scripts/wayland-check.sh`).
 - **M40 Windows.** `SetWinEventHook`, `GetLastInputInfo`, WTS lock, tray,
   `Run` key, winget and Scoop, Trusted Signing; disclosed UIPI and WSL2
   limits, with the shell hook as the WSL2 answer.

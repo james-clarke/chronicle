@@ -222,3 +222,73 @@ rows. The X11 path is unchanged: same tests, same install.
 - Compositors without `wlr-foreign-toplevel` (older Niri and river builds)
   get the same one-line error as GNOME; an IPC-only focus route for them
   is not planned.
+
+## Shipped (2026-09-10, main 591fe0d → this commit)
+
+Six commits on `main`, unpushed. Linux X11 unchanged: same tests, same
+install, `focus_route` defaults to `auto` and `auto` on an X11 login is
+X11.
+
+- **Chunk 0** (591fe0d). `focus_route` in config; `Route`/`Choice`/`choose`
+  in `wayland/mod.rs` with the environment half of the decision and the
+  GNOME/unknown error text; the terminal cwd probe moved from `x11.rs` to
+  `cwd.rs`; presence skipped on both Wayland routes.
+- **Chunk 1** (d0d95b0). `WlrFocusProvider` over
+  `zwlr_foreign_toplevel_manager_v1`, and the `FocusState` both routes
+  drive: the 1 s title debounce, the `FocusEvent` shape and the cwd probe.
+- **Chunk 2** (96b7b36). `WaylandAfkProvider` over `ext-idle-notify-v1`
+  with the `org_kde_kwin_idle` fallback; the connection poll moved into
+  `wayland/mod.rs`.
+- **Chunk 3** (9959d7e). The KWin script, the `dev.chronicled.Chronicle`
+  bus name and `KwinFocusProvider`.
+- **Chunk 4** (00d821f). `ipc.rs`: the focused pid from sway's, Hyprland's
+  and Niri's sockets.
+- **Chunk 5** (this commit). `focus_route` in the daemon status reply, in
+  `chronicle status` and as a Settings combo; `scripts/wayland-check.sh`;
+  README and direction doc.
+
+### What the gates actually showed
+
+Both routes were driven against nested compositors on this X11 box through
+`scripts/wayland-check.sh`, which is the same path the examples take.
+
+- Nested sway 1.10.1: two `foot` windows, five focus switches, correct
+  app_id and titles, the shell prompt burst collapsed into one title row,
+  a pid on every row alternating with the window, and a `Cwd` row filing
+  each into the `chronicle` project.
+- Nested kwin_wayland 6.3.6 on a private session bus: two windows, focus
+  rows with distinct pids, `Cwd` rows, the same debounce.
+- Idle in nested sway: the clock climbs a second per second from 1000 ms
+  and resets to zero on pointer motion.
+
+### Decisions that changed while building
+
+- **Every KWin `callDBus` argument crosses as a string.** KWin turns a JS
+  number into whichever of int32/uint32/double `QJSValue::toVariant`
+  picks, and a signature the interface does not declare is dropped without
+  an error on either side. The script ran and reported correctly for three
+  runs while the daemon saw nothing; only a `print()` in the script found
+  it. The pid is parsed back in Rust.
+- **The IPC pid is matched on app_id alone, not app_id and title.** All
+  three sockets answer about the window the compositor itself considers
+  focused, so a mismatch means focus moved between the protocol event and
+  the reply and the next event corrects it. A title, by contrast, changes
+  without the window changing — comparing it would lose pids for nothing.
+- **The manager's `toplevel` event needs `event_created_child!`.** Without
+  it wayland-client panics on the first window rather than returning an
+  error.
+- **Deps land with the chunk that uses them**, not all in chunk 0.
+
+## Still owed
+
+- A real Wayland login. Everything above is a nested compositor inside an
+  X11 session: the daemon has never run as the session's own client, so
+  the systemd unit's `WAYLAND_DISPLAY` import is unproven, and so is the
+  KWin route against a full Plasma session with a panel and a real
+  `org.kde.KWin` on the user's own bus.
+- Hyprland and Niri: their IPC parsers are covered by fixtures only, since
+  neither is installed here. Sway's is the one exercised for real.
+- GNOME: the Shell extension route.
+- Presence counts on Wayland through evdev where `/dev/input` is readable.
+- `org_kde_kwin_idle` is fixture-free: Debian's KWin 6.3.6 speaks
+  `ext-idle-notify-v1`, so the fallback branch has never run.
