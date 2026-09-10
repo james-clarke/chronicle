@@ -3,3 +3,9 @@ site/img/src/
 
 # Build logs from `cargo install` runs (m39).
 install-*.log
+
+# Agent tooling ignores (`.aider*` and friends, which live in .git/info/exclude
+# here) would otherwise swallow this: it is an aider *fixture*, test data the
+# session-format test reads, not aider's own state. A repo .gitignore beats
+# .git/info/exclude, so the negation has to live here.
+!fixtures/sessions/aider/repo/.aider.chat.history.md
