@@ -355,6 +355,9 @@ async fn probe(server: &ServerConfig) -> anyhow::Result<(String, String, Vec<Str
 async fn connect(
     server: &ServerConfig,
 ) -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
+    if let Some(url) = server.url.as_deref().filter(|u| !u.trim().is_empty()) {
+        return connect_remote(server, url).await;
+    }
     let mut cmd = Command::new(&server.command);
     cmd.args(&server.args).envs(&server.env);
     // Server stderr must not leak into the derive worker's (quiet) stderr.
@@ -363,6 +366,64 @@ async fn connect(
         .spawn()
         .with_context(|| format!("spawn {}", server.command))?;
     ().serve(transport).await.context("handshake")
+}
+
+/// Remote server over streamable HTTP (m37 chunk 5). The bearer token
+/// comes from the user's CLI (`bearer_command`, run through `sh -c`) or an
+/// environment variable (`bearer_env`); a server that needs neither gets
+/// no header.
+async fn connect_remote(
+    server: &ServerConfig,
+    url: &str,
+) -> anyhow::Result<rmcp::service::RunningService<rmcp::RoleClient, ()>> {
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let token = bearer_token(server).await?;
+    let mut config = StreamableHttpClientTransportConfig::with_uri(url.to_owned());
+    if let Some(t) = token {
+        config = config.auth_header(t);
+    }
+    let transport = StreamableHttpClientTransport::from_config(config);
+    ().serve(transport).await.context("handshake")
+}
+
+async fn bearer_token(server: &ServerConfig) -> anyhow::Result<Option<String>> {
+    if let Some(cmd) = server
+        .bearer_command
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
+        let out = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .stderr(Stdio::null())
+                .output(),
+        )
+        .await
+        .context("bearer command timed out")?
+        .with_context(|| format!("run bearer command for {}", server.name))?;
+        let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !out.status.success() || token.is_empty() {
+            anyhow::bail!("bearer command for {} gave no token", server.name);
+        }
+        return Ok(Some(token));
+    }
+    if let Some(var) = server
+        .bearer_env
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        let token = std::env::var(var)
+            .ok()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .with_context(|| format!("{var} is not set for {}", server.name))?;
+        return Ok(Some(token));
+    }
+    Ok(None)
 }
 
 async fn run_call(
@@ -515,6 +576,9 @@ mod action_tests {
             servers: vec![ServerConfig {
                 name: "fake".into(),
                 command: "/bin/sh".into(),
+                url: None,
+                bearer_command: None,
+                bearer_env: None,
                 args: vec!["-c".into(), format!("touch {}", marker.display())],
                 enabled: true,
                 env: Default::default(),

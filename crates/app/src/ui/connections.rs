@@ -198,6 +198,9 @@ struct ServerForm {
     preset_calls: Option<(Vec<ContextCall>, Vec<ContextCall>, Vec<ActionCall>)>,
     hint: Option<&'static str>,
     error: Option<String>,
+    /// Remote servers: the shell line that prints the bearer token
+    /// (`gh auth token`).
+    bearer_command: String,
 }
 
 impl ServerForm {
@@ -212,6 +215,7 @@ impl ServerForm {
             preset_calls: None,
             hint: None,
             error: None,
+            bearer_command: String::new(),
         }
     }
 
@@ -234,6 +238,7 @@ impl ServerForm {
             )),
             hint: Some(p.hint),
             error: None,
+            bearer_command: String::new(),
         }
     }
 
@@ -241,7 +246,8 @@ impl ServerForm {
         Self {
             original: Some(s.name.clone()),
             name: s.name.clone(),
-            command: s.command.clone(),
+            command: s.url.clone().unwrap_or_else(|| s.command.clone()),
+            bearer_command: s.bearer_command.clone().unwrap_or_default(),
             args: s.args.join("\n"),
             env: s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             enabled: s.enabled,
@@ -258,8 +264,15 @@ impl ServerForm {
         }
         let command = self.command.trim();
         if command.is_empty() {
-            return Err("command is required".into());
+            return Err("command or https:// url is required".into());
         }
+        // A URL in the command field is a remote server (m37 chunk 5).
+        let (command, url) = if command.starts_with("http://") || command.starts_with("https://") {
+            ("", Some(command.to_owned()))
+        } else {
+            (command, None)
+        };
+        let bearer = self.bearer_command.trim();
         let env = self
             .env
             .iter()
@@ -269,6 +282,9 @@ impl ServerForm {
         Ok(ServerConfig {
             name: name.to_owned(),
             command: command.to_owned(),
+            bearer_command: (url.is_some() && !bearer.is_empty()).then(|| bearer.to_owned()),
+            bearer_env: None,
+            url,
             args: self
                 .args
                 .lines()
@@ -314,12 +330,21 @@ fn form_ui(ui: &mut egui::Ui, form: &mut ServerForm) -> FormAct {
         ui.add_space(theme::SPACE_XS);
         ui.label("name");
         ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(f32::INFINITY));
-        ui.label("command");
+        ui.label("command, or the URL of a remote server");
         ui.add(
             egui::TextEdit::singleline(&mut form.command)
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Monospace),
         );
+        if form.command.trim_start().starts_with("http") {
+            ui.label("bearer token command (your CLI's login, e.g. gh auth token)");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.bearer_command)
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("gh auth token"),
+            );
+        }
         ui.label("args (one per line)");
         ui.add(
             egui::TextEdit::multiline(&mut form.args)
@@ -591,7 +616,10 @@ impl ImportState {
                     if e.skip.is_none() && existing.iter().any(|s| s.name == e.server.name) {
                         e.skip = Some("already configured".into());
                     }
-                    e.server.command = chronicle_core::config::resolve_command(&e.server.command);
+                    if !e.server.command.is_empty() {
+                        e.server.command =
+                            chronicle_core::config::resolve_command(&e.server.command);
+                    }
                     let tick = e.skip.is_none();
                     self.entries.push((e, tick));
                 }
@@ -928,7 +956,7 @@ impl Connections {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
                 ui.vertical(|ui| {
-                    let mut line = server.command.clone();
+                    let mut line = server.url.clone().unwrap_or_else(|| server.command.clone());
                     for a in &server.args {
                         line.push(' ');
                         line.push_str(a);
@@ -1097,7 +1125,11 @@ impl Connections {
                     .show(ui, width, |ui| {
                         ui.add_enabled(entry.skip.is_none(), egui::Checkbox::without_text(tick));
                     });
-                let mut line = entry.server.command.clone();
+                let mut line = entry
+                    .server
+                    .url
+                    .clone()
+                    .unwrap_or_else(|| entry.server.command.clone());
                 for a in &entry.server.args {
                     line.push(' ');
                     line.push_str(a);

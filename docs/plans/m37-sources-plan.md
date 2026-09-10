@@ -355,9 +355,14 @@ installed 21:24 and again 21:31 with two follow-up fixes.
   toggle. Verified on a sandbox copy of the live DB at zoom 0.55.
 - `chronicle status` (and `--json`) gains a sources block: rows this week
   and last seen per kind.
-- Not done: the remote MCP client (`url` + bearer from a CLI) — rmcp's
-  HTTP transport is a separate feature and OAuth 2.1 is its own chunk;
-  it stays on the M37 list.
+- Remote MCP servers: `[[servers]]` with `url` (streamable HTTP, rmcp's
+  reqwest transport with rustls) and `bearer_command` (`gh auth token`)
+  or `bearer_env`; the Settings form takes a URL in the command field and
+  shows the bearer-command field; imports from other clients' JSON now
+  accept `url` entries. Gate: GitHub's remote server
+  (`https://api.githubcopilot.com/mcp/`) with `gh auth token` — handshake,
+  44 tools, 1.3 s, and `get_me` answered through `mcp-check` on the
+  sandbox copy. OAuth 2.1 loopback stays out (no server here needs it).
 - Gate: `project test` unfiled is 10.0 % of focus (194 of 1943 min) —
   at the line, not under it; the self-score's unfiled (10 %, 19:00
   compute) reads again tomorrow. Sources row words: `browser` added; tmux
@@ -368,5 +373,6 @@ installed 21:24 and again 21:31 with two follow-up fixes.
 - James: `eval "$(chronicle shell-init zsh)"` in `.zshrc`; `chronicle
   hooks install` on the other five repos (installed on chronicle only);
   a `calendars` feed URL.
-- Remote MCP client; the editor-title resolver for remote URIs; GitLab
-  and the seven session formats against real files.
+- The editor-title resolver for remote URIs; GitLab and the seven
+  session formats against real files; OAuth 2.1 for a remote MCP server
+  that has no CLI token.

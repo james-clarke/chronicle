@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpConfigError {
+    #[error("server {0} has neither a command nor a url")]
+    NoTransport(String),
     #[error("failed to read mcp config: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to parse mcp config: {0}")]
@@ -50,7 +52,19 @@ pub struct McpConfig {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub name: String,
+    /// Executable for a stdio server; empty when `url` names a remote one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// Remote server over streamable HTTP (m37 chunk 5): the MCP endpoint
+    /// URL. `bearer_command` (a shell line such as `gh auth token`) or
+    /// `bearer_env` supplies the token — the user's existing CLI login,
+    /// never a token stored here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_env: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// Disabled servers keep their allowlist entries but are never spawned
@@ -106,9 +120,14 @@ impl McpConfig {
         Ok(cfg)
     }
 
-    /// Every call must name a listed server (enabled or not) and carry a
-    /// JSON object for its arguments.
+    /// Every server has a command or a url; every call must name a listed
+    /// server (enabled or not) and carry a JSON object for its arguments.
     pub fn validate(&self) -> Result<(), McpConfigError> {
+        for s in &self.servers {
+            if s.command.trim().is_empty() && s.url.as_deref().is_none_or(|u| u.trim().is_empty()) {
+                return Err(McpConfigError::NoTransport(s.name.clone()));
+            }
+        }
         let calls = self
             .context_calls
             .iter()
@@ -176,9 +195,10 @@ pub struct ImportEntry {
 }
 
 /// Parse the `mcpServers` map (top-level key, or the whole document when it
-/// is already the map). Only stdio servers import: entries with a `url` or
-/// a non-stdio `type` come back with `skip` set so the UI can list them.
-/// Bare commands are left as written; the caller resolves them.
+/// is already the map). Stdio servers and remote `url` servers (http / sse
+/// types, m37 chunk 5) import; anything else comes back with `skip` set so
+/// the UI can list it. Bare commands are left as written; the caller
+/// resolves them.
 pub fn parse_mcp_servers_json(text: &str) -> Result<Vec<ImportEntry>, String> {
     let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let map = match doc.get("mcpServers") {
@@ -191,18 +211,30 @@ pub fn parse_mcp_servers_json(text: &str) -> Result<Vec<ImportEntry>, String> {
     let mut out = Vec::new();
     for (name, v) in map {
         let mut skip = None;
-        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("stdio");
-        if kind != "stdio" {
+        let url = v
+            .get("url")
+            .and_then(|u| u.as_str())
+            .filter(|u| !u.trim().is_empty())
+            .map(str::to_owned);
+        let kind = v
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or(if url.is_some() { "http" } else { "stdio" });
+        if !matches!(
+            kind,
+            "stdio" | "http" | "sse" | "streamable-http" | "streamable_http"
+        ) {
             skip = Some(format!("{kind} transport not supported"));
-        } else if v.get("url").is_some() {
-            skip = Some("remote server (url) not supported".into());
         }
-        let command = v
-            .get("command")
-            .and_then(|c| c.as_str())
-            .unwrap_or_default()
-            .to_owned();
-        if skip.is_none() && command.is_empty() {
+        let command = if url.is_some() {
+            String::new()
+        } else {
+            v.get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        if skip.is_none() && command.is_empty() && url.is_none() {
             skip = Some("no command".into());
         }
         let args = v
@@ -229,6 +261,9 @@ pub fn parse_mcp_servers_json(text: &str) -> Result<Vec<ImportEntry>, String> {
             server: ServerConfig {
                 name: name.clone(),
                 command,
+                url,
+                bearer_command: None,
+                bearer_env: None,
                 args,
                 enabled: true,
                 env,
@@ -260,14 +295,13 @@ mod tests {
         assert_eq!(by("context-mode").skip, None);
         assert_eq!(by("jira").server.env.get("JIRA_URL").unwrap(), "https://x");
         assert_eq!(by("jira").server.env.len(), 1, "non-string env dropped");
+        assert_eq!(by("linear").skip, None);
         assert_eq!(
-            by("linear").skip.as_deref(),
-            Some("http transport not supported")
+            by("linear").server.url.as_deref(),
+            Some("https://mcp.linear.app/mcp")
         );
-        assert_eq!(
-            by("remote").skip.as_deref(),
-            Some("remote server (url) not supported")
-        );
+        assert_eq!(by("remote").skip, None);
+        assert!(by("remote").server.command.is_empty());
         assert_eq!(by("empty").skip.as_deref(), Some("no command"));
 
         // Bare map (a `.mcp.json` that is only the servers) works too.
@@ -286,6 +320,9 @@ mod tests {
                 ServerConfig {
                     name: "jira".into(),
                     command: "/usr/bin/uvx".into(),
+                    url: None,
+                    bearer_command: None,
+                    bearer_env: None,
                     args: vec!["mcp-atlassian".into()],
                     enabled: true,
                     env: BTreeMap::from([("JIRA_API_TOKEN".to_owned(), "s3cret".to_owned())]),
@@ -293,6 +330,9 @@ mod tests {
                 ServerConfig {
                     name: "off".into(),
                     command: "sleep".into(),
+                    url: None,
+                    bearer_command: None,
+                    bearer_env: None,
                     args: Vec::new(),
                     enabled: false,
                     env: BTreeMap::new(),
@@ -353,6 +393,9 @@ mod tests {
         cfg.servers.push(ServerConfig {
             name: "nope".into(),
             command: "c".into(),
+            url: None,
+            bearer_command: None,
+            bearer_env: None,
             args: Vec::new(),
             enabled: true,
             env: BTreeMap::new(),
