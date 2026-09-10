@@ -42,6 +42,9 @@ sha2 = "0.10"
 strsim = "0.11"
 ureq = "3"
 x11rb = { version = "0.14", features = ["screensaver", "xinput"] }
+# Wayland (m39): the pure-Rust backend, so no libwayland at build time.
+wayland-client = { version = "0.31", default-features = false }
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2"
 tracing = "0.1"

@@ -16,6 +16,9 @@ ureq.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
 x11rb.workspace = true
 zbus.workspace = true
 

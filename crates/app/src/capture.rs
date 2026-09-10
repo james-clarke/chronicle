@@ -37,7 +37,12 @@ pub(crate) fn spawn_capture(
                 X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
             spawn_afk_thread(config, afk, tx.clone())?;
         }
-        Route::Wlr => anyhow::bail!("the wlroots focus route lands in m39 chunk 1"),
+        Route::Wlr => {
+            use chronicle_capture::wayland::wlr::WlrFocusProvider;
+
+            let focus = WlrFocusProvider::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+            spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+        }
         Route::Kwin => anyhow::bail!("the KWin focus route lands in m39 chunk 3"),
     }
     spawn_lock_capture(tx.clone(), ctrl)?;

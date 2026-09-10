@@ -5,6 +5,9 @@
 //! stays logind, which is display-server independent. Presence counts have
 //! no Wayland protocol and stay off.
 
+pub mod focus;
+pub mod wlr;
+
 use crate::BoxError;
 
 /// Which focus provider the daemon runs.
