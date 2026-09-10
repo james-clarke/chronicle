@@ -1,0 +1,14 @@
+[
+  {
+    "ts": 1788609600000,
+    "type": "say",
+    "say": "task",
+    "text": "write a changelog entry"
+  },
+  {
+    "ts": 1788609900000,
+    "type": "say",
+    "say": "api_req_started",
+    "text": "{\"request\":\"...\"}"
+  }
+]

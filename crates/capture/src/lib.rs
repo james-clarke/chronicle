@@ -4,9 +4,14 @@
 //! platform-independent.
 
 pub mod ai_sessions;
+pub mod browser;
+pub mod docker;
 pub mod gcal;
 pub mod git;
 pub mod github;
+pub mod gitlab;
+pub mod hooks;
+pub mod ics;
 #[cfg(target_os = "linux")]
 pub mod lock;
 #[cfg(target_os = "linux")]
@@ -15,7 +20,12 @@ pub mod notes;
 pub mod ports;
 #[cfg(target_os = "linux")]
 pub mod presence;
+pub mod reflog;
+pub mod sessions;
 pub mod shell;
+pub mod shell_hook;
+pub mod tmux;
+pub mod workspaces;
 #[cfg(target_os = "linux")]
 pub mod x11;
 

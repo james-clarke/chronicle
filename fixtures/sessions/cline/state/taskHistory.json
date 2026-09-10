@@ -1,0 +1,8 @@
+[
+  {
+    "id": "t1",
+    "ts": 1788609600000,
+    "task": "write a changelog entry",
+    "cwdOnTaskInitialization": "/home/u/dev/cli"
+  }
+]

@@ -11,6 +11,13 @@
 //! titles the tool gave the conversation (`ai-title` records: the text it
 //! puts in the terminal title), so the anchor extractor can attach a
 //! terminal span to the session that owned its title (m32 chunk 2).
+//!
+//! m37 chunk 0: every other coding tool's session store
+//! (`crate::sessions`) folds through the same `Segment`/`FileState`
+//! machinery via `absorb_generic`, kept separate from the Claude path above
+//! so nothing about Claude's `ext_id`s or `detail` shape (beyond the new
+//! `"tool"` key) moves. Claude keeps its bare `<session>[#n]` id; every
+//! other format's is `<format>:<session>[#n]`.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -22,6 +29,7 @@ use chronicle_core::types::{ActivityEvent, ActivityKind, CaptureEvent};
 use crossbeam_channel::Sender;
 use jiff::Timestamp;
 
+use crate::sessions::{self, SessionFormat};
 use crate::{BoxError, FocusProvider};
 
 const POLL: Duration = Duration::from_secs(20);
@@ -47,8 +55,20 @@ const SESSION_GAP: Duration = Duration::from_secs(30 * 60);
 const MAX_TITLES: usize = 8;
 
 pub struct AiSessionProvider {
-    dirs: Vec<PathBuf>,
+    claude_dirs: Vec<PathBuf>,
+    formats: Vec<Box<dyn SessionFormat>>,
+    home: PathBuf,
+    /// Repos, worktrees, … a rootless format (Aider) is scanned at
+    /// directly, and a hash-keyed format (Gemini) matches its session
+    /// directories against.
+    cwd_candidates: Vec<PathBuf>,
     files: HashMap<PathBuf, FileState>,
+    /// Byte offset / row cursor per `(format, source path)`, opaque to us.
+    generic_cursors: HashMap<(&'static str, PathBuf), u64>,
+    /// One `FileState` per `(format, session id)`: a database-backed
+    /// format's single `Source` yields records for many sessions, grouped
+    /// here by the session id each record carries.
+    generic_state: HashMap<(&'static str, String), FileState>,
 }
 
 #[derive(Debug, Default)]
@@ -107,7 +127,9 @@ struct Segment {
 }
 
 impl Segment {
-    fn detail(&self) -> Option<String> {
+    /// `tool` names the format (`"claude"`, `"codex"`, …) in the emitted
+    /// JSON so anchors and Settings › Connections can tell sessions apart.
+    fn detail(&self, tool: &str) -> Option<String> {
         if self.prompts.is_empty() && self.paths.is_empty() && self.writes.is_empty() {
             return None;
         }
@@ -118,6 +140,7 @@ impl Segment {
             "prompt_minutes": self.prompt_minutes,
             "titles": self.titles,
             "touches": self.touches,
+            "tool": tool,
         });
         if let Some(a) = &self.last_assistant {
             v["last_assistant"] = serde_json::Value::String(a.clone());
@@ -166,29 +189,63 @@ struct Line {
 
 /// One transcript record the tracker acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Rec {
+enum TranscriptRec {
     Line(Line),
     /// An `ai-title` record: the conversation's current title.
     Title(String),
 }
 
 impl AiSessionProvider {
-    pub fn new(dirs: &[PathBuf]) -> Self {
+    /// `claude_dirs` are the configured `ai_session_dirs` (the Claude Code
+    /// roots; the default is the claude format's own `roots()`).
+    /// `formats` are every other detected `SessionFormat` (never
+    /// `"claude"`: that stays on the dedicated pipeline above so its
+    /// `detail` and `ext_id`s never move). `cwd_candidates` are repos and
+    /// worktrees, used by a rootless format (Aider) as scan targets and by
+    /// a hash-keyed one (Gemini) to resolve a place.
+    pub fn new(
+        claude_dirs: Vec<PathBuf>,
+        formats: Vec<Box<dyn SessionFormat>>,
+        home: PathBuf,
+        cwd_candidates: Vec<PathBuf>,
+    ) -> Self {
         Self {
-            dirs: dirs.iter().filter(|d| d.is_dir()).cloned().collect(),
+            claude_dirs: claude_dirs.into_iter().filter(|d| d.is_dir()).collect(),
+            formats,
+            home,
+            cwd_candidates,
             files: HashMap::new(),
+            generic_cursors: HashMap::new(),
+            generic_state: HashMap::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.dirs.is_empty()
+        self.claude_dirs.is_empty() && self.formats.is_empty()
+    }
+
+    /// Formats with an existing root under `home` (Settings › Connections'
+    /// "AI sessions" row). A rootless format (Aider) never appears here;
+    /// its presence is per-repo, not per-machine.
+    pub fn detected(home: &Path, formats: &[Box<dyn SessionFormat>]) -> Vec<&'static str> {
+        formats
+            .iter()
+            .filter(|f| !f.roots(home).is_empty())
+            .map(|f| f.name())
+            .collect()
     }
 
     /// One poll: pick up new/grown transcripts, return the sessions whose
-    /// end moved. `now` bounds the boot window.
+    /// end moved. `now` bounds the Claude boot window.
     fn scan(&mut self, now: SystemTime) -> Vec<ActivityEvent> {
+        let mut out = self.scan_claude(now);
+        out.extend(self.scan_generic());
+        out
+    }
+
+    fn scan_claude(&mut self, now: SystemTime) -> Vec<ActivityEvent> {
         let mut out = Vec::new();
-        for path in list_transcripts(&self.dirs) {
+        for path in list_transcripts(&self.claude_dirs) {
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
@@ -236,7 +293,86 @@ impl AiSessionProvider {
                     kind: ActivityKind::AiSession,
                     ext_id,
                     summary: seg.prompt.clone(),
-                    detail: seg.detail(),
+                    detail: seg.detail("claude"),
+                });
+            }
+        }
+        out
+    }
+
+    /// Every non-Claude format: poll its sources, fold their records into
+    /// `generic_state` (grouped by `(format, session id)`, since a
+    /// database-backed format's one `Source` covers many sessions), then
+    /// emit whatever moved.
+    fn scan_generic(&mut self) -> Vec<ActivityEvent> {
+        for format in &self.formats {
+            let fmt_name = format.name();
+            if fmt_name == "claude" {
+                continue; // the dedicated pipeline owns Claude.
+            }
+            let roots = format.roots(&self.home);
+            let mut sources: Vec<(sessions::Source, Option<String>)> = Vec::new();
+            if roots.is_empty() {
+                // A rootless format (Aider) is scanned at each candidate
+                // cwd directly.
+                for candidate in &self.cwd_candidates {
+                    for src in format.scan(candidate) {
+                        sources.push((src, None));
+                    }
+                }
+            } else {
+                for root in roots.iter().filter(|r| r.is_dir()) {
+                    for src in format.scan(root) {
+                        // Gemini names its session directory the sha256 of
+                        // the cwd; match it against a candidate so the
+                        // segment gets a real place. Every other format's
+                        // hint comes from the `Source` itself.
+                        let hint = if fmt_name == "gemini" {
+                            gemini_cwd_hint(&src.path, root, &self.cwd_candidates)
+                        } else {
+                            None
+                        };
+                        sources.push((src, hint));
+                    }
+                }
+            }
+            for (source, hint) in sources {
+                let key = (fmt_name, source.path.clone());
+                let cursor = self.generic_cursors.get(&key).copied().unwrap_or(0);
+                let (recs, next_cursor) = format.read(&source, cursor);
+                self.generic_cursors.insert(key, next_cursor);
+                let cwd_fallback = source.cwd_hint.clone().or(hint);
+                for rec in recs {
+                    let state_key = (fmt_name, rec.session_id.clone());
+                    let state = self.generic_state.entry(state_key).or_default();
+                    absorb_generic(state, rec, cwd_fallback.as_deref());
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        for ((fmt_name, _session_id), state) in self.generic_state.iter_mut() {
+            let Some(ident) = state.ident.clone() else {
+                continue;
+            };
+            for i in 0..state.segments.len() {
+                let Some(bare) = state.ext_id(i) else {
+                    continue;
+                };
+                let seg = &mut state.segments[i];
+                if seg.sent == Some(seg.end) {
+                    continue;
+                }
+                seg.sent = Some(seg.end);
+                out.push(ActivityEvent {
+                    ts: seg.ts,
+                    end_ts: Some(seg.end),
+                    repo: ident.repo.clone(),
+                    branch: seg.branch.clone(),
+                    kind: ActivityKind::AiSession,
+                    ext_id: Some(format!("{fmt_name}:{bare}")),
+                    summary: seg.prompt.clone(),
+                    detail: seg.detail(fmt_name),
                 });
             }
         }
@@ -244,11 +380,51 @@ impl AiSessionProvider {
     }
 }
 
+/// The candidate whose cwd hashes to `path`'s immediate child of `root`
+/// (Gemini's session directory name), if any.
+fn gemini_cwd_hint(path: &Path, root: &Path, candidates: &[PathBuf]) -> Option<String> {
+    let hash = path.strip_prefix(root).ok()?.components().next()?;
+    let hash = hash.as_os_str().to_str()?;
+    candidates
+        .iter()
+        .find(|c| sessions::gemini::sha256_hex(c.to_string_lossy().as_bytes()) == hash)
+        .map(|c| c.to_string_lossy().into_owned())
+}
+
+/// Fold a generic format's record into `state` through the same
+/// `absorb`/`Segment` machinery the Claude pipeline uses, so session-gap
+/// folding and per-minute bucketing behave identically for every format.
+fn absorb_generic(state: &mut FileState, rec: sessions::Rec, cwd_hint: Option<&str>) {
+    if let Some(title) = &rec.title {
+        if let Some(seg) = state.segments.last_mut() {
+            seg.push_title(title);
+        }
+        state.title = Some(title.clone());
+    }
+    let cwd = rec
+        .cwd
+        .clone()
+        .or_else(|| cwd_hint.map(str::to_owned))
+        .unwrap_or_default();
+    let line = Line {
+        ts: rec.ts,
+        cwd,
+        branch: rec.branch.unwrap_or_default(),
+        session_id: rec.session_id,
+        prompt: rec.prompt.clone(),
+        assistant: None,
+        paths: rec.paths,
+        typed: rec.prompt.is_some(),
+    };
+    absorb(state, TranscriptRec::Line(line));
+}
+
 /// Every session in the transcripts under `dirs` modified at or after
 /// `since`, read in full (no head/tail skip), one event per segment. For
 /// `chronicle backfill-sessions`: rows captured before the collector kept
 /// prompt minutes and titles get them from the transcript. Transcripts are
 /// grouped by session id so the caller can replace a session's rows whole.
+/// Claude only: every other format is read incrementally, not replayed.
 pub fn replay_transcripts(
     dirs: &[PathBuf],
     since: SystemTime,
@@ -284,7 +460,7 @@ pub fn replay_transcripts(
                     kind: ActivityKind::AiSession,
                     ext_id: state.ext_id(i),
                     summary: seg.prompt.clone(),
-                    detail: seg.detail(),
+                    detail: seg.detail("claude"),
                 }
             })
             .collect();
@@ -381,10 +557,10 @@ fn read_lines_from(path: &Path, from: u64) -> (Vec<String>, u64) {
     (lines, from + last_nl as u64 + 1)
 }
 
-fn absorb(state: &mut FileState, rec: Rec) {
+fn absorb(state: &mut FileState, rec: TranscriptRec) {
     let line = match rec {
-        Rec::Line(line) => line,
-        Rec::Title(title) => {
+        TranscriptRec::Line(line) => line,
+        TranscriptRec::Title(title) => {
             if let Some(seg) = state.segments.last_mut() {
                 seg.push_title(&title);
             }
@@ -498,21 +674,21 @@ fn repo_name(cwd: &str) -> String {
 /// an `ai-title` record (the title the tool shows in the terminal; it
 /// carries no timestamp and names the open segment). Sidechain (subagent)
 /// lines and other bookkeeping (`mode`, `attachment`, …) are nothing.
-fn parse(raw: &str) -> Option<Rec> {
+fn parse(raw: &str) -> Option<TranscriptRec> {
     let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
     let kind = v.get("type")?.as_str()?;
     if kind == "ai-title" {
         let title = v.get("aiTitle")?.as_str()?.trim();
-        return (!title.is_empty()).then(|| Rec::Title(title.to_owned()));
+        return (!title.is_empty()).then(|| TranscriptRec::Title(title.to_owned()));
     }
-    parse_line_value(&v, kind).map(Rec::Line)
+    parse_line_value(&v, kind).map(TranscriptRec::Line)
 }
 
 #[cfg(test)]
 fn parse_line(raw: &str) -> Option<Line> {
     match parse(raw)? {
-        Rec::Line(line) => Some(line),
-        Rec::Title(_) => None,
+        TranscriptRec::Line(line) => Some(line),
+        TranscriptRec::Title(_) => None,
     }
 }
 
@@ -572,8 +748,10 @@ fn is_tool_result(content: &serde_json::Value) -> bool {
 
 /// File paths named by the line's `tool_use` blocks (`file_path`, `path`,
 /// `notebook_path`), made relative to `cwd` when under it. Tool names are
-/// not checked: any tool that takes a path touched that file.
-fn tool_paths(content: &serde_json::Value, cwd: &str) -> Vec<String> {
+/// not checked: any tool that takes a path touched that file. `pub(crate)`
+/// so `sessions::claude`'s thin `SessionFormat` view reads paths the same
+/// way (m37 chunk 0).
+pub(crate) fn tool_paths(content: &serde_json::Value, cwd: &str) -> Vec<String> {
     const KEYS: [&str; 3] = ["file_path", "path", "notebook_path"];
     let Some(blocks) = content.as_array() else {
         return Vec::new();
@@ -593,8 +771,10 @@ fn tool_paths(content: &serde_json::Value, cwd: &str) -> Vec<String> {
 }
 
 /// A typed prompt: a string or the first text block. Tool results, tagged
-/// system/command payloads (`<…>`) and injected skill files are not prompts.
-fn prompt_text(content: &serde_json::Value) -> Option<String> {
+/// system/command payloads (`<…>`) and injected skill files are not
+/// prompts. `pub(crate)` so `sessions::claude` shares this clipping (m37
+/// chunk 0).
+pub(crate) fn prompt_text(content: &serde_json::Value) -> Option<String> {
     let text = match content {
         serde_json::Value::String(s) => s.as_str(),
         serde_json::Value::Array(blocks) => blocks
@@ -660,6 +840,10 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn provider(dirs: &[PathBuf]) -> AiSessionProvider {
+        AiSessionProvider::new(dirs.to_vec(), Vec::new(), PathBuf::new(), Vec::new())
+    }
+
     #[test]
     fn parses_only_timestamped_main_lines() {
         let l = parse_line(USER).unwrap();
@@ -700,7 +884,10 @@ mod tests {
             r#""isSidechain":false,"isMeta":true"#,
         );
         assert!(!parse_line(&meta).unwrap().typed, "injected context is not");
-        assert_eq!(parse(TITLE), Some(Rec::Title("Flaky test fix".into())));
+        assert_eq!(
+            parse(TITLE),
+            Some(TranscriptRec::Title("Flaky test fix".into()))
+        );
         assert!(parse(r#"{"type":"ai-title","aiTitle":"  ","sessionId":"s1"}"#).is_none());
 
         let mut state = FileState::default();
@@ -804,7 +991,7 @@ mod tests {
             seg.writes,
             [m("2026-09-02T19:00:00Z"), m("2026-09-02T19:01:00Z")]
         );
-        let d: serde_json::Value = serde_json::from_str(&seg.detail().unwrap()).unwrap();
+        let d: serde_json::Value = serde_json::from_str(&seg.detail("claude").unwrap()).unwrap();
         assert_eq!(d["writes"].as_array().unwrap().len(), 2);
     }
 
@@ -822,7 +1009,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut p = AiSessionProvider::new(std::slice::from_ref(&root));
+        let mut p = provider(std::slice::from_ref(&root));
         let now = SystemTime::now();
         let got = p.scan(now);
         assert_eq!(got.len(), 1, "{got:?}");
@@ -836,7 +1023,7 @@ mod tests {
         assert_eq!(
             e.detail.as_deref(),
             Some(
-                r#"{"last_assistant":"ok","paths":["src/lib.rs"],"prompt_minutes":[1788375600000],"prompts":["fix the flaky test"],"titles":[],"touches":[[1788375900000,0]],"writes":[1788375600000,1788375900000]}"#
+                r#"{"last_assistant":"ok","paths":["src/lib.rs"],"prompt_minutes":[1788375600000],"prompts":["fix the flaky test"],"titles":[],"tool":"claude","touches":[[1788375900000,0]],"writes":[1788375600000,1788375900000]}"#
             )
         );
         assert!(p.scan(now).is_empty(), "nothing moved");
@@ -937,5 +1124,66 @@ mod tests {
         assert_eq!(state.segments[1].ts, ts("2026-09-02T22:00:00Z"));
         assert_eq!(state.segments[1].end, ts("2026-09-02T22:05:00Z"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // m37 chunk 0: a non-Claude format's records fold through the same
+    // Segment machinery, prefixed ext_id and tagged detail.tool. `roots()`
+    // empty drives it through the per-candidate scan path (Aider's shape);
+    // the root-based path shares the same fold/emit code afterward.
+    #[test]
+    fn scan_generic_prefixes_ext_id_and_tags_the_tool() {
+        struct FakeCodex;
+        impl SessionFormat for FakeCodex {
+            fn name(&self) -> &'static str {
+                "codex"
+            }
+            fn roots(&self, _home: &Path) -> Vec<PathBuf> {
+                Vec::new()
+            }
+            fn scan(&self, candidate: &Path) -> Vec<sessions::Source> {
+                vec![sessions::Source {
+                    path: PathBuf::from("/fake/rollout-x.jsonl"),
+                    session_id: "x1".into(),
+                    cwd_hint: Some(candidate.to_string_lossy().into_owned()),
+                }]
+            }
+            fn read(&self, source: &sessions::Source, cursor: u64) -> (Vec<sessions::Rec>, u64) {
+                if cursor > 0 {
+                    return (Vec::new(), cursor);
+                }
+                (
+                    vec![sessions::Rec {
+                        ts: ts("2026-09-06T09:00:00Z"),
+                        cwd: None,
+                        branch: Some("main".into()),
+                        prompt: Some("add a health endpoint".into()),
+                        paths: vec!["src/health.rs".into()],
+                        write: true,
+                        title: None,
+                        session_id: source.session_id.clone(),
+                    }],
+                    1,
+                )
+            }
+        }
+
+        let mut p = AiSessionProvider::new(
+            Vec::new(),
+            vec![Box::new(FakeCodex)],
+            PathBuf::new(),
+            vec![PathBuf::from("/home/u/dev/other")],
+        );
+        let got = p.scan_generic();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let e = &got[0];
+        assert_eq!(e.ext_id.as_deref(), Some("codex:x1"));
+        assert_eq!(e.repo, "other");
+        assert_eq!(e.branch, "main");
+        assert_eq!(e.summary.as_deref(), Some("add a health endpoint"));
+        let d: serde_json::Value = serde_json::from_str(e.detail.as_deref().unwrap()).unwrap();
+        assert_eq!(d["tool"], "codex");
+        assert_eq!(d["paths"], serde_json::json!(["src/health.rs"]));
+
+        assert!(p.scan_generic().is_empty(), "nothing new");
     }
 }

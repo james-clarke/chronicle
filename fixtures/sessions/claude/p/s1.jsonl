@@ -1,0 +1,2 @@
+{"type":"user","cwd":"/home/u/dev/app","gitBranch":"main","sessionId":"s1","timestamp":"2026-09-02T19:00:00.000Z","isSidechain":false,"message":{"role":"user","content":"fix the flaky test"}}
+{"type":"assistant","cwd":"/home/u/dev/app","gitBranch":"main","sessionId":"s1","timestamp":"2026-09-02T19:05:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","name":"Edit","input":{"file_path":"/home/u/dev/app/src/lib.rs","old_string":"a"}}]}}

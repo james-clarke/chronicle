@@ -1,0 +1,3 @@
+{"timestamp":"2026-09-03T09:00:00.000Z","type":"session_meta","payload":{"id":"c1","cwd":"/home/u/dev/api","git":{"branch":"main"}}}
+{"timestamp":"2026-09-03T09:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add a health endpoint"}]}}
+{"timestamp":"2026-09-03T09:02:00.000Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"path\": \"src/health.rs\", \"content\": \"...\"}"}}
