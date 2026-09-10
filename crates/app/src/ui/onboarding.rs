@@ -102,61 +102,8 @@ pub(super) fn progress_ui(ui: &mut egui::Ui, dl: &ModelDownload) {
     ui.add(egui::ProgressBar::new(dl.fraction()).text(text));
 }
 
-pub(super) fn systemd_available() -> bool {
-    std::process::Command::new("systemctl")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-fn user_unit_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/systemd/user/chronicle.service"))
-}
-
-pub(super) fn service_unit_exists() -> bool {
-    user_unit_path().is_some_and(|p| p.exists())
-}
-
-/// Write the user unit (ExecStart pointed at this binary) and enable it.
-/// Deliberately `enable` without `--now`: the daemon is already running as
-/// this UI's parent and holds the single-instance socket; `--now` would start
-/// a second instance that just toggles and exits, leaving a confusing
-/// stopped unit.
-pub(super) fn install_service() -> Result<String, String> {
-    let exe = crate::own_exe().map_err(|e| e.to_string())?;
-    let unit_path = user_unit_path().ok_or("HOME not set")?;
-    let template = include_str!("../../../../packaging/chronicle.service");
-    let unit = template.replace(
-        "ExecStart=%h/.cargo/bin/chronicle run",
-        &format!("ExecStart={} run", exe.display()),
-    );
-    if let Some(dir) = unit_path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&unit_path, unit).map_err(|e| e.to_string())?;
-    for args in [["daemon-reload", ""], ["enable", "chronicle"]] {
-        let args: Vec<&str> = args.iter().filter(|a| !a.is_empty()).copied().collect();
-        let out = std::process::Command::new("systemctl")
-            .arg("--user")
-            .args(&args)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(format!(
-                "systemctl --user {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-    }
-    Ok("installed \u{2014} Chronicle will start at your next login".into())
-}
-
 impl TimelineApp {
-    /// Dismissible "run at login" card, shown while no user unit exists.
+    /// Dismissible "run at login" card, shown while nothing is installed yet.
     pub(super) fn service_card_ui(&mut self, ui: &mut egui::Ui) {
         if !self.service_card || self.service_dismissed {
             return;
@@ -195,7 +142,7 @@ impl TimelineApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if theme::primary_button(ui, "install service").clicked() {
-                    self.service_status = Some(install_service());
+                    self.service_status = Some(crate::service::install());
                 }
                 if theme::ghost_button(
                     ui,
@@ -305,5 +252,45 @@ impl TimelineApp {
         if let Some(spec) = start {
             self.start_model_download(&ui.ctx().clone(), spec);
         }
+    }
+
+    /// Card shown on Home while Accessibility isn't trusted yet (m38 chunk
+    /// 4): without it the focus provider still emits app names, just no
+    /// window titles. Re-checks `ax::trusted` at most every 5s — it shells
+    /// out to `AXIsProcessTrustedWithOptions`, not free per frame.
+    #[cfg(target_os = "macos")]
+    pub(super) fn ax_card_ui(&mut self, ui: &mut egui::Ui) {
+        if self
+            .ax_last_check
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
+        {
+            self.ax_trusted = chronicle_capture::macos::ax::trusted(false);
+            self.ax_last_check = Some(Instant::now());
+        }
+        if self.ax_trusted {
+            return;
+        }
+        theme::hover_card(ui, "ax_card", |ui| {
+            ui.label(
+                egui::RichText::new("Allow window titles")
+                    .text_style(egui::TextStyle::Heading)
+                    .color(theme::palette::TEXT),
+            );
+            ui.label(
+                "Chronicle reads the focused window's title through Accessibility \
+                 \u{2014} no screen recording. Grant it under Privacy & Security \
+                 \u{203a} Accessibility.",
+            );
+            ui.add_space(4.0);
+            if theme::primary_button(ui, "Open System Settings").clicked() {
+                let _ = std::process::Command::new("open")
+                    .arg(
+                        "x-apple.systempreferences:com.apple.preference.security\
+                         ?Privacy_Accessibility",
+                    )
+                    .spawn();
+            }
+        });
+        ui.add_space(8.0);
     }
 }

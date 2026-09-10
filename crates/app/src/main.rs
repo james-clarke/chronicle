@@ -6,8 +6,11 @@ mod daemon;
 mod derive;
 mod project;
 mod rotate;
+mod service;
 mod sources;
 mod status;
+#[cfg(target_os = "macos")]
+mod tray_macos;
 mod ui;
 
 use ai_job::ai_job_worker;
@@ -326,6 +329,12 @@ enum Cmd {
         #[arg(long)]
         client_secret: Option<String>,
     },
+    /// Run Chronicle at login (m38): a systemd user unit on Linux, a
+    /// LaunchAgent on macOS. The onboarding card calls the same code.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -360,6 +369,17 @@ enum HooksCmd {
         #[arg(long, default_value_t = 30)]
         days: u32,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Write the unit/plist and enable it (no `--now`: the running instance
+    /// already holds the single-instance socket).
+    Install,
+    /// Disable/unload it and delete the unit/plist.
+    Remove,
+    /// Whether it is enabled/loaded and running.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -542,6 +562,20 @@ fn main() -> anyhow::Result<()> {
             client_id,
             client_secret,
         } => gcal_login(&data_dir, client_id, client_secret),
+        Cmd::Service { cmd } => {
+            let result = match cmd {
+                ServiceCmd::Install => service::install(),
+                ServiceCmd::Remove => service::remove(),
+                ServiceCmd::Status => service::status(),
+            };
+            match result {
+                Ok(msg) => {
+                    println!("{msg}");
+                    Ok(())
+                }
+                Err(e) => bail!("{e}"),
+            }
+        }
     }
 }
 

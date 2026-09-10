@@ -352,6 +352,8 @@ impl TimelineApp {
                     let content_w = theme::content_width(ui);
                     self.model_card_ui(ui);
                     self.service_card_ui(ui);
+                    #[cfg(target_os = "macos")]
+                    self.ax_card_ui(ui);
                     self.resume_card_ui(ui);
                     self.intent_card_ui(ui, &mut pending);
                     let can_suggest = self.can_run("suggest_task");

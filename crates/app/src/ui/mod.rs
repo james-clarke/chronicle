@@ -695,12 +695,20 @@ struct TimelineApp {
     model_dl: Option<ModelDownload>,
     /// Selected PRESETS index in the onboarding card.
     preset_pick: usize,
-    /// "run at login" card eligible (systemctl present, no user unit yet).
+    /// "run at login" card eligible (a service manager is present, nothing
+    /// installed yet).
     service_card: bool,
     /// Meta flag: user dismissed the service card.
     service_dismissed: bool,
     /// Result of the last in-UI service install attempt.
     service_status: Option<Result<String, String>>,
+    /// Cached `ax::trusted` result (m38 chunk 4); re-checked at most every
+    /// 5s in `ax_card_ui`, never per frame.
+    #[cfg(target_os = "macos")]
+    ax_trusted: bool,
+    /// When `ax_trusted` was last refreshed; `None` forces a first check.
+    #[cfg(target_os = "macos")]
+    ax_last_check: Option<Instant>,
     /// Window visibility, shared with the stdin toggle thread.
     visible: Arc<AtomicBool>,
     /// Startup instant; focus-loss hiding waits out WM map-time focus flapping.
@@ -891,9 +899,13 @@ impl TimelineApp {
             has_cloud_backend: false,
             model_dl: None,
             preset_pick: 0,
-            service_card: onboarding::systemd_available() && !onboarding::service_unit_exists(),
+            service_card: crate::service::available() && !crate::service::installed(),
             service_dismissed: false,
             service_status: None,
+            #[cfg(target_os = "macos")]
+            ax_trusted: false,
+            #[cfg(target_os = "macos")]
+            ax_last_check: None,
             visible,
             started: Instant::now(),
             was_focused: false,

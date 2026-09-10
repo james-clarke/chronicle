@@ -162,10 +162,12 @@ pub(crate) fn spawn_signal_handler(ctrl_tx: Sender<CtrlMsg>) -> anyhow::Result<(
 
 /// StatusNotifierItem tray icon: left-click / "Show/Hide" toggles the UI
 /// child, "Quit" shuts the daemon down (same paths as socket + signals).
+#[cfg(target_os = "linux")]
 pub(crate) struct ChronicleTray {
     ctrl_tx: Sender<CtrlMsg>,
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for ChronicleTray {
     fn id(&self) -> String {
         "chronicle".into()
@@ -211,8 +213,11 @@ impl ksni::Tray for ChronicleTray {
 }
 
 /// Procedural icon (filled circle, UI accent blue) — no image asset/dep.
-pub(crate) fn tray_icon() -> ksni::Icon {
-    const SIZE: i32 = 22;
+/// Platform-neutral RGBA8 pixels: ksni's [`tray_icon`] packs them to ARGB,
+/// tray-icon on macOS (`tray_macos.rs`) takes RGBA (and a black/alpha
+/// variant as its template icon) directly via `Icon::from_rgba`.
+pub(crate) fn tray_pixels() -> (u32, u32, Vec<u8>) {
+    const SIZE: u32 = 22;
     let (r, g, b) = (0x5e_u8, 0x87_u8, 0xea_u8);
     let c = (SIZE - 1) as f32 / 2.0;
     let radius = c - 1.0;
@@ -220,20 +225,33 @@ pub(crate) fn tray_icon() -> ksni::Icon {
     for y in 0..SIZE {
         for x in 0..SIZE {
             let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            // 1px soft edge; ARGB32 in network byte order.
+            // 1px soft edge.
             let a = ((radius + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
-            data.extend_from_slice(&[a, r, g, b]);
+            data.extend_from_slice(&[r, g, b, a]);
         }
     }
+    (SIZE, SIZE, data)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn tray_icon() -> ksni::Icon {
+    let (width, height, rgba) = tray_pixels();
+    // ARGB32 in network byte order, ksni's own format.
+    let mut data = Vec::with_capacity(rgba.len());
+    let (pixels, _) = rgba.as_chunks::<4>();
+    for &[r, g, b, a] in pixels {
+        data.extend_from_slice(&[a, r, g, b]);
+    }
     ksni::Icon {
-        width: SIZE,
-        height: SIZE,
+        width: width as i32,
+        height: height as i32,
         data,
     }
 }
 
 /// Host the tray's D-Bus service on a background thread. No tray host running
 /// is non-fatal: log and continue, like the AW endpoint port conflict.
+#[cfg(target_os = "linux")]
 pub(crate) fn spawn_tray(ctrl_tx: Sender<CtrlMsg>) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("tray".into())
@@ -345,7 +363,40 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&sock); // stale socket from an unclean exit
     let listener = std::os::unix::net::UnixListener::bind(&sock)
         .with_context(|| format!("failed to bind {}", sock.display()))?;
+    let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
 
+    #[cfg(target_os = "linux")]
+    return run_loop(data_dir, listener, ctrl_tx, ctrl_rx);
+
+    // NSStatusItem and NSApplication must live on the main thread; the loop
+    // owns nothing that needs it, so it moves to its own thread and the main
+    // thread hosts the tray for the rest of the process's life.
+    #[cfg(target_os = "macos")]
+    {
+        let data_dir = data_dir.to_path_buf();
+        let tray_ctrl_tx = ctrl_tx.clone();
+        std::thread::Builder::new()
+            .name("daemon-main".into())
+            .spawn(
+                move || match run_loop(&data_dir, listener, ctrl_tx, ctrl_rx) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        tracing::error!("daemon loop failed: {e}");
+                        std::process::exit(1);
+                    }
+                },
+            )
+            .context("failed to spawn daemon-main thread")?;
+        crate::tray_macos::run_main(tray_ctrl_tx)
+    }
+}
+
+fn run_loop(
+    data_dir: &Path,
+    listener: std::os::unix::net::UnixListener,
+    ctrl_tx: Sender<CtrlMsg>,
+    ctrl_rx: crossbeam_channel::Receiver<CtrlMsg>,
+) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
     let config = Config::load(&data_dir.join("config.toml"))?;
     let filters = Filters::new(&config)?;
@@ -375,8 +426,8 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     )?);
     let started = Instant::now();
     let (tx, rx) = crossbeam_channel::unbounded();
-    let (ctrl_tx, ctrl_rx) = crossbeam_channel::unbounded();
     spawn_signal_handler(ctrl_tx.clone())?;
+    #[cfg(target_os = "linux")]
     spawn_tray(ctrl_tx.clone())?;
     spawn_capture(&config, data_dir, tx.clone(), ctrl_tx.clone())?;
     spawn_ctrl_listener(listener, ctrl_tx)?;
