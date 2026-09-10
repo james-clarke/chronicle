@@ -85,7 +85,7 @@ fn dedupe(list: Vec<Workspace>) -> Vec<Workspace> {
             last_ts_ms,
         })
         .collect();
-    out.sort_by(|a, b| b.last_ts_ms.cmp(&a.last_ts_ms));
+    out.sort_by_key(|w| std::cmp::Reverse(w.last_ts_ms));
     out
 }
 
@@ -166,14 +166,14 @@ fn read_recent_list(conn: &Connection) -> Option<Vec<(String, Option<String>)>> 
             if let Some(parsed) = parse_uri(&uri) {
                 out.push(parsed);
             }
-        } else if let Some(ws) = entry.workspace {
-            if let Some((path, remote)) = parse_uri(&ws.config_path) {
-                let parent = Path::new(&path)
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or(path);
-                out.push((parent, remote));
-            }
+        } else if let Some(ws) = entry.workspace
+            && let Some((path, remote)) = parse_uri(&ws.config_path)
+        {
+            let parent = Path::new(&path)
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or(path);
+            out.push((parent, remote));
         }
     }
     Some(out)
@@ -233,12 +233,13 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 3 <= bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 3 <= bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(byte);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

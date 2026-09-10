@@ -342,7 +342,7 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 // Fixture groups are the only tasks; general work is
                 // numbered past the clusters, one per project.
                 Target::General(project) => {
-                    let n = created.len() + 1 << 16;
+                    let n = (created.len() + 1) << 16;
                     (base + n as i64, format!("{project}: other work"))
                 }
             };
@@ -1422,6 +1422,7 @@ impl ReplayEngine<'_> {
 /// touched, with the open-task list as it stood at the batch's end, and score
 /// whether the corrected outcome comes out (m27 chunk 2). No MCP context: it
 /// is live data and would make runs incomparable.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replay_eval(
     data_dir: &Path,
     since_days: u64,

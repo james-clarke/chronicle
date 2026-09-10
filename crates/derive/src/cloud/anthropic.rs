@@ -392,7 +392,7 @@ fn classify_status(status: u16, text: &str) -> CloudError {
     match status {
         401 | 403 => CloudError::Auth(status, m),
         429 => CloudError::RateLimited(m),
-        529 | 500..=599 => CloudError::Server(status, m),
+        500..=599 => CloudError::Server(status, m),
         _ => CloudError::BadRequest(status, m),
     }
 }

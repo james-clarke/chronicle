@@ -97,22 +97,21 @@ impl SessionFormat for Cline {
         }
         // The files a task touched are static per task, not per message;
         // fold them in once, on the first read.
-        if cursor == 0 {
-            if let Some(paths) = task_paths(&source.path) {
-                if !paths.is_empty() {
-                    let ts = out.last().map(|r| r.ts).unwrap_or(Timestamp::UNIX_EPOCH);
-                    out.push(Rec {
-                        ts,
-                        cwd: None,
-                        branch: None,
-                        prompt: None,
-                        paths,
-                        write: true,
-                        title: None,
-                        session_id: source.session_id.clone(),
-                    });
-                }
-            }
+        if cursor == 0
+            && let Some(paths) = task_paths(&source.path)
+            && !paths.is_empty()
+        {
+            let ts = out.last().map(|r| r.ts).unwrap_or(Timestamp::UNIX_EPOCH);
+            out.push(Rec {
+                ts,
+                cwd: None,
+                branch: None,
+                prompt: None,
+                paths,
+                write: true,
+                title: None,
+                session_id: source.session_id.clone(),
+            });
         }
         (out, messages.len() as u64)
     }

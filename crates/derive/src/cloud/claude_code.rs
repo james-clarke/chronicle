@@ -374,7 +374,7 @@ mod tests {
         };
         let mut seen = Vec::new();
         let c = b.complete(&req, &mut |t| seen.push(t.to_owned())).unwrap();
-        assert_eq!(seen, [c.text.clone()]);
+        assert_eq!(seen, std::slice::from_ref(&c.text));
         assert_eq!(c.cost_usd, Some(0.0147));
         let missing = ClaudeCodeBackend::new("claude", "sonnet", Some("/nonexistent/claude"));
         let e = missing.probe().unwrap_err();

@@ -2543,12 +2543,15 @@ pub fn close_task(
     Ok(())
 }
 
+/// `(label, project, description)` of a task.
+pub type TaskIdentity = (String, Option<String>, Option<String>);
+
 /// A task's label, project and description; `None` when there is no such
 /// task.
 pub fn task_identity(
     conn: &Connection,
     task_id: i64,
-) -> Result<Option<(String, Option<String>, Option<String>)>, StorageError> {
+) -> Result<Option<TaskIdentity>, StorageError> {
     use rusqlite::OptionalExtension;
     Ok(conn
         .query_row(

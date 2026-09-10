@@ -389,7 +389,7 @@ mod tests {
     fn schemas_stay_inside_the_structured_output_subset() {
         fn walk(v: &serde_json::Value) {
             if let Some(o) = v.as_object() {
-                if o.get("type").map_or(false, |t| t == "object") {
+                if o.get("type").is_some_and(|t| t == "object") {
                     assert_eq!(o["additionalProperties"], false, "{v}");
                     assert!(o.contains_key("required"), "{v}");
                 }

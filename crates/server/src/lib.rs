@@ -841,8 +841,10 @@ mod tests {
     #[tokio::test]
     async fn shell_hook_route_is_forbidden_when_off() {
         let (tx, _rx) = crossbeam_channel::unbounded();
-        let mut config = Config::default();
-        config.shell_hook = false;
+        let config = Config {
+            shell_hook: false,
+            ..Config::default()
+        };
         let state = app_state(&config, tx, None).unwrap();
         let app = router(state);
         let res = app

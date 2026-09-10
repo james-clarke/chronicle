@@ -33,7 +33,7 @@ impl<R: BufRead> Iterator for SseReader<R> {
         loop {
             self.line.clear();
             match self.inner.read_line(&mut self.line) {
-                Ok(0) => return seen.then(|| Ok(ev)),
+                Ok(0) => return seen.then_some(Ok(ev)),
                 Ok(_) => {}
                 Err(e) => return Some(Err(e)),
             }

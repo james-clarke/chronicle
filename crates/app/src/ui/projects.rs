@@ -208,9 +208,11 @@ impl ProjectsPanel {
         let Some(conn) = conn else {
             return "no database".to_owned();
         };
-        let mut config = Config::default();
-        config.projects = self.cfgs();
-        config.project_join_min = self.join_min;
+        let config = Config {
+            projects: self.cfgs(),
+            project_join_min: self.join_min,
+            ..Config::default()
+        };
         let hi = Timestamp::now().as_millisecond();
         let lo = hi - i64::from(TEST_DAYS) * 86_400_000;
         match chronicle_core::storage::anchored_spans(conn, lo, hi) {
