@@ -1,0 +1,4 @@
+cargo install (chronicle v0.1.0 (/home/james/dev/chronicle/crates/app), 5 deps compiled)
+  warning: default toolchain implicitly overridden with `stable-x86_64-unknown-linux-gnu` by rustup toolchain file
+  Replacing /home/james/.cargo/bin/chronicle
+  Replaced package `chronicle v0.1.0 (/home/james/dev/chronicle/crates/app)` with `chronicle v0.1.0 (/home/james/dev/chronicle/crates/app)` (executable `chronicle`)

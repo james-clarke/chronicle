@@ -13,7 +13,7 @@
 //! compared — a window's title can change between the two without the
 //! window changing, and that would cost a pid for nothing.
 
-use std::io::{Read, Write};
+use std::io::{Read as _, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -74,8 +74,8 @@ impl Ipc {
     pub fn focused_pid(&self, app: &str) -> Option<u32> {
         let reply = match self {
             Ipc::Sway(path) => sway_request(path).ok()?,
-            Ipc::Hyprland(path) => line_request(path, "j/activewindow").ok()?,
-            Ipc::Niri(path) => line_request(path, "\"FocusedWindow\"").ok()?,
+            Ipc::Hyprland(path) => request(path, "j/activewindow", Read::Eof).ok()?,
+            Ipc::Niri(path) => request(path, "\"FocusedWindow\"", Read::Line).ok()?,
             Ipc::None => return None,
         };
         let value: serde_json::Value = serde_json::from_slice(&reply).ok()?;
@@ -161,14 +161,33 @@ fn sway_request(path: &PathBuf) -> std::io::Result<Vec<u8>> {
     Ok(payload)
 }
 
-/// Hyprland and Niri both take one line and answer with one JSON document.
-fn line_request(path: &PathBuf, request: &str) -> std::io::Result<Vec<u8>> {
+/// How the reply ends. Hyprland pretty-prints its JSON across lines and
+/// closes the socket, so its reply is everything up to EOF. Niri answers
+/// with one compact line and may hold the connection open, so reading to
+/// EOF there would block until the read timeout and lose the reply.
+enum Read {
+    Eof,
+    Line,
+}
+
+/// Hyprland and Niri both take one line of request.
+fn request(path: &PathBuf, request: &str, until: Read) -> std::io::Result<Vec<u8>> {
+    use std::io::{BufRead, BufReader, Read as _};
+
     let mut stream = connect(path)?;
     stream.write_all(request.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
+    let mut reader = BufReader::new(stream).take(MAX_REPLY);
     let mut reply = Vec::new();
-    stream.take(MAX_REPLY).read_to_end(&mut reply)?;
+    match until {
+        Read::Eof => {
+            reader.read_to_end(&mut reply)?;
+        }
+        Read::Line => {
+            reader.read_until(b'\n', &mut reply)?;
+        }
+    }
     Ok(reply)
 }
 

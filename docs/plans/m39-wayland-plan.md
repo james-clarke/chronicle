@@ -278,6 +278,10 @@ Both routes were driven against nested compositors on this X11 box through
   it wayland-client panics on the first window rather than returning an
   error.
 - **Deps land with the chunk that uses them**, not all in chunk 0.
+- **Hyprland is read to EOF, Niri to the first newline.** Hyprland
+  pretty-prints its JSON across lines and closes the socket; Niri answers
+  with one compact line and may hold the connection open, where reading to
+  EOF would block until the read timeout and lose the reply.
 
 ## Still owed
 

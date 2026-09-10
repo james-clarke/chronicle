@@ -97,9 +97,12 @@ fn focus_route(config: &Config) -> anyhow::Result<Route> {
             .map_err(|e| anyhow::anyhow!("{e}"))?
         {
             Choice::Route(route) => route,
-            // The one case that needs the compositor's answer: bound in chunk 1.
+            // The one case that needs the compositor's own answer:
+            // `WlrFocusProvider::new` fails with the "no route for this
+            // compositor" line when the global is absent.
             Choice::ProbeWlr => Route::Wlr,
         };
+    let _ = FOCUS_ROUTE.set(route);
     Ok(route)
 }
 
