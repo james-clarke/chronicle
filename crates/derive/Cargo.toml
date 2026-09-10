@@ -21,3 +21,7 @@ ureq.workspace = true
 [features]
 metal = ["llama-cpp-2/metal"]
 vulkan = ["llama-cpp-2/vulkan"]
+
+# Metal is the only sane backend on a Mac (m38): on by target, not by flag.
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { workspace = true, features = ["metal"] }

@@ -18,39 +18,85 @@ pub(crate) fn spawn_capture(
     tx: Sender<CaptureEvent>,
     ctrl: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
-    use chronicle_capture::FocusProvider;
     use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
 
     let focus = X11FocusProvider::new().map_err(|e| anyhow::anyhow!("X11 focus provider: {e}"))?;
-    let ftx = tx.clone();
-    let fctrl = ctrl.clone();
+    spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+    spawn_lock_capture(tx.clone(), ctrl)?;
+    let afk = X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
+    spawn_afk_thread(config, afk, tx.clone())?;
+    spawn_presence_capture(config, tx.clone())?;
+    spawn_common(config, data_dir, tx)
+}
+
+/// macOS (m38): the same shape as Linux with the polling providers in
+/// `chronicle_capture::macos`. Without the Accessibility grant the focus
+/// provider still runs (app names, empty titles) and logs once.
+#[cfg(target_os = "macos")]
+pub(crate) fn spawn_capture(
+    config: &Config,
+    data_dir: &Path,
+    tx: Sender<CaptureEvent>,
+    ctrl: Sender<CtrlMsg>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::macos::focus::MacFocusProvider;
+    use chronicle_capture::macos::input::MacAfkProvider;
+
+    let focus =
+        MacFocusProvider::new().map_err(|e| anyhow::anyhow!("macOS focus provider: {e}"))?;
+    spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+    spawn_lock_capture(tx.clone(), ctrl)?;
+    let afk = MacAfkProvider::new().map_err(|e| anyhow::anyhow!("macOS afk provider: {e}"))?;
+    spawn_afk_thread(config, afk, tx.clone())?;
+    spawn_presence_capture(config, tx.clone())?;
+    spawn_common(config, data_dir, tx)
+}
+
+/// The focus thread: the one provider that is load-bearing. Its exit
+/// closes the open span (m32 chunk 0).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_focus_thread(
+    focus: impl chronicle_capture::FocusProvider + 'static,
+    tx: Sender<CaptureEvent>,
+    ctrl: Sender<CtrlMsg>,
+) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("focus".into())
         .spawn(move || {
-            let etx = ftx.clone();
-            if let Err(e) = focus.run(ftx) {
+            let etx = tx.clone();
+            if let Err(e) = focus.run(tx) {
                 tracing::error!("focus provider exited: {e}");
                 // Nothing watches focus any more: the open span closes here
                 // instead of growing until the next restart (m32 chunk 0).
                 // A hard edge like a lock — idle would only mark it quiet.
                 let ts = Timestamp::now();
                 let _ = etx.send(CaptureEvent::Lock { locked: true, ts });
-                let _ = fctrl.send(CtrlMsg::CaptureLost {
+                let _ = ctrl.send(CtrlMsg::CaptureLost {
                     reason: "provider exit",
                     ts,
                 });
             }
         })?;
-    spawn_lock_capture(tx.clone(), ctrl)?;
+    Ok(())
+}
 
-    let afk = X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_afk_thread(
+    config: &Config,
+    afk: impl chronicle_capture::AfkProvider + 'static,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
     let threshold_ms = u64::from(config.afk_close_secs) * 1000;
-    let gtx = tx.clone();
     std::thread::Builder::new()
         .name("afk".into())
-        .spawn(move || afk_loop(afk, gtx, threshold_ms))?;
-    spawn_presence_capture(config, tx.clone())?;
+        .spawn(move || afk_loop(afk, tx, threshold_ms))?;
+    Ok(())
+}
 
+/// The platform-neutral collectors, after the platform's focus, lock, idle
+/// and presence threads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_common(config: &Config, data_dir: &Path, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
     spawn_git_capture(config, tx.clone())?;
     spawn_notes_capture(config, tx.clone())?;
     spawn_ai_sessions_capture(config, tx.clone())?;
@@ -168,16 +214,40 @@ pub(crate) fn spawn_lock_capture(
     tx: Sender<CaptureEvent>,
     ctrl: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
-    use chronicle_capture::LockSignal;
     use chronicle_capture::lock::LogindLock;
 
-    let lock = match LogindLock::new() {
-        Ok(lock) => lock,
+    match LogindLock::new() {
+        Ok(lock) => spawn_lock_thread(lock, tx, ctrl),
         Err(e) => {
             tracing::warn!("lock signal unavailable: {e}");
-            return Ok(());
+            Ok(())
         }
-    };
+    }
+}
+
+/// Session lock flag (m38): polled, never load-bearing.
+#[cfg(target_os = "macos")]
+pub(crate) fn spawn_lock_capture(
+    tx: Sender<CaptureEvent>,
+    ctrl: Sender<CtrlMsg>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::macos::lock::MacLock;
+
+    match MacLock::new() {
+        Ok(lock) => spawn_lock_thread(lock, tx, ctrl),
+        Err(e) => {
+            tracing::warn!("lock signal unavailable: {e}");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_lock_thread(
+    lock: impl chronicle_capture::LockSignal + 'static,
+    tx: Sender<CaptureEvent>,
+    ctrl: Sender<CtrlMsg>,
+) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("lock".into())
         .spawn(move || {
@@ -213,19 +283,45 @@ pub(crate) fn spawn_presence_capture(
     config: &chronicle_core::config::Config,
     tx: Sender<CaptureEvent>,
 ) -> anyhow::Result<()> {
-    use chronicle_capture::PresenceProvider;
     use chronicle_capture::presence::X11PresenceProvider;
 
     if !config.capture_presence {
         return Ok(());
     }
-    let provider = match X11PresenceProvider::new() {
-        Ok(provider) => provider,
+    match X11PresenceProvider::new() {
+        Ok(provider) => spawn_presence_thread(provider, tx),
         Err(e) => {
             tracing::warn!("presence counts unavailable: {e}");
-            return Ok(());
+            Ok(())
         }
-    };
+    }
+}
+
+/// CoreGraphics event counters per minute (m38): the same four counts.
+#[cfg(target_os = "macos")]
+pub(crate) fn spawn_presence_capture(
+    config: &chronicle_core::config::Config,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
+    use chronicle_capture::macos::input::MacPresenceProvider;
+
+    if !config.capture_presence {
+        return Ok(());
+    }
+    match MacPresenceProvider::new() {
+        Ok(provider) => spawn_presence_thread(provider, tx),
+        Err(e) => {
+            tracing::warn!("presence counts unavailable: {e}");
+            Ok(())
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_presence_thread(
+    provider: impl chronicle_capture::PresenceProvider + 'static,
+    tx: Sender<CaptureEvent>,
+) -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("presence".into())
         .spawn(move || {
@@ -481,7 +577,12 @@ pub(crate) fn gcal_login(
     let state = random_hex(16)?;
     let endpoints = gcal::Endpoints::default();
     let url = gcal::auth_url(&endpoints, &client_id, &redirect_uri, &state);
-    let _ = Command::new("xdg-open")
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = Command::new(opener)
         .arg(&url)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -580,14 +681,14 @@ pub(crate) fn wait_for_oauth_code(
     bail!("the loopback listener closed before the code arrived")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn spawn_capture(
     _config: &Config,
     _data_dir: &Path,
     _tx: Sender<CaptureEvent>,
     _ctrl: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
-    bail!("capture on this platform lands in M9/M10")
+    bail!("capture on this platform lands in M40")
 }
 
 pub(crate) const AFK_POLL: Duration = Duration::from_secs(30);

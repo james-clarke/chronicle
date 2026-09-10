@@ -1,6 +1,6 @@
 //! Provider traits + platform impls (`#[cfg]`). Everything downstream
-//! consumes `CaptureEvent` only. Platform impls land in M1 (X11), M17 (macOS),
-//! M18 (Windows); the git poller (m15) and the AI session watcher (m22) are
+//! consumes `CaptureEvent` only. X11 (M1) and macOS (M38) are in; Windows
+//! lands in M40; the git poller (m15) and the AI session watcher (m22) are
 //! platform-independent.
 
 pub mod ai_sessions;
@@ -14,6 +14,8 @@ pub mod hooks;
 pub mod ics;
 #[cfg(target_os = "linux")]
 pub mod lock;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod mic;
 pub mod notes;

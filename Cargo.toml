@@ -13,6 +13,14 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
 ksni = "0.3"
+# macOS (m38): AppKit for the frontmost app, CoreFoundation values, libproc via libc,
+# a menu-bar icon.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSDictionary", "NSRunLoop", "NSThread", "NSDate", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "NSApplication", "NSResponder"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFString", "CFDictionary", "CFNumber", "CFArray"] }
+libc = "0.2"
+tray-icon = "0.24"
 # Same executor selection as ksni so the two share one zbus build.
 zbus = { version = "5", default-features = false, features = ["tokio", "blocking-api"] }
 tower = { version = "0.5", features = ["util"] }

@@ -16,7 +16,6 @@ ureq.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 jiff.workspace = true
-ksni.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -28,6 +27,15 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 x11rb.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 
 [features]
 metal = ["chronicle-derive/metal"]
