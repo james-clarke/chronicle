@@ -33,12 +33,27 @@ const CHROMIUM_DIRS: &[(&str, &str)] = &[
     ("vivaldi", "vivaldi"),
 ];
 
+/// `(dir under ~/Library/Application Support, browser id)` for the
+/// Chromium family on macOS. Both this and [`CHROMIUM_DIRS`] are always
+/// probed; a base that doesn't exist on the running OS is just skipped.
+const CHROMIUM_DIRS_MACOS: &[(&str, &str)] = &[
+    ("Google/Chrome", "chrome"),
+    ("Chromium", "chromium"),
+    ("BraveSoftware/Brave-Browser", "brave"),
+    ("Microsoft Edge", "edge"),
+    ("Vivaldi", "vivaldi"),
+    ("Arc/User Data", "arc"),
+];
+
 /// `(dir under ~, browser id)` for the Firefox family. Snap/flatpak
-/// installs (different data dirs) are out of scope.
+/// installs (different data dirs) are out of scope. Includes the macOS
+/// profile dir, which has the same `profiles.ini`/`*.default*` layout as
+/// `.mozilla/firefox`.
 const FIREFOX_DIRS: &[(&str, &str)] = &[
     (".mozilla/firefox", "firefox"),
     (".librewolf", "librewolf"),
     (".zen", "zen"),
+    ("Library/Application Support/Firefox/Profiles", "firefox"),
 ];
 
 /// Schemes with nothing worth remembering: extension pages, inline data,
@@ -309,6 +324,15 @@ pub fn profiles(home: &Path) -> Vec<(String, PathBuf)> {
             }
         }
     }
+    for &(dir, browser) in CHROMIUM_DIRS_MACOS {
+        let base = home.join("Library/Application Support").join(dir);
+        for profile_dir in chromium_profile_dirs(&base) {
+            let db = base.join(&profile_dir).join("History");
+            if db.is_file() {
+                out.push((browser.to_owned(), db));
+            }
+        }
+    }
     for &(dir, browser) in FIREFOX_DIRS {
         let base = home.join(dir);
         let Ok(entries) = std::fs::read_dir(&base) else {
@@ -355,6 +379,22 @@ impl BrowserProvider {
         let mut profiles = Vec::new();
         for &(dir, browser) in CHROMIUM_DIRS {
             let base = home.join(".config").join(dir);
+            for profile_dir in chromium_profile_dirs(&base) {
+                let db = base.join(&profile_dir).join("History");
+                if db.is_file() {
+                    let is_default = profile_dir == "Default";
+                    profiles.push(Profile::new(
+                        browser,
+                        profile_dir,
+                        is_default,
+                        Family::Chromium,
+                        db,
+                    ));
+                }
+            }
+        }
+        for &(dir, browser) in CHROMIUM_DIRS_MACOS {
+            let base = home.join("Library/Application Support").join(dir);
             for profile_dir in chromium_profile_dirs(&base) {
                 let db = base.join(&profile_dir).join("History");
                 if db.is_file() {
@@ -604,5 +644,65 @@ mod tests {
         let ids: Vec<&str> = events.iter().filter_map(|e| e.ext_id.as_deref()).collect();
         assert!(ids.contains(&"chrome:1"), "{ids:?}");
         assert!(ids.contains(&"chrome/Profile 2:1"), "{ids:?}");
+    }
+
+    #[test]
+    fn macos_chrome_and_firefox_profile_dirs_are_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let now_ms = Timestamp::now().as_millisecond();
+
+        let chrome_dir = home.join("Library/Application Support/Google/Chrome/Default");
+        std::fs::create_dir_all(&chrome_dir).unwrap();
+        let t = chromium_us_from_ms(now_ms - 10_000);
+        chromium_db(
+            &chrome_dir.join("History"),
+            "https://example.com/mac",
+            "Mac Chrome",
+            1,
+            t,
+        );
+
+        let ff_dir =
+            home.join("Library/Application Support/Firefox/Profiles/abc123.default-release");
+        std::fs::create_dir_all(&ff_dir).unwrap();
+        let ff_db = ff_dir.join("places.sqlite");
+        {
+            let conn = Connection::open(&ff_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE moz_places(id INTEGER PRIMARY KEY, url TEXT, title TEXT);
+                 CREATE TABLE moz_historyvisits(id INTEGER PRIMARY KEY, place_id INTEGER, visit_date INTEGER);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO moz_places VALUES (1, 'https://example.org/mac', 'Mac Firefox')",
+                [],
+            )
+            .unwrap();
+            let t = firefox_us_from_ms(now_ms - 5_000);
+            conn.execute(
+                "INSERT INTO moz_historyvisits VALUES (7, 1, ?1)",
+                params![t],
+            )
+            .unwrap();
+        }
+
+        let found = profiles(home);
+        assert!(
+            found
+                .iter()
+                .any(|(b, p)| b == "chrome" && *p == chrome_dir.join("History")),
+            "{found:?}"
+        );
+        assert!(
+            found.iter().any(|(b, p)| b == "firefox" && *p == ff_db),
+            "{found:?}"
+        );
+
+        let mut provider = BrowserProvider::new(home);
+        let events = provider.poll();
+        let ids: Vec<&str> = events.iter().filter_map(|e| e.ext_id.as_deref()).collect();
+        assert!(ids.contains(&"chrome:1"), "{ids:?}");
+        assert!(ids.contains(&"firefox:7"), "{ids:?}");
     }
 }

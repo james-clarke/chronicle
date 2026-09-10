@@ -32,7 +32,10 @@ pub(crate) fn run_main(ctrl_tx: Sender<CtrlMsg>) -> ! {
     }
 
     app.run();
-    unreachable!("NSApplication::run never returns");
+    // `-[NSApplication run]` does return if something sends it `stop:`;
+    // there's nothing left to run at that point, so exit rather than assert
+    // the unreachable (`exit` is `-> !`, so the fn signature still holds).
+    std::process::exit(0);
 }
 
 /// The status item and its "Show/Hide" / "Quit" menu (same `CtrlMsg`s as the
@@ -45,7 +48,7 @@ fn build_tray() -> tray_icon::Result<(tray_icon::TrayIcon, MenuId, MenuId)> {
     menu.append_items(&[&show_hide, &quit])
         .map_err(|e| tray_icon::Error::OsError(std::io::Error::other(e)))?;
 
-    let (width, height, rgba) = crate::daemon::tray_pixels();
+    let (width, height, rgba) = crate::daemon::tray_pixels(44);
     // Template icon: alpha-only (r=g=b=0), so AppKit tints it for light and
     // dark menu bars instead of showing it in the fixed accent color.
     let (pixels, _) = rgba.as_chunks::<4>();

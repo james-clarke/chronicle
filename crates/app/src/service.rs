@@ -154,6 +154,12 @@ mod macos_impl {
         }
         std::fs::write(&path, plist).map_err(|e| e.to_string())?;
         let uid = uid()?;
+        // A previous `remove` left the label disabled (persistent flag,
+        // survives across boots); re-enable before bootstrapping so a
+        // reinstall isn't silently refused.
+        let _ = std::process::Command::new("launchctl")
+            .args(["enable", &format!("gui/{uid}/{LABEL}")])
+            .output();
         let out = std::process::Command::new("launchctl")
             .args([
                 "bootstrap",
@@ -162,35 +168,35 @@ mod macos_impl {
             ])
             .output()
             .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-            let already_loaded =
-                stderr.contains("already") || matches!(out.status.code(), Some(37) | Some(5));
-            if !already_loaded {
-                return Err(format!(
-                    "launchctl bootstrap failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
+        // launchd's exit code 5 covers every generic bootstrap failure (bad
+        // plist, permissions, no GUI session) as well as "already
+        // bootstrapped" — it isn't diagnostic on its own. Ask launchd
+        // directly instead of pattern-matching the exit code.
+        let print = std::process::Command::new("launchctl")
+            .args(["print", &format!("gui/{uid}/{LABEL}")])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !print.status.success() {
+            return Err(format!(
+                "launchctl bootstrap failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         Ok("installed \u{2014} Chronicle will start at your next login".into())
     }
 
+    /// `bootout` SIGTERMs the whole job tree — the UI child and the daemon
+    /// it runs under, not just the LaunchAgent registration — so a "run at
+    /// login" toggle would kill the running app out from under the user.
+    /// `disable` only flips launchd's persistent load flag (mirrors the
+    /// Linux `systemctl --user disable` path, which is also without
+    /// `--now`); the running process is left alone and the plist removal
+    /// below is what actually stops it starting again next login.
     pub(crate) fn remove() -> Result<String, String> {
         let uid = uid()?;
-        let out = std::process::Command::new("launchctl")
-            .args(["bootout", &format!("gui/{uid}/{LABEL}")])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-            if !stderr.contains("not found") && !stderr.contains("no such process") {
-                return Err(format!(
-                    "launchctl bootout failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-        }
+        let _ = std::process::Command::new("launchctl")
+            .args(["disable", &format!("gui/{uid}/{LABEL}")])
+            .output();
         if let Ok(path) = plist_path() {
             let _ = std::fs::remove_file(path);
         }
@@ -248,9 +254,18 @@ pub(crate) use other_impl::{available, install, installed, remove, status};
 #[allow(dead_code)]
 pub(crate) fn render_plist(exe: &Path, log: &Path, home: &Path) -> String {
     include_str!("../../../packaging/dev.chronicled.chronicle.plist")
-        .replace("@EXE@", &exe.display().to_string())
-        .replace("@LOG@", &log.display().to_string())
-        .replace("@HOME@", &home.display().to_string())
+        .replace("@EXE@", &xml_escape(&exe.display().to_string()))
+        .replace("@LOG@", &xml_escape(&log.display().to_string()))
+        .replace("@HOME@", &xml_escape(&home.display().to_string()))
+}
+
+/// Escape the three XML metacharacters a path could plausibly contain
+/// before splicing it into the plist template.
+#[allow(dead_code)]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -267,5 +282,16 @@ mod tests {
         assert!(rendered.contains("/usr/local/bin/chronicle"));
         assert!(rendered.contains("dev.chronicled.chronicle"));
         assert!(rendered.contains("<key>KeepAlive</key>"));
+    }
+
+    #[test]
+    fn plist_escapes_ampersand_in_exe_path() {
+        let rendered = render_plist(
+            Path::new("/Users/j/dev & build/chronicle"),
+            Path::new("/Users/j/logs/launchd.log"),
+            Path::new("/Users/j"),
+        );
+        assert!(rendered.contains("/Users/j/dev &amp; build/chronicle"));
+        assert!(!rendered.contains("dev & build"));
     }
 }

@@ -121,32 +121,36 @@ fn rows_for(parent: u32) -> Vec<Row> {
 /// tab), else the terminal's own cwd.
 pub fn terminal_cwd(pid: u32) -> Option<String> {
     let mut rows = rows_for(pid);
-    if let Some(login_pid) = rows
+    // Terminal.app and iTerm2 wrap every tab's shell in its own `login`.
+    let logins: Vec<u32> = rows
         .iter()
-        .find(|(_, name, _, _)| name == "login")
+        .filter(|(_, name, _, _)| name == "login")
         .map(|r| r.0)
-    {
+        .collect();
+    for login_pid in logins {
         rows.extend(rows_for(login_pid));
     }
     cwd(pick_terminal_child(pid, &rows))
 }
 
-/// Pure pick over process rows: the newest direct child of `terminal` by
-/// start time; when one of those children is `login` (Terminal.app and
-/// iTerm2 spawn it before the shell), the newest of *its* children
-/// instead. `terminal` itself when it has no usable children.
+/// Pure pick over process rows: the newest shell under `terminal` by start
+/// time, where a `login` child (Terminal.app and iTerm2 spawn one per tab
+/// before the shell) stands for its own children. `terminal` itself when it
+/// has no usable children.
 fn pick_terminal_child(terminal: u32, rows: &[Row]) -> u32 {
     let children_of =
         |parent: u32| -> Vec<&Row> { rows.iter().filter(|(_, _, _, p)| *p == parent).collect() };
-    let mut candidates = children_of(terminal);
-    if let Some(login_pid) = candidates
-        .iter()
-        .find(|(_, name, _, _)| name == "login")
-        .map(|r| r.0)
-    {
-        let login_children = children_of(login_pid);
-        if !login_children.is_empty() {
-            candidates = login_children;
+    let mut candidates = Vec::new();
+    for child in children_of(terminal) {
+        let shells = if child.1 == "login" {
+            children_of(child.0)
+        } else {
+            Vec::new()
+        };
+        if shells.is_empty() {
+            candidates.push(child);
+        } else {
+            candidates.extend(shells);
         }
     }
     candidates
@@ -187,6 +191,17 @@ mod tests {
             row(402, "bash", 40, 300),
         ];
         assert_eq!(pick_terminal_child(100, &rows), 402);
+    }
+
+    #[test]
+    fn newest_tab_wins_across_login_wrappers() {
+        let rows = vec![
+            row(300, "login", 5, 100),
+            row(401, "zsh", 10, 300),
+            row(310, "login", 50, 100),
+            row(411, "zsh", 60, 310),
+        ];
+        assert_eq!(pick_terminal_child(100, &rows), 411);
     }
 
     #[test]

@@ -31,7 +31,13 @@ unsafe extern "C" {
     /// `options` may be omitted (equivalent to plain `AXIsProcessTrusted`);
     /// `Some` with `kAXTrustedCheckOptionPrompt` set to `true` shows the
     /// system consent alert.
-    pub fn AXIsProcessTrustedWithOptions(options: Option<&CFDictionary>) -> bool;
+    /// Returns a CF `Boolean` (`unsigned char`), never a C `_Bool`: compare
+    /// against 0 rather than declaring `bool`.
+    pub fn AXIsProcessTrustedWithOptions(options: Option<&CFDictionary>) -> u8;
+
+    /// Cap on how long a synchronous AX request waits on the target app
+    /// (the default is several seconds; a hung app would stall the poll).
+    pub fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout_secs: f32) -> AXError;
 
     /// The one key `AXIsProcessTrustedWithOptions` understands.
     pub static kAXTrustedCheckOptionPrompt: &'static CFString;
@@ -50,6 +56,7 @@ pub const EVENT_OTHER_MOUSE_DOWN: u32 = 25;
 pub const EVENT_MOUSE_MOVED: u32 = 5;
 pub const EVENT_LEFT_MOUSE_DRAGGED: u32 = 6;
 pub const EVENT_RIGHT_MOUSE_DRAGGED: u32 = 7;
+pub const EVENT_OTHER_MOUSE_DRAGGED: u32 = 27;
 pub const EVENT_SCROLL_WHEEL: u32 = 22;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -57,8 +64,9 @@ unsafe extern "C" {
     /// Seconds since the last input event of `event_type` on `state_id`.
     pub fn CGEventSourceSecondsSinceLastEventType(state_id: i32, event_type: u32) -> f64;
 
-    /// A per-event-type counter that increments forever and wraps; only
-    /// deltas between two reads are meaningful (input.rs folds them).
+    /// A per-event-type counter that increments for the session and
+    /// restarts at 0 with it; only deltas between two reads are meaningful
+    /// (input.rs folds them).
     pub fn CGEventSourceCounterForEventType(state_id: i32, event_type: u32) -> u32;
 
     /// Null when there is no session (e.g. fast user switching); the

@@ -1,8 +1,9 @@
-//! Frontmost-app polling (m38): `NSWorkspace` has no "focus changed"
-//! notification worth a run loop, so this polls once a second — X11 already
-//! debounces titles to that granularity (x11.rs:33), so nothing downstream
-//! sees a coarser signal. Window titles come from the Accessibility API,
-//! which needs a one-time user grant; without it every title is empty.
+//! Frontmost-app polling (m38): `NSWorkspace`'s activation notification
+//! needs a run loop, so this polls once a second instead — X11 pushes focus
+//! edges and debounces titles to 1 s (x11.rs:33), so the only loss is a
+//! focus visit shorter than a second. Window titles come from the
+//! Accessibility API, which needs a one-time user grant; without it every
+//! title is empty.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -26,10 +27,17 @@ const TRUST_RECHECK: Duration = Duration::from_secs(30);
 pub struct MacFocusProvider;
 
 impl MacFocusProvider {
+    /// Asks for the Accessibility grant once with the prompt option, which
+    /// is also what makes TCC list the binary under Privacy & Security.
     pub fn new() -> Result<Self, BoxError> {
+        ax::trusted(true);
         Ok(Self)
     }
 }
+
+/// Cap on one synchronous AX request, so a hung frontmost app costs the
+/// poll a quarter second rather than the system default of several.
+const AX_TIMEOUT_SECS: f32 = 0.25;
 
 struct State {
     last_pid: Option<i32>,
@@ -56,6 +64,10 @@ fn window_title(pid: i32) -> String {
     };
     // SAFETY: `AXUIElementCreateApplication` follows the Create rule.
     let app: CFRetained<CFType> = unsafe { CFRetained::from_raw(app) };
+    // SAFETY: `app` is a live AX element; the call only records a timeout.
+    let _ = unsafe {
+        ffi::AXUIElementSetMessagingTimeout(CFRetained::as_ptr(&app).as_ptr(), AX_TIMEOUT_SECS)
+    };
 
     let focused_window = CFString::from_str("AXFocusedWindow");
     let mut window: *const CFType = std::ptr::null();
@@ -148,65 +160,70 @@ impl FocusProvider for MacFocusProvider {
             state.warned = true;
         }
         loop {
-            if state.trust_checked.elapsed() >= TRUST_RECHECK {
-                state.trusted = ax::trusted(false);
-                state.trust_checked = Instant::now();
-                if state.trusted {
-                    state.warned = false;
-                } else if !state.warned {
-                    tracing::warn!("Accessibility not granted: window titles unavailable");
-                    state.warned = true;
+            // AppKit returns autoreleased objects; a plain thread has no pool,
+            // so without one every poll leaks.
+            objc2::rc::autoreleasepool(|_| -> Result<(), BoxError> {
+                if state.trust_checked.elapsed() >= TRUST_RECHECK {
+                    state.trusted = ax::trusted(false);
+                    state.trust_checked = Instant::now();
+                    if state.trusted {
+                        state.warned = false;
+                    } else if !state.warned {
+                        tracing::warn!("Accessibility not granted: window titles unavailable");
+                        state.warned = true;
+                    }
                 }
-            }
 
-            let app = workspace.frontmostApplication();
-            let (name, pid) = match app {
-                Some(app) => {
-                    let name = app
-                        .localizedName()
-                        .map(|s| s.to_string())
-                        .or_else(|| app.bundleIdentifier().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let pid = app.processIdentifier();
-                    (name, if pid >= 0 { Some(pid) } else { None })
-                }
-                None => ("unknown".to_string(), None),
-            };
-            let title = if state.trusted {
-                pid.map(window_title).unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let u32_pid = pid.map(|p| p as u32);
-
-            if pid != state.last_pid {
-                state.last_pid = pid;
-                state.last_app = name.clone();
-                state.last_title = title.clone();
-                let event = FocusEvent {
-                    ts: Timestamp::now(),
-                    app: name.clone(),
-                    title,
-                    pid: u32_pid,
+                let app = workspace.frontmostApplication();
+                let (name, pid) = match app {
+                    Some(app) => {
+                        let name = app
+                            .localizedName()
+                            .map(|s| s.to_string())
+                            .or_else(|| app.bundleIdentifier().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let pid = app.processIdentifier();
+                        (name, if pid >= 0 { Some(pid) } else { None })
+                    }
+                    None => ("unknown".to_string(), None),
                 };
-                if tx.send(CaptureEvent::Focus(event)).is_err() {
-                    return Err("event channel closed".into());
-                }
-                state.probe_cwd(&name, u32_pid, &tx);
-            } else if title != state.last_title {
-                state.last_title = title.clone();
-                let event = FocusEvent {
-                    ts: Timestamp::now(),
-                    app: state.last_app.clone(),
-                    title,
-                    pid: u32_pid,
+                let title = if state.trusted {
+                    pid.map(window_title).unwrap_or_default()
+                } else {
+                    String::new()
                 };
-                if tx.send(CaptureEvent::TitleChanged(event)).is_err() {
-                    return Err("event channel closed".into());
-                }
-                state.probe_cwd(&state.last_app.clone(), u32_pid, &tx);
-            }
+                let u32_pid = pid.map(|p| p as u32);
 
+                if pid != state.last_pid {
+                    state.last_pid = pid;
+                    state.last_app = name.clone();
+                    state.last_title = title.clone();
+                    let event = FocusEvent {
+                        ts: Timestamp::now(),
+                        app: name.clone(),
+                        title,
+                        pid: u32_pid,
+                    };
+                    if tx.send(CaptureEvent::Focus(event)).is_err() {
+                        return Err("event channel closed".into());
+                    }
+                    state.probe_cwd(&name, u32_pid, &tx);
+                } else if title != state.last_title {
+                    state.last_title = title.clone();
+                    let event = FocusEvent {
+                        ts: Timestamp::now(),
+                        app: state.last_app.clone(),
+                        title,
+                        pid: u32_pid,
+                    };
+                    if tx.send(CaptureEvent::TitleChanged(event)).is_err() {
+                        return Err("event channel closed".into());
+                    }
+                    state.probe_cwd(&state.last_app.clone(), u32_pid, &tx);
+                }
+
+                Ok(())
+            })?;
             std::thread::sleep(POLL);
         }
     }

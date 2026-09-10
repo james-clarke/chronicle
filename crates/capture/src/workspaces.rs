@@ -43,6 +43,17 @@ pub fn read_all(home: &Path) -> Vec<Workspace> {
         let user_root = home.join(".config").join(dir).join("User");
         out.extend(read_vscdb(&user_root, editor));
         out.extend(read_workspace_storage(&user_root, editor));
+
+        // macOS: same editor dir names, under Application Support instead
+        // of .config. Both bases are always probed; a missing one is
+        // skipped by the read_dir/open calls inside read_vscdb /
+        // read_workspace_storage.
+        let macos_user_root = home
+            .join("Library/Application Support")
+            .join(dir)
+            .join("User");
+        out.extend(read_vscdb(&macos_user_root, editor));
+        out.extend(read_workspace_storage(&macos_user_root, editor));
     }
     out.extend(read_jetbrains(home));
     out.extend(read_zed(home));
@@ -252,17 +263,21 @@ fn percent_decode(s: &str) -> String {
 // ---------------------------------------------------------------------
 
 fn read_jetbrains(home: &Path) -> Vec<Workspace> {
-    let root = home.join(".config").join("JetBrains");
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let xml_path = entry.path().join("options").join("recentProjects.xml");
-        let Ok(text) = std::fs::read_to_string(&xml_path) else {
+    for root in [
+        home.join(".config").join("JetBrains"),
+        home.join("Library/Application Support").join("JetBrains"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
-        out.extend(parse_jetbrains_xml(&text, home));
+        for entry in entries.flatten() {
+            let xml_path = entry.path().join("options").join("recentProjects.xml");
+            let Ok(text) = std::fs::read_to_string(&xml_path) else {
+                continue;
+            };
+            out.extend(parse_jetbrains_xml(&text, home));
+        }
     }
     out
 }
@@ -309,18 +324,24 @@ fn extract_xml_attr(block: &str, name: &str) -> Option<String> {
 // ---------------------------------------------------------------------
 
 fn read_zed(home: &Path) -> Vec<Workspace> {
-    let root = home.join(".local").join("share").join("zed").join("db");
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let db_path = entry.path().join("db.sqlite");
-        if !db_path.is_file() {
+    for root in [
+        home.join(".local").join("share").join("zed").join("db"),
+        home.join("Library/Application Support")
+            .join("Zed")
+            .join("db"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
-        }
-        if let Some(rows) = with_temp_copy(&db_path, read_zed_workspaces).flatten() {
-            out.extend(rows);
+        };
+        for entry in entries.flatten() {
+            let db_path = entry.path().join("db.sqlite");
+            if !db_path.is_file() {
+                continue;
+            }
+            if let Some(rows) = with_temp_copy(&db_path, read_zed_workspaces).flatten() {
+                out.extend(rows);
+            }
         }
     }
     out
@@ -566,6 +587,87 @@ mod tests {
 
         let cands = candidates(&ws);
         assert_eq!(cands, vec![repo]);
+    }
+
+    #[test]
+    fn macos_roots_are_found_for_vscode_jetbrains_and_zed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // --- VS Code family, under Library/Application Support ---
+        let user_root = home.join("Library/Application Support/Code/User");
+        let vscdb = user_root.join("globalStorage/state.vscdb");
+        fs::create_dir_all(vscdb.parent().unwrap()).unwrap();
+        let recent = json!({
+            "entries": [
+                {"folderUri": "file:///home/u/dev/mac-repo"},
+            ]
+        })
+        .to_string();
+        {
+            let conn = Connection::open(&vscdb).unwrap();
+            conn.execute_batch("CREATE TABLE ItemTable (key TEXT, value BLOB)")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+                params!["history.recentlyOpenedPathsList", recent],
+            )
+            .unwrap();
+        }
+
+        // --- JetBrains, under Library/Application Support ---
+        let jb_options =
+            home.join("Library/Application Support/JetBrains/IntelliJIdea2024.2/options");
+        fs::create_dir_all(&jb_options).unwrap();
+        fs::write(
+            jb_options.join("recentProjects.xml"),
+            r#"<component name="RecentProjectsManager">
+  <option name="additionalInfo">
+    <map>
+      <entry key="$USER_HOME$/dev/mac-jb">
+        <value><RecentProjectMetaInfo>
+          <option name="activationTimestamp" value="1725900000000" />
+        </RecentProjectMetaInfo></value>
+      </entry>
+    </map>
+  </option>
+</component>"#,
+        )
+        .unwrap();
+
+        // --- Zed, under Library/Application Support/Zed/db ---
+        let zed_dir = home.join("Library/Application Support/Zed/db/abcdef");
+        fs::create_dir_all(&zed_dir).unwrap();
+        let zed_db = zed_dir.join("db.sqlite");
+        {
+            let conn = Connection::open(&zed_db).unwrap();
+            conn.execute_batch("CREATE TABLE workspaces (paths TEXT, timestamp TEXT)")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO workspaces (paths, timestamp) VALUES (?1, ?2)",
+                params!["/home/u/dev/mac-zed", "2026-09-01 12:00:00"],
+            )
+            .unwrap();
+        }
+
+        let ws = read_all(home);
+
+        assert!(
+            ws.iter()
+                .any(|w| w.editor == "vscode" && w.path == "/home/u/dev/mac-repo"),
+            "{ws:?}"
+        );
+        let jb_path = home.join("dev/mac-jb").display().to_string();
+        assert!(
+            ws.iter()
+                .any(|w| w.editor == "jetbrains" && w.path == jb_path),
+            "{ws:?}"
+        );
+        assert!(
+            ws.iter()
+                .any(|w| w.editor == "zed" && w.path == "/home/u/dev/mac-zed"),
+            "{ws:?}"
+        );
     }
 
     #[test]

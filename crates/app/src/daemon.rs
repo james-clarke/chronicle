@@ -215,27 +215,28 @@ impl ksni::Tray for ChronicleTray {
 /// Procedural icon (filled circle, UI accent blue) — no image asset/dep.
 /// Platform-neutral RGBA8 pixels: ksni's [`tray_icon`] packs them to ARGB,
 /// tray-icon on macOS (`tray_macos.rs`) takes RGBA (and a black/alpha
-/// variant as its template icon) directly via `Icon::from_rgba`.
-pub(crate) fn tray_pixels() -> (u32, u32, Vec<u8>) {
-    const SIZE: u32 = 22;
+/// variant as its template icon) directly via `Icon::from_rgba`. `size` is
+/// the square's edge in pixels: ksni wants 22, tray-icon on macOS wants 44
+/// (it rescales its template icon to 18pt, so 44px stays crisp on Retina).
+pub(crate) fn tray_pixels(size: u32) -> (u32, u32, Vec<u8>) {
     let (r, g, b) = (0x5e_u8, 0x87_u8, 0xea_u8);
-    let c = (SIZE - 1) as f32 / 2.0;
+    let c = (size - 1) as f32 / 2.0;
     let radius = c - 1.0;
-    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for y in 0..SIZE {
-        for x in 0..SIZE {
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
             let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
             // 1px soft edge.
             let a = ((radius + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
             data.extend_from_slice(&[r, g, b, a]);
         }
     }
-    (SIZE, SIZE, data)
+    (size, size, data)
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn tray_icon() -> ksni::Icon {
-    let (width, height, rgba) = tray_pixels();
+    let (width, height, rgba) = tray_pixels(22);
     // ARGB32 in network byte order, ksni's own format.
     let mut data = Vec::with_capacity(rgba.len());
     let (pixels, _) = rgba.as_chunks::<4>();
@@ -373,6 +374,24 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     // thread hosts the tray for the rest of the process's life.
     #[cfg(target_os = "macos")]
     {
+        // A panic on the daemon-main thread must not leave the main thread
+        // parked in `NSApplication::run()` with a dead daemon behind it:
+        // launchd only relaunches on process exit, and a panicked thread
+        // alone doesn't produce one. Run the default hook first (still logs
+        // to stderr/log file), then force the exit ourselves.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            prev_hook(info);
+            tracing::error!("panic on daemon-main thread: {info}");
+            std::process::exit(101);
+        }));
+        // No GUI session (over ssh, or run as a LaunchDaemon rather than a
+        // LaunchAgent): `NSApplication::sharedApplication` aborts in
+        // `_RegisterApplication` without one, so skip the tray and run the
+        // loop on this thread instead.
+        if !chronicle_capture::macos::lock::gui_session() {
+            return run_loop(data_dir, listener, ctrl_tx, ctrl_rx);
+        }
         let data_dir = data_dir.to_path_buf();
         let tray_ctrl_tx = ctrl_tx.clone();
         std::thread::Builder::new()

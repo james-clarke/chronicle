@@ -283,6 +283,10 @@ impl TimelineApp {
             );
             ui.add_space(4.0);
             if theme::primary_button(ui, "Open System Settings").clicked() {
+                // The prompt option is what makes TCC create an Accessibility
+                // entry for this binary at all; without it, the pane opens
+                // with Chronicle simply missing from the list to toggle.
+                let _ = chronicle_capture::macos::ax::trusted(true);
                 let _ = std::process::Command::new("open")
                     .arg(
                         "x-apple.systempreferences:com.apple.preference.security\

@@ -16,6 +16,8 @@
 		<key>SuccessfulExit</key>
 		<false/>
 	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>LimitLoadToSessionType</key>

@@ -36,11 +36,8 @@ impl AfkProvider for MacAfkProvider {
 }
 
 /// A snapshot of the four raw event counters CoreGraphics tracks, each
-/// itself the wrapping sum of the underlying `CGEventType`s that make up
-/// one presence dimension (m38 design: multiple button/motion event types
-/// fold into one count). Summing before differencing is still exact across
-/// a wrap of any individual counter, since `u32` wrapping subtraction is
-/// modular.
+/// the sum of the `CGEventType`s that make up one presence dimension
+/// (several button and motion event types fold into one count).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Counters {
     keys: u32,
@@ -64,19 +61,24 @@ impl Counters {
                 .wrapping_add(counter(ffi::EVENT_OTHER_MOUSE_DOWN)),
             motion: counter(ffi::EVENT_MOUSE_MOVED)
                 .wrapping_add(counter(ffi::EVENT_LEFT_MOUSE_DRAGGED))
-                .wrapping_add(counter(ffi::EVENT_RIGHT_MOUSE_DRAGGED)),
+                .wrapping_add(counter(ffi::EVENT_RIGHT_MOUSE_DRAGGED))
+                .wrapping_add(counter(ffi::EVENT_OTHER_MOUSE_DRAGGED)),
             scroll: counter(ffi::EVENT_SCROLL_WHEEL),
         }
     }
 }
 
-/// Adds the wrapping deltas between `prev` and `now` into `cur`'s counts.
-/// Pure so it runs without CoreGraphics.
+/// Adds the deltas between `prev` and `now` into `cur`'s counts. A counter
+/// below its previous read is a session restart (fast user switch,
+/// loginwindow), not a wrap: 2^32 events cannot happen inside one poll, so
+/// that poll contributes nothing rather than four billion. Pure so it runs
+/// without CoreGraphics.
 fn fold(prev: &Counters, now: &Counters, cur: &mut PresenceMinute) {
-    cur.keys += now.keys.wrapping_sub(prev.keys);
-    cur.buttons += now.buttons.wrapping_sub(prev.buttons);
-    cur.motion += now.motion.wrapping_sub(prev.motion);
-    cur.scroll += now.scroll.wrapping_sub(prev.scroll);
+    let delta = |now: u32, prev: u32| now.saturating_sub(prev);
+    cur.keys += delta(now.keys, prev.keys);
+    cur.buttons += delta(now.buttons, prev.buttons);
+    cur.motion += delta(now.motion, prev.motion);
+    cur.scroll += delta(now.scroll, prev.scroll);
 }
 
 fn minute_of(ms: i64) -> i64 {
@@ -145,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_handles_wraparound() {
+    fn fold_treats_a_counter_reset_as_no_input() {
         let prev = Counters {
             keys: u32::MAX - 2,
             buttons: 0,
@@ -160,8 +162,9 @@ mod tests {
         };
         let mut cur = PresenceMinute::default();
         fold(&prev, &now, &mut cur);
-        // Wrapped past u32::MAX: -2 -> -1 -> 0 -> 1 -> 2 is 5 key events.
-        assert_eq!(cur.keys, 5);
+        // A counter that went backwards restarted with the session: this
+        // poll counts nothing instead of ~4 billion keys.
+        assert_eq!(cur.keys, 0);
     }
 
     #[test]

@@ -53,3 +53,20 @@ impl LockSignal for MacLock {
         }
     }
 }
+
+/// Whether this process runs inside a GUI login session: the session
+/// dictionary is null over ssh and under a LaunchDaemon, where AppKit
+/// (the menu-bar icon) must not be started.
+pub fn gui_session() -> bool {
+    // SAFETY: Copy rule; null is the documented "no session" result.
+    let ptr = unsafe { ffi::CGSessionCopyCurrentDictionary() };
+    match NonNull::new(ptr) {
+        Some(ptr) => {
+            // SAFETY: non-null Copy-rule result, released on drop.
+            let _dict: CFRetained<CFDictionary<CFString, CFType>> =
+                unsafe { CFRetained::from_raw(ptr) };
+            true
+        }
+        None => false,
+    }
+}

@@ -94,6 +94,11 @@ impl CoreAudioMic {
 impl MicSource for CoreAudioMic {
     fn active_inputs(&mut self) -> Result<Vec<String>, String> {
         let device = Self::default_input_device()?;
+        // `kAudioObjectUnknown`: no input device at all, which is "no call",
+        // not an error to warn about every poll.
+        if device == 0 {
+            return Ok(Vec::new());
+        }
         if Self::is_running(device)? {
             Ok(vec!["microphone".to_owned()])
         } else {

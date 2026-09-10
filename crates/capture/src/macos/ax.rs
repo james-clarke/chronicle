@@ -24,5 +24,5 @@ pub fn trusted(prompt: bool) -> bool {
     let key = unsafe { ffi::kAXTrustedCheckOptionPrompt };
     let options = CFDictionary::from_slices(&[key], &[value]);
     // SAFETY: `options` is a valid dictionary kept alive for the call.
-    unsafe { ffi::AXIsProcessTrustedWithOptions(Some(options.as_opaque())) }
+    unsafe { ffi::AXIsProcessTrustedWithOptions(Some(options.as_opaque())) != 0 }
 }
