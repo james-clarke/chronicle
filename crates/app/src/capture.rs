@@ -6,11 +6,17 @@ use anyhow::{Context, bail};
 use chronicle_core::config::Config;
 
 use crate::daemon::CtrlMsg;
+#[cfg(target_os = "linux")]
+use chronicle_capture::wayland::Route;
 use chronicle_core::types::CaptureEvent;
 use crossbeam_channel::Sender;
 use jiff::{Timestamp, ToSpan};
 use regex::Regex;
 
+/// Linux: the focus route is X11 or one of the two Wayland routes (m39),
+/// chosen from `focus_route` and the session environment. Focus is the
+/// load-bearing provider, so a session with no route fails the daemon with
+/// the reason rather than starting blind.
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn_capture(
     config: &Config,
@@ -18,15 +24,40 @@ pub(crate) fn spawn_capture(
     tx: Sender<CaptureEvent>,
     ctrl: Sender<CtrlMsg>,
 ) -> anyhow::Result<()> {
-    use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
+    let route = focus_route(config)?;
+    tracing::info!(route = route.as_str(), "focus route");
+    match route {
+        Route::X11 => {
+            use chronicle_capture::x11::{X11AfkProvider, X11FocusProvider};
 
-    let focus = X11FocusProvider::new().map_err(|e| anyhow::anyhow!("X11 focus provider: {e}"))?;
-    spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+            let focus =
+                X11FocusProvider::new().map_err(|e| anyhow::anyhow!("X11 focus provider: {e}"))?;
+            spawn_focus_thread(focus, tx.clone(), ctrl.clone())?;
+            let afk =
+                X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
+            spawn_afk_thread(config, afk, tx.clone())?;
+        }
+        Route::Wlr => anyhow::bail!("the wlroots focus route lands in m39 chunk 1"),
+        Route::Kwin => anyhow::bail!("the KWin focus route lands in m39 chunk 3"),
+    }
     spawn_lock_capture(tx.clone(), ctrl)?;
-    let afk = X11AfkProvider::new().map_err(|e| anyhow::anyhow!("X11 afk provider: {e}"))?;
-    spawn_afk_thread(config, afk, tx.clone())?;
-    spawn_presence_capture(config, tx.clone())?;
+    spawn_presence_capture(config, route, tx.clone())?;
     spawn_common(config, data_dir, tx)
+}
+
+#[cfg(target_os = "linux")]
+fn focus_route(config: &Config) -> anyhow::Result<Route> {
+    use chronicle_capture::wayland::Choice;
+
+    let route =
+        match chronicle_capture::wayland::choose(&config.focus_route, |k| std::env::var(k).ok())
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+        {
+            Choice::Route(route) => route,
+            // The one case that needs the compositor's answer: bound in chunk 1.
+            Choice::ProbeWlr => Route::Wlr,
+        };
+    Ok(route)
 }
 
 /// macOS (m38): the same shape as Linux with the polling providers in
@@ -276,16 +307,23 @@ fn spawn_lock_thread(
 }
 
 /// XI2 raw-event counts per minute (m32 chunk 1): keys, buttons, motion,
-/// scroll — never which. Off by config, or when the server lacks XInput 2;
-/// never load-bearing.
+/// scroll — never which. Off by config, on a Wayland route, or when the
+/// server lacks XInput 2; never load-bearing.
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn_presence_capture(
     config: &chronicle_core::config::Config,
+    route: Route,
     tx: Sender<CaptureEvent>,
 ) -> anyhow::Result<()> {
     use chronicle_capture::presence::X11PresenceProvider;
 
     if !config.capture_presence {
+        return Ok(());
+    }
+    // No Wayland protocol reports input to an ordinary client, and evdev
+    // needs the `input` group no packaged install grants (m39).
+    if route != Route::X11 {
+        tracing::info!("presence counts unavailable on Wayland; idle still works");
         return Ok(());
     }
     match X11PresenceProvider::new() {

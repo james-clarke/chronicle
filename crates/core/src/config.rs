@@ -32,7 +32,13 @@ pub struct Config {
     pub away_secs: u32,
     /// Count keys / buttons / motion / scroll per minute into `presence`
     /// (counts only, never what was typed). Off = no row is written.
+    /// Linux X11 and macOS only: Wayland has no protocol for it (m39).
     pub capture_presence: bool,
+    /// Which focus provider runs on Linux (m39): `auto` reads the session
+    /// environment, `x11` forces X11 (which is also how to capture X
+    /// clients through Xwayland), `wlr` the wlr-foreign-toplevel protocol,
+    /// `kwin` the KWin script. Ignored on macOS.
+    pub focus_route: String,
     /// Derivation may start when idle at least this long.
     pub derive_idle_secs: u32,
     /// Live tier (m27): while active, the resident worker labels the current
@@ -172,6 +178,7 @@ impl Default for Config {
             quiet_secs: 600,
             away_secs: 1800,
             capture_presence: true,
+            focus_route: "auto".into(),
             derive_idle_secs: 300,
             live_secs: 300,
             worker_idle_secs: 1200,

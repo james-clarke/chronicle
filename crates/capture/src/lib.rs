@@ -1,10 +1,12 @@
 //! Provider traits + platform impls (`#[cfg]`). Everything downstream
-//! consumes `CaptureEvent` only. X11 (M1) and macOS (M38) are in; Windows
-//! lands in M40; the git poller (m15) and the AI session watcher (m22) are
-//! platform-independent.
+//! consumes `CaptureEvent` only. X11 (M1), macOS (M38) and Wayland (M39)
+//! are in; Windows lands in M40; the git poller (m15) and the AI session
+//! watcher (m22) are platform-independent.
 
 pub mod ai_sessions;
 pub mod browser;
+#[cfg(target_os = "linux")]
+pub mod cwd;
 pub mod docker;
 pub mod gcal;
 pub mod git;
@@ -26,6 +28,8 @@ pub mod sessions;
 pub mod shell;
 pub mod shell_hook;
 pub mod tmux;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 pub mod workspaces;
 #[cfg(target_os = "linux")]
 pub mod x11;
