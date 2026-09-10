@@ -44,6 +44,9 @@ struct AppState {
     api_key: Option<String>,
     /// Open edit span per (project, branch) across heartbeats.
     edits: Mutex<Folder>,
+    /// Open shell span per place across `chronicle shell-init` posts (m37
+    /// chunk 1); None = `shell_hook` is off in config.
+    shell: Option<Mutex<chronicle_capture::shell_hook::HookFold>>,
     /// Read once at startup: `/proc/sys/kernel/hostname` doesn't change
     /// while the daemon runs, so `info()` shouldn't block the
     /// current-thread runtime on it per request.
@@ -97,6 +100,9 @@ fn app_state(
         tx,
         api_key,
         edits: Mutex::new(Folder::default()),
+        shell: config
+            .shell_hook
+            .then(|| Mutex::new(chronicle_capture::shell_hook::HookFold::new())),
         hostname: std::fs::read_to_string("/proc/sys/kernel/hostname")
             .map(|s| s.trim().to_owned())
             .unwrap_or_else(|_| "localhost".into()),
@@ -162,6 +168,10 @@ fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(wakatime_heartbeats),
         )
         .route("/api/heartbeat", axum::routing::post(wakatime_heartbeats))
+        // Chronicle's own local hooks (m37): the shell precmd hook and the
+        // git hooks post here; loopback only, like everything above.
+        .route("/api/chronicle/shell", axum::routing::post(shell_post))
+        .route("/api/chronicle/git", axum::routing::post(git_post))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
@@ -402,6 +412,48 @@ async fn wakatime_heartbeats(
     }
     drop(folder);
     (StatusCode::CREATED, Json(json!({ "responses": responses }))).into_response()
+}
+
+/// `chronicle shell-init`'s precmd hook: cwd, program name and the
+/// command's start and end, folded into `shell` spans per place (m37
+/// chunk 1). Never the command line.
+async fn shell_post(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+    let Some(fold) = st.shell.as_ref() else {
+        return (StatusCode::FORBIDDEN, "shell_hook is off in config").into_response();
+    };
+    let Ok(post) = serde_json::from_slice::<chronicle_capture::shell_hook::ShellPost>(&body) else {
+        return (StatusCode::BAD_REQUEST, "bad shell post").into_response();
+    };
+    let now_ms = Timestamp::now().as_millisecond();
+    let events = {
+        let mut fold = fold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut events = fold.flush(now_ms);
+        events.extend(fold.push(post, now_ms));
+        events
+    };
+    for event in events {
+        if st.tx.send(CaptureEvent::Activity(event)).is_err() {
+            tracing::error!("daemon event channel closed; dropping shell event");
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `chronicle hook <name>` (a git hook `chronicle hooks install` wrote)
+/// posts the checkout or commit it saw, at the second it happened (m37
+/// chunk 2).
+async fn git_post(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+    let Ok(post) = serde_json::from_slice::<chronicle_capture::hooks::HookPost>(&body) else {
+        return (StatusCode::BAD_REQUEST, "bad hook post").into_response();
+    };
+    for event in chronicle_capture::hooks::to_events(&post) {
+        if st.tx.send(CaptureEvent::Activity(event)).is_err() {
+            tracing::error!("daemon event channel closed; dropping git hook event");
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Both routes take one heartbeat or an array of them (wakapi's contract).

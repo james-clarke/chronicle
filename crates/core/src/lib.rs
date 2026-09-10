@@ -9,6 +9,7 @@ pub mod extract;
 pub mod heartbeats;
 pub mod insights;
 pub mod intent;
+pub mod links;
 pub mod merge;
 pub mod models_config;
 pub mod prepass;

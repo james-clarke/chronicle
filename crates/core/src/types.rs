@@ -80,6 +80,9 @@ pub enum Dedupe {
     LatestCheckout,
     /// Every observation is a row.
     None,
+    /// One row per `(kind, ext_id)`, the first observation wins (a commit
+    /// the hook posted at commit time and the poller saw 20 s later).
+    Once,
     /// One row per `(kind, ext_id)`; a repeat rewrites `ts`/`end_ts` (and
     /// an empty summary).
     Upsert,
@@ -137,7 +140,7 @@ impl ActivityKind {
     pub fn dedupe(self) -> Dedupe {
         match self {
             ActivityKind::Checkout => Dedupe::LatestCheckout,
-            ActivityKind::Commit => Dedupe::None,
+            ActivityKind::Commit => Dedupe::Once,
             ActivityKind::AiSession
             | ActivityKind::Call
             | ActivityKind::Meeting

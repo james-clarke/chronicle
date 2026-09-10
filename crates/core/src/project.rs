@@ -32,6 +32,11 @@ pub struct Project {
     pub titles: Vec<Regex>,
     /// Lowercased app names.
     pub apps: Vec<String>,
+    /// `host/path` globs from the repos' link files (m37 chunk 2,
+    /// `links::read_links`): a dashboard page files here by its Link anchor.
+    pub links: Vec<String>,
+    /// Found under a configured repo's parent, not configured (m37 chunk 2).
+    pub discovered: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -41,7 +46,54 @@ pub struct Matcher {
 
 impl Matcher {
     pub fn from_config(config: &Config) -> Self {
-        Self::new(&config.projects_effective())
+        let mut m = Self::new(&config.projects_effective());
+        if config.discover_repos {
+            m.discover();
+        }
+        m
+    }
+
+    /// Append every git repo found one level under a configured repo's
+    /// parent that no project claims, as a discovered project named after
+    /// its folder (m37 chunk 2): time in `~/dev/continental` files without
+    /// a config edit. A folder whose name a configured project already has
+    /// is skipped.
+    pub fn discover(&mut self) {
+        let known: Vec<PathBuf> = self.projects.iter().flat_map(|p| p.paths.clone()).collect();
+        let parents = parents_of(&known);
+        for repo in discover_repos(&parents, &known) {
+            if self
+                .projects
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(&repo.name))
+            {
+                continue;
+            }
+            let mut slugs = HashSet::new();
+            if let Some(slug) = repo
+                .remote
+                .as_deref()
+                .and_then(|r| r.split_once('/').map(|(_, s)| s))
+            {
+                slugs.insert(slug.to_ascii_lowercase());
+            }
+            let links = link_patterns(std::slice::from_ref(&repo.path));
+            let mut places = HashSet::new();
+            places.insert(repo.name.clone());
+            self.projects.push(Project {
+                name: repo.name,
+                derive: true,
+                paths: vec![repo.path],
+                places,
+                slugs,
+                tickets: Vec::new(),
+                domains: Vec::new(),
+                titles: Vec::new(),
+                apps: Vec::new(),
+                links,
+                discovered: true,
+            });
+        }
     }
 
     pub fn new(cfgs: &[ProjectCfg]) -> Self {
@@ -72,9 +124,12 @@ impl Matcher {
                     .filter_map(|p| p.file_name())
                     .map(|n| n.to_string_lossy().to_ascii_lowercase())
                     .collect();
+                let links = link_patterns(&paths);
                 Project {
                     name: c.name.trim().to_owned(),
                     derive: c.derive,
+                    links,
+                    discovered: false,
                     paths,
                     places,
                     slugs,
@@ -223,6 +278,15 @@ impl Matcher {
                             .strip_suffix(d.as_str())
                             .is_some_and(|r| r.ends_with('.'))
                 })
+            }) {
+                return Some(&p.name);
+            }
+        }
+        for a in anchors.iter().filter(|a| a.kind == AnchorKind::Link) {
+            if let Some(p) = self.projects.iter().find(|p| {
+                p.links
+                    .iter()
+                    .any(|pat| extract::link_matches(pat, &a.value))
             }) {
                 return Some(&p.name);
             }
@@ -415,6 +479,175 @@ fn finish(host: &str, path: &str) -> Option<String> {
         host.to_ascii_lowercase(),
         path.to_ascii_lowercase()
     ))
+}
+
+/// The `host/path` globs the link files under `paths` name.
+fn link_patterns(paths: &[PathBuf]) -> Vec<String> {
+    let mut out: Vec<String> = paths
+        .iter()
+        .flat_map(|p| crate::links::read_links(p))
+        .filter_map(|l| l.url_pattern)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+// ---- Repo discovery (m37 chunk 2): the parents of the configured repos,
+// scanned one level deep for git repos no project claims. Pure filesystem
+// reads; nothing here writes or shells out to git.
+
+/// One repo found under a scanned parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredRepo {
+    pub path: PathBuf,
+    /// Folder basename, lowercased like `config::projects_effective`.
+    pub name: String,
+    /// `host/org/repo`, via `project::remote_of`.
+    pub remote: Option<String>,
+}
+
+/// Immediate children of each of `parents` that are git repos, excluding
+/// `known` paths and their worktrees. A hidden child (name starting with
+/// `.`) is skipped, as is a parent that does not exist. Sorted by name.
+pub fn discover_repos(parents: &[PathBuf], known: &[PathBuf]) -> Vec<DiscoveredRepo> {
+    let excluded = excluded_paths(known);
+    let mut out = Vec::new();
+    for parent in parents {
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if name.starts_with('.') || !is_git_repo(&path) {
+                continue;
+            }
+            let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if excluded.contains(&canon) {
+                continue;
+            }
+            out.push(DiscoveredRepo {
+                remote: remote_of(&path),
+                name: name.to_ascii_lowercase(),
+                path,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Unique parents of `repos`, first-seen order.
+pub fn parents_of(repos: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for repo in repos {
+        if let Some(parent) = repo.parent()
+            && seen.insert(parent.to_path_buf())
+        {
+            out.push(parent.to_path_buf());
+        }
+    }
+    out
+}
+
+fn is_git_repo(path: &Path) -> bool {
+    let dot = path.join(".git");
+    dot.is_dir() || dot.is_file()
+}
+
+/// `known` paths plus their worktrees, canonicalised so a discovered path
+/// reached through a symlinked parent still matches.
+fn excluded_paths(known: &[PathBuf]) -> HashSet<PathBuf> {
+    let mut set = HashSet::new();
+    for k in known {
+        set.insert(std::fs::canonicalize(k).unwrap_or_else(|_| k.clone()));
+        for wt in worktrees_of(k) {
+            set.insert(std::fs::canonicalize(&wt).unwrap_or(wt));
+        }
+    }
+    set
+}
+
+#[cfg(test)]
+mod discover_tests {
+    #[test]
+    fn matcher_discovers_sibling_repos_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("dev");
+        for name in ["known", "found"] {
+            std::fs::create_dir_all(parent.join(name).join(".git")).unwrap();
+        }
+        std::fs::create_dir_all(parent.join("plain")).unwrap();
+        let cfg = crate::config::ProjectCfg {
+            name: "known".into(),
+            repos: vec![parent.join("known").display().to_string()],
+            ..Default::default()
+        };
+        let mut m = super::Matcher::new(&[cfg]);
+        m.discover();
+        m.discover();
+        let names: Vec<&str> = m.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["known", "found"]);
+        assert!(m.projects[1].discovered && m.projects[1].derive);
+        assert_eq!(m.resolve("found"), Some("found"));
+    }
+
+    use super::*;
+
+    fn make_repo(dir: &Path) {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn discovers_unknown_repos_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        let repo_a = parent.join("repo-a");
+        let repo_b = parent.join("Repo-B");
+        let plain = parent.join("plain-dir");
+        make_repo(&repo_a);
+        make_repo(&repo_b);
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let known = [repo_a.clone()];
+        let found = discover_repos(&[parent.to_path_buf()], &known);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, repo_b);
+        assert_eq!(found[0].name, "repo-b");
+    }
+
+    #[test]
+    fn skips_hidden_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_repo(&tmp.path().join(".hidden-repo"));
+        assert!(discover_repos(&[tmp.path().to_path_buf()], &[]).is_empty());
+    }
+
+    #[test]
+    fn missing_parent_is_skipped_silently() {
+        let found = discover_repos(&[PathBuf::from("/no/such/parent-xyz")], &[]);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn parents_of_repos_unique_and_ordered() {
+        let repos = vec![
+            PathBuf::from("/a/one"),
+            PathBuf::from("/a/two"),
+            PathBuf::from("/b/three"),
+        ];
+        assert_eq!(
+            parents_of(&repos),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+    }
 }
 
 #[cfg(test)]

@@ -61,6 +61,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/033_verdict_advice.sql")),
         M::up(include_str!("../migrations/034_claims.sql")),
         M::up(include_str!("../migrations/035_backend_score.sql")),
+        M::up(include_str!("../migrations/036_repo_links_workspaces.sql")),
     ])
 });
 
@@ -162,16 +163,35 @@ pub fn insert_activity_event(conn: &Connection, e: &ActivityEvent) -> Result<(),
     use rusqlite::OptionalExtension;
     match e.kind.dedupe() {
         Dedupe::LatestCheckout => {
-            let last: Option<String> = conn
+            // A backfilled row (reflog, m37 chunk 2) older than the latest
+            // stored checkout is history, not a repeat of it.
+            let last: Option<(String, i64)> = conn
                 .query_row(
-                    "SELECT branch FROM activity_events WHERE repo=?1 AND kind='checkout'
+                    "SELECT branch, ts FROM activity_events WHERE repo=?1 AND kind='checkout'
                      ORDER BY ts DESC, id DESC LIMIT 1",
                     params![e.repo],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            if last.as_deref() == Some(e.branch.as_str()) {
+            if let Some((branch, ts)) = last
+                && branch == e.branch
+                && ts_to_ms(e.ts) >= ts
+            {
                 return Ok(());
+            }
+        }
+        Dedupe::Once => {
+            if let Some(ext) = &e.ext_id {
+                let seen: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM activity_events WHERE kind=?1 AND ext_id=?2 LIMIT 1",
+                        params![e.kind.as_str(), ext],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if seen.is_some() {
+                    return Ok(());
+                }
             }
         }
         Dedupe::Upsert => {
@@ -318,6 +338,125 @@ pub fn latest_activity_per_kind(conn: &Connection) -> Result<Vec<ActivityEvent>,
          ORDER BY v.kind"
     ))?;
     let rows = stmt.query_map([], activity_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Focus time by (project, mode) over `[lo, hi)` (m37 chunk 4): the spans
+/// whose anchors name a kind of work (`deploying`, `on-call`, …), clipped
+/// to the range, biggest first. An unfiled span's project is "".
+pub fn mode_ms(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(String, String, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(s.project, ''), a.value,
+                SUM(MIN(s.end_ts, ?2) - MAX(s.start_ts, ?1))
+         FROM spans s JOIN span_anchors a ON a.span_id = s.id
+         WHERE a.kind = 'mode' AND s.kind = 'focus' AND s.start_ts < ?2 AND s.end_ts > ?1
+         GROUP BY 1, 2 ORDER BY 3 DESC",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// One row of `repo_links` (m37 chunk 2): what a link file at a repo's
+/// root says the repo is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoLinkRow {
+    /// Absolute repo path.
+    pub repo: String,
+    pub kind: String,
+    pub name: String,
+    pub url_pattern: Option<String>,
+}
+
+/// Replace a repo's link rows with what the poll just read.
+pub fn replace_repo_links(
+    conn: &mut Connection,
+    repo: &str,
+    links: &[RepoLinkRow],
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM repo_links WHERE repo = ?1", [repo])?;
+    {
+        let mut ins = tx.prepare(
+            "INSERT OR REPLACE INTO repo_links (repo, kind, name, url_pattern, seen_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for l in links {
+            ins.execute(params![repo, l.kind, l.name, l.url_pattern, now_ms])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Every link row, repo then kind then name.
+pub fn repo_links(conn: &Connection) -> Result<Vec<RepoLinkRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT repo, kind, name, url_pattern FROM repo_links ORDER BY repo, kind, name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(RepoLinkRow {
+            repo: r.get(0)?,
+            kind: r.get(1)?,
+            name: r.get(2)?,
+            url_pattern: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// One row of `editor_workspaces` (m37 chunk 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    pub editor: String,
+    pub path: String,
+    /// Remote authority (`ssh-remote+host`), empty for a local path.
+    pub remote: String,
+    pub last_ts: Option<i64>,
+}
+
+/// Upsert what the editors' recent lists say; a known row keeps the later
+/// `last_ts`.
+pub fn upsert_workspaces(
+    conn: &mut Connection,
+    rows: &[WorkspaceRow],
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    let tx = conn.transaction()?;
+    {
+        let mut ins = tx.prepare(
+            "INSERT INTO editor_workspaces (editor, path, remote, last_ts, seen_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(editor, path, remote) DO UPDATE SET
+                 last_ts = MAX(COALESCE(editor_workspaces.last_ts, 0), COALESCE(excluded.last_ts, 0)),
+                 seen_ts = excluded.seen_ts",
+        )?;
+        for w in rows {
+            ins.execute(params![w.editor, w.path, w.remote, w.last_ts, now_ms])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Every workspace row, most recently used first.
+pub fn editor_workspaces(conn: &Connection) -> Result<Vec<WorkspaceRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT editor, path, remote, last_ts FROM editor_workspaces
+         ORDER BY COALESCE(last_ts, 0) DESC, path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(WorkspaceRow {
+            editor: r.get(0)?,
+            path: r.get(1)?,
+            remote: r.get(2)?,
+            last_ts: r.get(3)?,
+        })
+    })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -717,6 +856,9 @@ pub fn anchor_spans(
             "INSERT OR IGNORE INTO span_anchors (span_id, kind, value) VALUES (?1, ?2, ?3)",
         )?;
         for (id, start, end, app, title, url) in &spans {
+            let url = url
+                .clone()
+                .or_else(|| extract::browse_url(title, *start, *end, &events));
             let own = extract::extract(app, title, url.as_deref(), ticket_re);
             let more = extract::from_activity(app, title, *start, *end, &own, &events, ticket_re);
             let all: Vec<Anchor> = extract::merge(own, more);

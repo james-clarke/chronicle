@@ -320,6 +320,7 @@ mod tests {
             gaps: Vec::new(),
             underived_ms: 0,
             self_ms: 0,
+            modes: Vec::new(),
             by_kind: Vec::new(),
         }
     }

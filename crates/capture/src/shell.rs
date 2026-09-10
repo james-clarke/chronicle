@@ -19,7 +19,9 @@ use crate::{BoxError, FocusProvider};
 
 const POLL: Duration = Duration::from_secs(60);
 /// Commands further apart than this are separate stretches of terminal work.
-const GAP_MS: i64 = 10 * 60 * 1000;
+/// Shared with the shell-hook fold (shell_hook.rs), which closes on the same
+/// gap.
+pub(crate) const GAP_MS: i64 = 10 * 60 * 1000;
 /// A command left running (a dev server, a `sleep`) must not stretch the span
 /// past the gap that would have closed it.
 const MAX_CMD_MS: i64 = GAP_MS;
@@ -155,18 +157,6 @@ struct Span {
 }
 
 impl Span {
-    /// Top three programs by count, ties by name: "cargo ×12 · git ×5".
-    fn summary(&self) -> String {
-        let mut counts: Vec<(&String, &usize)> = self.counts.iter().collect();
-        counts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        counts
-            .iter()
-            .take(3)
-            .map(|(p, n)| format!("{p} \u{d7}{n}"))
-            .collect::<Vec<_>>()
-            .join(" \u{b7} ")
-    }
-
     /// Every emit carries the counts so far; storage's upsert keeps the
     /// newest non-empty summary under the same `ext_id`.
     fn event(&self) -> ActivityEvent {
@@ -177,10 +167,23 @@ impl Span {
             branch: String::new(),
             kind: ActivityKind::Shell,
             ext_id: Some(format!("{}#{}", self.cwd, self.start_ms)),
-            summary: Some(self.summary()),
+            summary: Some(summarize_counts(&self.counts)),
             detail: None,
         }
     }
+}
+
+/// Top three by count, ties by name: "cargo ×12 · git ×5". Shared with the
+/// shell-hook fold (shell_hook.rs), which folds the same way per place.
+pub(crate) fn summarize_counts(counts: &HashMap<String, usize>) -> String {
+    let mut counts: Vec<(&String, &usize)> = counts.iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    counts
+        .iter()
+        .take(3)
+        .map(|(p, n)| format!("{p} \u{d7}{n}"))
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
 }
 
 impl Fold {

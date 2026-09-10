@@ -156,6 +156,10 @@ pub struct RangeReport {
     /// minutes sit inside the task rows (the window stretches the block it
     /// reviews) and this line names them; it is not added to the total.
     pub self_ms: i64,
+    /// Focus time by (project, mode) (m37 chunk 4), from
+    /// [`crate::storage::mode_ms`]; `build` leaves it empty. Sits inside
+    /// the project rows ("of which 40m deploying"), not added to totals.
+    pub modes: Vec<(String, String, i64)>,
     /// Milliseconds per kind of work over every task, biggest first (m32
     /// chunk 1); only the intervals that carry a kind count.
     pub by_kind: Vec<(String, i64)>,
@@ -321,8 +325,21 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
         gaps: Vec::new(),
         underived_ms: 0,
         self_ms: 0,
+        modes: Vec::new(),
         by_kind,
     })
+}
+
+/// "deploying 40m, on-call 12m" for one project's modes (m37 chunk 4), or
+/// empty. Under a minute is left out.
+pub fn modes_line(modes: &[(String, String, i64)], project: &str) -> String {
+    let key = if project == UNTAGGED { "" } else { project };
+    modes
+        .iter()
+        .filter(|(p, _, ms)| p == key && *ms >= 60_000)
+        .map(|(_, m, ms)| format!("{m} {}", fmt_dur(*ms)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn hours(ms: i64) -> String {
@@ -382,6 +399,14 @@ pub fn to_md(r: &RangeReport) -> String {
             let _ = write!(out, " {} |", cell(ms));
         }
         let _ = writeln!(out, " {} |", fmt_dur(p.total_ms));
+        let modes = modes_line(&r.modes, &p.project);
+        if !modes.is_empty() {
+            let _ = write!(out, "| | _of which {modes}_ |");
+            for _ in &r.days {
+                out.push_str(" |");
+            }
+            out.push_str(" |\n");
+        }
         for t in r.tasks.iter().filter(|t| t.project == p.project) {
             let _ = write!(out, "| | {} |", task_display_label(&t.label, &t.project));
             for ms in &t.by_day {

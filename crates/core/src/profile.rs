@@ -104,7 +104,9 @@ impl Key {
                 }
                 AnchorKind::Place | AnchorKind::Doc => 0.5,
                 AnchorKind::Session => 0.25,
-                AnchorKind::People | AnchorKind::Domain => 0.0,
+                AnchorKind::People | AnchorKind::Domain | AnchorKind::Link | AnchorKind::Mode => {
+                    0.0
+                }
             },
             Key::Term(_) => 0.0,
         }

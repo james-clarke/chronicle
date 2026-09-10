@@ -805,7 +805,11 @@ fn anchor_evidence(
         if b <= a {
             continue;
         }
-        let own = extract::extract(&s.app, &s.title, s.url.as_deref(), re);
+        let url = s
+            .url
+            .clone()
+            .or_else(|| extract::browse_url(&s.title, a, b, vcs));
+        let own = extract::extract(&s.app, &s.title, url.as_deref(), re);
         let more = extract::from_activity(&s.app, &s.title, a, b, &own, vcs, re);
         for anchor in extract::merge(own, more) {
             match anchor.kind {

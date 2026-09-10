@@ -35,6 +35,14 @@ pub enum AnchorKind {
     People,
     /// Site.
     Domain,
+    /// A dashboard page as `host/seg/seg[/seg[/seg]]` (m37 chunk 2):
+    /// `vercel.com/acme/web`, `fly.io/apps/api`; only for the hosts a
+    /// repo's link files can name, so the project matcher files the page.
+    Link,
+    /// The kind of work a page or app names (m37 chunk 4): `deploying`,
+    /// `on-call`, `debugging-prod`, `testing-api`, `database`, `infra`,
+    /// `network`, `design`, `docs`, `mail`. Reports carry minutes by it.
+    Mode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,7 +53,7 @@ pub enum Strength {
 }
 
 impl AnchorKind {
-    pub const ALL: [AnchorKind; 9] = [
+    pub const ALL: [AnchorKind; 11] = [
         AnchorKind::Item,
         AnchorKind::Change,
         AnchorKind::Branch,
@@ -55,6 +63,8 @@ impl AnchorKind {
         AnchorKind::Place,
         AnchorKind::People,
         AnchorKind::Domain,
+        AnchorKind::Link,
+        AnchorKind::Mode,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -68,6 +78,8 @@ impl AnchorKind {
             AnchorKind::Place => "place",
             AnchorKind::People => "people",
             AnchorKind::Domain => "domain",
+            AnchorKind::Link => "link",
+            AnchorKind::Mode => "mode",
         }
     }
 
@@ -83,7 +95,9 @@ impl AnchorKind {
             | AnchorKind::Session
             | AnchorKind::Event => Strength::Strong,
             AnchorKind::Doc | AnchorKind::Place => Strength::Medium,
-            AnchorKind::People | AnchorKind::Domain => Strength::Weak,
+            AnchorKind::People | AnchorKind::Domain | AnchorKind::Link | AnchorKind::Mode => {
+                Strength::Weak
+            }
         }
     }
 }
@@ -373,7 +387,229 @@ pub fn extract(app: &str, title: &str, url: Option<&str>, ticket_re: &Regex) -> 
     {
         out.push(Anchor::new(AnchorKind::Item, key.as_str()));
     }
+    if let Some(mode) = mode_of(fam, app, title_raw, url) {
+        out.push(Anchor::new(AnchorKind::Mode, mode));
+    }
     dedup(out)
+}
+
+/// The real URL of a browser span the extension never reported (m37
+/// chunk 4): the `browse` history visit whose page title is the span's
+/// title, latest at or before the span's end, looking back a few minutes
+/// before its start (the visit lands before the tab gets focus). `None`
+/// when no visit's title matches — a guess by time alone would file the
+/// wrong site.
+pub fn browse_url(
+    title: &str,
+    start_ms: i64,
+    end_ms: i64,
+    events: &[ActivityEvent],
+) -> Option<String> {
+    const LOOKBACK_MS: i64 = 10 * 60 * 1000;
+    let cleaned = clean_title(title);
+    let body = strip_browser_suffix(&cleaned);
+    if body.is_empty() {
+        return None;
+    }
+    events
+        .iter()
+        .filter(|e| e.kind == ActivityKind::Browse)
+        .filter(|e| {
+            let ts = e.ts.as_millisecond();
+            ts >= start_ms - LOOKBACK_MS && ts <= end_ms
+        })
+        .filter(|e| {
+            e.summary
+                .as_deref()
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case(body))
+        })
+        .max_by_key(|e| e.ts.as_millisecond())
+        .and_then(|e| {
+            let d: serde_json::Value = serde_json::from_str(e.detail.as_deref()?).ok()?;
+            d.get("url")?.as_str().map(str::to_owned)
+        })
+}
+
+/// Hosts whose pages a repo's link files can claim (`links::read_links`):
+/// the Link anchor is `host/…` up to four segments, lowercased.
+const LINK_HOSTS: [&str; 12] = [
+    "vercel.com",
+    "fly.io",
+    "supabase.com",
+    "app.netlify.com",
+    "dash.cloudflare.com",
+    "dashboard.doppler.com",
+    "sentry.io",
+    "dashboard.render.com",
+    "railway.app",
+    "app.circleci.com",
+    "buildkite.com",
+    "app.doppler.com",
+];
+
+fn link_value(host: &str, segs: &[String]) -> Option<String> {
+    let known = LINK_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")));
+    if !known || segs.is_empty() {
+        return None;
+    }
+    let mut v = host.to_ascii_lowercase();
+    for s in segs.iter().take(4) {
+        if s.is_empty() {
+            break;
+        }
+        v.push('/');
+        v.push_str(&s.to_ascii_lowercase());
+    }
+    Some(v)
+}
+
+/// Whether a Link anchor value matches a link-file pattern: segments
+/// compared one by one, `*` matches any one segment, a shorter pattern is
+/// a prefix (`fly.io/apps/api` matches `fly.io/apps/api/monitoring`).
+pub fn link_matches(pattern: &str, value: &str) -> bool {
+    let mut p = pattern.split('/').filter(|s| !s.is_empty());
+    let mut v = value.split('/').filter(|s| !s.is_empty());
+    loop {
+        match (p.next(), v.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(ps), Some(vs)) => {
+                if ps != "*" && !ps.eq_ignore_ascii_case(vs) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// The kind of work a span names, from its page's host and path or its
+/// app and title; `None` for the ordinary case.
+fn mode_of(fam: Family, app: &str, title: &str, url: Option<&str>) -> Option<&'static str> {
+    let app_l = app.to_ascii_lowercase();
+    let title_l = title.to_ascii_lowercase();
+    if fam == Family::Browser
+        && let Some(u) = url.and_then(parse_url)
+        && let Some(m) = mode_of_url(&u.host, &u.segs)
+    {
+        return Some(m);
+    }
+    let app_has = |names: &[&str]| names.iter().any(|n| app_l.contains(n));
+    if app_has(&["postman", "bruno", "insomnia", "hoppscotch"]) {
+        return Some("testing-api");
+    }
+    if app_has(&[
+        "dbeaver",
+        "tableplus",
+        "datagrip",
+        "pgadmin",
+        "beekeeper",
+        "dbgate",
+    ]) {
+        return Some("database");
+    }
+    if app_has(&["wireshark", "charles", "proxyman", "mitmproxy"]) {
+        return Some("network");
+    }
+    if app_has(&["figma", "penpot", "sketch"]) {
+        return Some("design");
+    }
+    if app_has(&["thunderbird", "evolution", "geary", "mailspring"]) {
+        return Some("mail");
+    }
+    if fam == Family::Terminal
+        && [
+            "psql",
+            "mysql",
+            "mongosh",
+            "sqlite3",
+            "redis-cli",
+            "pgcli",
+            "mycli",
+        ]
+        .iter()
+        .any(|t| title_l.starts_with(t) || title_l.contains(&format!(" {t} ")))
+    {
+        return Some("database");
+    }
+    if fam == Family::Chat && (title_l.contains("#inc-") || title_l.starts_with("inc-")) {
+        return Some("on-call");
+    }
+    None
+}
+
+fn mode_of_url(host: &str, segs: &[String]) -> Option<&'static str> {
+    let seg = |i: usize| segs.get(i).map(String::as_str).unwrap_or("");
+    let ends = |h: &str| host == h || host.ends_with(&format!(".{h}"));
+    if ends("pagerduty.com")
+        || ends("opsgenie.com")
+        || ends("incident.io")
+        || ends("firehydrant.io")
+    {
+        return Some("on-call");
+    }
+    if ends("sentry.io")
+        || ends("datadoghq.com")
+        || ends("datadoghq.eu")
+        || ends("grafana.net")
+        || host.contains("grafana")
+        || ends("newrelic.com")
+        || ends("honeycomb.io")
+        || host.contains("kibana")
+        || ends("splunkcloud.com")
+        || ends("splunk.com")
+        || ends("bugsnag.com")
+        || ends("rollbar.com")
+    {
+        return Some("debugging-prod");
+    }
+    if host_is(host, &["github.com"]) && seg(2) == "actions" {
+        return Some("deploying");
+    }
+    if (host_is(host, &["gitlab.com"]) || host.contains("gitlab."))
+        && segs.iter().any(|s| s == "pipelines" || s == "jobs")
+    {
+        return Some("deploying");
+    }
+    if ends("app.circleci.com")
+        || ends("buildkite.com")
+        || ends("dashboard.render.com")
+        || ends("railway.app")
+        || host.contains("argocd")
+        || (ends("vercel.com") && seg(2) == "deployments")
+        || (ends("app.netlify.com") && segs.iter().any(|s| s == "deploys"))
+        || (ends("fly.io") && seg(0) == "apps")
+    {
+        return Some("deploying");
+    }
+    if ends("console.aws.amazon.com")
+        || ends("console.cloud.google.com")
+        || ends("portal.azure.com")
+        || ends("cloud.digitalocean.com")
+        || ends("console.hetzner.cloud")
+        || ends("app.terraform.io")
+    {
+        return Some("infra");
+    }
+    if ends("postman.co") || ends("getpostman.com") || ends("hoppscotch.io") {
+        return Some("testing-api");
+    }
+    if ends("figma.com") || ends("penpot.app") {
+        return Some("design");
+    }
+    if host == "mail.google.com" || host.starts_with("outlook.") || ends("fastmail.com") {
+        return Some("mail");
+    }
+    if (host.ends_with(".atlassian.net") && seg(0) == "wiki")
+        || ends("notion.so")
+        || host == "docs.google.com"
+        || host.contains("confluence")
+        || ends("readme.io")
+    {
+        return Some("docs");
+    }
+    None
 }
 
 /// Anchors from collector events that overlap the span. `events` must
@@ -1257,6 +1493,9 @@ fn browser(title: &str, url: Option<&str>, out: &mut Vec<Anchor>) {
     }
     out.push(Anchor::new(AnchorKind::Domain, url.domain.clone()));
     let segs = &url.segs;
+    if let Some(link) = link_value(host, segs) {
+        out.push(Anchor::new(AnchorKind::Link, link));
+    }
     let seg = |i: usize| segs.get(i).map(String::as_str).unwrap_or("");
     let site_doc = |out: &mut Vec<Anchor>| {
         if let Some(doc) = doc_value(strip_site_suffix(body, host)) {
@@ -1777,7 +2016,8 @@ mod tests {
             None,
             &re(),
         );
-        assert!(a.is_empty());
+        // Only the mail mode (m37 chunk 4): no document from an inbox view.
+        assert!(a.iter().all(|x| x.kind == AnchorKind::Mode), "{a:?}");
         let a = extract(
             "obsidian",
             "Weekly review - Work - Obsidian v1.5",
