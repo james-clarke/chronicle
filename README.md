@@ -12,7 +12,7 @@ Everything below is the current plan, not hard rules.
 |---|---|
 | Language | Rust stable, edition 2024, cargo workspace |
 | UI | egui via `eframe` (no webview) |
-| Tray: **mac/win only** | `tray-icon` |
+| Tray | `ksni` (Linux, m19); `tray-icon` (macOS, m38); Windows deferred |
 | Storage | `rusqlite` (`bundled` + FTS5), WAL, `rusqlite_migration` |
 | Time | `jiff` (IANA tzdb, DST-correct; `time`'s local-offset lookup is unsound in threaded daemons) |
 | LLM | llama.cpp embedded via `llama-cpp-2` (pin exact version; no semver) |
@@ -21,7 +21,7 @@ Everything below is the current plan, not hard rules.
 | MCP | `rmcp` (official SDK, pin version), stdio only |
 | Linux capture | `x11rb` (X11 only) |
 | Windows capture | `windows` crate |
-| macOS capture | `objc2`/`objc2-app-kit`; `macos-accessibility-client` (AX trust prompt); `objc2-application-services` or `axuielement` (AXObserver) |
+| macOS capture | `objc2`/`objc2-app-kit` (`NSWorkspace`), `objc2-core-foundation`; `AX*`/`CGEventSource*`/`CGSessionCopyCurrentDictionary`/`AudioObjectGetPropertyData` as hand-written `extern "C"` in `ffi.rs` (m38) |
 | Concurrency | sync threads + `crossbeam-channel`; tokio confined to `server` + `mcp` |
 
 ## Platform matrix
@@ -33,7 +33,7 @@ Everything below is the current plan, not hard rules.
 | AFK | XScreenSaver `QueryInfo` | `CGEventSourceSecondsSinceLastEventType` | `GetLastInputInfo` |
 | Presence counts | XI2 raw events, counted per minute | `CGEventSourceCounterForEventType` | `GetLastInputInfo` + low-level hook |
 | Screen lock | logind D-Bus `LockedHint` | `com.apple.screenIsLocked` notification | WTS session notifications |
-| Tray | **none** | yes | yes |
+| Tray | `ksni` StatusNotifierItem (m19) | `tray-icon` status item (m38) | yes |
 | Open UI | app icon / `chronicle toggle` | tray click | tray click |
 | Autostart | `systemd --user` unit | LaunchAgent plist | HKCU `Run` key |
 | LLM accel | CPU (Vulkan opt) | Metal | CPU (Vulkan opt) |
@@ -44,7 +44,7 @@ Platform notes:
 - **Linux autostart (m11):** `systemd --user` unit (`packaging/chronicle.service`) is the sole Linux autostart mechanism — a supervised lifecycle (SIGTERM on `stop`, `Restart=on-failure`) is what makes the clean-shutdown path exercisable; a bare XDG `.desktop` entry has no stop contract. `WantedBy=graphical-session.target`, not `default.target`, since capture needs `DISPLAY`.
 - **Presence (m32):** the `presence` table holds per-minute counts only — how many keys, buttons, motion and scroll events — never which keys; `capture_presence = false` turns it off. Idle shorter than `quiet_secs` (10 min; `away_secs` 30 min with an agent writing, a call or a meeting on screen) stays inside the span as quiet time, so reading and watching an agent are not cut as absence.
 - **X11:** windows die racily, all property reads must tolerate `BadWindow`/`BadDrawable` as non-fatal. Subscribe `PropertyChangeMask` on each new active window (catches tab-title changes), unsubscribe previous. Debounce title changes 1 s.
-- **macOS:** AX permission is a hard gate. Detect via `AXIsProcessTrustedWithOptions`, onboarding screen with deep link to System Settings, degrade to app-only tracking until granted. Message clearly: titles via AX, **no screen recording**. Daemon owns the main-thread run loop (required for NSWorkspace + AXObserver anyway) and hosts the tray; tray-icon must be created on the main thread after the event loop starts (`StartCause::Init`). UI stays a child process.
+- **macOS (m38):** shipped — 1 s poll of `NSWorkspace.frontmostApplication` + the AX focused window title (not event-driven: AX permission is a card, not a blocker — untrusted just means empty titles); `CGEventSourceSecondsSinceLastEventType` for idle and `CGEventSourceCounterForEventType` for presence counts; `CGSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]` polled every 2 s for the lock flag; `lsof -iTCP -sTCP:LISTEN` for ports; CoreAudio's `kAudioDevicePropertyDeviceIsRunningSomewhere` for mic-in-use (app is always "microphone" — no TCC-gated tap); autostart via a LaunchAgent installed by `chronicle service install` (same CLI/onboarding path as Linux's systemd unit); Homebrew formula via cargo-dist. Daemon owns the main-thread run loop for `NSApplication` (activation policy Accessory, no Dock icon) and hosts the `tray-icon` status item; the capture/server loop moves to a `daemon-main` thread. UI stays a child process. EventKit (Calendar/Reminders) is deferred — ICS subscriptions (m37) cover the calendar route on every platform without the extra entitlement and TCC prompt.
 - **Windows:** dedicated capture thread with `GetMessage` pump, `WINEVENT_OUTOFCONTEXT`; tray shares the daemon's message pump. UI stays a child process.
 
 ## Non-functional requirements
@@ -217,10 +217,40 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 - **Onboarding:** model download progress, autostart opt-in, macOS AX flow.
 - **Settings:** connections (MCP servers with a test button and presets, watched git repos with last-seen status), batch length, idle threshold, exclusions, model path/choice, port.
 
-## Running as a service (Linux)
+## Installing
+
+```sh
+# macOS or Linux, via Homebrew (once a release is tagged)
+brew install james-clarke/tap/chronicle
+
+# macOS or Linux, via the shell installer cargo-dist generates
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-installer.sh | sh
+
+# from source, any platform
+cargo install --path crates/app
+```
+
+## Running as a service
+
+`chronicle service install|remove|status` (m38) wraps the platform's service
+manager — the onboarding "run at login" card calls the same code:
+
+```sh
+chronicle service install   # write + enable the unit/plist, no --now
+chronicle service status    # is-enabled/is-active (Linux), loaded? (macOS)
+chronicle service remove    # disable/unload it and delete the unit/plist
+```
+
+### Linux (`systemd --user`)
 
 ```sh
 cargo install --path crates/app
+chronicle service install
+```
+
+By hand, the same result:
+
+```sh
 mkdir -p ~/.config/systemd/user
 cp packaging/chronicle.service ~/.config/systemd/user/
 systemctl --user daemon-reload
@@ -229,9 +259,20 @@ systemctl --user enable --now chronicle
 
 Verify with `systemctl --user status chronicle` and `chronicle status` (exit 0 + "healthy"). `systemctl --user stop chronicle` sends SIGTERM — the daemon kills its UI/derive children and exits cleanly.
 
-- `ExecStart` assumes `~/.cargo/bin/chronicle` (plain `cargo install`); if `command -v chronicle` says otherwise, edit the path in the unit.
+- `ExecStart` assumes `~/.cargo/bin/chronicle` (plain `cargo install`); `chronicle service install` points it at the running binary instead.
 - Some X11 session setups don't import `DISPLAY`/`XAUTHORITY` into `systemd --user`; check `systemctl --user show-environment | grep DISPLAY` if the unit fails at boot (modern display managers wire this via PAM).
 - Logs: `{data_dir}/logs/chronicle.log` (5 MB size-rotated, one `.log.1` backup); under systemd, stderr also lands in `journalctl --user -u chronicle -f`.
+
+### macOS (LaunchAgent)
+
+```sh
+cargo install --path crates/app
+chronicle service install
+```
+
+Writes `~/Library/LaunchAgents/dev.chronicled.chronicle.plist` (rendered from `packaging/dev.chronicled.chronicle.plist`) and `launchctl bootstrap`s it into the user's GUI domain: `RunAtLoad`, `KeepAlive.SuccessfulExit = false` (the `Restart=on-failure` equivalent). `bootstrap` starts a second `chronicle run` right away; it sees the already-running instance's single-instance socket, toggles the UI and exits 0 — `KeepAlive.SuccessfulExit = false` tells launchd to leave that alone instead of treating the clean exit as a crash to relaunch.
+
+Verify with `chronicle service status` (`loaded` once bootstrapped) or `launchctl print gui/$(id -u)/dev.chronicled.chronicle`. Logs: `{data_dir}/logs/launchd.log`.
 
 ## Conventions
 

@@ -3,6 +3,13 @@ name = "chronicle"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage = "https://chronicled.dev"
+description = "Local-first, privacy-driven activity tracker with a correctable timeline and chat."
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 anyhow.workspace = true
