@@ -354,7 +354,16 @@ shape: four examples at cosine ≥ 0.6 pull the label toward a
 correction's project wording ("Brotherhood Tooling documentation" onto a
 KDE-configuration stretch, "PB-Email system" onto a games search), so the
 first thing to try is fewer examples (k = 2) or a higher floor (0.7),
-re-judged with the frontier referee.
+re-judged with the frontier referee. Tried 2026-09-09 21:47, same ten
+tasks, claude-sonnet-5 referee: k = 2 gives examples win 2, lose 3, tie 5
+of 10 — no better than k = 4 (4 / 3 / 3); the losses keep the same shape
+(task 168's KDE stretch still pulled to "production deployment
+configurations"). k stays 4. The 0.7 floor, run 22:02: every task still
+got four examples (the stored corrections all sit above 0.7 to these
+digests) and the verdicts are the baseline's, 4 / 3 / 3 — the floor is
+not the lever either; both constants stay as they were. The losses (168,
+153, 131) are all "examples name a neighbouring project's work": the next
+try is restricting examples to the task's own project, not a knob.
 
 Order 0 → 1 → 2 → 3 → 4 → 5. Chunk 0 is a day and unblocks the decision;
 1 is a prerequisite for any user other than James; 2–3 are the accuracy
