@@ -511,6 +511,16 @@ cross-project placements.
 - **M40 Windows.** `SetWinEventHook`, `GetLastInputInfo`, WTS lock, tray,
   `Run` key, winget and Scoop, Trusted Signing; disclosed UIPI and WSL2
   limits, with the shell hook as the WSL2 answer.
+- **M41 Connections as a surface.** A connector registry in
+  `crates/core/src/connectors.rs` driving the Settings panel, a new setup
+  flow, `chronicle connections --json` and a generated `site/tools.html`;
+  declarative per-platform probes with a five-value support state where
+  "planned" is first-class; the tools the person used that Chronicle could
+  not read, mined from their own activity; and an integration request the
+  user's browser files as a GitHub issue, with Chronicle making no request
+  of its own. Plan: `m41-connections-plan.md`. Chunks 0 and 1 are worth
+  running with or before M40, since they are what makes the Windows port
+  appear in the product without another panel edit.
 - **Cross-cutting.** cargo-dist from M38 on. M36 and M37 can interleave:
   the M30 thesis still holds that evidence shape caps accuracy, so each new
   source is an accuracy win too. The tray mockups for the site wait until
