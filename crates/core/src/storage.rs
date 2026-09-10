@@ -307,22 +307,27 @@ pub fn place_rows_in_range(
 /// opens under, for repos with no checkout inside it.
 pub fn branch_state_before(conn: &Connection, lo: i64) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {ACTIVITY_COLS} FROM activity_events
-         WHERE kind='checkout' AND ts < ?1
-           AND id IN (SELECT MAX(id) FROM activity_events
-                      WHERE kind='checkout' AND ts < ?1 GROUP BY repo)"
+        "SELECT {ACTIVITY_COLS_V} FROM activity_events v
+         WHERE v.kind='checkout' AND v.ts < ?1
+           AND NOT EXISTS (SELECT 1 FROM activity_events w
+                           WHERE w.kind='checkout' AND w.ts < ?1 AND w.repo = v.repo
+                             AND (w.ts, w.id) > (v.ts, v.id))"
     ))?;
     let rows = stmt.query_map([lo], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Newest git event per repo — the settings panel's per-repo "last seen"
-/// line. Ordered by repo name.
+/// line. Ordered by repo name. Newest by time, not row id: a reflog
+/// backfill (m37 chunk 2) inserts old checkouts late.
 pub fn latest_vcs_event_per_repo(conn: &Connection) -> Result<Vec<ActivityEvent>, StorageError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {ACTIVITY_COLS} FROM activity_events
-         WHERE id IN (SELECT MAX(id) FROM activity_events WHERE {VCS_KINDS} GROUP BY repo)
-         ORDER BY repo"
+        "SELECT {ACTIVITY_COLS_V} FROM activity_events v
+         WHERE v.{VCS_KINDS}
+           AND NOT EXISTS (SELECT 1 FROM activity_events w
+                           WHERE w.{VCS_KINDS} AND w.repo = v.repo
+                             AND (w.ts, w.id) > (v.ts, v.id))
+         ORDER BY v.repo"
     ))?;
     let rows = stmt.query_map([], activity_from_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
