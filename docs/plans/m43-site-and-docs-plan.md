@@ -150,7 +150,7 @@ All five chunks, in one pass, with these deviations from the plan above.
   cast document `fixtures/README.md` introduces; the M42 plan's chunk 0 owed
   that document and it lives here. `day3_sms`/`day4_heroku` were not used:
   they are real days with the identifiers swapped, and they still carry the
-  author's searches and the employer's product name. The `sam@` shell
+  author's searches and the employer's product name. The author's shell
   prompt was renamed to `sam@` tree-wide in the same pass.
 - **Chunk 1.** Seven images replaced (`og`, `home-wide`, `timeline-wide`,
   `reports-wide`, `triage`, `model`) and eight deleted rather than
