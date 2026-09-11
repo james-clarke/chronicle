@@ -28,6 +28,8 @@ body {
 
 a { color: var(--blue); text-decoration: none; }
 a:hover { text-decoration: underline; }
+/* links inside running text are underlined, not colour-only */
+p a:not(.btn) { text-decoration: underline; text-decoration-color: rgba(94, 135, 234, 0.55); text-underline-offset: 3px; }
 
 h1, h2, h3 { line-height: 1.1; letter-spacing: -0.02em; margin: 0 0 0.5em; }
 h1 { font-size: clamp(2.6rem, 6vw, 4.4rem); font-weight: 700; }
@@ -612,7 +614,7 @@ section { padding: 72px 0; }
 }
 .demo-ph { position: absolute; left: 10px; top: 5px; color: var(--muted); opacity: 1; }
 .demo-typed { display: inline-block; vertical-align: bottom; width: 0; overflow: hidden; white-space: nowrap; border-right: 2px solid transparent; }
-.demo-add { padding: 5px 12px; border-radius: 6px; background: var(--blue); color: #fff; font-weight: 600; }
+.demo-add { padding: 5px 12px; border-radius: 6px; background: #3b63d6; color: #fff; font-weight: 600; }
 .demo-task { padding: 2px 0 2px 12px; margin: 0 0 18px; border-left: 3px solid var(--green); }
 .demo-task b { display: block; color: var(--text); font-size: 0.9rem; font-weight: 500; }
 .demo-time { display: grid; color: var(--muted); }
@@ -620,7 +622,7 @@ section { padding: 72px 0; }
 .demo-time i:last-child { opacity: 1; }
 .demo-tags { display: flex; gap: 6px; margin-top: 5px; }
 .demo-tags em { font-style: normal; padding: 0 7px; border-radius: 4px; background: var(--line); color: var(--soft); font-size: 0.72rem; }
-.demo-tags em.p { background: rgba(94, 135, 234, 0.18); color: var(--blue); }
+.demo-tags em.p { background: rgba(94, 135, 234, 0.18); color: #8fabf4; }
 .demo-feed { list-style: none; margin: 0; padding: 0; height: 10.8em; overflow: hidden; }
 .demo-feed ol, .demo-feed li { margin: 0; padding: 0; }
 .demo-row { position: relative; height: 3.6em; }
@@ -724,7 +726,8 @@ section { padding: 72px 0; }
 .grab-row h3 { margin: 0 0 12px; font-size: 1rem; font-weight: 600; }
 .grab-row h3 small { margin-left: 8px; color: var(--muted); font-size: 0.78rem; font-weight: 400; }
 .grab-row .fine { margin: 12px 0 0; }
-.grab-row.quiet { opacity: 0.62; }
+.grab-row.quiet { border-style: dashed; }
+.grab-row.quiet h3 { color: var(--soft); }
 .cmd { margin: 0; overflow-x: auto; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); padding: 10px 12px; }
 .cmd code { display: block; white-space: pre; font-size: 0.8rem; color: var(--soft); }
 a.btn { cursor: pointer; }
