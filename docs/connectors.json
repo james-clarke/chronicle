@@ -109,7 +109,7 @@
       "windows"
     ],
     "state": "supported",
-    "blurb": "codex, gemini, copilot, aider, cline, amp, opencode and cursor transcripts, read the same way, on whenever one is there",
+    "blurb": "codex, gemini, copilot, aider, cline, opencode and cursor transcripts, read the same way, on whenever one is there",
     "probes": [
       {
         "probe": "path",
@@ -128,13 +128,17 @@
       },
       {
         "probe": "path",
-        "path": "{data}/amp/threads",
-        "platforms": []
+        "path": "~/.local/share/opencode",
+        "platforms": [
+          "linux"
+        ]
       },
       {
         "probe": "path",
-        "path": "{data}/opencode",
-        "platforms": []
+        "path": "~/.config/Cursor/User/globalStorage",
+        "platforms": [
+          "linux"
+        ]
       }
     ],
     "produces": [
@@ -158,6 +162,21 @@
       {
         "probe": "path",
         "path": "{config}/Code/User/workspaceStorage",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{config}/Cursor/User/workspaceStorage",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{config}/VSCodium/User/workspaceStorage",
+        "platforms": []
+      },
+      {
+        "probe": "path",
+        "path": "{config}/Windsurf/User/workspaceStorage",
         "platforms": []
       },
       {
@@ -211,6 +230,13 @@
       {
         "probe": "path",
         "path": "~/Library/Safari/History.db",
+        "platforms": [
+          "macos"
+        ]
+      },
+      {
+        "probe": "path",
+        "path": "~/Library/Application Support/Firefox/Profiles",
         "platforms": [
           "macos"
         ]
@@ -309,7 +335,7 @@
     "probes": [
       {
         "probe": "path",
-        "path": "{data}/atuin/history.db",
+        "path": "~/.local/share/atuin/history.db",
         "platforms": []
       }
     ],
@@ -544,6 +570,13 @@
         "cmd": "lsof",
         "platforms": [
           "macos"
+        ]
+      },
+      {
+        "probe": "command",
+        "cmd": "netstat",
+        "platforms": [
+          "windows"
         ]
       }
     ],

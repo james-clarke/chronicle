@@ -7,17 +7,26 @@ use anyhow::{Context, bail};
 use chronicle_capture::hooks;
 use chronicle_core::config::Config;
 use chronicle_core::connectors::{self, ConnectKind, Platform, Support};
+use chronicle_core::health;
 
-/// `chronicle connections [--json]` (m41 chunk 0): the connector registry,
-/// grouped the way Settings groups it, with what the config says about each
-/// row on this machine. `--json` prints `docs/connectors.json` verbatim —
-/// the same table the site's tools page reads.
+/// `chronicle connections [--json]` (m41 chunks 0 and 1): the connector
+/// registry, grouped the way Settings groups it, with what each row is
+/// doing on this machine. `--json` prints `docs/connectors.json` verbatim —
+/// the registry as the site's tools page reads it, which is deliberately
+/// machine-independent, so health is text only.
 pub(crate) fn connections(data_dir: &Path, json: bool) -> anyhow::Result<()> {
     if json {
         print!("{}", connectors::to_json());
         return Ok(());
     }
     let config = Config::load(&data_dir.join("config.toml"))?;
+    let daemon_up = matches!(
+        crate::status::query_daemon(&crate::daemon::socket_path(data_dir)),
+        crate::status::Liveness::Running(_)
+    );
+    let env = health::Env::host(daemon_up);
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db")).ok();
+    let now_ms = jiff::Timestamp::now().as_millisecond();
     for kind in ConnectKind::ORDER {
         let rows: Vec<_> = connectors::for_platform(Platform::HOST)
             .filter(|c| c.kind == kind)
@@ -27,24 +36,30 @@ pub(crate) fn connections(data_dir: &Path, json: bool) -> anyhow::Result<()> {
         }
         println!("{}", kind.label());
         for c in rows {
-            let state = match (c.state, connectors::enabled(&config, c)) {
-                (Support::Supported | Support::Partial { .. }, Some(false)) => "off",
-                (Support::Supported, Some(true)) => "on",
-                (Support::Supported, None) => "auto",
-                (Support::Partial { .. }, _) => "partial",
-                (Support::Planned, _) => "planned",
-                (Support::Detected, _) => "unsupported",
-                (Support::WontDo { .. }, _) => "not planned",
-            };
-            println!("    {state:<12} {:<38} {}", c.name, c.blurb);
-            match c.state {
-                Support::Partial { note } => println!("{:<56}{note}", ""),
-                Support::WontDo { reason } => println!("{:<56}{reason}", ""),
-                _ => {}
-            }
+            let state = health::health_of(conn.as_ref(), &config, &env, c, now_ms);
+            println!(
+                "    {:<11} {:<38} {}",
+                health::label(c, &state),
+                c.name,
+                note(c, &state, now_ms)
+            );
         }
     }
     Ok(())
+}
+
+/// The last column: the numbers when there are numbers, the reason when
+/// something is broken, and otherwise the line that says what the tool
+/// would give you.
+fn note(c: &connectors::Connector, state: &health::Health, now_ms: i64) -> String {
+    if let Some(detail) = crate::status::health_detail(health::unit(c), state, now_ms) {
+        return detail;
+    }
+    match c.state {
+        Support::Partial { note } => format!("{} \u{b7} {note}", c.blurb),
+        Support::WontDo { reason } => reason.to_owned(),
+        _ => c.blurb.to_owned(),
+    }
 }
 
 /// `chronicle shell-init <shell>`: print the precmd hook for the shell to

@@ -279,13 +279,17 @@ pub const REGISTRY: &[Connector] = &[
         kind: ConnectKind::Files,
         platforms: ALL,
         state: Support::Supported,
-        blurb: "codex, gemini, copilot, aider, cline, amp, opencode and cursor transcripts, read the same way, on whenever one is there",
+        blurb: "codex, gemini, copilot, aider, cline, opencode and cursor transcripts, read the same way, on whenever one is there",
+        // One probe per format's source dir, as the format reads it
+        // (`crates/capture/src/sessions/`). opencode and cursor are written
+        // as Linux paths there, so the probe says Linux too rather than
+        // claiming a macOS row the collector would not find.
         probes: &[
             Probe::path("~/.codex/sessions"),
             Probe::path("~/.gemini/tmp"),
             Probe::path("~/.copilot/session-state"),
-            Probe::path("{data}/amp/threads"),
-            Probe::path("{data}/opencode"),
+            Probe::path_on("~/.local/share/opencode", LINUX),
+            Probe::path_on("~/.config/Cursor/User/globalStorage", LINUX),
         ],
         produces: &[ActivityKind::AiSession],
         setup: &[],
@@ -298,8 +302,13 @@ pub const REGISTRY: &[Connector] = &[
         platforms: ALL,
         state: Support::Supported,
         blurb: "recently-opened folders from VS Code, JetBrains and Zed on disk, so a window title resolves to a repo",
+        // The VS Code family roots the collector scans
+        // (`crates/capture/src/workspaces.rs:29`), plus JetBrains and Zed.
         probes: &[
             Probe::path("{config}/Code/User/workspaceStorage"),
+            Probe::path("{config}/Cursor/User/workspaceStorage"),
+            Probe::path("{config}/VSCodium/User/workspaceStorage"),
+            Probe::path("{config}/Windsurf/User/workspaceStorage"),
             Probe::path("{config}/JetBrains"),
             Probe::path("{config}/Zed/db"),
         ],
@@ -322,6 +331,10 @@ pub const REGISTRY: &[Connector] = &[
                 &[Platform::MacOs],
             ),
             Probe::path_on("~/Library/Safari/History.db", &[Platform::MacOs]),
+            Probe::path_on(
+                "~/Library/Application Support/Firefox/Profiles",
+                &[Platform::MacOs],
+            ),
             Probe::path_on("{data}/Google/Chrome/User Data", &[Platform::Windows]),
         ],
         produces: &[ActivityKind::Browse],
@@ -375,7 +388,9 @@ pub const REGISTRY: &[Connector] = &[
         platforms: ALL,
         state: Support::Supported,
         blurb: "atuin's history.db every 60 s: working directory, program name and duration, never the command line",
-        probes: &[Probe::path("{data}/atuin/history.db")],
+        // Not `{data}`: the collector reads this exact path on every
+        // platform (`crates/capture/src/shell.rs:32`).
+        probes: &[Probe::path("~/.local/share/atuin/history.db")],
         produces: &[ActivityKind::Shell],
         setup: &[SetupStep::Toggle {
             field: "shell_history",
@@ -499,6 +514,7 @@ pub const REGISTRY: &[Connector] = &[
         probes: &[
             Probe::path_on("/proc/net/tcp", LINUX),
             Probe::cmd_on("lsof", &[Platform::MacOs]),
+            Probe::cmd_on("netstat", &[Platform::Windows]),
         ],
         produces: &[ActivityKind::Cwd],
         setup: &[],
@@ -681,13 +697,20 @@ pub fn for_platform(p: Platform) -> impl Iterator<Item = &'static Connector> {
 /// Whether this connector is switched on in the config: `None` when no
 /// config field decides it (it is on whenever the tool is there).
 ///
-/// m41 chunk 1 turns this into a `Health` that also knows whether rows are
-/// arriving; until then it is what "state on this machine" means.
+/// Whether it is *working* is `health::health_of`, which reads this plus
+/// the probes and the rows.
 pub fn enabled(cfg: &Config, c: &Connector) -> Option<bool> {
     let field = c.setup.iter().find_map(|s| match s {
         SetupStep::Toggle { field } | SetupStep::Field { field, .. } => Some(*field),
         _ => None,
     })?;
+    config_on(cfg, field)
+}
+
+/// Is this config field switched on? The one list mapping a descriptor's
+/// field name to the typed `Config`, shared by `enabled` and by the
+/// `Config` probe.
+pub fn config_on(cfg: &Config, field: &str) -> Option<bool> {
     match field {
         "git_repos" => Some(!cfg.git_repos.is_empty()),
         "ai_session_dirs" => Some(!cfg.ai_session_dirs.is_empty()),

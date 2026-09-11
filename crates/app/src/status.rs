@@ -6,6 +6,8 @@ use crate::daemon::{DaemonStatus, socket_path};
 use crate::rotate;
 use anyhow::Context;
 use chronicle_core::config::Config;
+use chronicle_core::connectors::{self, Platform};
+use chronicle_core::health::{self, Health};
 use jiff::{Timestamp, ToSpan, Zoned, civil, tz::TimeZone};
 
 pub(crate) fn init_logging(
@@ -126,37 +128,40 @@ pub(crate) struct DbStatus {
     /// replay and drift notes per backend from meta.
     pub(crate) backend_score: Vec<chronicle_core::storage::BackendScore>,
     pub(crate) bench_notes: BenchNotes,
-    /// Per source kind (m37 chunk 5): rows this week and the last one seen.
-    pub(crate) sources: Vec<SourceStatus>,
+    /// Per connector (m41 chunk 1): what each one that is here at all is
+    /// doing, worst first.
+    pub(crate) connections: Vec<ConnectorStatus>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct SourceStatus {
-    pub(crate) kind: String,
-    pub(crate) week_rows: i64,
-    pub(crate) last_ts: i64,
+pub(crate) struct ConnectorStatus {
+    pub(crate) id: &'static str,
+    pub(crate) name: &'static str,
+    #[serde(flatten)]
+    pub(crate) health: Health,
 }
 
-/// One line per activity kind that ever wrote a row: this week's count and
-/// how long ago the last one landed.
-pub(crate) fn source_status(
+/// One line per connector that is on this machine at all (m41 chunk 1),
+/// broken first, then working, then the ones waiting on a step. This
+/// replaced a block keyed by `ActivityKind`: a kind could not say which of
+/// the collectors behind it was the one that stopped.
+pub(crate) fn connector_status(
     conn: &rusqlite::Connection,
+    config: &Config,
+    daemon_up: bool,
     now_ms: i64,
-) -> anyhow::Result<Vec<SourceStatus>> {
-    let week_lo = now_ms - 7 * 86_400_000;
-    let mut stmt = conn.prepare(
-        "SELECT kind, SUM(CASE WHEN COALESCE(end_ts, ts) >= ?1 THEN 1 ELSE 0 END),
-                MAX(COALESCE(end_ts, ts))
-         FROM activity_events GROUP BY kind ORDER BY kind",
-    )?;
-    let rows = stmt.query_map([week_lo], |r| {
-        Ok(SourceStatus {
-            kind: r.get(0)?,
-            week_rows: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-            last_ts: r.get(2)?,
+) -> Vec<ConnectorStatus> {
+    let env = health::Env::host(daemon_up);
+    let mut out: Vec<ConnectorStatus> = connectors::for_platform(Platform::HOST)
+        .map(|c| ConnectorStatus {
+            id: c.id,
+            name: c.name,
+            health: health::health_of(Some(conn), config, &env, c, now_ms),
         })
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        .filter(|s| s.health != Health::Absent)
+        .collect();
+    out.sort_by_key(|s| s.health.rank());
+    out
 }
 
 /// Per backend: the bench's last replay note and drift note.
@@ -193,7 +198,7 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         self_score,
         backend_score,
         bench_notes,
-        sources: _,
+        connections: _,
     } = db;
     let mut out = String::new();
     match liveness {
@@ -290,15 +295,19 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
             out.push_str(&format!("    {}\n", b.line(replay, drift)));
         }
     }
-    if !db.sources.is_empty() {
-        out.push_str("  sources, this week:\n");
+    if !db.connections.is_empty() {
+        out.push_str("  connections:\n");
         let now_ms = Timestamp::now().as_millisecond();
-        for s in &db.sources {
-            let ago = fmt_secs(((now_ms - s.last_ts).max(0) / 1000) as u64);
-            out.push_str(&format!(
-                "    {:<12} {:>6} rows, last {ago} ago\n",
-                s.kind, s.week_rows
-            ));
+        for s in &db.connections {
+            let c = connectors::by_id(s.id);
+            let unit = c.map_or("row", health::unit);
+            let label = c.map_or_else(|| s.health.label(), |c| health::label(c, &s.health));
+            match health_detail(unit, &s.health, now_ms) {
+                Some(detail) => {
+                    out.push_str(&format!("    {label:<10} {:<38} {detail}\n", s.name));
+                }
+                None => out.push_str(&format!("    {label:<10} {}\n", s.name)),
+            }
         }
     }
     out.push_str(&format!(
@@ -312,6 +321,31 @@ pub(crate) fn format_status(liveness: &Liveness, db: &DbStatus) -> String {
         out.push_str(&format!("  last prune: {} ago\n", fmt_secs(*age)));
     }
     out
+}
+
+/// The numbers behind a `Working` row and the reason behind a `Broken`
+/// one, in the words both `chronicle status` and `chronicle connections`
+/// use. `None` for the states that have nothing to add.
+pub(crate) fn health_detail(unit: &str, h: &Health, now_ms: i64) -> Option<String> {
+    match h {
+        Health::Working {
+            last_seen_ms,
+            rows_7d,
+        } => {
+            let ago = fmt_secs(((now_ms - last_seen_ms).max(0) / 1000) as u64);
+            let plural = if *rows_7d == 1 { "" } else { "s" };
+            Some(match (unit, rows_7d) {
+                (_, 0) => format!("last {ago} ago"),
+                // Discovery is a live scan, not a store: there is no "this
+                // week" about it and no age worth printing.
+                ("project", n) => format!("{n} project{plural} discovered"),
+                ("row", n) => format!("{n} row{plural} this week, last {ago} ago"),
+                (u, n) => format!("{n} {u}{plural}, last {ago} ago"),
+            })
+        }
+        Health::Broken { reason } => Some(reason.clone()),
+        _ => None,
+    }
 }
 
 pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
@@ -364,7 +398,12 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             chronicle_core::self_score::DAYS,
         )?,
         bench_notes: bench_notes(&conn)?,
-        sources: source_status(&conn, now_ms)?,
+        connections: connector_status(
+            &conn,
+            &config,
+            matches!(liveness, Liveness::Running(_)),
+            now_ms,
+        ),
     };
 
     if json {
@@ -389,7 +428,7 @@ pub(crate) fn status(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             "underived_today_ms": db.underived_today_ms,
             "self_score": db.self_score,
             "backend_score": db.backend_score,
-            "sources": db.sources,
+            "connections": db.connections,
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
