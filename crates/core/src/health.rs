@@ -85,14 +85,17 @@ impl Env {
 /// pattern stays relative — it names a file inside a watched repo, not a
 /// file at the root.
 pub fn expand(env: &Env, pattern: &str) -> PathBuf {
-    if let Some(rest) = pattern.strip_prefix("{config}/") {
-        return env.config_dir.join(rest);
-    }
-    if let Some(rest) = pattern.strip_prefix("{data}/") {
-        return env.data_dir.join(rest);
-    }
-    if let Some(rest) = pattern.strip_prefix("~/") {
-        return env.home.join(rest);
+    for (token, base) in [
+        ("{config}", &env.config_dir),
+        ("{data}", &env.data_dir),
+        ("~", &env.home),
+    ] {
+        if pattern == token {
+            return base.clone();
+        }
+        if let Some(rest) = pattern.strip_prefix(&format!("{token}/")) {
+            return base.join(rest);
+        }
     }
     PathBuf::from(pattern)
 }
@@ -385,6 +388,15 @@ fn ext_id_predicate(id: &str) -> Option<String> {
         // commits it posts are the row the poller would have written 20 s
         // later, so they stay with `git_repos`.
         "git_hooks" => " AND ext_id LIKE 'hook:%'".to_owned(),
+        // Pull requests: the ext_id is the web URL, and GitLab's carries
+        // `/-/merge_requests/` whatever host it is on
+        // (`crates/capture/src/gitlab.rs:118`, `github.rs:94`).
+        "gitlab_mrs" => " AND ext_id LIKE '%/-/merge_requests/%'".to_owned(),
+        "github_prs" => " AND ext_id NOT LIKE '%/-/merge_requests/%'".to_owned(),
+        // Meetings: an ICS event is `ics:<uid>` (`ics.rs:194`), a Google
+        // one is the bare event id (`gcal.rs:445`).
+        "calendars_ics" => " AND ext_id LIKE 'ics:%'".to_owned(),
+        "google_calendar" => " AND ext_id NOT LIKE 'ics:%'".to_owned(),
         _ => return None,
     })
 }
@@ -643,6 +655,43 @@ mod tests {
         assert_eq!((hook.rows_7d, atuin.rows_7d), (1, 2));
         assert_eq!(hook.last_ts, Some(now - 1000));
         assert_eq!(atuin.last_ts, Some(now - 2000));
+    }
+
+    /// The same, for the two pairs whose rows are URLs and calendar ids
+    /// rather than prefixed keys.
+    #[test]
+    fn pull_requests_and_meetings_split_by_their_own_shape() {
+        let (_tmp, conn) = db();
+        let cfg = Config::default();
+        let now = 1_000_000_000_000;
+        let insert = |kind: &str, ext_id: &str| {
+            conn.execute(
+                "INSERT INTO activity_events (ts, end_ts, repo, branch, kind, ext_id)
+                 VALUES (?1, ?1, '', '', ?2, ?3)",
+                rusqlite::params![now - 1000, kind, ext_id],
+            )
+            .unwrap();
+        };
+        insert("pr_authored", "https://github.com/org/app/pull/1");
+        insert("pr_reviewed", "https://ghe.internal/org/app/pull/2");
+        insert("pr_authored", "https://gitlab.com/g/app/-/merge_requests/3");
+        insert("meeting", "ics:abcd@1234");
+        insert("meeting", "0p9q8r7s6t");
+
+        let rows = |id: &str| evidence(Some(&conn), &cfg, by_id(id).unwrap(), now).rows_7d;
+        assert_eq!(rows("github_prs"), 2, "an enterprise host is still GitHub");
+        assert_eq!(rows("gitlab_mrs"), 1);
+        assert_eq!(rows("calendars_ics"), 1);
+        assert_eq!(rows("google_calendar"), 1);
+    }
+
+    #[test]
+    fn a_bare_token_expands_to_the_directory_itself() {
+        let env = Env::fake(Platform::MacOs, Path::new("/root"));
+        let base = PathBuf::from("/root/Library/Application Support");
+        assert_eq!(expand(&env, "{config}"), base);
+        assert_eq!(expand(&env, "{data}"), base);
+        assert_eq!(expand(&env, "~"), PathBuf::from("/root"));
     }
 
     /// A `Planned` tool that is installed is `Found`, never `Connected` or
