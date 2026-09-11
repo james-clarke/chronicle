@@ -396,7 +396,7 @@ Verify with `chronicle service status` (`loaded` once bootstrapped) or `launchct
 
 Order: **Linux polish first, then macOS → Windows.** Ports wait until the product shape is nailed down on Linux — porting an unfinished shape multiplies rework by three platforms. Polish bar before porting: trustworthy data, appliance feel, visible product.
 
-**M0–M39 are complete (2026-09-11); M41 has its registry, health and setup chunks (0–2) with the request path (3–5) still open; M40 Windows is the open port.**
+**M0–M39 and M41 are complete (2026-09-11); M40 Windows is the open port, planned and not started.**
 Each milestone has a plan doc under `docs/plans/` (`mNN-*-plan.md`, ending in
 a Shipped section that records what landed and where it deviated);
 `workflow.md` at the root is the dev/deploy entry point. The table below is
@@ -448,7 +448,7 @@ M17, and Windows is M40.
 | 37 | **Sources:** session formats, the shell hook, git hooks, browser history, link files, ICS calendars |
 | 38 | **macOS:** the same daemon on the second platform — written without a Mac, never run on one |
 | 39 | **Wayland:** wlroots and KWin behind the existing traits |
-| 40 | **Windows:** the remaining port. No plan doc yet, no target in `dist-workspace.toml` |
+| 40 | **Windows:** the remaining port. Plan in `docs/plans/m40-windows-plan.md` (2026-09-11): `SetWinEventHook` on a message-pump thread, `GetLastInputInfo`, WTS lock, `GetExtendedTcpTable`, the capability-store mic, a named-pipe single instance, the `Run` key, `tray-icon`, `x86_64-pc-windows-msvc` through cargo-dist; UIPI and WSL2 disclosed. Not started |
 | 41 | **Connections as a surface:** the connector registry, per-platform probes, a health per connector |
 | 42 | **Open source:** the licence, a synthetic corpus, a clean history — in progress |
 | 43 | **The site and the docs, caught up:** the screenshots, and an entry point for `docs/plans/` |
