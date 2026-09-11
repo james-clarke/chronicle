@@ -129,3 +129,47 @@ What shipped and is nowhere on the page:
   and the section reads correctly with or without it.
 - The tray mockups the M34 plan deferred are now unblocked, since M38
   shipped a real tray to screenshot.
+
+## Shipped (2026-09-11)
+
+All five chunks, in one pass, with these deviations from the plan above.
+
+- **Chunk 0.** The rendering setup is `scripts/site-shots.sh` over a hidden
+  `chronicle replay --case <fixture>=<day> --reconcile` (`crates/app/src/replay.rs`),
+  which writes a fixture's events through `storage::insert_event` and
+  `sessionizer::refresh` exactly as the daemon does, then places every closed
+  batch through the segmenter tier the shipped config uses and drains the
+  `name_task` jobs through the local model. Nothing loaded a fixture into a
+  database before this. Beside it, a public `chronicle task add` (Home's
+  declare, step for step) and three env hooks for the UI child:
+  `CHRONICLE_UI_DAY`, `CHRONICLE_UI_TASK`, `CHRONICLE_UI_SETTINGS`, so no
+  screenshot needs a click. Gate met: two runs differ only by the clock and
+  by what the local model named.
+- **The corpus is designed, not real.** `fixtures/site/*.jsonl` are five
+  generated days (`scripts/site_week.py`, seeded) for Sam, the developer the
+  cast document `fixtures/README.md` introduces; the M42 plan's chunk 0 owed
+  that document and it lives here. `day3_sms`/`day4_heroku` were not used:
+  they are real days with the identifiers swapped, and they still carry the
+  author's searches and the employer's product name. The `sam@` shell
+  prompt was renamed to `sam@` tree-wide in the same pass.
+- **Chunk 1.** Seven images replaced (`og`, `home-wide`, `timeline-wide`,
+  `reports-wide`, `triage`, `model`) and eight deleted rather than
+  regenerated, since the page never referenced them. `pipeline.webp` is
+  gone: "Shows its work" now quotes the sandbox's own `chronicle status`
+  self-score block, which says more than the pipeline card did. No
+  connections screenshot: the registry probes this machine, so the panel
+  would have shown the author's repositories however the data dir was
+  sandboxed. Checked by eye against every rendered image.
+- **Chunks 2 and 3.** The band, the day and every "How it works" panel are
+  Sam's Thursday, read from the sandbox database, not typed. New sections:
+  "What it can read" (three cards and a pointer to the README, not to
+  `tools.html`, which M41 has not generated) and "Open source, built in the
+  open", which absorbed the build-numbers block. Platforms stayed in the
+  download section, with the macOS line now saying it has never run on a
+  Mac. Budgets: 218 KB above the fold, 398 KB page weight.
+- **Chunk 4.** `docs/README.md` and the README introduction.
+
+Owed: the naming job files a minted task under a project it invents
+(`platform-eng`, `django`); the seed script unfiles those, but the prompt
+should be constrained to the configured projects. `chronicle replay` does
+not reproduce `activity_events`, presence rows or the consolidation tier.

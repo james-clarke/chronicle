@@ -1,15 +1,39 @@
 # Chronicle
 
-Local-first, privacy-driven activity tracker. Captures window/app focus
-events, derives "what was I working on" with an embedded local LLM, shows a
-correctable timeline + chat. Single binary, no account, no telemetry of any
-kind. Nothing leaves the machine unless you configure it to: an MCP server
-you added, or a cloud model you brought a key for. Settings › Storage &
-server lists exactly what those are.
+Chronicle is a small window in the corner of your screen that knows what you
+worked on, for how long, and why. A daemon watches which window is in front
+and when you step away, and files that time into the tasks you were actually
+doing: a ticket key in a tab, the folder a terminal is in, a branch name, a
+window you filed before, and a local language model for what the rules cannot
+place. It writes the standup, draws the day in lanes, adds the week up by
+project, and answers questions about any of it, from one SQLite file on your
+own disk.
 
-## How this doc works
+![Chronicle home, dragged wide: the tasks being worked on beside the day's feed](site/img/home-wide.webp)
 
-Everything below is the current plan, not hard rules.
+- **Local first.** One binary, no account, no server, no telemetry. The
+  language model runs on your CPU. Nothing leaves the machine unless you
+  configure it to: an MCP server you added, or a cloud model you brought a
+  key for. Settings › Storage & server lists exactly what those are.
+- **Correctable.** Rename a task, move a block, throw one out; the
+  correction is kept and read first next time. Once a day it scores its own
+  placements and prints the result in `chronicle status`.
+- **Linux X11 and Wayland today, macOS ported but unsigned, Windows not
+  yet.** The [platform matrix](#platform-matrix) below says what each route
+  actually does.
+
+The site is [chronicled.dev](https://chronicled.dev/). Install from
+[Installing](#installing); the licence is [AGPL-3.0](#license). The design
+record is [`docs/`](docs/README.md): one plan per milestone, written before
+the code, with what shipped and what is still owed.
+
+## How this document is organised
+
+Everything from here to [Milestones](#milestones) is the working reference
+for the code as it stands: the stack, the platform matrix, and one section
+per subsystem, each pointing at the plan that shaped it. It is kept in step
+with the tree, not with intentions. [How this was built](#how-this-was-built)
+at the end is the part a stranger should read first.
 
 ## Stack
 
