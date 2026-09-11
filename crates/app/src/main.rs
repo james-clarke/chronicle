@@ -5,6 +5,7 @@ mod chat_worker;
 mod daemon;
 mod derive;
 mod project;
+mod replay;
 mod rotate;
 mod service;
 mod sources;
@@ -70,6 +71,23 @@ enum Cmd {
     Derive {
         #[arg(long)]
         batch: i64,
+    },
+    /// Internal: load fixture event streams into the data dir the way the
+    /// daemon would have captured them (m43 chunk 0), then print the batch
+    /// ids they closed, one per line, for `chronicle derive --batch` to
+    /// pick up.
+    #[command(hide = true)]
+    Replay {
+        /// `<fixture.jsonl>=<YYYY-MM-DD>`: the stream, and the local day its
+        /// first event lands on, keeping every event's wall-clock time.
+        /// Repeatable.
+        #[arg(long = "case", value_name = "FIXTURE=YYYY-MM-DD", required = true)]
+        cases: Vec<String>,
+        /// Place each case's batches through the segmenter tier the way the
+        /// daemon's tick does, instead of leaving them pending for
+        /// `chronicle derive --batch`.
+        #[arg(long)]
+        reconcile: bool,
     },
     /// Internal: warm chat inference worker.
     #[command(hide = true)]
@@ -192,7 +210,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ModelCmd,
     },
-    /// List and edit tasks.
+    /// Declare, list and edit tasks.
     Task {
         #[command(subcommand)]
         cmd: TaskCmd,
@@ -420,6 +438,20 @@ enum TaskCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Declare a task, the way Home's declare row does: a work-item key in
+    /// the label becomes the task's anchor, and time that matches it starts
+    /// landing there.
+    Add {
+        /// What you are working on. A ticket key or URL in it becomes the
+        /// anchor, and the label when it is all there is.
+        label: String,
+        /// A configured project, or a repo folder that names one; anything
+        /// else is kept as typed and counts as unfiled until a rule matches.
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
     /// Close a task (the UI's close): it stops taking time; reopen from
     /// the task manager or `task list --all` if it was a slip.
     Close {
@@ -468,6 +500,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Standup { day } => standup_cmd(&data_dir, day.as_deref()),
         Cmd::Derive { batch } => derive_worker(&data_dir, batch),
+        Cmd::Replay { cases, reconcile } => replay::replay(&data_dir, &cases, reconcile),
         Cmd::DeriveWorker => derive_resident(&data_dir),
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
@@ -651,6 +684,46 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
                     }
                 );
             }
+            Ok(())
+        }
+        TaskCmd::Add {
+            label,
+            project,
+            description,
+        } => {
+            let config = Config::load(&data_dir.join("config.toml"))?;
+            let now = jiff::Timestamp::now();
+            let input = label.trim().to_owned();
+            if input.is_empty() {
+                bail!("the label cannot be empty");
+            }
+            let ticket = regex::Regex::new(&config.ticket_regex)
+                .ok()
+                .and_then(|re| re.find(&input).map(|m| m.as_str().to_owned()));
+            let label = match &ticket {
+                Some(key) if input == *key || input.starts_with("http") => key.clone(),
+                _ => input,
+            };
+            // Home's rule (m35 chunk 1): a typed project resolves to a
+            // configured one when it names one or its repo folder, and is
+            // otherwise kept as typed.
+            let typed = project.unwrap_or_default().trim().to_owned();
+            let matcher = chronicle_core::project::Matcher::from_config(&config);
+            let project = matcher.resolve(&typed).map(str::to_owned).unwrap_or(typed);
+            let project = (!project.is_empty()).then_some(project.as_str());
+            let id = storage::insert_user_task(&conn, now, &label, project)?;
+            if let Some(d) = description
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+            {
+                storage::set_task_description(&conn, id, Some(d))?;
+            }
+            if let Some(key) = &ticket {
+                storage::set_task_external_ref(&conn, id, key)?;
+            }
+            chronicle_core::segmenter::seed_task_evidence(&mut conn, &config, now, id)?;
+            println!("task {id}: {label} [{}]", project.unwrap_or("-"));
             Ok(())
         }
         TaskCmd::Close { id } => {

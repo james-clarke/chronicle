@@ -628,6 +628,22 @@ impl TimelineApp {
             // sits outside the scroll area) that scrolls the form.
             let wide = theme::wide(ui.ctx());
             let mut jump: Option<&str> = None;
+            // `CHRONICLE_UI_SETTINGS=<section>` jumps there on the third
+            // frame, once the form has a layout to scroll (the site's
+            // screenshot script; the index beside the form otherwise).
+            let env_jump = egui::Id::new("settings_env_jump");
+            let frame = ui.ctx().data(|d| d.get_temp::<u8>(env_jump).unwrap_or(0));
+            if frame < 3 {
+                ui.ctx().data_mut(|d| d.insert_temp(env_jump, frame + 1));
+                if frame == 2
+                    && let Ok(name) = std::env::var("CHRONICLE_UI_SETTINGS")
+                {
+                    jump = SECTIONS
+                        .iter()
+                        .find(|s| s.eq_ignore_ascii_case(&name))
+                        .copied();
+                }
+            }
             ui.horizontal_top(|ui| {
                 let avail = ui.available_width();
                 let max_w = avail.min(520.0);

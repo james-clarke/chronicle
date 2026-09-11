@@ -814,7 +814,12 @@ impl TimelineApp {
         composited: bool,
     ) -> Self {
         let tz = TimeZone::system();
-        let day = Zoned::now().with_time_zone(tz.clone()).date();
+        // `CHRONICLE_UI_DAY=YYYY-MM-DD` opens on that day (the site's
+        // screenshot script); today otherwise.
+        let day = std::env::var("CHRONICLE_UI_DAY")
+            .ok()
+            .and_then(|v| v.parse::<civil::Date>().ok())
+            .unwrap_or_else(|| Zoned::now().with_time_zone(tz.clone()).date());
         let day_header = day.strftime("%a %-d %b %Y").to_string();
         let week_anchor = chronicle_core::timeref::week_start(day).unwrap_or(day);
         let week_range = match week_anchor.checked_add(6.days()) {
@@ -1054,6 +1059,17 @@ impl TimelineApp {
             )) => {
                 self.spans = spans;
                 self.groups = groups;
+                // `CHRONICLE_UI_TASK=<id>` opens that task's detail pane once
+                // the groups it must be in have loaded (the site's screenshot
+                // script; a card click otherwise).
+                if self.selected_task.is_none()
+                    && let Some(id) = std::env::var("CHRONICLE_UI_TASK")
+                        .ok()
+                        .and_then(|v| v.parse::<i64>().ok())
+                    && self.groups.iter().any(|g| g.task_id == id)
+                {
+                    self.selected_task = Some(id);
+                }
                 self.agents = agents;
                 self.unplaced = unplaced;
                 self.open_tasks = open;
