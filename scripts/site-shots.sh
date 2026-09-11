@@ -56,9 +56,6 @@ seed() {
   done
   # shellcheck disable=SC2086
   "$BIN" replay $cases --reconcile > "$SB/batches.txt"
-  # The naming job files a minted task under whatever project it invents;
-  # anything not in config.toml is unfiled here, as a person would leave it.
-  sql "UPDATE tasks SET project=NULL WHERE source='derived' AND project IS NOT NULL AND lower(project) NOT IN ('contoso','mailer','northwind');"
 
   # The corrections a person makes on a Thursday afternoon: two of the
   # model's names replaced, a meeting named, one minted task thrown out so

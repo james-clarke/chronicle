@@ -1037,7 +1037,16 @@ pub(crate) fn run_ai_job(
                 None,
                 None,
             );
-            let s = engine.suggest_task(JobKind::NameTask, &digest)?;
+            let mut s = engine.suggest_task(JobKind::NameTask, &digest)?;
+            // The model may answer with a project of its own invention
+            // (`platform-eng`); only a configured name is filed, the rest
+            // stays unfiled for the person to map.
+            let matcher = chronicle_core::project::Matcher::from_config(config);
+            s.project = s
+                .project
+                .as_deref()
+                .and_then(|p| matcher.resolve(p))
+                .map(str::to_owned);
             let n = conn.execute(
                 "UPDATE tasks SET label=?1, project=COALESCE(project, ?2)
                  WHERE id=?3 AND source='derived' AND label=?4",
