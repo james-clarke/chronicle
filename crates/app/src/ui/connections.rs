@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use chronicle_core::config::expand_home;
+use chronicle_core::connectors::{self, ConnectKind, Platform};
+use chronicle_core::health::{self, Health};
 use chronicle_core::storage;
-use chronicle_core::types::{ActivityEvent, ActivityKind};
+use chronicle_core::types::ActivityEvent;
 use chronicle_mcp::{ActionCall, ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
@@ -480,6 +482,46 @@ fn row_status(
     }
 }
 
+/// Connectors whose rows are drawn by a section of their own: the repo
+/// list above, and the MCP server list. The registry still carries them —
+/// `chronicle connections` and the site want one table — but the panel
+/// would draw them twice.
+const DRAWN_ELSEWHERE: &[&str] = &["git_repos", "git_hooks"];
+
+/// Every `config.toml` switch a descriptor can name, so a row's toggle can
+/// borrow one list instead of a different field of `LocalSources` each
+/// time. `ai_session_dirs` is here as a bool: it is a list in the config,
+/// and switching it back on restores the default dir.
+const SWITCHES: &[&str] = &[
+    "ai_session_dirs",
+    "github_prs",
+    "gitlab_mrs",
+    "mic_capture",
+    "google_calendar",
+    "shell_history",
+    "editor_heartbeats",
+    "shell_hook",
+    "discover_repos",
+    "browser_history",
+];
+
+/// The bool behind one switch name. `ai_session_dirs` has none — it is a
+/// list, handled where the rows are written back.
+fn switch<'a>(src: &'a mut LocalSources, field: &str) -> Option<&'a mut bool> {
+    Some(match field {
+        "github_prs" => &mut src.github_prs,
+        "gitlab_mrs" => &mut src.gitlab_mrs,
+        "mic_capture" => &mut src.mic_capture,
+        "google_calendar" => &mut src.google_calendar,
+        "shell_history" => &mut src.shell_history,
+        "editor_heartbeats" => &mut src.editor_heartbeats,
+        "shell_hook" => &mut src.shell_hook,
+        "discover_repos" => &mut src.discover_repos,
+        "browser_history" => &mut src.browser_history,
+        _ => return None,
+    })
+}
+
 /// Local collector switches (m22), mirrored from config.toml like
 /// `git_repos`. Sessions are on iff `ai_session_dirs` is non-empty; the
 /// toggle restores the default dir when switching back on.
@@ -527,32 +569,6 @@ impl LocalSources {
         c.discover_repos = self.discover_repos;
         c.calendars = self.calendars.clone();
     }
-}
-
-fn kind_label(k: ActivityKind) -> &'static str {
-    match k {
-        ActivityKind::AiSession => "session",
-        ActivityKind::PrAuthored => "authored",
-        ActivityKind::PrReviewed => "reviewed",
-        ActivityKind::Call => "call",
-        other => other.as_str(),
-    }
-}
-
-/// One sources row: title, switch (`None` = detected, no switch), blocker
-/// (tool/dir missing), the kinds whose newest event feeds the chip, detail
-/// caption.
-type SourceRow<'a> = (
-    &'a str,
-    Option<&'a mut bool>,
-    Option<String>,
-    &'a [ActivityKind],
-    String,
-);
-
-/// Bare command resolved on PATH (plus the user bin dirs the daemon sees)?
-fn on_path(cmd: &str) -> bool {
-    chronicle_core::config::resolve_command(cmd).contains('/')
 }
 
 /// `resolve_git_dir(repo).is_some()` per repo, index aligned with `repos`.
@@ -654,8 +670,9 @@ pub(super) struct Connections {
     last_fetch: Option<(String, Timestamp, Option<String>)>,
     /// Newest vcs event per repo basename.
     repo_last: BTreeMap<String, ActivityEvent>,
-    /// Newest event per kind (local collector rows).
-    kind_last: Vec<ActivityEvent>,
+    /// What each connector is doing on this machine (m41 chunk 1): probes
+    /// and row counts, read at load rather than per frame.
+    health: BTreeMap<&'static str, Health>,
     /// Key WakaTime plugins authenticate with (meta `wakapi_api_key`).
     wakapi_key: Option<String>,
     repo_add: String,
@@ -667,15 +684,6 @@ pub(super) struct Connections {
     /// `resolve_git_dir(repo).is_some()` per `git_repos` entry (index
     /// aligned); refreshed at load and after add/remove, not per frame.
     repo_resolved: Vec<bool>,
-    /// `gh`/`pw-dump` on PATH and the atuin db present; filesystem/PATH
-    /// checks that don't change within a settings session, so cached at
-    /// load instead of probed every frame.
-    gh_on_path: bool,
-    glab_on_path: bool,
-    tmux_on_path: bool,
-    docker_on_path: bool,
-    pw_dump_on_path: bool,
-    atuin_present: bool,
     /// Session formats with a directory on this machine (m37 chunk 0).
     session_formats: Vec<&'static str>,
     /// Browser profiles with a history DB (m37 chunk 4), by browser name.
@@ -722,22 +730,24 @@ impl Connections {
             .into_iter()
             .map(|e| (e.repo.clone(), e))
             .collect();
-        let kind_last = conn
-            .and_then(|c| storage::latest_activity_per_kind(c).ok())
-            .unwrap_or_default();
         let wakapi_key = conn.and_then(|c| storage::get_meta(c, "wakapi_api_key").ok().flatten());
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let discovered: Vec<String> =
-            chronicle_core::config::Config::load(&data_dir.join("config.toml"))
-                .map(|c| chronicle_core::project::Matcher::from_config(&c))
-                .map(|m| {
-                    m.projects
-                        .iter()
-                        .filter(|p| p.discovered)
-                        .map(|p| p.name.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
+        let config =
+            chronicle_core::config::Config::load(&data_dir.join("config.toml")).unwrap_or_default();
+        let discovered: Vec<String> = chronicle_core::project::Matcher::from_config(&config)
+            .projects
+            .iter()
+            .filter(|p| p.discovered)
+            .map(|p| p.name.clone())
+            .collect();
+        // `daemon_up` is false because health does not read endpoint
+        // probes: whether the daemon answers is one fact about the whole
+        // product, reported on Home, not a per-row verdict.
+        let env = health::Env::host(false);
+        let now_ms = Timestamp::now().as_millisecond();
+        let health = connectors::for_platform(Platform::HOST)
+            .map(|c| (c.id, health::health_of(conn, &config, &env, c, now_ms)))
+            .collect();
         Self {
             mcp_path,
             mcp,
@@ -749,7 +759,7 @@ impl Connections {
             mcp_status: None,
             last_fetch,
             repo_last,
-            kind_last,
+            health,
             wakapi_key,
             repo_add: String::new(),
             repo_error: None,
@@ -760,12 +770,6 @@ impl Connections {
             .ok()
             .map(|t| t.email),
             repo_resolved: repo_status(git_repos),
-            gh_on_path: on_path("gh"),
-            glab_on_path: on_path("glab"),
-            tmux_on_path: on_path("tmux"),
-            docker_on_path: on_path("docker"),
-            pw_dump_on_path: on_path("pw-dump"),
-            atuin_present: chronicle_capture::shell::default_db_path().is_file(),
             session_formats: home
                 .as_deref()
                 .map(|h| {
@@ -1397,53 +1401,67 @@ impl Connections {
     /// One row per local collector: a switch, a status chip from the newest
     /// stored event, and the tool gate the daemon applies at spawn (`gh`,
     /// `pw-dump` on PATH) surfaced here instead of only in the log.
+    /// The local sources section (m41 chunk 1): one row per connector the
+    /// registry claims for this platform, in the registry's own grouping,
+    /// with the health the probes and the event tables report. Git repos
+    /// and MCP servers keep the sections above — their descriptors are
+    /// skipped here rather than drawn twice.
     fn sources_ui(&mut self, ui: &mut egui::Ui, src: &mut LocalSources) {
         let width = ui.available_width();
         let mut sessions_on = !src.ai_session_dirs.is_empty();
         let missing_dir = self.session_dir_missing.clone();
-        let session_detail = if sessions_on {
-            src.ai_session_dirs.join(", ")
-        } else {
-            "Claude Code transcripts under ~/.claude/projects".to_owned()
-        };
-        let gcal_detail = match self.google_account.as_deref() {
-            Some("") => "primary calendar every 5 min".to_owned(),
-            Some(email) => format!("primary calendar every 5 min \u{b7} {email}"),
-            None => "primary calendar every 5 min \u{b7} read-only, events scope".to_owned(),
-        };
+
+        // What this machine has to say about a row, where the registry's
+        // one-line blurb would be the poorer answer: the profiles found,
+        // the projects discovered, the workspaces read.
+        let mut details: BTreeMap<&'static str, String> = BTreeMap::new();
+        details.insert(
+            "claude_code_sessions",
+            if sessions_on {
+                src.ai_session_dirs.join(", ")
+            } else {
+                "Claude Code transcripts under ~/.claude/projects".to_owned()
+            },
+        );
         let others: Vec<&str> = self
             .session_formats
             .iter()
             .copied()
             .filter(|f| *f != "claude")
             .collect();
-        let formats_detail = if others.is_empty() {
-            "none found \u{b7} looks for codex, gemini, copilot, aider, cline, opencode, cursor"
-                .to_owned()
-        } else {
-            format!(
-                "found: {} \u{b7} first prompt, cwd and paths only",
-                others.join(", ")
-            )
-        };
-        let mut formats_on = !others.is_empty() && sessions_on;
-        let browser_detail = if self.browser_profiles.is_empty() {
-            "no Chrome, Chromium, Brave, Edge, Firefox, LibreWolf or Zen profile found".to_owned()
-        } else {
-            format!(
-                "{} \u{b7} copied and read every 60 s, query strings dropped, private windows absent",
-                self.browser_profiles.join(", ")
-            )
-        };
-        let discover_detail = if self.discovered.is_empty() {
-            "git repos beside the ones above become projects without a config edit".to_owned()
-        } else {
-            format!("discovered: {}", self.discovered.join(", "))
-        };
-        let links_detail = if self.link_rows.is_empty() {
-            "vercel, netlify, fly, render, wrangler, supabase, doppler, sentry, CI and the build system, read at each repo root"
-                .to_owned()
-        } else {
+        details.insert(
+            "agent_sessions",
+            if others.is_empty() {
+                "none found \u{b7} looks for codex, gemini, copilot, aider, cline, opencode, cursor"
+                    .to_owned()
+            } else {
+                format!(
+                    "found: {} \u{b7} first prompt, cwd and paths only",
+                    others.join(", ")
+                )
+            },
+        );
+        details.insert(
+            "browser_history",
+            if self.browser_profiles.is_empty() {
+                "no Chrome, Chromium, Brave, Edge, Firefox, LibreWolf or Zen profile found"
+                    .to_owned()
+            } else {
+                format!(
+                    "{} \u{b7} copied and read every 60 s, query strings dropped, private windows absent",
+                    self.browser_profiles.join(", ")
+                )
+            },
+        );
+        details.insert(
+            "repo_discovery",
+            if self.discovered.is_empty() {
+                "git repos beside the ones above become projects without a config edit".to_owned()
+            } else {
+                format!("discovered: {}", self.discovered.join(", "))
+            },
+        );
+        if !self.link_rows.is_empty() {
             let mut names: Vec<String> = self
                 .link_rows
                 .iter()
@@ -1451,7 +1469,7 @@ impl Connections {
                 .map(|l| format!("{} {}", l.kind, l.name))
                 .collect();
             names.dedup();
-            let builds: Vec<&str> = self
+            let mut builds: Vec<&str> = self
                 .link_rows
                 .iter()
                 .filter(|l| l.kind == "build")
@@ -1463,16 +1481,13 @@ impl Connections {
                     d.push_str(" \u{b7} ");
                 }
                 d.push_str("build: ");
-                let mut b = builds;
-                b.sort_unstable();
-                b.dedup();
-                d.push_str(&b.join(", "));
+                builds.sort_unstable();
+                builds.dedup();
+                d.push_str(&builds.join(", "));
             }
-            d
-        };
-        let workspaces_detail = if self.workspace_rows.is_empty() {
-            "VS Code, Cursor, Windsurf, JetBrains and Zed recent lists: none found".to_owned()
-        } else {
+            details.insert("link_files", d);
+        }
+        if !self.workspace_rows.is_empty() {
             let mut editors: Vec<&str> = self
                 .workspace_rows
                 .iter()
@@ -1485,180 +1500,111 @@ impl Connections {
                 .iter()
                 .filter(|w| !w.remote.is_empty())
                 .count();
-            format!(
-                "{} workspaces from {}{}",
-                self.workspace_rows.len(),
-                editors.join(", "),
-                if remote > 0 {
-                    format!(" \u{b7} {remote} remote")
-                } else {
-                    String::new()
-                }
-            )
-        };
-        let calendars_detail = if src.calendars.is_empty() {
-            "add `calendars = [\"https://…/basic.ics\"]` to config.toml: a secret iCal address, no OAuth"
-                .to_owned()
-        } else {
-            format!("{} feeds every 15 min, \u{b1}7 days", src.calendars.len())
-        };
-        let mut calendars_on = !src.calendars.is_empty();
-        let mut links_on = !self.link_rows.is_empty();
-        let mut workspaces_on = !self.workspace_rows.is_empty();
-        let mut tmux_on = self.tmux_on_path;
-        let mut docker_on = self.docker_on_path;
-        let shell_hook_detail = if src.shell_hook {
-            "eval \"$(chronicle shell-init zsh)\" in your rc file \u{b7} cwd, program name and duration per command, never the command line"
-                .to_owned()
-        } else {
-            "the local route answers 403".to_owned()
-        };
-
-        subhead(ui, "Files on this machine", |_| {});
-        let mut files: [SourceRow; 8] = [
-            (
-                "Claude Code sessions",
-                Some(&mut sessions_on),
-                missing_dir.map(|d| format!("no such directory: {d}")),
-                &[ActivityKind::AiSession],
-                session_detail,
-            ),
-            (
-                "Other agents' sessions",
-                Some(&mut formats_on),
-                None,
-                &[],
-                formats_detail,
-            ),
-            (
-                "Browser history",
-                Some(&mut src.browser_history),
-                self.browser_profiles
-                    .is_empty()
-                    .then(|| "no history database found".to_owned()),
-                &[ActivityKind::Browse],
-                browser_detail,
-            ),
-            (
-                "Repo discovery",
-                Some(&mut src.discover_repos),
-                None,
-                &[],
-                discover_detail,
-            ),
-            ("Link files", Some(&mut links_on), None, &[], links_detail),
-            (
-                "Editor workspaces",
-                Some(&mut workspaces_on),
-                None,
-                &[],
-                workspaces_detail,
-            ),
-            (
-                "Shell history (atuin)",
-                Some(&mut src.shell_history),
-                (!self.atuin_present).then(|| "no atuin history.db".to_owned()),
-                &[ActivityKind::Shell],
-                "atuin history.db every 60 s \u{b7} cwd, program name and duration only".to_owned(),
-            ),
-            (
-                "Calendars (ICS)",
-                Some(&mut calendars_on),
-                None,
-                &[ActivityKind::Meeting],
-                calendars_detail,
-            ),
-        ];
-        self.source_rows(ui, width, &mut files, &[1, 4, 5, 7]);
-
-        ui.add_space(theme::SPACE_SM);
-        subhead(ui, "Local servers and sockets", |_| {});
-        let mut local: [SourceRow; 5] = [
-            (
-                "Editor heartbeats (WakaTime plugins)",
-                Some(&mut src.editor_heartbeats),
-                None,
-                &[ActivityKind::Edit],
-                "vim-wakatime and friends post to this machine \u{b7} folded into edit spans per project"
+            details.insert(
+                "editor_workspaces",
+                format!(
+                    "{} workspaces from {}{}",
+                    self.workspace_rows.len(),
+                    editors.join(", "),
+                    if remote > 0 {
+                        format!(" \u{b7} {remote} remote")
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }
+        if !src.calendars.is_empty() {
+            details.insert(
+                "calendars_ics",
+                format!("{} feeds every 15 min, \u{b1}7 days", src.calendars.len()),
+            );
+        }
+        if src.shell_hook {
+            details.insert(
+                "shell_hook",
+                "eval \"$(chronicle shell-init zsh)\" in your rc file \u{b7} cwd, program name and duration per command, never the command line"
                     .to_owned(),
-            ),
-            (
-                "Shell hook",
-                Some(&mut src.shell_hook),
-                None,
-                &[ActivityKind::Shell],
-                shell_hook_detail,
-            ),
-            (
-                "tmux panes",
-                Some(&mut tmux_on),
-                (!self.tmux_on_path).then(|| "tmux not on PATH".to_owned()),
-                &[ActivityKind::Cwd],
-                "the attached panes' working directories every 60 s".to_owned(),
-            ),
-            (
-                "Docker Compose stacks",
-                Some(&mut docker_on),
-                (!self.docker_on_path).then(|| "docker not on PATH".to_owned()),
-                &[ActivityKind::Cwd],
-                "each running stack's working_dir label every 60 s".to_owned(),
-            ),
-            (
-                "Calls (microphone in use)",
-                Some(&mut src.mic_capture),
-                (!self.pw_dump_on_path).then(|| "pw-dump not on PATH".to_owned()),
-                &[ActivityKind::Call],
-                "pw-dump every 20 s \u{b7} each stretch becomes a call".to_owned(),
-            ),
-        ];
-        self.source_rows(ui, width, &mut local, &[2, 3]);
-        if let Some(key) = self.wakapi_key.clone() {
-            ui.horizontal(|ui| {
-                ui.add_space(16.0);
-                caption(ui, format!("api key {}", masked(&key)), None);
-                if theme::ghost_button(ui, theme::glyph(theme::icon::COPY))
-                    .on_hover_text("copy the api key for ~/.wakatime.cfg")
-                    .clicked()
+            );
+        }
+        details.insert(
+            "google_calendar",
+            match self.google_account.as_deref() {
+                Some("") => "primary calendar every 5 min".to_owned(),
+                Some(email) => format!("primary calendar every 5 min \u{b7} {email}"),
+                None => "primary calendar every 5 min \u{b7} read-only, events scope".to_owned(),
+            },
+        );
+
+        // The switches, copied out: a row's toggle borrows this list rather
+        // than a different field of `src` each time.
+        let mut switches: Vec<(&'static str, bool)> = SWITCHES
+            .iter()
+            .map(|f| match *f {
+                "ai_session_dirs" => (*f, sessions_on),
+                field => (*f, switch(src, field).is_some_and(|b| *b)),
+            })
+            .collect();
+
+        for kind in [
+            ConnectKind::Files,
+            ConnectKind::LocalServer,
+            ConnectKind::Cli,
+            ConnectKind::Account,
+        ] {
+            let rows: Vec<&'static connectors::Connector> =
+                connectors::for_platform(Platform::HOST)
+                    .filter(|c| c.kind == kind && !DRAWN_ELSEWHERE.contains(&c.id))
+                    .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            if kind != ConnectKind::Files {
+                ui.add_space(theme::SPACE_SM);
+            }
+            subhead(ui, kind.label(), |_| {});
+            for c in rows {
+                // The two blockers a probe cannot see: a configured session
+                // directory that is gone, and an account that is not signed
+                // in.
+                let blocker = match c.id {
+                    "claude_code_sessions" => missing_dir
+                        .clone()
+                        .map(|d| format!("no such directory: {d}")),
+                    "google_calendar" if self.google_account.is_none() => {
+                        Some("not signed in: run `chronicle gcal-login`".to_owned())
+                    }
+                    _ => None,
+                };
+                self.source_row(ui, width, c, &mut switches, &details, blocker.as_deref());
+                // The key the WakaTime plugins authenticate with belongs to
+                // the row above it, not to the end of the group.
+                if c.id == "editor_heartbeats"
+                    && let Some(key) = self.wakapi_key.clone()
                 {
-                    ui.ctx().copy_text(key.clone());
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        caption(ui, format!("api key {}", masked(&key)), None);
+                        if theme::ghost_button(ui, theme::glyph(theme::icon::COPY))
+                            .on_hover_text("copy the api key for ~/.wakatime.cfg")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(key.clone());
+                        }
+                    });
                 }
-            });
+            }
         }
 
-        ui.add_space(theme::SPACE_SM);
-        subhead(ui, "Your CLIs", |_| {});
-        let mut clis: [SourceRow; 2] = [
-            (
-                "GitHub pull requests (gh)",
-                Some(&mut src.github_prs),
-                (!self.gh_on_path).then(|| "gh not on PATH".to_owned()),
-                &[ActivityKind::PrAuthored, ActivityKind::PrReviewed],
-                "gh search prs, authored + reviewed, every 5 min \u{b7} your existing login".to_owned(),
-            ),
-            (
-                "GitLab merge requests (glab)",
-                Some(&mut src.gitlab_mrs),
-                (!self.glab_on_path).then(|| "glab not on PATH".to_owned()),
-                &[ActivityKind::PrAuthored, ActivityKind::PrReviewed],
-                "glab mr list, assigned + reviewing, every 5 min per GitLab repo \u{b7} your existing login"
-                    .to_owned(),
-            ),
-        ];
-        self.source_rows(ui, width, &mut clis, &[]);
-
-        ui.add_space(theme::SPACE_SM);
-        subhead(ui, "Accounts", |_| {});
-        let mut accounts: [SourceRow; 1] = [(
-            "Google Calendar",
-            Some(&mut src.google_calendar),
-            self.google_account
-                .is_none()
-                .then(|| "not signed in: run `chronicle gcal-login`".to_owned()),
-            &[ActivityKind::Meeting],
-            gcal_detail,
-        )];
-        self.source_rows(ui, width, &mut accounts, &[]);
-
+        for (field, on) in switches {
+            if field == "ai_session_dirs" {
+                sessions_on = on;
+                continue;
+            }
+            if let Some(slot) = switch(src, field) {
+                *slot = on;
+            }
+        }
         if sessions_on != !src.ai_session_dirs.is_empty() {
             src.ai_session_dirs = if sessions_on {
                 chronicle_core::config::Config::default().ai_session_dirs
@@ -1669,59 +1615,101 @@ impl Connections {
         }
     }
 
-    /// The rows of one sources group. `detected` indexes rows whose switch
-    /// only reports what is on this machine (no config behind it): drawn
-    /// without a toggle.
-    fn source_rows(
+    /// One source row: the registry's name and blurb, this machine's health
+    /// as the dot and chip, and a toggle only where a descriptor names a
+    /// config field to flip.
+    fn source_row(
         &self,
         ui: &mut egui::Ui,
         width: f32,
-        rows: &mut [SourceRow],
-        detected: &[usize],
+        c: &'static connectors::Connector,
+        switches: &mut [(&'static str, bool)],
+        details: &BTreeMap<&'static str, String>,
+        blocker: Option<&str>,
     ) {
-        for (i, (name, on, blocker, kinds, detail)) in rows.iter_mut().enumerate() {
-            let is_on = on.as_deref().copied().unwrap_or(true);
-            let last = self
-                .kind_last
+        let stored = self.health.get(c.id).cloned().unwrap_or(Health::Absent);
+        let toggle = c.setup.iter().find_map(|s| match s {
+            connectors::SetupStep::Toggle { field } => Some(*field),
+            _ => None,
+        });
+        // Health is read at load, but a switch flips in this frame: carry
+        // the toggle's live value so a row answers the click that just
+        // happened instead of waiting for Settings to be reopened. A row
+        // with no switch has nothing to carry and keeps what it was given.
+        let present = matches!(
+            stored,
+            Health::Found | Health::Connected | Health::Working { .. }
+        );
+        let state = match toggle.map(|field| {
+            switches
                 .iter()
-                .filter(|e| kinds.contains(&e.kind))
-                .max_by_key(|e| e.end_ts.unwrap_or(e.ts));
-            let (dot, chip, color) = match (is_on, blocker.as_deref(), last) {
-                (false, _, _) => (palette::TEXT_DIM, "off".to_owned(), palette::TEXT_DIM),
-                (true, Some(why), _) => (palette::RED, why.to_owned(), palette::RED),
-                (true, None, Some(ev)) => (
-                    palette::GREEN,
-                    format!(
-                        "{} {}",
-                        kind_label(ev.kind),
-                        ago(ev.end_ts.unwrap_or(ev.ts).as_millisecond())
-                    ),
-                    palette::TEXT_DIM,
-                ),
-                (true, None, None) if kinds.is_empty() => {
-                    (palette::GREEN, "on".to_owned(), palette::TEXT_DIM)
+                .find(|(f, _)| *f == field)
+                .is_some_and(|(_, v)| *v)
+        }) {
+            None | Some(true) if present => stored,
+            Some(false) if present => Health::Found,
+            None => stored,
+            Some(true) => Health::Broken {
+                reason: match stored {
+                    Health::Broken { reason } => reason,
+                    // Switched on this frame, so health has no reason yet:
+                    // name the first thing the descriptor looks for.
+                    _ => c
+                        .probes
+                        .iter()
+                        .find_map(|p| match p.kind {
+                            connectors::ProbeKind::Command { cmd } => {
+                                Some(format!("{cmd} not on PATH"))
+                            }
+                            connectors::ProbeKind::Path { path } => {
+                                Some(format!("{path} is missing"))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| "not on this machine".to_owned()),
+                },
+            },
+            Some(false) => Health::Absent,
+        };
+        let (dot, chip, color) = match (&state, blocker) {
+            (_, Some(why)) => (palette::RED, why.to_owned(), palette::RED),
+            (Health::Broken { reason }, _) => (palette::RED, reason.clone(), palette::RED),
+            (Health::Working { last_seen_ms, .. }, _) => {
+                (palette::GREEN, ago(*last_seen_ms), palette::TEXT_DIM)
+            }
+            (Health::Connected, _) => (
+                palette::AMBER,
+                "nothing seen yet".to_owned(),
+                palette::AMBER,
+            ),
+            (Health::Found | Health::Absent, _) => (
+                palette::TEXT_DIM,
+                health::label(c, &state).to_owned(),
+                palette::TEXT_DIM,
+            ),
+        };
+        theme::ListRow::new(c.name)
+            .emphasis()
+            .dot(dot)
+            .chip(chip, color)
+            .show(ui, width, |ui| {
+                if let Some(field) = toggle
+                    && let Some(sw) = switches.iter_mut().find(|(f, _)| *f == field)
+                {
+                    theme::toggle(ui, &mut sw.1);
                 }
-                (true, None, None) => (
-                    palette::AMBER,
-                    "nothing seen yet".to_owned(),
-                    palette::AMBER,
-                ),
-            };
-            let toggle = !detected.contains(&i);
-            theme::ListRow::new(name)
-                .emphasis()
-                .dot(dot)
-                .chip(chip, color)
-                .show(ui, width, |ui| {
-                    if toggle && let Some(on) = on.as_deref_mut() {
-                        theme::toggle(ui, on);
-                    }
-                });
-            ui.horizontal(|ui| {
-                ui.add_space(16.0);
-                caption(ui, detail.clone(), None);
             });
-        }
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            caption(
+                ui,
+                details
+                    .get(c.id)
+                    .cloned()
+                    .unwrap_or_else(|| c.blurb.to_owned()),
+                None,
+            );
+        });
     }
 
     fn add_repo(&mut self, git_repos: &mut Vec<String>) -> Result<(), String> {
