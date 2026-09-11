@@ -7907,7 +7907,7 @@ mod tests {
         super::MIGRATIONS.to_latest(&mut conn).unwrap();
         for (id, label, project, status) in [
             (1, "old", "contoso", "open"),
-            (2, "cased", "Contoso", "open"),
+            (2, "cased", "Acme", "open"),
             (3, "odd", "ai server", "open"),
             (4, "gone", "mailer", "closed"),
             (5, "old odd", "harrypotter.com", "closed"),
@@ -7929,7 +7929,7 @@ mod tests {
             changed,
             [
                 (1, "contoso".to_owned(), "acme".to_owned()),
-                (2, "Contoso".to_owned(), "acme".to_owned()),
+                (2, "Acme".to_owned(), "acme".to_owned()),
                 (4, "mailer".to_owned(), "acme".to_owned()),
             ]
         );

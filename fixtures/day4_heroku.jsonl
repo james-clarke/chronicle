@@ -1,6 +1,6 @@
 {"ts": "2026-08-27T13:46:29.943Z", "kind": "title", "app": "Google-chrome", "title": "northwind-memberships | Contoso Dashboard - Google Chrome"}
 {"ts": "2026-08-27T13:47:49.747Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships | Contoso Dashboard", "url": "https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/1/"}
-{"ts": "2026-08-27T13:49:35.940Z", "kind": "focus", "app": "Terminator", "title": "acme-memberships.py (~/dev/contoso/contoso/settings) - VIM"}
+{"ts": "2026-08-27T13:49:35.940Z", "kind": "focus", "app": "Terminator", "title": "memberships.py (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:49:40.671Z", "kind": "title", "app": "Terminator", "title": "mcp.toml (~/.local/share/chronicle) - VIM"}
 {"ts": "2026-08-27T13:49:42.469Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/chronicle"}
 {"ts": "2026-08-27T13:49:44.004Z", "kind": "focus", "app": "chronicle", "title": "Chronicle"}
@@ -42,11 +42,11 @@
 {"ts": "2026-08-27T13:59:15.251Z", "kind": "focus", "app": "chronicle", "title": "Chronicle"}
 {"ts": "2026-08-27T13:59:15.441Z", "kind": "focus", "app": "Terminator", "title": "./local.sh shell_plus"}
 {"ts": "2026-08-27T13:59:18.887Z", "kind": "focus", "app": "Slack", "title": "task-force-team (Channel) - PB - 2 new items - Slack"}
-{"ts": "2026-08-27T13:59:20.956Z", "kind": "focus", "app": "Terminator", "title": "acme-memberships.py (~/dev/contoso/contoso/settings) - VIM"}
+{"ts": "2026-08-27T13:59:20.956Z", "kind": "focus", "app": "Terminator", "title": "memberships.py (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:59:24.431Z", "kind": "title", "app": "Terminator", "title": "✳ Campaign SMS sending failure"}
-{"ts": "2026-08-27T13:59:30.410Z", "kind": "title", "app": "Terminator", "title": "acme-memberships.py (~/dev/contoso/contoso/settings) - VIM"}
+{"ts": "2026-08-27T13:59:30.410Z", "kind": "title", "app": "Terminator", "title": "memberships.py (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:59:33.933Z", "kind": "title", "app": "Terminator", "title": "./local.sh shell_plus"}
-{"ts": "2026-08-27T13:59:41.029Z", "kind": "title", "app": "Terminator", "title": "acme-memberships.py (~/dev/contoso/contoso/settings) - VIM"}
+{"ts": "2026-08-27T13:59:41.029Z", "kind": "title", "app": "Terminator", "title": "memberships.py (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:59:44.819Z", "kind": "title", "app": "Terminator", "title": "contoso.py (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:59:46.983Z", "kind": "title", "app": "Terminator", "title": "./local.sh shell_plus"}
 {"ts": "2026-08-27T13:59:51.585Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/mailer"}
@@ -130,9 +130,9 @@
 {"ts": "2026-08-27T14:19:31.011Z", "kind": "title", "app": "Google-chrome", "title": "For you - Assigned to me - Jira - Google Chrome"}
 {"ts": "2026-08-27T14:19:49.923Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Jira", "url": "https://acme.atlassian.net/browse/ACME-11032?xpis=eyJicmlkZ2UiOiJzbWFydExpbmtzIiwiaWQiOiIxNzg3ODQwMjg1NjYzIiwic291cmNlIjoiamlyYSJ9"}
 {"ts": "2026-08-27T14:19:50.899Z", "kind": "title", "app": "Google-chrome", "title": "Jira - Google Chrome"}
-{"ts": "2026-08-27T14:19:53.165Z", "kind": "title", "app": "Google-chrome", "title": "[ACME-11032] Plays: manage client-specific Caylex Skills through Contoso - Jira - Google Chrome"}
+{"ts": "2026-08-27T14:19:53.165Z", "kind": "title", "app": "Google-chrome", "title": "[ACME-11032] Plans: manage client-specific renewal rules through Contoso - Jira - Google Chrome"}
 {"ts": "2026-08-27T14:20:37.386Z", "kind": "focus", "app": "Terminator", "title": "✳ Campaign SMS sending failure"}
-{"ts": "2026-08-27T14:20:50.540Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11032] Plays: manage client-specific Caylex Skills through Contoso - Jira", "url": "https://acme.atlassian.net/browse/ACME-11032"}
+{"ts": "2026-08-27T14:20:50.540Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11032] Plans: manage client-specific renewal rules through Contoso - Jira", "url": "https://acme.atlassian.net/browse/ACME-11032"}
 {"ts": "2026-08-27T14:21:12.459Z", "kind": "title", "app": "Terminator", "title": "./local.sh shell_plus"}
 {"ts": "2026-08-27T14:21:14.851Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/mailer"}
 {"ts": "2026-08-27T14:21:16.502Z", "kind": "title", "app": "Terminator", "title": "./local.sh shell_plus"}

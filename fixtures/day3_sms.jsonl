@@ -143,7 +143,7 @@
 {"ts": "2026-08-27T13:37:54.303Z", "kind": "title", "app": "Google-chrome", "title": "Contoso Control Panel - Google Chrome"}
 {"ts": "2026-08-27T13:38:31.869Z", "kind": "focus", "app": "Terminator", "title": "contoso.py + (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:38:37.783Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/contoso"}
-{"ts": "2026-08-27T13:38:45.039Z", "kind": "title", "app": "Terminator", "title": "acme-memberships.py (~/dev/contoso/contoso/settings) - VIM"}
+{"ts": "2026-08-27T13:38:45.039Z", "kind": "title", "app": "Terminator", "title": "memberships.py (~/dev/contoso/contoso/settings) - VIM"}
 {"ts": "2026-08-27T13:38:55.432Z", "kind": "focus", "app": "Google-chrome", "title": "Contoso Control Panel - Google Chrome"}
 {"ts": "2026-08-27T13:38:57.544Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Settings | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/settings"}
 {"ts": "2026-08-27T13:38:58.520Z", "kind": "title", "app": "Google-chrome", "title": "northwind-memberships · Settings | Heroku - Google Chrome"}

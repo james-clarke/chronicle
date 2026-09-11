@@ -78,6 +78,6 @@
 13:37:52–13:38:31 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
 13:38:31–13:38:37 [focus] Terminator: contoso.py + (~/dev/contoso/contoso/settings) - VIM
 13:38:37–13:38:45 [focus] Terminator: sam@workstation:~/dev/contoso
-13:38:45–13:38:55 [focus] Terminator: acme-memberships.py (~/dev/contoso/contoso/settings) - VIM
+13:38:45–13:38:55 [focus] Terminator: memberships.py (~/dev/contoso/contoso/settings) - VIM
 13:38:55–13:40:03 [focus] Google-chrome: northwind-memberships · Settings | Heroku <https://dashboard.heroku.com/apps/northwind-memberships/settings>
 13:40:03–13:40:06 [context-switching]

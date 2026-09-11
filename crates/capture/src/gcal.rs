@@ -500,7 +500,7 @@ mod tests {
 
     const EVENTS: &str = r#"{
       "kind": "calendar#events",
-      "summary": "james.clarke@callplaybook.com",
+      "summary": "sam@acme.com",
       "items": [
         {"id":"ev1","status":"confirmed","summary":"  Sprint planning  ",
          "start":{"dateTime":"2026-09-03T09:00:00+01:00"},

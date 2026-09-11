@@ -2479,10 +2479,7 @@ mod tests {
             },
         ];
         let labels = HashMap::from([(7, "derived".to_owned()), (9, "declared".to_owned())]);
-        let projects = HashMap::from([
-            (7, Some("acme".to_owned())),
-            (9, Some("acme".to_owned())),
-        ]);
+        let projects = HashMap::from([(7, Some("acme".to_owned())), (9, Some("acme".to_owned()))]);
         let sinks = Sinks {
             current: HashMap::from([("acme".to_owned(), 9)]),
             ..Sinks::default()

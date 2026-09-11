@@ -28,7 +28,8 @@
 13:59:24–13:59:30 [focus] Terminator: ✳ Campaign SMS sending failure
 13:59:30–13:59:33 [context-switching]
 13:59:33–13:59:41 [focus] Terminator: ./local.sh shell_plus
-13:59:41–13:59:55 [context-switching]
+13:59:41–13:59:46 [focus] Terminator: memberships.py (~/dev/contoso/contoso/settings) - VIM
+13:59:46–13:59:55 [context-switching]
 13:59:55–14:00:02 [focus] Terminator: ✳ Campaign SMS sending failure
 14:00:02–14:00:06 [context-switching]
 14:00:06–14:00:11 [focus] Terminator: ./local.sh shell_plus

@@ -2350,8 +2350,8 @@ mod tests {
     #[test]
     fn matches_label_and_project_case_insensitive() {
         assert!(matches_filter("chron", "Chronicle m13", None));
-        assert!(matches_filter("play", "review PR", Some("Contoso")));
-        assert!(!matches_filter("jira", "review PR", Some("Contoso")));
+        assert!(matches_filter("acm", "review PR", Some("Acme")));
+        assert!(!matches_filter("jira", "review PR", Some("Acme")));
         assert!(!matches_filter("jira", "review PR", None));
     }
 }

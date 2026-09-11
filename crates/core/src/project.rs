@@ -835,7 +835,7 @@ mod tests {
             },
             cfg("chronicle"),
         ]);
-        assert_eq!(m.resolve("Contoso"), Some("acme"));
+        assert_eq!(m.resolve("Acme"), Some("acme"));
         assert_eq!(m.resolve("CONTOSO"), Some("acme"));
         assert_eq!(m.resolve("mailer"), Some("acme"));
         assert_eq!(m.resolve("chronicle"), Some("chronicle"));
