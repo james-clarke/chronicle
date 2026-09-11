@@ -87,8 +87,9 @@ table.
 | [m37-sources-plan.md](plans/m37-sources-plan.md) | Sources: session formats, shell/git hooks, repo discovery, remote MCP servers | shipped, small follow-ups owed (remote-URI resolver, OAuth 2.1) |
 | [m38-macos-plan.md](plans/m38-macos-plan.md) | macOS: the same daemon ported, written and compiled without a Mac | shipped; real-hardware verification and signing owed |
 | [m39-wayland-plan.md](plans/m39-wayland-plan.md) | Wayland: wlroots and KWin focus routes behind the existing traits | shipped; verification on a real Wayland login owed |
-| [m41-connections-plan.md](plans/m41-connections-plan.md) | Connections as a surface: the connector registry, per-platform probes and health | chunks 0–1 shipped; chunks 2–5 (setup flow, mined list, requests, the review loop) owed |
-| [m42-open-source-plan.md](plans/m42-open-source-plan.md) | Open source: the licence, a synthetic corpus, a clean git history | in progress |
+| [m40-windows-plan.md](plans/m40-windows-plan.md) | Windows: the last port — a message-pump capture thread, named pipe, `Run` key, tray, MSVC target — written without a Windows machine | plan written 2026-09-11; not started |
+| [m41-connections-plan.md](plans/m41-connections-plan.md) | Connections as a surface: the connector registry, per-platform probes and health, the setup view, what you work with, requests and the tools page | shipped; in-app visual checks of the mined list and the compose box owed |
+| [m42-open-source-plan.md](plans/m42-open-source-plan.md) | Open source: the licence, a synthetic corpus, a clean git history | shipped and force-pushed 2026-09-11; the visibility flip is James's |
 | [m43-site-and-docs-plan.md](plans/m43-site-and-docs-plan.md) | The site and the docs caught up: new screenshots, and this docs index | in progress |
 
 ## Generated files
