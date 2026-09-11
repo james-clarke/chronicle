@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::connectors::{self, Support};
+use crate::connectors::{self, Platform, Support};
 use crate::extract::{self, Family};
 use crate::sessionizer::domain;
 use crate::storage::{self, StorageError};
@@ -270,41 +270,174 @@ pub fn request_url(title: &str, body: &str) -> String {
     )
 }
 
-/// The request for a mined tool: what it is and how much of the month it
-/// took, the two facts a maintainer ranks by.
-pub fn request_for_tool(t: &Tool, days_window: i64) -> (String, String) {
-    let what = match t.seen {
-        Seen::App => "app",
-        Seen::Domain => "site",
-    };
-    let title = format!("Integration request: {}", t.label());
-    let body = format!(
-        "**Tool:** {} ({what})\n**Seen:** {} over {} days in the last {days_window}\n\n\
-         **What I'd want out of it:**\n\n",
-        t.label(),
-        minutes_label(t.minutes),
-        t.days
-    );
-    (title, body)
+impl Tool {
+    /// The one-word kind for a chip or a request's category.
+    pub fn category(&self) -> &'static str {
+        match (self.seen, self.family) {
+            (Seen::Domain, _) => "site",
+            (_, Family::Terminal) => "terminal",
+            (_, Family::Editor) => "editor",
+            (_, Family::Vcs) => "git client",
+            (_, Family::Browser) => "browser",
+            (_, Family::Chat) => "chat",
+            (_, Family::Mail) => "mail",
+            (_, Family::Meeting) => "meetings",
+            (_, Family::Document) => "documents",
+            (_, Family::Other) => "app",
+        }
+    }
 }
 
-/// The request for a registry row the person ticked but Chronicle cannot
-/// read yet.
-pub fn request_for_connector(c: &connectors::Connector) -> (String, String) {
-    let title = format!("Integration request: {}", c.name);
-    let body = format!(
-        "**Tool:** {} (`{}`, {})\n**Status in the registry:** {}\n\n\
-         **What I'd want out of it:**\n\n",
-        c.name,
-        c.id,
-        c.kind.label(),
-        match c.state {
-            Support::Planned => "planned",
-            Support::Detected => "detected, not supported",
-            Support::WontDo { reason } => reason,
-            Support::Partial { note } => note,
-            Support::Supported => "supported",
+/// The platform word the request carries.
+pub fn platform_label() -> &'static str {
+    match Platform::HOST {
+        Platform::Linux => "Linux",
+        Platform::MacOs => "macOS",
+        Platform::Windows => "Windows",
+    }
+}
+
+/// The window title the app spent most of the window in: one line of
+/// evidence a maintainer can recognise the tool by. Titles are the private
+/// part of a span, so the caller redacts it and shows it as a removable chip.
+pub fn sample_title(conn: &Connection, app: &str, since_ms: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT title FROM spans WHERE kind = 'focus' AND app = ?1 AND start_ts >= ?2 \
+         AND title <> '' GROUP BY title ORDER BY SUM(end_ts - start_ts) DESC LIMIT 1",
+        rusqlite::params![app, since_ms],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// One integration request (m41 chunk 4). `body()` is the issue body in the
+/// shape `.github/ISSUE_TEMPLATE/integration-request.yml` produces for a
+/// hand-filed issue, so both routes land the same; the URL carries it
+/// verbatim, so the preview *is* the issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub tool: String,
+    pub category: String,
+    pub platform: String,
+    pub why: String,
+    /// Kept evidence lines, already redacted.
+    pub evidence: Vec<String>,
+}
+
+impl Request {
+    pub fn for_tool(t: &Tool, sample_title: Option<String>, days_window: i64) -> Request {
+        let what = match t.seen {
+            Seen::App => "window class",
+            Seen::Domain => "domain",
+        };
+        let mut evidence = vec![
+            format!(
+                "seen {} over {} days in the last {days_window}",
+                minutes_label(t.minutes),
+                t.days
+            ),
+            format!("{what} `{}`", t.name),
+        ];
+        if let Some(title) = sample_title {
+            evidence.push(format!("sample title `{title}`"));
         }
-    );
-    (title, body)
+        Request {
+            tool: t.label(),
+            category: t.category().to_owned(),
+            platform: platform_label().to_owned(),
+            why: String::new(),
+            evidence,
+        }
+    }
+
+    pub fn for_connector(c: &connectors::Connector) -> Request {
+        let state = match c.state {
+            Support::Planned => "planned".to_owned(),
+            Support::Detected => "detected, not supported".to_owned(),
+            Support::WontDo { reason } => format!("not planned: {reason}"),
+            Support::Partial { note } => format!("partial: {note}"),
+            Support::Supported => "supported".to_owned(),
+        };
+        Request {
+            tool: c.name.to_owned(),
+            category: c.kind.label().to_ascii_lowercase(),
+            platform: platform_label().to_owned(),
+            why: String::new(),
+            evidence: vec![format!("registry row `{}`, {state}", c.id)],
+        }
+    }
+
+    pub fn title(&self) -> String {
+        format!("Integration request: {}", self.tool.trim())
+    }
+
+    /// GitHub renders an issue-form submission as `### Label` blocks with
+    /// `_No response_` for an empty optional field; this is that shape.
+    pub fn body(&self) -> String {
+        fn block(label: &str, value: &str) -> String {
+            let v = value.trim();
+            format!(
+                "### {label}\n\n{}\n\n",
+                if v.is_empty() { "_No response_" } else { v }
+            )
+        }
+        let evidence = if self.evidence.is_empty() {
+            String::new()
+        } else {
+            self.evidence
+                .iter()
+                .map(|l| format!("- {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut out = String::new();
+        out.push_str(&block("Tool", &self.tool));
+        out.push_str(&block("Category", &self.category));
+        out.push_str(&block("Platform", &self.platform));
+        out.push_str(&block("What I'd want out of it", &self.why));
+        out.push_str(&block("Evidence", &evidence));
+        out.trim_end().to_owned() + "\n"
+    }
+
+    pub fn url(&self) -> String {
+        request_url(&self.title(), &self.body())
+    }
+
+    /// The file a person without a GitHub account keeps: title, then body.
+    pub fn markdown(&self) -> String {
+        format!("# {}\n\n{}", self.title(), self.body())
+    }
+
+    /// A file name for `markdown()`: the tool, lowercased, non-alphanumerics
+    /// folded to one dash.
+    pub fn slug(&self) -> String {
+        let mut out = String::new();
+        for c in self.tool.to_lowercase().chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c);
+            } else if !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+        let s = out.trim_matches('-');
+        if s.is_empty() {
+            "request".to_owned()
+        } else {
+            s.to_owned()
+        }
+    }
+}
+
+/// Local counters behind the "is issue friction losing signal" question
+/// (m41 decision 3): composed vs. actually opened in the browser.
+pub const REQUESTS_COMPOSED: &str = "requests_composed";
+pub const REQUESTS_FILED: &str = "requests_filed";
+
+pub fn bump(conn: &Connection, key: &str) {
+    let n: i64 = storage::get_meta(conn, key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let _ = storage::set_meta(conn, key, Some(&(n + 1).to_string()));
 }

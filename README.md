@@ -296,8 +296,11 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 - **Settings:** eight cards — connections (MCP servers with a test button and
   presets, watched git repos with hook status, every connector in the
   registry with its health, and *what you work with*: the month's apps and
-  sites no connector reads, ranked by minutes, each with a request button
-  that opens a prefilled GitHub issue in your browser, plus the registry as
+  sites no connector reads, ranked by minutes, each with a request button;
+  the compose box prefills tool, category and platform, carries the
+  evidence as lines you can drop, shows the issue body exactly as it will
+  appear, and opens a prefilled GitHub issue in your browser, copies it, or
+  saves it to a file — Chronicle itself sends nothing; plus the registry as
   a tick list of what you use), projects, model and cloud backends, capture,
   derivation, standup and journal, storage and server (including the list of
   what leaves this machine), window and appearance.

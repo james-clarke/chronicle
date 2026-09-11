@@ -1,0 +1,41 @@
+name: Integration request
+description: A tool you work with that Chronicle cannot read yet.
+title: "Integration request: "
+labels: ["integration-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Chronicle's Settings › Connections › *What you work with* fills this in
+        for you from your own machine and opens it here, in your browser.
+        Filing by hand works the same; only the tool and what you want are needed.
+  - type: input
+    id: tool
+    attributes:
+      label: Tool
+      description: The app, site or CLI, as it names itself.
+      placeholder: Slack
+    validations:
+      required: true
+  - type: input
+    id: category
+    attributes:
+      label: Category
+      description: editor, terminal, git client, browser, chat, mail, meetings, documents, site, CLI, account, or other.
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Linux, macOS or Windows.
+  - type: textarea
+    id: why
+    attributes:
+      label: What I'd want out of it
+      description: What Chronicle should read from it, and what that would tell your day.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Minutes and days from *What you work with*, if you used the request button. Paths and hostnames are redacted before they get here; remove anything else you would rather not share.

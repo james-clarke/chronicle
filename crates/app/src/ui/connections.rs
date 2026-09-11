@@ -14,7 +14,7 @@ use chronicle_core::connectors::{self, ConnectKind, Platform};
 use chronicle_core::health::{self, Health};
 use chronicle_core::storage;
 use chronicle_core::types::ActivityEvent;
-use chronicle_core::usage::{self, Declared, Tool};
+use chronicle_core::usage::{self, Declared, Request, Tool};
 use chronicle_mcp::{ActionCall, ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
@@ -495,20 +495,46 @@ const MINED_ROWS: usize = 12;
 const REQUEST_HOVER: &str =
     "open a prefilled GitHub issue in your browser \u{2014} Chronicle itself sends nothing";
 
-/// The one-word kind for a mined row's chip.
-fn family_word(t: &Tool) -> &'static str {
-    use chronicle_core::extract::Family;
-    match (t.seen, t.family) {
-        (usage::Seen::Domain, _) => "site",
-        (_, Family::Terminal) => "terminal",
-        (_, Family::Editor) => "editor",
-        (_, Family::Vcs) => "git client",
-        (_, Family::Browser) => "browser",
-        (_, Family::Chat) => "chat",
-        (_, Family::Mail) => "mail",
-        (_, Family::Meeting) => "meetings",
-        (_, Family::Document) => "documents",
-        (_, Family::Other) => "app",
+/// The compose box behind every "request" button (m41 chunk 4): the
+/// request being edited, each evidence line as a chip the person can drop,
+/// and what happened to it. Nothing here leaves the machine until the
+/// person's own browser opens the issue.
+struct RequestForm {
+    req: Request,
+    /// Evidence lines (redacted) and whether they stay in the body.
+    chips: Vec<(String, bool)>,
+    status: Option<Result<String, String>>,
+    /// The composed counter was bumped for this form.
+    counted: bool,
+}
+
+impl RequestForm {
+    fn new(mut req: Request) -> Self {
+        // Paths, hostnames, query strings and anything token-shaped come
+        // out before the person sees the line; what they see is what goes.
+        let chips = req
+            .evidence
+            .drain(..)
+            .map(|l| (chronicle_derive::redact::redact(&l).text, true))
+            .collect();
+        Self {
+            req,
+            chips,
+            status: None,
+            counted: false,
+        }
+    }
+
+    /// The request as it stands: kept chips only.
+    fn current(&self) -> Request {
+        let mut r = self.req.clone();
+        r.evidence = self
+            .chips
+            .iter()
+            .filter(|(_, keep)| *keep)
+            .map(|(l, _)| l.clone())
+            .collect();
+        r
     }
 }
 
@@ -729,6 +755,10 @@ pub(super) struct Connections {
     declared: Declared,
     declare_open: bool,
     declare_filter: String,
+    /// Some = the request compose box is open (m41 chunk 4).
+    request: Option<RequestForm>,
+    /// `{data_dir}/requests`, where "save to file" writes.
+    requests_dir: PathBuf,
 }
 
 impl Connections {
@@ -851,6 +881,8 @@ impl Connections {
             declared: conn.map(Declared::load).unwrap_or_default(),
             declare_open: false,
             declare_filter: String::new(),
+            request: None,
+            requests_dir: data_dir.join("requests"),
         }
     }
 
@@ -875,6 +907,7 @@ impl Connections {
         ui.add_space(theme::SPACE_SM);
         self.sources_ui(ui, sources);
         self.worklist_ui(ui, conn);
+        self.request_ui(ui, conn);
         caption(
             ui,
             "repo and source changes apply on the daemon's next start".to_owned(),
@@ -1585,6 +1618,7 @@ impl Connections {
 
         // The switches, copied out: a row's toggle borrows this list rather
         // than a different field of `src` each time.
+        let mut request: Option<&'static connectors::Connector> = None;
         let mut switches: Vec<(&'static str, bool)> = SWITCHES
             .iter()
             .map(|f| match *f {
@@ -1627,7 +1661,15 @@ impl Connections {
                     }
                     _ => None,
                 };
-                self.source_row(ui, width, c, &mut switches, &details, blocker.as_deref());
+                self.source_row(
+                    ui,
+                    width,
+                    c,
+                    &mut switches,
+                    &details,
+                    blocker.as_deref(),
+                    &mut request,
+                );
                 // The key the WakaTime plugins authenticate with belongs to
                 // the row above it, not to the end of the group.
                 if c.id == "editor_heartbeats"
@@ -1647,6 +1689,9 @@ impl Connections {
             }
         }
 
+        if let Some(c) = request {
+            self.request = Some(RequestForm::new(Request::for_connector(c)));
+        }
         for (field, on) in switches {
             if field == "ai_session_dirs" {
                 sessions_on = on;
@@ -1677,6 +1722,7 @@ impl Connections {
         switches: &mut [(&'static str, bool)],
         details: &BTreeMap<&'static str, String>,
         blocker: Option<&str>,
+        request: &mut Option<&'static connectors::Connector>,
     ) {
         let stored = self.health.get(c.id).cloned().unwrap_or(Health::Absent);
         let toggle = c.setup.iter().find_map(|s| match s {
@@ -1760,9 +1806,7 @@ impl Connections {
                         .on_hover_text(REQUEST_HOVER)
                         .clicked()
                 {
-                    let (title, body) = usage::request_for_connector(c);
-                    ui.ctx()
-                        .open_url(egui::OpenUrl::new_tab(usage::request_url(&title, &body)));
+                    *request = Some(c);
                 }
             });
         ui.horizontal(|ui| {
@@ -1789,6 +1833,7 @@ impl Connections {
             caption(ui, format!("last {MINED_DAYS} days"), None);
         });
         let width = ui.available_width();
+        let mut compose: Option<usize> = None;
         let unread: Vec<usize> = (0..self.mined.len())
             .filter(|&i| self.mined[i].unread())
             .take(MINED_ROWS)
@@ -1809,7 +1854,7 @@ impl Connections {
             let label = t.label();
             let (state, color) = match t.claimed_by {
                 Some(_) => ("planned", palette::AMBER),
-                None => (family_word(t), palette::TEXT_DIM),
+                None => (t.category(), palette::TEXT_DIM),
             };
             theme::ListRow::new(&label)
                 .chip(
@@ -1822,11 +1867,18 @@ impl Connections {
                         .on_hover_text(REQUEST_HOVER)
                         .clicked()
                     {
-                        let (title, body) = usage::request_for_tool(t, MINED_DAYS);
-                        ui.ctx()
-                            .open_url(egui::OpenUrl::new_tab(usage::request_url(&title, &body)));
+                        compose = Some(i);
                     }
                 });
+        }
+        if let Some(i) = compose {
+            let t = &self.mined[i];
+            let since = Timestamp::now().as_millisecond() - MINED_DAYS * 86_400_000;
+            let sample = match t.seen {
+                usage::Seen::App => conn.and_then(|c| usage::sample_title(c, &t.name, since)),
+                usage::Seen::Domain => None,
+            };
+            self.request = Some(RequestForm::new(Request::for_tool(t, sample, MINED_DAYS)));
         }
 
         ui.add_space(theme::SPACE_XS);
@@ -1896,6 +1948,134 @@ impl Connections {
         });
         if dirty && let Some(conn) = conn {
             let _ = self.declared.save(conn);
+        }
+    }
+
+    /// The compose box (m41 chunk 4): tool, category and platform prefilled,
+    /// the "why" field, the evidence chips, and the issue body exactly as it
+    /// will appear. Three ways out: the browser (a prefilled `issues/new`
+    /// URL under the person's own account), the clipboard, or a file under
+    /// the data dir for people without a GitHub account.
+    fn request_ui(&mut self, ui: &mut egui::Ui, conn: Option<&Connection>) {
+        let requests_dir = self.requests_dir.clone();
+        let Some(form) = &mut self.request else {
+            return;
+        };
+        if !form.counted {
+            form.counted = true;
+            if let Some(c) = conn {
+                usage::bump(c, usage::REQUESTS_COMPOSED);
+            }
+        }
+        let mut close = false;
+        let width = (ui.ctx().content_rect().width() - 48.0).clamp(240.0, 440.0);
+        let resp = egui::Modal::new(egui::Id::new("integration_request")).show(ui.ctx(), |ui| {
+            ui.set_width(width);
+            ui.label(
+                egui::RichText::new("Request an integration")
+                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .color(palette::TEXT),
+            );
+            caption(
+                ui,
+                "opens a prefilled GitHub issue in your browser, under your account \u{2014} \
+                 Chronicle sends nothing"
+                    .to_owned(),
+                None,
+            );
+            ui.add_space(theme::SPACE_XS);
+            ui.label("tool");
+            ui.add(egui::TextEdit::singleline(&mut form.req.tool).desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                ui.label("category");
+                ui.add(egui::TextEdit::singleline(&mut form.req.category).desired_width(120.0));
+                ui.label("platform");
+                ui.add(egui::TextEdit::singleline(&mut form.req.platform).desired_width(90.0));
+            });
+            ui.label("what you'd want out of it");
+            ui.add(
+                egui::TextEdit::multiline(&mut form.req.why)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            if !form.chips.is_empty() {
+                ui.label("evidence \u{2014} drop any line you would rather keep");
+                for (line, keep) in form.chips.iter_mut() {
+                    ui.horizontal(|ui| {
+                        if theme::ghost_button(ui, "\u{d7}")
+                            .on_hover_text("drop this line")
+                            .clicked()
+                        {
+                            *keep = false;
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(line.as_str()).text_style(theme::caption()),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
+                form.chips.retain(|(_, keep)| *keep);
+            }
+            ui.add_space(theme::SPACE_XS);
+            let current = form.current();
+            caption(ui, "the issue, exactly as it will appear".to_owned(), None);
+            egui::ScrollArea::vertical()
+                .id_salt("request_preview")
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(current.body())
+                                .text_style(egui::TextStyle::Monospace)
+                                .size(11.0)
+                                .color(palette::TEXT_DIM),
+                        )
+                        .selectable(true)
+                        .wrap(),
+                    );
+                });
+            ui.add_space(theme::SPACE_XS);
+            match &form.status {
+                Some(Ok(msg)) => {
+                    ui.colored_label(palette::GREEN, msg.as_str());
+                }
+                Some(Err(msg)) => {
+                    ui.colored_label(palette::RED, msg.as_str());
+                }
+                None => {}
+            }
+            ui.horizontal(|ui| {
+                let ready = !current.tool.trim().is_empty();
+                if theme::primary_button_enabled(ui, ready, "open GitHub issue").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(current.url()));
+                    if let Some(c) = conn {
+                        usage::bump(c, usage::REQUESTS_FILED);
+                    }
+                    form.status = Some(Ok("opened in your browser".into()));
+                }
+                if theme::secondary_button(ui, "copy").clicked() {
+                    ui.ctx().copy_text(current.markdown());
+                    form.status = Some(Ok("copied".into()));
+                }
+                if theme::secondary_button(ui, "save to file").clicked() {
+                    let name = format!("{}-{}.md", current.slug(), jiff::Zoned::now().date());
+                    let path = requests_dir.join(name);
+                    form.status = Some(
+                        std::fs::create_dir_all(&requests_dir)
+                            .and_then(|()| std::fs::write(&path, current.markdown()))
+                            .map(|()| format!("saved {}", path.display()))
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                if theme::ghost_button(ui, "close").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || resp.should_close() {
+            self.request = None;
         }
     }
 

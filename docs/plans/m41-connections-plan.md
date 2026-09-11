@@ -318,5 +318,30 @@ section at the end of Settings › Connections:
 - Not visually verified in this pass: the section sits below the fold of
   Settings › Connections and James was at the mouse, so no scroll shot.
 
-Chunks 4–5 (the compose box with evidence chips and the issue template;
-the ranking script and `site/tools.html`) are open.
+**Chunk 4** landed 2026-09-11 as `usage::Request` and a compose modal in
+the connections panel (`RequestForm`, `request_ui`):
+
+- **The body is the issue.** `Request::body` renders the same `### Label`
+  blocks GitHub produces for an issue-form submission (`_No response_`
+  for an empty field), and the URL carries that body verbatim with
+  `labels=integration-request`, so the monospace preview is byte-identical
+  to what lands, and a hand-filed issue through
+  `.github/ISSUE_TEMPLATE/integration-request.yml` has the same shape.
+  Checked: a body with blank lines, backticks, `#` and `%` decodes back
+  identical from the URL.
+- **Evidence is redacted before it is shown.** Each line passes through
+  `chronicle_derive::redact::redact` on the way into the form, then sits
+  as a chip with a drop button; the body is rebuilt from the kept chips
+  every frame. For a mined app the lines are minutes-over-days, the window
+  class, and the most-focused window title; for a domain, no title. With
+  every chip dropped the request still carries tool, category and platform.
+- **Three ways out**: *open GitHub issue* (the browser, the person's
+  account), *copy* (title plus body as markdown), *save to file*
+  (`{data_dir}/requests/<slug>-<date>.md`). No file dialog: the app has no
+  `rfd` dependency and the path is shown instead.
+- **The friction counter** is two meta integers, `requests_composed` and
+  `requests_filed`, bumped when a form opens and when the browser button
+  is pressed — the input to decision 3's escape hatch.
+- Not visually verified in this pass, for the same reason as chunk 3.
+
+Chunk 5 (the ranking script and `site/tools.html`) is open.
