@@ -14,6 +14,7 @@ use chronicle_core::connectors::{self, ConnectKind, Platform};
 use chronicle_core::health::{self, Health};
 use chronicle_core::storage;
 use chronicle_core::types::ActivityEvent;
+use chronicle_core::usage::{self, Declared, Tool};
 use chronicle_mcp::{ActionCall, ContextCall, ImportEntry, McpConfig, ServerConfig, ServerProbe};
 use eframe::egui;
 use jiff::Timestamp;
@@ -488,6 +489,29 @@ fn row_status(
 /// would draw them twice.
 const DRAWN_ELSEWHERE: &[&str] = &["git_repos", "git_hooks"];
 
+/// The mined list's window and length (m41 chunk 3).
+const MINED_DAYS: i64 = 30;
+const MINED_ROWS: usize = 12;
+const REQUEST_HOVER: &str =
+    "open a prefilled GitHub issue in your browser \u{2014} Chronicle itself sends nothing";
+
+/// The one-word kind for a mined row's chip.
+fn family_word(t: &Tool) -> &'static str {
+    use chronicle_core::extract::Family;
+    match (t.seen, t.family) {
+        (usage::Seen::Domain, _) => "site",
+        (_, Family::Terminal) => "terminal",
+        (_, Family::Editor) => "editor",
+        (_, Family::Vcs) => "git client",
+        (_, Family::Browser) => "browser",
+        (_, Family::Chat) => "chat",
+        (_, Family::Mail) => "mail",
+        (_, Family::Meeting) => "meetings",
+        (_, Family::Document) => "documents",
+        (_, Family::Other) => "app",
+    }
+}
+
 /// Every `config.toml` switch a descriptor can name, so a row's toggle can
 /// borrow one list instead of a different field of `LocalSources` each
 /// time. `ai_session_dirs` is here as a bool: it is a list in the config,
@@ -698,6 +722,13 @@ pub(super) struct Connections {
     /// First `ai_session_dirs` entry that doesn't exist, if any; refreshed
     /// at load and whenever the sessions toggle changes the dirs.
     session_dir_missing: Option<String>,
+    /// Apps and domains in focus over the last 30 days (m41 chunk 3),
+    /// ranked by minutes, read at load.
+    mined: Vec<Tool>,
+    /// What the person ticked as "I use this" (meta `declared_tools`).
+    declared: Declared,
+    declare_open: bool,
+    declare_filter: String,
 }
 
 impl Connections {
@@ -805,6 +836,21 @@ impl Connections {
                 .and_then(|c| storage::editor_workspaces(c).ok())
                 .unwrap_or_default(),
             session_dir_missing: missing_session_dir(ai_session_dirs),
+            mined: conn
+                .and_then(|c| {
+                    usage::mined(
+                        c,
+                        &config,
+                        &jiff::tz::TimeZone::system(),
+                        now_ms,
+                        MINED_DAYS,
+                    )
+                    .ok()
+                })
+                .unwrap_or_default(),
+            declared: conn.map(Declared::load).unwrap_or_default(),
+            declare_open: false,
+            declare_filter: String::new(),
         }
     }
 
@@ -828,6 +874,7 @@ impl Connections {
         self.repos_ui(ui, git_repos);
         ui.add_space(theme::SPACE_SM);
         self.sources_ui(ui, sources);
+        self.worklist_ui(ui, conn);
         caption(
             ui,
             "repo and source changes apply on the daemon's next start".to_owned(),
@@ -1552,13 +1599,17 @@ impl Connections {
             ConnectKind::Cli,
             ConnectKind::Account,
         ] {
-            let rows: Vec<&'static connectors::Connector> =
+            let mut rows: Vec<&'static connectors::Connector> =
                 connectors::for_platform(Platform::HOST)
                     .filter(|c| c.kind == kind && !DRAWN_ELSEWHERE.contains(&c.id))
                     .collect();
             if rows.is_empty() {
                 continue;
             }
+            // What the person said they use sorts to the top of its group,
+            // planned rows included (m41 chunk 3); stable, so the registry
+            // order holds within each half.
+            rows.sort_by_key(|c| !self.declared.uses(c.id));
             if kind != ConnectKind::Files {
                 ui.add_space(theme::SPACE_SM);
             }
@@ -1698,6 +1749,21 @@ impl Connections {
                 {
                     theme::toggle(ui, &mut sw.1);
                 }
+                // A row the person uses that Chronicle cannot read yet is
+                // the one that earns a request (m41 chunk 3).
+                if self.declared.uses(c.id)
+                    && !matches!(
+                        c.state,
+                        connectors::Support::Supported | connectors::Support::Partial { .. }
+                    )
+                    && theme::ghost_button(ui, "request")
+                        .on_hover_text(REQUEST_HOVER)
+                        .clicked()
+                {
+                    let (title, body) = usage::request_for_connector(c);
+                    ui.ctx()
+                        .open_url(egui::OpenUrl::new_tab(usage::request_url(&title, &body)));
+                }
             });
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -1710,6 +1776,127 @@ impl Connections {
                 None,
             );
         });
+    }
+
+    /// What you work with (m41 chunk 3): the month's apps and sites no
+    /// connector reads, ranked by minutes, each with a request button; then
+    /// the registry as a tick list of what the person says they use, and a
+    /// free line for anything without a row. Ticks live in `meta` and sort
+    /// the rows above.
+    fn worklist_ui(&mut self, ui: &mut egui::Ui, conn: Option<&Connection>) {
+        ui.add_space(theme::SPACE_SM);
+        subhead(ui, "What you work with", |ui| {
+            caption(ui, format!("last {MINED_DAYS} days"), None);
+        });
+        let width = ui.available_width();
+        let unread: Vec<usize> = (0..self.mined.len())
+            .filter(|&i| self.mined[i].unread())
+            .take(MINED_ROWS)
+            .collect();
+        if unread.is_empty() {
+            caption(
+                ui,
+                if self.mined.is_empty() {
+                    "nothing in focus yet".to_owned()
+                } else {
+                    "everything you spent time in this month has a connector".to_owned()
+                },
+                None,
+            );
+        }
+        for i in unread {
+            let t = &self.mined[i];
+            let label = t.label();
+            let (state, color) = match t.claimed_by {
+                Some(_) => ("planned", palette::AMBER),
+                None => (family_word(t), palette::TEXT_DIM),
+            };
+            theme::ListRow::new(&label)
+                .chip(
+                    format!("{} \u{b7} {} d", usage::minutes_label(t.minutes), t.days),
+                    palette::TEXT_DIM,
+                )
+                .chip(state, color)
+                .show(ui, width, |ui| {
+                    if theme::ghost_button(ui, "request")
+                        .on_hover_text(REQUEST_HOVER)
+                        .clicked()
+                    {
+                        let (title, body) = usage::request_for_tool(t, MINED_DAYS);
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(usage::request_url(&title, &body)));
+                    }
+                });
+        }
+
+        ui.add_space(theme::SPACE_XS);
+        theme::disclosure_header(
+            ui,
+            &mut self.declare_open,
+            "what I use",
+            Some(self.declared.ids.len()).filter(|n| *n > 0),
+        );
+        let open = self.declare_open;
+        let declared = &mut self.declared;
+        let filter = &mut self.declare_filter;
+        let health = &self.health;
+        let mut dirty = false;
+        theme::fade_body(ui, "declare", open, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                caption(
+                    ui,
+                    "tick what you use; it sorts to the top and, where Chronicle cannot read it yet, earns a request button"
+                        .to_owned(),
+                    None,
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.add(
+                    egui::TextEdit::singleline(filter)
+                        .hint_text("filter\u{2026}")
+                        .desired_width(160.0),
+                );
+            });
+            let q = filter.trim().to_lowercase();
+            for c in connectors::for_platform(Platform::HOST) {
+                if !q.is_empty() && !c.name.to_lowercase().contains(&q) && !c.id.contains(&q) {
+                    continue;
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    let mut on = declared.uses(c.id);
+                    if theme::toggle(ui, &mut on).changed() {
+                        if on {
+                            declared.ids.insert(c.id.to_owned());
+                        } else {
+                            declared.ids.remove(c.id);
+                        }
+                        dirty = true;
+                    }
+                    ui.label(c.name);
+                    let h = health.get(c.id).cloned().unwrap_or(Health::Absent);
+                    theme::badge(ui, health::label(c, &h), palette::TEXT_DIM);
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut declared.other)
+                            .hint_text("anything else you use, in a few words")
+                            .desired_width(width - 16.0 - 8.0),
+                    )
+                    .changed()
+                {
+                    dirty = true;
+                }
+            });
+        });
+        if dirty && let Some(conn) = conn {
+            let _ = self.declared.save(conn);
+        }
     }
 
     fn add_repo(&mut self, git_repos: &mut Vec<String>) -> Result<(), String> {

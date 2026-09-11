@@ -27,6 +27,7 @@ pub mod setup;
 pub mod storage;
 pub mod timeref;
 pub mod types;
+pub mod usage;
 
 use std::path::PathBuf;
 

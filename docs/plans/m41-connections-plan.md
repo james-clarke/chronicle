@@ -290,5 +290,33 @@ registry, `chronicle status`'s per-connector block). Chunk 2 landed
 - **`chronicle setup` prints and writes nothing**: the switches are
   `config.toml` fields and the commands are the person's to run.
 
-Chunks 3–5 (what you work with, requests, the loop James sees) are open
-and wait for the first public release.
+**Chunk 3** landed 2026-09-11 as `core::usage` plus a "What you work with"
+section at the end of Settings › Connections:
+
+- **Mined from focus spans, not activity events.** `usage::mined` rolls
+  `spans` (kind `focus`) over 30 days by window class, or by domain when
+  a browser span carries a URL (port dropped, `about:`/`newtab` pseudo
+  hosts skipped), ranked by minutes with distinct local days; under 5
+  minutes or on one day only is a visit, not a tool. Chronicle's own
+  window is left out.
+- **Claims live beside the registry, not in it.** A small table maps
+  connector → app family (`extract::family`), window-class fragment or
+  domain suffix. A tool claimed by a `Planned` connector shows as
+  *planned*; unclaimed rows are the demand signal. On this box the list
+  named Slack (planned), YouTube, Render, Heroku, CircleCI, the AWS
+  console, Vercel and the employer's staging hosts, and none of the
+  connected tools — the gate held.
+- **Requests already open a browser.** Chunk 4's compose box is not built;
+  each mined row and each ticked-but-unreadable registry row has a
+  *request* button that opens `issues/new?labels=integration-request` with
+  a title and a two-line body. `usage::request_url` is the shape chunk 4
+  grows into; Chronicle itself sends nothing.
+- **Declared** is a disclosure under the mined list: the registry as
+  toggles with each row's health word, a filter box, a free line. Stored
+  as JSON in meta `declared_tools`; ticked rows sort to the top of their
+  group in the connections list, planned rows included.
+- Not visually verified in this pass: the section sits below the fold of
+  Settings › Connections and James was at the mouse, so no scroll shot.
+
+Chunks 4–5 (the compose box with evidence chips and the issue template;
+the ranking script and `site/tools.html`) are open.

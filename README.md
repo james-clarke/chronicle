@@ -294,8 +294,11 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
   fresh profile, again from Settings › Connections; `chronicle setup`
   prints the same plan for a headless machine.
 - **Settings:** eight cards — connections (MCP servers with a test button and
-  presets, watched git repos with hook status, and every connector in the
-  registry with its health), projects, model and cloud backends, capture,
+  presets, watched git repos with hook status, every connector in the
+  registry with its health, and *what you work with*: the month's apps and
+  sites no connector reads, ranked by minutes, each with a request button
+  that opens a prefilled GitHub issue in your browser, plus the registry as
+  a tick list of what you use), projects, model and cloud backends, capture,
   derivation, standup and journal, storage and server (including the list of
   what leaves this machine), window and appearance.
 
