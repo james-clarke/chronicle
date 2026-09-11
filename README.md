@@ -238,12 +238,20 @@ is already on `PATH` on current distros. Homebrew ignores that and uses its
 own prefix. The release also carries a plain `.tar.xz` per target for anyone
 who would rather place the binary themselves.
 
-Both routes need a tagged release, which needs `main` pushed and the
-`james-clarke/homebrew-tap` repo to exist. macOS builds are unsigned until
-the Developer ID certificate is in the repo secrets (`macos-sign = false` in
+Both routes need a tagged release, which needs `main` pushed, the
+`james-clarke/homebrew-tap` repo to exist, and `HOMEBREW_TAP_TOKEN` in this
+repository's secrets (`release.yml:297`; everything else uses the built-in
+`GITHUB_TOKEN`). macOS builds are unsigned until the Developer ID
+certificate is in the repo secrets (`macos-sign = false` in
 `dist-workspace.toml` until then, since turning it on without
 `CODESIGN_CERTIFICATE`/`_PASSWORD`/`_IDENTITY` fails the release build).
 Windows has no target yet; it lands in M40.
+
+`dist plan` prints exactly what a tag produces: the shell installer, the
+Homebrew formula, and a `.tar.xz` per target for
+`aarch64-apple-darwin`, `x86_64-apple-darwin` and
+`x86_64-unknown-linux-gnu`, each carrying the binary, `LICENSE` and this
+file.
 
 ## Running as a service
 
@@ -345,6 +353,48 @@ Get the $99 Apple Developer account **before M17** so notarization is a v1.1 con
 - Signing: Apple notarization; Windows OV/EV cert (SmartScreen).
 - MCP from chat; dynamic tool selection.
 
+## How this was built
+
+Chronicle is written by Claude, working in this repository under direction
+and review. That is a claim about process, so here is the evidence rather
+than the assurance.
+
+Every milestone starts as a plan document under `docs/plans/` — 31 of them,
+`mNN-*-plan.md` — written before the code, carrying a `file:line` for each
+claim it makes about what the tree does today, the decisions taken and the
+ones deliberately deferred, and a Shipped section at the end recording what
+actually landed and where it deviated from the plan. The plans are the
+design record; the git history is the build log, and neither has been
+tidied to look better than it was.
+
+What stands in for a second pair of eyes on the code is a gate that runs at
+every milestone: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`,
+and the test suite — 452 tests, most of them fixture-driven, including
+golden-output tests over recorded days and a replay eval that scores
+derivation quality against a corrections corpus so a prompt change cannot
+quietly regress it. `scripts/mac-check.sh` and `scripts/wayland-check.sh`
+compile the platform code that this machine cannot run.
+
+What that does not prove, stated plainly:
+
+- **macOS has never run.** The port (M38) compiles for both Darwin targets
+  and the platform code is written, but no milestone acceptance has been
+  re-run on real hardware, and the builds are unsigned.
+- **Wayland has never run.** The wlroots and KWin routes (M39) were written
+  against the protocols and a check script, not against a Wayland login.
+- **Windows is not ported.** There is no target in `dist-workspace.toml`;
+  it lands in M40.
+- **The cloud model routes are barely exercised.** M36's frontier advisor
+  is tested against a loopback mock; faithfulness on real jobs, the nightly
+  Batches pass and the cache-hit share all wait on an API key.
+
+Linux X11 is the platform this has been used on daily, and is the only one
+where "it works" means someone watched it work.
+
 ## License
 
-Closed source. All rights reserved, see `LICENSE`.
+AGPL-3.0-only. Copyright © 2026 James Clarke.
+
+The full text is in `LICENSE`, verbatim, which is why the copyright line
+lives here instead of at the top of that file — licence detectors read a
+modified GNU header as a different licence.
