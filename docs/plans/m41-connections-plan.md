@@ -344,4 +344,24 @@ the connections panel (`RequestForm`, `request_ui`):
   is pressed — the input to decision 3's escape hatch.
 - Not visually verified in this pass, for the same reason as chunk 3.
 
-Chunk 5 (the ranking script and `site/tools.html`) is open.
+**Chunk 5** landed 2026-09-11:
+
+- **The table is committed, not spliced at build time.** Render has no
+  cargo and no promise of `jq`, so `chronicle connections --html` renders
+  the registry (`connectors::to_site_html`) and `scripts/site-tools.sh`
+  splices it into `site/tools.html` between `<!-- tools -->` markers; the
+  drift test that guards `docs/connectors.json` now guards that region
+  too, which is the gate. `site/build.sh` checks the page against the
+  same rules as the front page (no third-party requests, no script, 150
+  KB), and the front page's sources paragraph links to it.
+- **Issue numbers are a table beside the registry**, `connectors::REQUESTED`
+  (`id → issue`), empty until the first request; a `Planned` row with an
+  entry shows `#N` in Settings and on the tools page. `scripts/requests.sh`
+  ranks open `integration-request` issues by 👍, then all reactions, then
+  age, and prints the lines to paste.
+- Not done: nothing in the app fetches issue state — the number is only as
+  current as the last `REQUESTED` edit, which is the point of keeping the
+  app offline.
+
+All five chunks are in. What is still owed is the release itself: none of
+this is reachable by a stranger until `main` is pushed public and tagged.

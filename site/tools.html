@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>chronicle — tools</title>
+  <meta name="description" content="Every tool Chronicle can read, what state it is in, and what it gives you: sessions, git, browsers, editors, calendars, pull requests and MCP servers, on Linux, macOS and Windows.">
+  <link rel="canonical" href="https://chronicled.dev/tools.html">
+  <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <a class="brand" href="./"><img class="mark" src="img/mark.svg" width="26" height="12" alt="">chronicle</a>
+  <a class="top-link" href="https://github.com/james-clarke/chronicle">Read the source</a>
+</header>
+
+<main>
+
+<section class="tools-page" id="tools">
+  <h2>What it reads.</h2>
+  <p class="section-lede">Every tool Chronicle knows about, supported or not. A <em>planned</em> row is a tool people have and Chronicle cannot read yet; the number beside it is the open request. This table is the same registry the app's Settings › Connections and <code>chronicle connections</code> render, committed from the source tree.</p>
+  <p class="fine">Missing something you work with? In the app, Settings › Connections › <em>What you work with</em> lists the tools it saw you use and could not read, each with a request button that opens a prefilled issue in your browser. Or <a href="https://github.com/james-clarke/chronicle/issues/new?template=integration-request.yml">file one by hand</a>.</p>
+<!-- tools -->
+<h3>Files on this machine</h3>
+<table class="tools">
+<tr><th>Tool</th><th>State</th><th>Platforms</th><th>What it gives you</th></tr>
+<tr id="git_repos"><td>Git repos</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>branch switches and commits, polled every 60 s per watched repo</td></tr>
+<tr id="git_hooks"><td>Git hooks</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>post-checkout, post-commit and post-rewrite record the exact time a 60 s poll misses</td></tr>
+<tr id="claude_code_sessions"><td>Claude Code sessions</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>each transcript's working directory, first prompt and touched paths — never the transcript</td></tr>
+<tr id="agent_sessions"><td>Other agents' sessions</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>codex, gemini, copilot, aider, cline, opencode and cursor transcripts, read the same way, on whenever one is there</td></tr>
+<tr id="editor_workspaces"><td>Editor workspaces</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>recently-opened folders from VS Code, JetBrains and Zed on disk, so a window title resolves to a repo</td></tr>
+<tr id="browser_history"><td>Browser history</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>the history database, copied and read-only, query strings dropped — the zero-install browser route</td></tr>
+<tr id="repo_discovery"><td>Repo discovery</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>git repos next to the ones you watch, filed as discovered projects instead of unfiled time</td></tr>
+<tr id="link_files"><td>Link files</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>.vercel, fly.toml, render.yaml, .sentryclirc and friends name the service a repo deploys to</td></tr>
+<tr id="repo_notes"><td>Repo notes</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>each repo's .remember/today-*.md entries: what you or your tools wrote down, and when</td></tr>
+<tr id="shell_history_atuin"><td>Shell history (atuin)</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>atuin's history.db every 60 s: working directory, program name and duration, never the command line</td></tr>
+<tr id="calendars_ics"><td>Calendars (ICS)</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>a subscription URL from any calendar, polled every 15 min, ±7 days — no OAuth</td></tr>
+<tr id="native_shell_history"><td>Native shell history (zsh, bash, fish)</td><td class="st wontdo">not planned · the file is command lines, which carry secrets; the shell hook reports cwd and program name instead</td><td>Linux · macOS · Windows</td><td>read the shell hook's row instead: same coverage, none of the command text</td></tr>
+</table>
+<h3>Local servers and sockets</h3>
+<table class="tools">
+<tr><th>Tool</th><th>State</th><th>Platforms</th><th>What it gives you</th></tr>
+<tr id="editor_heartbeats"><td>Editor heartbeats (WakaTime plugins)</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>vim-wakatime and its siblings post to this machine once ~/.wakatime.cfg points api_url here; folded into edit spans per project</td></tr>
+<tr id="shell_hook"><td>Shell hook</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>a precmd hook posts working directory, program name and duration per command — never the command line</td></tr>
+<tr id="browser_extension"><td>Browser extension (ActivityWatch)</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>aw-watcher-web posts the URL and title of the focused tab: the precise route, where history is the easy one</td></tr>
+<tr id="tmux"><td>tmux panes</td><td class="st supported">supported</td><td>Linux · macOS</td><td>the attached panes' working directories every 60 s</td></tr>
+<tr id="docker_compose"><td>Docker Compose stacks</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>each running stack's working_dir label every 60 s, which is the repo it belongs to</td></tr>
+<tr id="listening_ports"><td>Listening ports</td><td class="st partial">partial · Linux reads /proc; macOS needs lsof and Windows GetExtendedTcpTable</td><td>Linux · macOS · Windows</td><td>the repo behind every local dev server, so a localhost tab lands on the right project</td></tr>
+<tr id="mic_capture"><td>Calls (microphone in use)</td><td class="st partial">partial · PipeWire on Linux; macOS CoreAudio and the Windows capability registry are not written</td><td>Linux · macOS · Windows</td><td>the only cross-app call signal: each stretch of microphone use becomes a call</td></tr>
+<tr id="ngrok"><td>ngrok tunnels</td><td class="st planned">planned</td><td>Linux · macOS · Windows</td><td>the local API says which service is exposed, and so which repo the tunnel belongs to</td></tr>
+</table>
+<h3>Your CLIs</h3>
+<table class="tools">
+<tr><th>Tool</th><th>State</th><th>Platforms</th><th>What it gives you</th></tr>
+<tr id="github_prs"><td>GitHub pull requests (gh)</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>gh search prs, authored and reviewed, every 5 min · your existing login, read only</td></tr>
+<tr id="gitlab_mrs"><td>GitLab merge requests (glab)</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>glab mr list, assigned and reviewing, every 5 min per GitLab repo · your existing login</td></tr>
+<tr id="tailscale"><td>Tailscale</td><td class="st planned">planned</td><td>Linux · macOS · Windows</td><td>which network you are on, which is how prod work tells itself apart from local work</td></tr>
+</table>
+<h3>Accounts</h3>
+<table class="tools">
+<tr><th>Tool</th><th>State</th><th>Platforms</th><th>What it gives you</th></tr>
+<tr id="google_calendar"><td>Google Calendar</td><td class="st partial">partial · needs a Google Cloud OAuth client of your own; the ICS route is the easier one</td><td>Linux · macOS · Windows</td><td>the primary calendar's events as meeting spans, with attendees</td></tr>
+</table>
+<h3>MCP servers</h3>
+<table class="tools">
+<tr><th>Tool</th><th>State</th><th>Platforms</th><th>What it gives you</th></tr>
+<tr id="mcp_servers"><td>MCP servers</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>local and remote MCP servers answer the chat's context calls; nothing is called unless you ask</td></tr>
+<tr id="jira"><td>Jira</td><td class="st supported">supported</td><td>Linux · macOS · Windows</td><td>PROJ-123 in a branch anchors the task; the Atlassian MCP server fetches the issue on demand</td></tr>
+<tr id="linear"><td>Linear</td><td class="st planned">planned</td><td>Linux · macOS · Windows</td><td>ENG-123 keys, lowercase in branches, and the official remote server for the issue itself</td></tr>
+<tr id="sentry"><td>Sentry</td><td class="st planned">planned</td><td>Linux · macOS · Windows</td><td>.sentryclirc names the project; the issue id says which fire you were putting out</td></tr>
+<tr id="slack"><td>Slack</td><td class="st planned">planned</td><td>Linux · macOS · Windows</td><td>channel names come from the window title today; the official server would give the thread</td></tr>
+</table>
+<!-- /tools -->
+</section>
+
+</main>
+
+<footer class="foot">
+  <p class="proof">This page: no third-party requests, no script, no cookies, no analytics.</p>
+</footer>
+
+</body>
+</html>

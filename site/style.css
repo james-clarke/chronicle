@@ -776,3 +776,22 @@ a.btn { cursor: pointer; }
   .band.in .blk, .band.in .blk .tip, .band.in .track::after, .wipe.in .wipe-after, .wipe.in .wipe-box::after,
   .stage.in .panel code span[style], .stages::before, .demo.in * { animation: none; }
 }
+
+/* tools page (m41 chunk 5) */
+.tools-page { max-width: var(--max); margin: 0 auto; padding: 24px 24px 64px; }
+.tools-page h3 { margin: 36px 0 10px; color: var(--soft); }
+.tools { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.95rem; }
+.tools th:nth-child(1) { width: 22%; }
+.tools th:nth-child(2) { width: 18%; }
+.tools th:nth-child(3) { width: 20%; }
+.tools th { text-align: left; color: var(--muted); font-weight: 500; font-size: 0.85rem; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); }
+.tools td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--soft); }
+.tools td:first-child { color: var(--text); }
+.tools td:nth-child(3) { color: var(--muted); }
+.tools .st.supported { color: var(--green); }
+.tools .st.partial { color: var(--amber); }
+.tools .st.planned { color: var(--blue); }
+.tools .st.detected, .tools .st.wontdo { color: var(--muted); }
+@media (max-width: 720px) {
+  .tools th:nth-child(3), .tools td:nth-child(3) { display: none; }
+}

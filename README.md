@@ -135,9 +135,14 @@ Evidence collectors (m15/m22) ride the same channel as `CaptureEvent::Activity(A
 `chronicle connections` is the full list — every tool Chronicle can read,
 what state it is in on this machine, and what it would take to connect it.
 It is generated from one registry (`crates/core/src/connectors.rs`, m41),
-which also drives Settings › Connections and the site's tools page, so the
-three cannot drift. `chronicle connections --json` is the same table as
-`docs/connectors.json`.
+which also drives Settings › Connections and the site's tools page
+(`site/tools.html`, spliced by `scripts/site-tools.sh` from
+`chronicle connections --html`), so the three cannot drift: a test fails
+when either committed copy is stale. `chronicle connections --json` is the
+same table as `docs/connectors.json`. Integration requests land as GitHub
+issues labelled `integration-request`; `scripts/requests.sh` ranks them by
+reactions and prints the `REQUESTED` lines that let a planned row show its
+issue number.
 
 Most connectors need nothing: a session transcript, a git repo, a browser
 history database or an editor's recent-workspace list is read wherever it

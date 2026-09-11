@@ -1661,15 +1661,11 @@ impl Connections {
                     }
                     _ => None,
                 };
-                self.source_row(
-                    ui,
-                    width,
-                    c,
-                    &mut switches,
-                    &details,
-                    blocker.as_deref(),
-                    &mut request,
-                );
+                if let Some(pick) =
+                    self.source_row(ui, width, c, &mut switches, &details, blocker.as_deref())
+                {
+                    request = Some(pick);
+                }
                 // The key the WakaTime plugins authenticate with belongs to
                 // the row above it, not to the end of the group.
                 if c.id == "editor_heartbeats"
@@ -1722,8 +1718,8 @@ impl Connections {
         switches: &mut [(&'static str, bool)],
         details: &BTreeMap<&'static str, String>,
         blocker: Option<&str>,
-        request: &mut Option<&'static connectors::Connector>,
-    ) {
+    ) -> Option<&'static connectors::Connector> {
+        let mut request = None;
         let stored = self.health.get(c.id).cloned().unwrap_or(Health::Absent);
         let toggle = c.setup.iter().find_map(|s| match s {
             connectors::SetupStep::Toggle { field } => Some(*field),
@@ -1795,6 +1791,12 @@ impl Connections {
                 {
                     theme::toggle(ui, &mut sw.1);
                 }
+                // A planned row with an open request shows its number, so
+                // the person sees it is on a list and not in a void (chunk 5).
+                if let Some(n) = connectors::issue_for(c.id) {
+                    ui.hyperlink_to(format!("#{n}"), format!("{}/{n}", connectors::ISSUES))
+                        .on_hover_text("the open integration request for this tool");
+                }
                 // A row the person uses that Chronicle cannot read yet is
                 // the one that earns a request (m41 chunk 3).
                 if self.declared.uses(c.id)
@@ -1806,7 +1808,7 @@ impl Connections {
                         .on_hover_text(REQUEST_HOVER)
                         .clicked()
                 {
-                    *request = Some(c);
+                    request = Some(c);
                 }
             });
         ui.horizontal(|ui| {
@@ -1820,6 +1822,7 @@ impl Connections {
                 None,
             );
         });
+        request
     }
 
     /// What you work with (m41 chunk 3): the month's apps and sites no

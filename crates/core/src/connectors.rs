@@ -741,6 +741,81 @@ pub fn to_json() -> String {
     s
 }
 
+/// Open integration requests by connector id (m41 chunk 5): the issue a
+/// `Planned` row points at, so a person sees their request is on a list.
+/// `scripts/requests.sh` prints the lines to paste here.
+pub const REQUESTED: &[(&str, u32)] = &[];
+
+pub fn issue_for(id: &str) -> Option<u32> {
+    REQUESTED.iter().find(|(c, _)| *c == id).map(|(_, n)| *n)
+}
+
+pub const ISSUES: &str = "https://github.com/james-clarke/chronicle/issues";
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The site's tools page body (m41 chunk 5): every connector by kind, its
+/// state, the platforms the descriptor covers, and what it gives you. The
+/// fragment is committed into `site/tools.html` between `<!-- tools -->`
+/// markers (`chronicle connections --html`, then `scripts/site-tools.sh`);
+/// a drift test keeps it equal to this.
+pub fn to_site_html() -> String {
+    let mut out = String::new();
+    for kind in ConnectKind::ORDER {
+        let rows: Vec<&Connector> = REGISTRY.iter().filter(|c| c.kind == kind).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "<h3>{}</h3>\n<table class=\"tools\">\n",
+            esc(kind.label())
+        ));
+        out.push_str(
+            "<tr><th>Tool</th><th>State</th><th>Platforms</th><th>What it gives you</th></tr>\n",
+        );
+        for c in rows {
+            let (class, state) = match c.state {
+                Support::Supported => ("supported", "supported".to_owned()),
+                Support::Partial { note } => ("partial", format!("partial \u{b7} {}", esc(note))),
+                Support::Planned => (
+                    "planned",
+                    match issue_for(c.id) {
+                        Some(n) => format!("planned \u{b7} <a href=\"{ISSUES}/{n}\">#{n}</a>"),
+                        None => "planned".to_owned(),
+                    },
+                ),
+                Support::Detected => ("detected", "detected, not read".to_owned()),
+                Support::WontDo { reason } => {
+                    ("wontdo", format!("not planned \u{b7} {}", esc(reason)))
+                }
+            };
+            let platforms: Vec<&str> = c
+                .platforms
+                .iter()
+                .map(|p| match p {
+                    Platform::Linux => "Linux",
+                    Platform::MacOs => "macOS",
+                    Platform::Windows => "Windows",
+                })
+                .collect();
+            out.push_str(&format!(
+                "<tr id=\"{}\"><td>{}</td><td class=\"st {class}\">{state}</td><td>{}</td><td>{}</td></tr>\n",
+                esc(c.id),
+                esc(c.name),
+                platforms.join(" \u{b7} "),
+                esc(c.blurb)
+            ));
+        }
+        out.push_str("</table>\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

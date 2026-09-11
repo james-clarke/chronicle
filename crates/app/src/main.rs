@@ -325,6 +325,9 @@ enum Cmd {
     Connections {
         #[arg(long)]
         json: bool,
+        /// The site's tools page body (`site/tools.html`, m41 chunk 5).
+        #[arg(long, conflicts_with = "json")]
+        html: bool,
     },
     /// The first five minutes (m41 chunk 2): what already works on this
     /// machine, what is one step away, and what needs an account first —
@@ -509,7 +512,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::McpCheck => mcp_check(&data_dir),
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Task { cmd } => task_cmd(&data_dir, cmd),
-        Cmd::Connections { json } => sources::connections(&data_dir, json),
+        Cmd::Connections { json, html } => sources::connections(&data_dir, json, html),
         Cmd::Setup => sources::setup(&data_dir),
         Cmd::ShellInit { shell } => sources::shell_init(&data_dir, &shell),
         Cmd::Hooks { cmd } => match cmd {

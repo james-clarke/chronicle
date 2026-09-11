@@ -15,9 +15,13 @@ use chronicle_core::setup::{self, Group};
 /// doing on this machine. `--json` prints `docs/connectors.json` verbatim —
 /// the registry as the site's tools page reads it, which is deliberately
 /// machine-independent, so health is text only.
-pub(crate) fn connections(data_dir: &Path, json: bool) -> anyhow::Result<()> {
+pub(crate) fn connections(data_dir: &Path, json: bool, html: bool) -> anyhow::Result<()> {
     if json {
         print!("{}", connectors::to_json());
+        return Ok(());
+    }
+    if html {
+        print!("{}", connectors::to_site_html());
         return Ok(());
     }
     let config = Config::load(&data_dir.join("config.toml"))?;
