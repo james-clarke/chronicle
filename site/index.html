@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>chronicle</title>
-  <meta name="description" content="Chronicle runs in the background and turns the windows you were in into the tasks you were actually doing. Standup, timeline, reports and chat from one file on your own disk. No account, no server, no telemetry.">
+  <meta name="description" content="Chronicle runs in the background and turns the windows you were in into the tasks you were actually doing. Standup, timeline, reports by project and chat from one file on your own disk. No account, no server, no telemetry. Open source, AGPL-3.0.">
   <meta property="og:type" content="website">
   <meta property="og:title" content="chronicle — your day, written down">
-  <meta property="og:description" content="A small window in the corner of your screen that knows what you worked on, for how long, and why. Nothing leaves your machine.">
+  <meta property="og:description" content="A small window in the corner of your screen that knows what you worked on, for how long, and why. Everything stays on your own disk.">
   <link rel="canonical" href="https://chronicled.dev/">
   <meta property="og:url" content="https://chronicled.dev/">
   <meta property="og:image" content="https://chronicled.dev/img/og.webp">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="The Chronicle window on a desktop: the tasks being worked on, time today and next step, beside the day's feed">
+  <meta property="og:image:alt" content="The Chronicle window on a desktop: a developer's open tasks with time today and next step, beside the day's feed of placed blocks">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
   <link rel="stylesheet" href="style.css">
@@ -33,18 +33,18 @@
 <section class="hero">
   <div class="hero-text">
     <h1>Your day,<br>written down.</h1>
-    <p class="lede">A small window in the corner of your screen that knows what you worked on, for how long, and why. Nothing leaves your machine.</p>
+    <p class="lede">A small window in the corner of your screen that knows what you worked on, for how long, and why. Everything stays on your own disk; a cloud model only if you bring the key.</p>
     <ul class="nos" aria-label="What Chronicle does not have">
       <li>no account</li>
       <li>no server</li>
       <li>no telemetry</li>
       <li>no screenshots</li>
       <li>no keylogging</li>
-      <li>no cloud</li>
+      <li>no lock-in</li>
     </ul>
     <div class="cta">
       <a class="btn primary" href="#download"><i></i>Download</a>
-      <a class="btn" href="mailto:james.clarke@callplaybook.com?subject=Chronicle">Get in touch</a>
+      <a class="btn" href="https://github.com/james-clarke/chronicle">Read the source</a>
     </div>
     <div class="pulse" id="build" aria-label="When the last update was pushed, read from the repository when the page is built">
       <!-- pulse -->
@@ -58,36 +58,32 @@
       <img class="desk win" src="img/desk-win.webp" width="1200" height="675" alt="">
       <img class="desk mac" src="img/desk-mac.webp" width="1600" height="900" alt="">
     </div>
-    <img class="app" src="img/home-wide.webp" fetchpriority="high" width="1478" height="1080" alt="Chronicle home, dragged wide: the tasks being worked on with time today and next step on the left, the feed of the day's blocks on the right">
+    <img class="app" src="img/home-wide.webp" fetchpriority="high" width="1478" height="1080" alt="Chronicle home, dragged wide: open tasks grouped by project with time today and the next step on the left, the feed of the day's placed blocks on the right">
   </div>
 </section>
 
 <section class="band-section">
   <div class="band">
-    <div class="track" aria-label="One day of blocks; the playhead names each one as it passes, or hover or tab to a block">
-      <span class="blk b" style="left:2.0%;--l:2.0;--w:8.8;width:8.8%" tabindex="0"><span class="tip"><b>Q3 launch brief</b><em>08:12–09:05 · 53m</em><small>model · 0.90</small></span></span>
-      <span class="blk x" style="left:10.8%;--l:10.8;--w:2.5;width:2.5%" tabindex="0"><span class="tip"><b>Slack · #launch-planning</b><em>09:05–09:20 · 15m</em><small>loose · not filed yet</small></span></span>
-      <span class="blk a" style="left:13.3%;--l:13.3;--w:5.9;width:5.9%" tabindex="0"><span class="tip"><b>LAUNCH-241 landing page copy</b><em>09:20–09:55 · 35m</em><small>rule: title has LAUNCH-241 · 0.50 · to confirm</small></span></span>
-      <span class="blk c" style="left:20.0%;--l:20.0;--w:5.3;width:5.3%" tabindex="0"><span class="tip"><b>Launch sync</b><em>10:00–10:32 · 32m · on a call</em><small>model · 0.85</small></span></span>
-      <span class="blk a" style="left:25.3%;--l:25.3;--w:11.4;width:11.4%" tabindex="0"><span class="tip"><b>LAUNCH-241 landing page copy</b><em>10:32–11:40 · 1h08m</em><small>model · 0.90</small></span></span>
-      <span class="blk x" style="left:36.7%;--l:36.7;--w:2.5;width:2.5%" tabindex="0"><span class="tip"><b>Chrome · Gmail</b><em>11:40–11:55 · 15m</em><small>loose · not filed yet</small></span></span>
-      <span class="blk b" style="left:47.5%;--l:47.5;--w:10.8;width:10.8%" tabindex="0"><span class="tip"><b>Q3 launch brief</b><em>12:45–13:50 · 1h05m</em><small>model · 0.90</small></span></span>
-      <span class="blk a" style="left:58.3%;--l:58.3;--w:2.5;width:2.5%" tabindex="0"><span class="tip"><b>LAUNCH-241 landing page copy</b><em>13:50–14:05 · 15m</em><small>rule: you filed this window before · 0.50 · to confirm</small></span></span>
-      <span class="blk a" style="left:60.8%;--l:60.8;--w:8.4;width:8.4%" tabindex="0"><span class="tip"><b>LAUNCH-241 landing page copy</b><em>14:05–14:55 · 50m</em><small>model · 0.90</small></span></span>
-      <span class="blk c r" style="left:70.0%;--l:70.0;--w:3.3;width:3.3%" tabindex="0"><span class="tip"><b>Design review</b><em>15:00–15:20 · 20m · on a call</em><small>model · 0.80</small></span></span>
-      <span class="blk b r" style="left:73.3%;--l:73.3;--w:11.7;width:11.7%" tabindex="0"><span class="tip"><b>Q3 launch brief</b><em>15:20–16:30 · 1h10m</em><small>you kept it · never re-placed</small></span></span>
-      <span class="blk a r" style="left:85.8%;--l:85.8;--w:8.4;width:8.4%" tabindex="0"><span class="tip"><b>LAUNCH-241 landing page copy</b><em>16:35–17:25 · 50m</em><small>model · 0.80</small></span></span>
-      <span class="blk x r" style="left:94.2%;--l:94.2;--w:2.5;width:2.5%" tabindex="0"><span class="tip"><b>Terminal · ~/dev</b><em>17:25–17:40 · 15m</em><small>loose · not filed yet</small></span></span>
+    <div class="track" aria-label="One Thursday of blocks; the playhead names each one as it passes, or hover or tab to a block">
+      <span class="blk x" style="left:5.0%;--l:5.0;--w:6.4;width:6.4%" tabindex="0"><span class="tip"><b>standup and #platform-eng</b><em>08:30–09:08 · 38m</em><small>new task · named by the model · you renamed it</small></span></span>
+      <span class="blk a" style="left:11.4%;--l:11.4;--w:13.1;width:13.1%" tabindex="0"><span class="tip"><b>ACME-11382 renewal reminder emails</b><em>09:08–10:27 · 1h19m</em><small>declared in contoso · holds ACME-11382</small></span></span>
+      <span class="blk x" style="left:26.3%;--l:26.3;--w:2.6;width:2.6%" tabindex="0"><span class="tip"><b>Django template docs</b><em>10:37–10:53 · 16m</em><small>new · 0.56 · to confirm</small></span></span>
+      <span class="blk a" style="left:28.9%;--l:28.9;--w:13.5;width:13.5%" tabindex="0"><span class="tip"><b>ACME-11382 renewal reminder emails</b><em>10:53–12:14 · 1h21m</em><small>declared in contoso · holds ACME-11382</small></span></span>
+      <span class="blk b" style="left:50.4%;--l:50.4;--w:6.7;width:6.7%" tabindex="0"><span class="tip"><b>ACME-11390 northwind batch times out</b><em>13:02–13:42 · 34m</em><small>northwind-qa · #northwind-alerts</small></span></span>
+      <span class="blk a" style="left:57.1%;--l:57.1;--w:4.8;width:4.8%" tabindex="0"><span class="tip"><b>ACME-11382 renewal reminder emails</b><em>13:42–14:11 · 29m</em><small>PR #416, #409 · to confirm</small></span></span>
+      <span class="blk c" style="left:61.9%;--l:61.9;--w:7.8;width:7.8%" tabindex="0"><span class="tip"><b>renewal emails design review</b><em>14:11–14:58 · 47m · on a call</em><small>new · Meet + Figma · 0.85</small></span></span>
+      <span class="blk a r" style="left:69.7%;--l:69.7;--w:11.4;width:11.4%" tabindex="0"><span class="tip"><b>ACME-11382 renewal reminder emails</b><em>14:58–16:06 · 1h08m</em><small>PR #415 · CI run 2231 · 1.00</small></span></span>
+      <span class="blk x r" style="left:81.1%;--l:81.1;--w:12.9;width:12.9%" tabindex="0"><span class="tip"><b>standup and #platform-eng</b><em>16:06–17:24 · 48m</em><small>Slack · evidence · 1.05</small></span></span>
     </div>
     <div class="ticks" aria-hidden="true"><span>08:00</span><span>10:00</span><span>12:00</span><span>14:00</span><span>16:00</span><span>18:00</span></div>
     <ul class="legend" aria-label="Tasks in this day">
-      <li><i class="a"></i>LAUNCH-241 landing page copy</li>
-      <li><i class="b"></i>Q3 launch brief</li>
-      <li><i class="c"></i>calls</li>
-      <li><i class="x"></i>loose time</li>
+      <li><i class="a"></i>ACME-11382 renewal reminder emails</li>
+      <li><i class="b"></i>ACME-11390 northwind batch</li>
+      <li><i class="c"></i>design review</li>
+      <li><i class="x"></i>the rest, named by the model</li>
     </ul>
   </div>
-  <p class="band-caption"><b>7h38m</b> focused · 45m loose · 40m away · 12m not captured · 12 switches. One Thursday, sorted while it was still happening. Hover a block.</p>
+  <p class="band-caption"><b>7h56m</b> placed · 15m loose · 54m away · 29 blocks in 6 tasks · 2 corrections. Sam's Thursday, filed while it was still happening. Hover a block.</p>
 </section>
 
 <section class="showcase">
@@ -97,33 +93,35 @@
   </div>
   <figure class="wipe">
     <div class="wipe-box">
-      <div class="wipe-before" aria-hidden="true"><pre>07:04:12  focus    Terminator      m27-chunks-2-7-execution — Claude Code
-07:31:50  focus    Google-chrome   ACME-11381 Fix derivation/task accuracy — Jira
-07:58:07  focus    Terminator      m27-chunks-2-7-execution — Claude Code
-08:22:41  focus    Google-chrome   Comparing northwind:main...staging — Pull Request #9480
-08:40:19  focus    Terminator      contoso (main) — zsh
-09:03:55  focus    Terminator      m27-chunks-2-7-execution — Claude Code
-09:31:08  focus    Google-chrome   ACME-11382 Start dev — Jira
-09:44:26  focus    Terminator      mailer (feat/ACME-11382) — zsh
-10:12:30  focus    Google-chrome   Comparing staging...ACME-11382 — Pull Request #9481
-10:35:02  focus    Terminator      contoso (main) — zsh
-10:36:48  away     5m
-11:02:15  focus    Terminator      11381 and 11374 merged and deployed — Claude Code
-11:29:40  focus    Google-chrome   ACME-11374 Merge · Deploy — Jira
-11:47:33  focus    Terminator      mailer (feat/ACME-11382) — zsh
-12:10:09  away     1h34m
-13:44:52  focus    Terminator      m27-chunks-2-7-execution — Claude Code
-14:08:21  focus    Google-chrome   Comparing staging...ACME-11382 — Pull Request #9481
-14:27:36  focus    Terminator      mailer (feat/ACME-11382) — zsh
-14:59:14  focus    Google-chrome   CI · mailer · run 2231 — GitHub
-15:06:58  focus    Terminator      mailer (feat/ACME-11382) — zsh
-15:31:20  focus    Terminator      contoso (main) — zsh
-15:48:03  focus    Google-chrome   Exploring CI caching — Google Search
-16:06:17  focus    Terminator      mailer (feat/ACME-11382) — zsh
-16:40:45  focus    Terminator      m27-chunks-2-7-execution — Claude Code
-17:16:22  focus    Terminator      contoso (main) — zsh
-17:24:09  away</pre></div>
-      <img class="wipe-after" src="img/task-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across the day, a card per task underneath, and one task open on the right with its sessions, where the time went and the activity that touched it" loading="lazy" decoding="async">
+      <div class="wipe-before" aria-hidden="true"><pre>08:30:31  focus    Google-chrome   Hacker News
+08:31:56  focus    Slack           #platform-eng - Acme
+08:50:26  focus    Google-chrome   Inbox (3) - sam@acme.com - Gmail
+08:56:00  focus    Google-chrome   Platform standup - Google Meet
+09:08:16  focus    Terminator      sam@workstation: ~/dev/contoso
+09:10:19  focus    Code            renewals.py — contoso
+09:21:55  focus    Code            renewal_reminder.html — contoso
+09:23:17  focus    Google-chrome   The Django template language | Django documentation
+10:27:08  focus    figma           Renewal reminder email
+10:46:00  away     7m
+10:53:33  focus    Code            renewals.py — contoso
+10:59:18  focus    Code            test_renewals.py — contoso
+11:09:28  focus    Google-chrome   [ACME-11382] contoso: membership renewal reminder emails - Jira
+11:44:32  focus    Terminator      sam@workstation: ~/dev/contoso
+12:14:00  away     47m
+13:02:42  focus    Google-chrome   northwind-qa · Settings | Heroku
+13:24:26  focus    Slack           #northwind-alerts - Acme
+13:42:32  focus    Google-chrome   Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso
+13:52:36  focus    Google-chrome   Audit log for plan changes by priya · Pull Request #409 · acme/contoso
+14:13:29  focus    Google-chrome   Renewal emails: design review - Google Meet
+14:19:47  focus    Code            notes.md — scratch
+14:58:18  focus    Code            test_renewals.py — contoso
+15:06:00  focus    Google-chrome   CI · contoso · run 2231 - GitHub
+15:23:13  focus    Google-chrome   Membership renewal reminder emails by sam · Pull Request #415 · acme/contoso
+16:06:46  focus    Slack           #platform-eng - Acme
+17:03:47  focus    Google-chrome   Membership renewal reminder emails by sam · Pull Request #415 · acme/contoso
+17:18:46  focus    Code            notes.md — scratch
+17:24:00  away</pre></div>
+      <img class="wipe-after" src="img/timeline-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across a Thursday, a card per task underneath, and the renewal emails task open on the right with its sessions and where the time went" loading="lazy" decoding="async">
     </div>
     <input class="wipe-handle" type="range" min="0" max="100" value="0" aria-label="Drag to compare: raw window titles on the left, the placed timeline on the right" oninput="this.parentNode.style.setProperty('--x',this.value+'%')">
     <figcaption><span>what it saw</span><span>what it wrote down</span></figcaption>
@@ -133,17 +131,17 @@
 <section class="showcase">
   <div class="showcase-head">
     <h2>The week, added up.</h2>
-    <p>Deep work, longest block, switches, the hour that fragments, and how it compares with last week. Every task grouped by project with its share of the hours. Nothing to fill in.</p>
+    <p>Projects first: a stacked bar per day, the week's mix, every project with its share of the hours and the tasks under it. Then deep work, the longest block, switches, the hour that fragments, and how it compares with last week. Nothing to fill in.</p>
   </div>
   <figure class="wide-shot">
-    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars, a project mix bar, a project legend with a bar, duration and share per row, six focus tiles including 17h55m of deep work and 87 switches, and tasks grouped by project" loading="lazy" decoding="async">
-    <figcaption><span>reports · this week</span><span>31 aug – 6 sep</span></figcaption>
+    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars for Monday to Friday, a project mix bar, contoso, northwind and mailer with duration and share per row, and six focus tiles" loading="lazy" decoding="async">
+    <figcaption><span>reports · this week</span><span>7 – 11 sep</span></figcaption>
   </figure>
 </section>
 
 <section class="how">
   <h2>How it works</h2>
-  <p class="section-lede">One morning, first window to standup line. Same rows at every step.</p>
+  <p class="section-lede">One Thursday, first window to standup line. Same rows at every step.</p>
 
   <div class="stage-heads" aria-hidden="true">
     <span>What happens</span>
@@ -156,93 +154,130 @@
       <div class="stage-text">
         <h3>Sees</h3>
         <p>Which window is in front, and when you step away. App name and title. No keystrokes, no screenshots, no clipboard.</p>
-        <p>Calls, calendar, ticket keys, the folder a terminal is in: noted beside each stretch. Hands off the keyboard is quiet, not away, until the screen locks or ten minutes pass with nothing live.</p>
+        <p>Beside the window, the sources you switch on: the folder each shell command ran in, checkouts and commits to the second, the AI session in your terminal, browser history, the calendar you subscribe to, a microphone in use. Hands off the keyboard is quiet, not away, until the screen locks or ten minutes pass with nothing live.</p>
       </div>
       <figure class="panel">
-        <figcaption>focus events · one batch</figcaption>
-        <pre><code>09:02:14  focus    Chrome   Q3 launch brief – Google Docs
-09:31:40  focus    Slack    #launch-planning
-09:40:00  meeting  Launch sync · calendar · 09:40–10:15
-09:40:11  call     microphone on
-10:12:22  focus    Chrome   LAUNCH-241 Landing page copy – Jira
-          anchor   item LAUNCH-241
-10:40:10  focus    Figma    Landing page v2
-11:20:00  quiet    no input · Figma still in front
-11:31:40  lock     away · batch closed · 5 spans</code></pre>
+        <figcaption>events · one batch</figcaption>
+        <pre><code>09:08:16  focus    Terminator  sam@workstation: ~/dev/contoso
+          place    ~/dev/contoso · repo contoso
+09:10:19  focus    Code        renewals.py — contoso
+09:23:17  focus    Chrome      The Django template language · docs.djangoproject.com
+09:41:02  shell    pytest tests/test_renewals.py · 41 s · ~/dev/contoso
+10:27:08  focus    Figma       Renewal reminder email
+10:46:00  quiet    no input · Figma still in front
+10:53:00  back     away 7m
+11:09:28  focus    Chrome      [ACME-11382] contoso: membership renewal… · Jira
+          anchor   item ACME-11382
+11:52:10  git      commit 4c1e9a2 on feat/ACME-11382 · contoso
+12:14:00  lock     away · batch closed · 9 spans</code></pre>
       </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Places</h3>
-        <p>Every minute, plain rules: a ticket key in a branch or a tab, the project folder, a window you filed before. Marked to confirm.</p>
-        <p>When the batch closes, the local model reads a short digest and places the rest. About two minutes on a laptop CPU.</p>
-        <p>Minutes it was not running are written down as not captured, never guessed.</p>
+        <p>Project first: the repository a terminal is in, a ticket prefix, a domain, a title pattern you wrote. Then the task, from evidence: a ticket key in a tab or a branch, a window you filed before, the words a task has attracted. Every minute, deterministic, with a margin; a thin margin is marked to confirm.</p>
+        <p>What no task claims for long enough becomes a new one, and the local model's only job is to name it. Minutes it was not running are written down as not captured, never guessed.</p>
       </div>
       <figure class="panel">
-        <figcaption>rules, then the model</figcaption>
-        <pre><code>rules   10:12–10:40  LAUNCH-241 landing page copy
-        title has LAUNCH-241 · 0.50 · to confirm
+        <figcaption>project, then evidence, then a name</figcaption>
+        <pre><code>project  ~/dev/contoso · ACME-11382 · acme.atlassian.net → contoso
+         northwind-qa · #northwind-alerts               → northwind
 
-model   09:02–09:31  Q3 launch brief               0.90
-        09:31–10:12  launch sync · Q3 launch       0.85
-        10:12–11:15  LAUNCH-241 landing page copy  0.90
+task     09:08–12:14  ACME-11382 membership renewal reminder emails
+         holds ACME-11382 · declared in contoso · 1.00
+         13:02–13:41  ACME-11390 northwind renewal batch times out
+         northwind-qa · #northwind-alerts · 0.82
+         14:11–14:58  new · Meet + Figma, 47m, nothing holds it
 
-stored  3 blocks · replaces 1 provisional row</code></pre>
+named    "Renewal emails design review" · local model · 38 s
+stored   3 segments · 1 to confirm · 0 provisional rows left</code></pre>
       </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Learns</h3>
-        <p>It will be wrong sometimes. Rename a task, move a block, throw one out; the correction is kept and read first next time. Thrown out is a hard no.</p>
+        <p>It will be wrong sometimes. Rename a task, move a block, throw one out; the correction is kept, embedded, and read first next time a window like it comes up. Thrown out is a hard no.</p>
         <p>Loose time folds into runs you file in one go. Once a day, slivers tidy into their neighbours. One undo.</p>
       </div>
       <figure class="panel shot">
         <figcaption>organize · unassigned time</figcaption>
-        <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one 26-minute run with a suggested task pre-filled, and an assign button" loading="lazy" decoding="async">
+        <img src="img/triage.webp" width="678" height="470" alt="Chronicle organize view: the day's unassigned time folded into one run with a suggested task pre-filled, and an assign button" loading="lazy" decoding="async">
       </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Writes</h3>
-        <p>Standup, timeline, task cards, reports, chat. One table, nothing worked out twice, nothing stored anywhere else.</p>
+        <p>Standup, timeline, task cards, reports by project, chat. One table, nothing worked out twice, nothing stored anywhere else.</p>
       </div>
       <figure class="panel">
         <figcaption>same rows, four ways</figcaption>
-        <pre><code>standup   Yesterday: landing page copy and the launch brief
-          (LAUNCH-241, 2h13m) · launch sync (32m)
-timeline  09:02 ──────────────── 11:15  Q3 launch
-report    Q3 launch · LAUNCH-241 · 2.2 h
-chat      "what did I do before the launch sync?" → same rows</code></pre>
+        <pre><code>standup   Yesterday: renewal reminder emails (ACME-11382, 5h12m),
+          the northwind batch fix on QA (ACME-11390, 39m),
+          design review (47m) · PR #415 is up
+timeline  09:08 ──────────────── 12:14  ACME-11382
+report    contoso · ACME-11382 · 5.2 h · 61 %
+chat      "what did I do before the design review?" → same rows</code></pre>
       </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Shows its work</h3>
-        <p>Settings keeps the pipeline in view: the model loaded, the worker, batches waiting, the last batch with its tokens. Two buttons: the digest the model read, the answer it gave.</p>
+        <p>Once a day it scores itself: how much of the active day it covered, how many placements you threw out, how many verdicts it got wrong, and how often it was confident and wrong. The numbers sit in Settings and print from <code>chronicle status</code>, per model, so a prompt change that costs accuracy is seen the next morning.</p>
+        <p>Every placement keeps its reason. Two buttons: the digest the model read, the answer it gave.</p>
       </div>
-      <figure class="panel shot">
-        <figcaption>settings › derivation</figcaption>
-        <img src="img/pipeline.webp" width="880" height="590" alt="Chronicle settings, derivation: batch every 30 minutes, derive after 300 seconds idle, a placement switch for the evidence-scoring segmenter, background under 10 minutes; then the pipeline card with the model file, worker idle, 1 pending batch, the last derive as batch 89 at 13:54 in 76.9 seconds with its prompt and output token counts, and buttons to show the digest and the last output" loading="lazy" decoding="async">
+      <figure class="panel">
+        <figcaption>chronicle status · self-score</figcaption>
+        <pre><code>$ chronicle status
+  self-score, 7 days to 2026-09-11 (computed 2026-09-11 12:09):
+    coverage 98% of 36h13m active
+    tasks minted 7, merged within a day 0 (0%)
+    ejects 0 of 116 placements (0%), renames 3
+    verdicts 90 closed, 0 wrong (0%); confident-wrong 0 of 13 (0%)
+    cross-project placements 0; unfiled 8h06m of 36h13m active (22%)
+  per backend, same days:
+    local: 6 jobs · faithfulness – · advisor – · $0.00/day</code></pre>
       </figure>
     </li>
 
     <li class="stage">
       <div class="stage-text">
         <h3>Your own key, if you want</h3>
-        <p>Local until you paste an API key. Then pick what goes out: writing and chat, or everything. The key sits in one file only you can read.</p>
+        <p>Local until you paste an API key. Then pick what goes out: writing and chat, or everything. The key sits in one file only you can read, and the day's spend has a cap.</p>
         <p>Storage &amp; server keeps one line saying what left the machine today. With no key it ends in “nothing else”.</p>
       </div>
       <figure class="panel shot">
         <figcaption>settings › model</figcaption>
-        <img src="img/model.webp" width="880" height="900" alt="Chronicle settings, model: the local model path, then cloud backends with one row, anthropic, claude-sonnet-5, tested in 1180 ms, a note that prompts routed there go to Anthropic under its commercial API terms, and the routing grid with chat, narrative, standup, journal, task description, checkpoint, suggest task and name new tasks set to anthropic, tidy day and derive batches set to local" loading="lazy" decoding="async">
+        <img src="img/model.webp" width="880" height="800" alt="Chronicle settings, model: cloud backends with one row, anthropic, claude-sonnet-5, tested in 1180 ms, the local model's last seven days beside it, and the routing grid with chat, narrative, standup, journal, task description, checkpoint, suggest task, name new tasks and advise placements set to anthropic, tidy day, derive batches, live tier and the night pass set to local, and a daily cap" loading="lazy" decoding="async">
       </figure>
     </li>
 
   </ol>
+</section>
+
+<section class="showcase" id="sources">
+  <div class="showcase-head">
+    <h2>What it can read.</h2>
+    <p>The window title is the floor. Everything else is a source you switch on, each one a row in Settings with its state, what it produced this week, and what it would take to connect. Nothing is read that is not listed there.</p>
+  </div>
+  <div class="grab">
+    <div class="grab-row">
+      <h3>On this machine</h3>
+      <p class="fine">Git repositories and their hooks, the folder each shell command ran in, listening ports and Compose stacks, link files beside a project, browser history, a microphone in use.</p>
+    </div>
+    <div class="grab-row">
+      <h3>Your tools</h3>
+      <p class="fine">AI sessions in eight formats, Claude Code and Codex among them, editor heartbeats, pull requests through <code>gh</code>, a calendar by ICS or Google.</p>
+    </div>
+    <div class="grab-row">
+      <h3>Elsewhere, read-only</h3>
+      <p class="fine">MCP servers, local or remote: a Jira or Linear the derivation can ask about a ticket key. Allowlisted calls, nothing written back without a confirm.</p>
+    </div>
+  </div>
+  <p class="fine">Each source is a row in Settings › Connections with its state on this machine, what it produced this week, and what it would take to connect. The full list, with what each one needs on Linux, macOS and Windows, is in the <a href="https://github.com/james-clarke/chronicle#local-sources">README</a>.</p>
 </section>
 
 <section class="demo" id="demo">
@@ -297,7 +332,7 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
     <div class="grab-row">
       <h3>macOS <small>Apple silicon and Intel</small></h3>
       <p class="cmd"><code>brew install james-clarke/tap/chronicle</code></p>
-      <p class="fine">Not signed by Apple yet, so this is the developer route until that lands. Chronicle reads the focused window&rsquo;s title through Accessibility and asks for that permission once, on the first run.</p>
+      <p class="fine">Ported and compiled for both, never yet run on a Mac, and not signed by Apple, so this is the developer route until both change. Chronicle reads the focused window&rsquo;s title through Accessibility and asks for that permission once, on the first run.</p>
     </div>
     <div class="grab-row quiet">
       <h3>Windows</h3>
@@ -308,13 +343,13 @@ chat      "what did I do before the launch sync?" → same rows</code></pre>
 </section>
 
 <section class="build" id="open">
-  <h2>The build, in the open.</h2>
-  <p class="section-lede">Read from the source tree when the page is built. The binary size is typed in with its date, because Render does not build Rust.</p>
+  <h2>Open source, built in the open.</h2>
+  <p class="section-lede">AGPL-3.0, one repository, no contributor agreement. The code is written by Claude, working in that repository under direction and review, and the evidence for that is the record rather than the claim: every milestone starts as a plan written before the code, with a gate per chunk and a list of what was knowingly left undone, and none of them are tidied afterwards. <a href="https://github.com/james-clarke/chronicle/blob/main/docs/README.md">Start with the index.</a></p>
   <!-- numbers -->
   <p class="numbers">tests, crates and the migration number are read from the tree when the page is built</p>
   <!-- /numbers -->
-  <p class="numbers"><b>41 MB</b> binary · <b>1</b> file, no runtime <small>· release build, 2026-09-08</small></p>
-  <p class="fine">Tests are a grep for <code>#[test]</code>; the migration is the highest file in the migrations folder.</p>
+  <p class="numbers"><b>46 MB</b> binary · <b>1</b> file, no runtime <small>· release build, 2026-09-11</small></p>
+  <p class="fine">Read from the source tree when the page is built. Tests are a grep for <code>#[test]</code>; the migration is the highest file in the migrations folder; the binary size is typed in with its date, because Render does not build Rust.</p>
 </section>
 
 </main>
