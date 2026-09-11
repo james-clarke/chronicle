@@ -1,0 +1,41 @@
+# The configuration the site's screenshots are rendered under (m43 chunk 0).
+# `scripts/site-shots.sh` copies it into a sandbox data dir; nothing here
+# points at a real machine. The projects match the cast in fixtures/README.md.
+
+batch_minutes = 30
+afk_close_secs = 120
+derive_idle_secs = 300
+title_similarity = 0.8
+retention_days = 180
+task_autoclose_days = 3
+port = 5601
+cors_allow = []
+browser_apps = ["firefox", "chrome", "chromium", "brave", "safari"]
+excluded_apps = []
+excluded_titles = []
+distraction_patterns = []
+background_minutes = 10
+git_repos = []
+ai_session_dirs = []
+github_prs = false
+mic_capture = false
+ticket_regex = "[A-Z][A-Z0-9]+-[0-9]+"
+checkpoint_afk_secs = 1800
+derive_mode = "segmenter"
+
+[[projects]]
+name = "contoso"
+repos = ["~/dev/contoso"]
+tickets = ["ACME"]
+domains = ["acme.atlassian.net", "github.com"]
+titles = ["(?i)contoso"]
+
+[[projects]]
+name = "mailer"
+repos = ["~/dev/mailer"]
+titles = ["(?i)mailer", "(?i)twilio"]
+
+[[projects]]
+name = "northwind"
+titles = ["(?i)northwind"]
+domains = ["heroku.com", "console.aws.amazon.com"]

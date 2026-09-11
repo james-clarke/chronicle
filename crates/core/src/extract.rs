@@ -1777,12 +1777,7 @@ mod tests {
 
     #[test]
     fn terminal_paths_name_the_project() {
-        let a = extract(
-            "Terminator",
-            "sam@workstation:~/dev/chronicle",
-            None,
-            &re(),
-        );
+        let a = extract("Terminator", "sam@workstation:~/dev/chronicle", None, &re());
         assert_eq!(kinds(&a, AnchorKind::Place), ["chronicle"]);
         let a = extract(
             "Terminator",

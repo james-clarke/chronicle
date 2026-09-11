@@ -1,0 +1,115 @@
+{"ts": "2026-09-08T12:36:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-08T12:36:32.000Z", "kind": "focus", "app": "Google-chrome", "title": "Acme Engineering - Calendar - Week of 7 Sep 2026 - Google Chrome"}
+{"ts": "2026-09-08T12:36:34.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Acme Engineering - Calendar - Week of 7 Sep 2026", "url": "https://calendar.google.com/calendar/u/0/r/week/2026/9/7"}
+{"ts": "2026-09-08T12:39:45.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-08T12:42:25.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform board - Agile Board - Jira - Google Chrome"}
+{"ts": "2026-09-08T12:42:27.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform board - Agile Board - Jira", "url": "https://acme.atlassian.net/jira/software/projects/ACME/boards/12"}
+{"ts": "2026-09-08T12:44:19.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-08T12:51:23.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-08T12:51:25.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-08T12:56:09.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-08T12:58:09.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform standup - Google Meet - Google Chrome"}
+{"ts": "2026-09-08T12:58:11.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform standup - Google Meet", "url": "https://meet.google.com/kqz-pltf-std"}
+{"ts": "2026-09-08T13:11:00.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-08T13:15:03.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-08T13:15:05.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-08T13:19:54.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · mailer · run 884 - GitHub - Google Chrome"}
+{"ts": "2026-09-08T13:19:56.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · mailer · run 884 - GitHub", "url": "https://github.com/acme/mailer/actions/runs/884"}
+{"ts": "2026-09-08T13:22:32.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-08T13:22:34.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-08T13:44:03.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-08T13:55:59.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-08T14:11:48.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-08T14:11:50.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-08T14:12:33.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-08T14:19:01.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-08T14:22:37.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-08T14:23:32.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-08T14:27:39.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T14:28:30.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sending email | Django documentation - Google Chrome"}
+{"ts": "2026-09-08T14:28:32.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sending email | Django documentation", "url": "https://docs.djangoproject.com/en/5.2/topics/email/"}
+{"ts": "2026-09-08T14:33:07.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T14:36:11.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sending email | Django documentation - Google Chrome"}
+{"ts": "2026-09-08T14:36:13.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sending email | Django documentation", "url": "https://docs.djangoproject.com/en/5.2/topics/email/"}
+{"ts": "2026-09-08T14:39:16.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T14:42:49.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T14:43:51.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T14:47:02.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T14:47:04.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T14:53:35.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T14:58:12.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T14:59:46.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:07:54.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:09:02.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T15:11:04.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:18:33.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T15:24:16.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:25:05.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:28:25.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T15:28:27.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T15:29:44.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T15:32:26.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:33:57.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:44:41.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T15:57:25.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T16:00:39.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T16:04:00.000Z", "kind": "afk", "idle": true}
+{"ts": "2026-09-08T16:49:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-08T16:49:14.000Z", "kind": "focus", "app": "Google-chrome", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-08T16:49:16.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso", "url": "https://github.com/acme/contoso/pull/416"}
+{"ts": "2026-09-08T17:05:25.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T17:14:03.000Z", "kind": "focus", "app": "Google-chrome", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-08T17:14:05.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso", "url": "https://github.com/acme/contoso/pull/416"}
+{"ts": "2026-09-08T17:15:19.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T17:16:51.000Z", "kind": "focus", "app": "Google-chrome", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-08T17:16:53.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso", "url": "https://github.com/acme/contoso/pull/416"}
+{"ts": "2026-09-08T17:17:53.000Z", "kind": "focus", "app": "Google-chrome", "title": "Drop the legacy invoice export by tomasz · Pull Request #410 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-08T17:17:55.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Drop the legacy invoice export by tomasz · Pull Request #410 · acme/contoso", "url": "https://github.com/acme/contoso/pull/410"}
+{"ts": "2026-09-08T17:21:21.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T17:21:23.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T17:29:07.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T17:34:19.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T17:49:49.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T17:55:28.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sending email | Django documentation - Google Chrome"}
+{"ts": "2026-09-08T17:55:30.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sending email | Django documentation", "url": "https://docs.djangoproject.com/en/5.2/topics/email/"}
+{"ts": "2026-09-08T18:09:51.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T18:35:08.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T18:48:33.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T18:52:06.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T19:02:56.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sending email | Django documentation - Google Chrome"}
+{"ts": "2026-09-08T19:02:58.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sending email | Django documentation", "url": "https://docs.djangoproject.com/en/5.2/topics/email/"}
+{"ts": "2026-09-08T19:03:48.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T19:17:25.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T19:18:39.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T19:26:49.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T19:32:48.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T19:36:11.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T19:38:33.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sam / Jordan 1:1 - Google Meet - Google Chrome"}
+{"ts": "2026-09-08T19:38:35.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sam / Jordan 1:1 - Google Meet", "url": "https://meet.google.com/one-sjrd-one"}
+{"ts": "2026-09-08T20:09:18.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T20:11:24.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:20:06.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:21:41.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T20:21:43.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T20:24:15.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:31:49.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T20:31:51.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T20:35:33.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sending email | Django documentation - Google Chrome"}
+{"ts": "2026-09-08T20:35:35.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sending email | Django documentation", "url": "https://docs.djangoproject.com/en/5.2/topics/email/"}
+{"ts": "2026-09-08T20:38:20.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T20:45:25.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:46:45.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:48:20.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T20:48:22.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T20:52:36.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:54:16.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T20:55:03.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-08T20:57:13.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T21:16:11.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira - Google Chrome"}
+{"ts": "2026-09-08T21:16:13.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11382] contoso: membership renewal reminder emails - Jira", "url": "https://acme.atlassian.net/browse/ACME-11382"}
+{"ts": "2026-09-08T21:19:00.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-08T21:22:19.000Z", "kind": "focus", "app": "Code", "title": "notes.md — scratch — Visual Studio Code"}
+{"ts": "2026-09-08T21:30:17.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-08T21:32:38.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-08T21:32:40.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-08T21:33:00.000Z", "kind": "afk", "idle": true}

@@ -1,0 +1,115 @@
+{"ts": "2026-09-07T12:32:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-07T12:32:00.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform board - Agile Board - Jira - Google Chrome"}
+{"ts": "2026-09-07T12:32:02.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform board - Agile Board - Jira", "url": "https://acme.atlassian.net/jira/software/projects/ACME/boards/12"}
+{"ts": "2026-09-07T12:35:51.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-07T12:35:53.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-07T12:44:43.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-07T12:52:01.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform standup - Google Meet - Google Chrome"}
+{"ts": "2026-09-07T12:52:03.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform standup - Google Meet", "url": "https://meet.google.com/kqz-pltf-std"}
+{"ts": "2026-09-07T12:54:07.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform standup - Google Meet - Google Chrome"}
+{"ts": "2026-09-07T12:54:09.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform standup - Google Meet", "url": "https://meet.google.com/kqz-pltf-std"}
+{"ts": "2026-09-07T12:58:22.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform standup - Google Meet - Google Chrome"}
+{"ts": "2026-09-07T12:58:24.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform standup - Google Meet", "url": "https://meet.google.com/kqz-pltf-std"}
+{"ts": "2026-09-07T13:04:15.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T13:10:20.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T13:16:49.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T13:19:17.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T13:21:23.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T13:27:49.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T13:33:59.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T13:42:59.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11381] mailer: retry backoff on SMS sends - Jira - Google Chrome"}
+{"ts": "2026-09-07T13:43:01.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11381] mailer: retry backoff on SMS sends - Jira", "url": "https://acme.atlassian.net/browse/ACME-11381"}
+{"ts": "2026-09-07T13:51:01.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T13:53:49.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T14:06:02.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T14:07:30.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-07T14:17:12.000Z", "kind": "focus", "app": "Google-chrome", "title": "Error and Warning Dictionary | Twilio - Google Chrome"}
+{"ts": "2026-09-07T14:17:14.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Error and Warning Dictionary | Twilio", "url": "https://www.twilio.com/docs/api/errors"}
+{"ts": "2026-09-07T14:24:31.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11381] mailer: retry backoff on SMS sends - Jira - Google Chrome"}
+{"ts": "2026-09-07T14:24:33.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11381] mailer: retry backoff on SMS sends - Jira", "url": "https://acme.atlassian.net/browse/ACME-11381"}
+{"ts": "2026-09-07T14:26:08.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T14:33:40.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T14:41:00.000Z", "kind": "afk", "idle": true}
+{"ts": "2026-09-07T14:49:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-07T14:49:37.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T14:59:37.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T15:17:20.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T15:19:18.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T15:20:53.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T15:23:50.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T15:32:21.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-07T15:34:04.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T15:36:01.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T15:41:39.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T15:46:06.000Z", "kind": "focus", "app": "Google-chrome", "title": "Error and Warning Dictionary | Twilio - Google Chrome"}
+{"ts": "2026-09-07T15:46:08.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Error and Warning Dictionary | Twilio", "url": "https://www.twilio.com/docs/api/errors"}
+{"ts": "2026-09-07T15:47:18.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T15:51:42.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T15:54:43.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T16:02:25.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T16:08:08.000Z", "kind": "focus", "app": "Google-chrome", "title": "Error and Warning Dictionary | Twilio - Google Chrome"}
+{"ts": "2026-09-07T16:08:10.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Error and Warning Dictionary | Twilio", "url": "https://www.twilio.com/docs/api/errors"}
+{"ts": "2026-09-07T16:08:51.000Z", "kind": "focus", "app": "Code", "title": "sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T16:11:03.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T16:12:00.000Z", "kind": "afk", "idle": true}
+{"ts": "2026-09-07T16:56:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-07T16:56:14.000Z", "kind": "focus", "app": "Google-chrome", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-07T16:56:16.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso", "url": "https://github.com/acme/contoso/pull/409"}
+{"ts": "2026-09-07T17:06:57.000Z", "kind": "focus", "app": "Google-chrome", "title": "Drop the legacy invoice export by tomasz · Pull Request #410 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-07T17:06:59.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Drop the legacy invoice export by tomasz · Pull Request #410 · acme/contoso", "url": "https://github.com/acme/contoso/pull/410"}
+{"ts": "2026-09-07T17:10:28.000Z", "kind": "focus", "app": "Google-chrome", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-07T17:10:30.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso", "url": "https://github.com/acme/contoso/pull/409"}
+{"ts": "2026-09-07T17:31:21.000Z", "kind": "focus", "app": "Code", "title": "deploy.yml — contoso — Visual Studio Code"}
+{"ts": "2026-09-07T17:44:20.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · contoso · run 2231 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T17:44:22.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · contoso · run 2231 - GitHub", "url": "https://github.com/acme/contoso/actions/runs/2231"}
+{"ts": "2026-09-07T17:57:04.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-07T18:00:20.000Z", "kind": "focus", "app": "Google-chrome", "title": "Workflow syntax for GitHub Actions - GitHub Docs - Google Chrome"}
+{"ts": "2026-09-07T18:00:22.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Workflow syntax for GitHub Actions - GitHub Docs", "url": "https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions"}
+{"ts": "2026-09-07T18:02:24.000Z", "kind": "focus", "app": "Code", "title": "deploy.yml — contoso — Visual Studio Code"}
+{"ts": "2026-09-07T18:03:59.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-07T18:09:17.000Z", "kind": "focus", "app": "Code", "title": "deploy.yml — contoso — Visual Studio Code"}
+{"ts": "2026-09-07T18:11:30.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-07T18:13:32.000Z", "kind": "focus", "app": "Google-chrome", "title": "Workflow syntax for GitHub Actions - GitHub Docs - Google Chrome"}
+{"ts": "2026-09-07T18:13:34.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Workflow syntax for GitHub Actions - GitHub Docs", "url": "https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions"}
+{"ts": "2026-09-07T18:15:36.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-07T18:37:24.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · contoso · run 2231 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T18:37:26.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · contoso · run 2231 - GitHub", "url": "https://github.com/acme/contoso/actions/runs/2231"}
+{"ts": "2026-09-07T18:54:48.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-07T18:57:45.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · contoso · run 2231 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T18:57:47.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · contoso · run 2231 - GitHub", "url": "https://github.com/acme/contoso/actions/runs/2231"}
+{"ts": "2026-09-07T18:58:30.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sprint 41 planning - Google Meet - Google Chrome"}
+{"ts": "2026-09-07T18:58:32.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sprint 41 planning - Google Meet", "url": "https://meet.google.com/abc-sprn-pln"}
+{"ts": "2026-09-07T19:17:11.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform board - Agile Board - Jira - Google Chrome"}
+{"ts": "2026-09-07T19:17:13.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform board - Agile Board - Jira", "url": "https://acme.atlassian.net/jira/software/projects/ACME/boards/12"}
+{"ts": "2026-09-07T19:33:49.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sprint 41 planning - Google Meet - Google Chrome"}
+{"ts": "2026-09-07T19:33:51.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sprint 41 planning - Google Meet", "url": "https://meet.google.com/abc-sprn-pln"}
+{"ts": "2026-09-07T19:34:02.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T19:35:17.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · mailer · run 884 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T19:35:19.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · mailer · run 884 - GitHub", "url": "https://github.com/acme/mailer/actions/runs/884"}
+{"ts": "2026-09-07T19:39:00.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T19:44:07.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T19:58:28.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · mailer · run 884 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T19:58:30.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · mailer · run 884 - GitHub", "url": "https://github.com/acme/mailer/actions/runs/884"}
+{"ts": "2026-09-07T20:11:15.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-07T20:12:03.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-07T20:12:05.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-07T20:13:26.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T20:27:29.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · mailer · run 884 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T20:27:31.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · mailer · run 884 - GitHub", "url": "https://github.com/acme/mailer/actions/runs/884"}
+{"ts": "2026-09-07T20:36:43.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-07T20:36:45.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-07T20:45:15.000Z", "kind": "focus", "app": "Google-chrome", "title": "CI · mailer · run 884 - GitHub - Google Chrome"}
+{"ts": "2026-09-07T20:45:17.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "CI · mailer · run 884 - GitHub", "url": "https://github.com/acme/mailer/actions/runs/884"}
+{"ts": "2026-09-07T20:55:02.000Z", "kind": "focus", "app": "Code", "title": "test_sender.py — mailer — Visual Studio Code"}
+{"ts": "2026-09-07T20:56:11.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-07T20:56:13.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-07T20:57:38.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-07T21:00:20.000Z", "kind": "focus", "app": "Google-chrome", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer - Google Chrome"}
+{"ts": "2026-09-07T21:00:22.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Retry SMS sends with exponential backoff by sam · Pull Request #412 · acme/mailer", "url": "https://github.com/acme/mailer/pull/412"}
+{"ts": "2026-09-07T21:14:33.000Z", "kind": "focus", "app": "Code", "title": "notes.md — scratch — Visual Studio Code"}
+{"ts": "2026-09-07T21:17:42.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-07T21:20:05.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-07T21:20:07.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-07T21:21:40.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-07T21:27:09.000Z", "kind": "focus", "app": "Code", "title": "notes.md — scratch — Visual Studio Code"}
+{"ts": "2026-09-07T21:29:00.000Z", "kind": "afk", "idle": true}

@@ -170,10 +170,7 @@ mod tests {
 
     #[test]
     fn cwd_forms() {
-        assert_eq!(
-            cwd_repo("sam@box:~/dev/mailer").as_deref(),
-            Some("mailer")
-        );
+        assert_eq!(cwd_repo("sam@box:~/dev/mailer").as_deref(), Some("mailer"));
         assert_eq!(
             cwd_repo("models.py (~/dev/mailer/mailer) - VIM").as_deref(),
             Some("mailer")

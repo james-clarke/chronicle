@@ -1,0 +1,139 @@
+{"ts": "2026-09-09T12:41:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-09T12:41:33.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T12:43:45.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-09T12:43:47.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-09T12:50:14.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T12:50:16.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T12:51:43.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T12:55:37.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T12:55:39.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T12:57:53.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T12:59:53.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-09T12:59:55.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-09T13:01:14.000Z", "kind": "focus", "app": "Google-chrome", "title": "Platform standup - Google Meet - Google Chrome"}
+{"ts": "2026-09-09T13:01:16.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Platform standup - Google Meet", "url": "https://meet.google.com/kqz-pltf-std"}
+{"ts": "2026-09-09T13:12:06.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T13:12:08.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T13:13:30.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T13:14:47.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-09T13:20:40.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T13:26:36.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T13:26:38.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T13:29:08.000Z", "kind": "focus", "app": "Google-chrome", "title": "mailerdb-staging - Database details | Aurora and RDS - Google Chrome"}
+{"ts": "2026-09-09T13:29:10.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "mailerdb-staging - Database details | Aurora and RDS", "url": "https://console.aws.amazon.com/rds/home#database:id=mailerdb-staging"}
+{"ts": "2026-09-09T13:30:16.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T13:30:18.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T13:32:56.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T13:36:08.000Z", "kind": "focus", "app": "Google-chrome", "title": "mailerdb-staging - Database details | Aurora and RDS - Google Chrome"}
+{"ts": "2026-09-09T13:36:10.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "mailerdb-staging - Database details | Aurora and RDS", "url": "https://console.aws.amazon.com/rds/home#database:id=mailerdb-staging"}
+{"ts": "2026-09-09T13:40:09.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T13:41:35.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T13:41:37.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T13:42:25.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T13:50:50.000Z", "kind": "focus", "app": "Google-chrome", "title": "Periodic Tasks — Celery 5.5 documentation - Google Chrome"}
+{"ts": "2026-09-09T13:50:52.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Periodic Tasks — Celery 5.5 documentation", "url": "https://docs.celeryq.dev/en/stable/userguide/periodic-tasks.html"}
+{"ts": "2026-09-09T13:58:15.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T13:58:17.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T14:05:11.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T14:05:13.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T14:08:15.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-09T14:11:18.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T14:13:01.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/mailer"}
+{"ts": "2026-09-09T14:17:48.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T14:17:50.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T14:19:40.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T14:19:42.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T14:25:02.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11390] northwind: renewal batch times out nightly - Jira - Google Chrome"}
+{"ts": "2026-09-09T14:25:04.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11390] northwind: renewal batch times out nightly - Jira", "url": "https://acme.atlassian.net/browse/ACME-11390"}
+{"ts": "2026-09-09T14:28:37.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T14:34:34.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T14:34:36.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T14:48:17.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T14:49:34.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T14:49:36.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T15:00:38.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T15:00:40.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T15:16:50.000Z", "kind": "focus", "app": "Google-chrome", "title": "mailerdb-staging - Database details | Aurora and RDS - Google Chrome"}
+{"ts": "2026-09-09T15:16:52.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "mailerdb-staging - Database details | Aurora and RDS", "url": "https://console.aws.amazon.com/rds/home#database:id=mailerdb-staging"}
+{"ts": "2026-09-09T15:21:49.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T15:32:43.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Metrics | Heroku - Google Chrome"}
+{"ts": "2026-09-09T15:32:45.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Metrics | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/metrics/web"}
+{"ts": "2026-09-09T15:34:06.000Z", "kind": "focus", "app": "Google-chrome", "title": "Periodic Tasks — Celery 5.5 documentation - Google Chrome"}
+{"ts": "2026-09-09T15:34:08.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Periodic Tasks — Celery 5.5 documentation", "url": "https://docs.celeryq.dev/en/stable/userguide/periodic-tasks.html"}
+{"ts": "2026-09-09T15:35:33.000Z", "kind": "focus", "app": "Slack", "title": "#northwind-alerts - Acme - Slack"}
+{"ts": "2026-09-09T15:36:37.000Z", "kind": "focus", "app": "Google-chrome", "title": "[ACME-11390] northwind: renewal batch times out nightly - Jira - Google Chrome"}
+{"ts": "2026-09-09T15:36:39.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "[ACME-11390] northwind: renewal batch times out nightly - Jira", "url": "https://acme.atlassian.net/browse/ACME-11390"}
+{"ts": "2026-09-09T15:41:09.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T15:50:00.000Z", "kind": "focus", "app": "Google-chrome", "title": "mailerdb-staging - Database details | Aurora and RDS - Google Chrome"}
+{"ts": "2026-09-09T15:50:02.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "mailerdb-staging - Database details | Aurora and RDS", "url": "https://console.aws.amazon.com/rds/home#database:id=mailerdb-staging"}
+{"ts": "2026-09-09T15:51:39.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships · Logs | Heroku - Google Chrome"}
+{"ts": "2026-09-09T15:51:41.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships · Logs | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-memberships/logs"}
+{"ts": "2026-09-09T15:52:00.000Z", "kind": "afk", "idle": true}
+{"ts": "2026-09-09T16:40:00.000Z", "kind": "afk", "idle": false}
+{"ts": "2026-09-09T16:40:08.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T16:40:10.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T16:48:06.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T16:49:27.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T16:49:29.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T16:54:19.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T16:55:53.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T16:55:55.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T16:57:37.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T16:59:29.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T17:06:03.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T17:06:05.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T17:11:42.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-qa · Settings | Heroku - Google Chrome"}
+{"ts": "2026-09-09T17:11:44.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-qa · Settings | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-qa/settings"}
+{"ts": "2026-09-09T17:12:51.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T17:12:53.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T17:15:09.000Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-qa · Settings | Heroku - Google Chrome"}
+{"ts": "2026-09-09T17:15:11.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-qa · Settings | Heroku", "url": "https://dashboard.heroku.com/apps/northwind-qa/settings"}
+{"ts": "2026-09-09T17:17:39.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T17:19:40.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T17:21:17.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T17:42:52.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T17:42:54.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T17:46:41.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T17:47:53.000Z", "kind": "focus", "app": "Google-chrome", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T17:47:55.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Chunk the nightly renewal batch by sam · Pull Request #418 · acme/contoso", "url": "https://github.com/acme/contoso/pull/418"}
+{"ts": "2026-09-09T18:02:33.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T18:06:50.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T18:28:46.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T18:31:32.000Z", "kind": "focus", "app": "Google-chrome", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T18:31:34.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso", "url": "https://github.com/acme/contoso/pull/409"}
+{"ts": "2026-09-09T18:38:52.000Z", "kind": "focus", "app": "Google-chrome", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T18:38:54.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso", "url": "https://github.com/acme/contoso/pull/416"}
+{"ts": "2026-09-09T18:46:56.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T18:47:58.000Z", "kind": "focus", "app": "Google-chrome", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T18:48:00.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso", "url": "https://github.com/acme/contoso/pull/416"}
+{"ts": "2026-09-09T18:55:45.000Z", "kind": "focus", "app": "Google-chrome", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T18:55:47.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Audit log for plan changes by priya · Pull Request #409 · acme/contoso", "url": "https://github.com/acme/contoso/pull/409"}
+{"ts": "2026-09-09T18:57:22.000Z", "kind": "focus", "app": "Google-chrome", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso - Google Chrome"}
+{"ts": "2026-09-09T18:57:24.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Rate-limit the public signup endpoint by priya · Pull Request #416 · acme/contoso", "url": "https://github.com/acme/contoso/pull/416"}
+{"ts": "2026-09-09T19:02:30.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:07:23.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:19:28.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:37:54.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:39:09.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T19:40:56.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:47:17.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:49:00.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T19:50:21.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T20:03:44.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T20:09:16.000Z", "kind": "focus", "app": "Google-chrome", "title": "Sending email | Django documentation - Google Chrome"}
+{"ts": "2026-09-09T20:09:18.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Sending email | Django documentation", "url": "https://docs.djangoproject.com/en/5.2/topics/email/"}
+{"ts": "2026-09-09T20:20:33.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T20:26:28.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T20:30:25.000Z", "kind": "focus", "app": "Code", "title": "tasks.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T20:39:28.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T20:44:12.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T20:50:46.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T21:03:23.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T21:04:51.000Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation: ~/dev/contoso"}
+{"ts": "2026-09-09T21:12:01.000Z", "kind": "focus", "app": "Code", "title": "test_renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T21:27:57.000Z", "kind": "focus", "app": "Code", "title": "renewals.py — contoso — Visual Studio Code"}
+{"ts": "2026-09-09T21:28:12.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-09T21:35:13.000Z", "kind": "focus", "app": "Google-chrome", "title": "Inbox (3) - sam@acme.com - Gmail - Google Chrome"}
+{"ts": "2026-09-09T21:35:15.500Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Inbox (3) - sam@acme.com - Gmail", "url": "https://mail.google.com/mail/u/0/#inbox"}
+{"ts": "2026-09-09T21:35:55.000Z", "kind": "focus", "app": "Slack", "title": "#platform-eng - Acme - Slack"}
+{"ts": "2026-09-09T21:36:00.000Z", "kind": "afk", "idle": true}
