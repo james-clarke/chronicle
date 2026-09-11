@@ -17,7 +17,6 @@
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
   <link rel="stylesheet" href="style.css">
-  <link rel="preload" as="image" href="img/home-wide.webp" fetchpriority="high">
   <link rel="preload" as="image" href="img/desk-win.webp">
   <link rel="preload" as="image" href="img/desk-mac.webp">
 </head>
@@ -53,12 +52,40 @@
       <!-- /pulse -->
     </div>
   </div>
-  <div class="hero-art">
+  <div class="hero-art demo">
     <div class="screen" aria-hidden="true">
       <img class="desk win" src="img/desk-win.webp" width="1200" height="675" alt="">
       <img class="desk mac" src="img/desk-mac.webp" width="1600" height="900" alt="">
     </div>
-    <img class="app" src="img/home-wide.webp" fetchpriority="high" width="1478" height="1080" alt="Chronicle home, dragged wide: open tasks grouped by project with time today and the next step on the left, the feed of the day's placed blocks on the right">
+    <figure class="panel app" aria-label="A replay of the corner window: a task typed in and added, then three browser windows arriving in the feed and being placed under it">
+      <figcaption>home · the corner window · replayed</figcaption>
+      <div class="demo-body">
+        <div class="demo-head"><span>Working on</span><span>suggest</span></div>
+        <div class="demo-input">
+          <span class="demo-field"><span class="demo-ph">declare a task...</span><span class="demo-typed">research web framework for work</span></span>
+          <b class="demo-add">add</b>
+        </div>
+        <div class="demo-task">
+          <b>research web framework for work</b>
+          <span class="demo-time"><i>no time today</i><i>4m today · touched 10:18</i><i>10m today · touched 10:24</i><i>19m today · touched 10:33</i></span>
+          <span class="demo-tags"><em class="p">chronicle</em><em>declared</em></span>
+        </div>
+        <div class="demo-head"><span>Feed</span><span>tidy · organize</span></div>
+        <ol class="demo-feed">
+          <li class="demo-row r3">
+            <span class="demo-state placed"><time>10:24</time><i></i><b>research web framework for work</b><small>9m</small><span><em class="warn">to confirm</em> placed by a rule · you filed this window before · Google-chrome: web frameworks 2026</span></span>
+          </li>
+          <li class="demo-row r2">
+            <span class="demo-state new"><time>10:18</time><i></i><b>Google-chrome · Django vs FastAPI in 2026 — Hacker News</b><small>20s</small><span><em>new</em> waiting for the model</span></span>
+            <span class="demo-state placed"><time>10:18</time><i></i><b>research web framework for work</b><small>6m</small><span>placed by the model · Google-chrome: Django vs FastAPI in 2026 — Hacker News</span></span>
+          </li>
+          <li class="demo-row r1">
+            <span class="demo-state new"><time>10:14</time><i></i><b>Google-chrome · web frameworks 2026 — Google Search</b><small>12s</small><span><em>new</em> waiting for the model</span></span>
+            <span class="demo-state placed"><time>10:14</time><i></i><b>research web framework for work</b><small>4m</small><span>placed by the model · Google-chrome: web frameworks 2026 — Google Search</span></span>
+          </li>
+        </ol>
+      </div>
+    </figure>
   </div>
 </section>
 
@@ -280,42 +307,16 @@ chat      "what did I do before the design review?" → same rows</code></pre>
   <p class="fine">Each source is a row in Settings › Connections with its state on this machine, what it produced this week, and what it would take to connect. The full list, with what each one needs on Linux, macOS and Windows, is on the <a href="tools.html">tools page</a>, written from the same registry the app reads.</p>
 </section>
 
-<section class="demo" id="demo">
+<section class="showcase" id="demo">
   <div class="demo-grid">
     <div class="demo-text">
       <h2>Set a task.<br>Go and do it.</h2>
       <p>Install it, open it, type a task in. Then start working. The first window you open shows up in the feed within seconds, picked up and tracking, with the reason beside it.</p>
       <p>Nothing to start, nothing to stop, nothing to tag.</p>
-      <p class="fine">Replayed by the page; the words are the feed's own.</p>
     </div>
-    <figure class="panel app" aria-label="A replay of the corner window: a task typed in and added, then three browser windows arriving in the feed and being placed under it">
-      <figcaption>home · the corner window</figcaption>
-      <div class="demo-body">
-        <div class="demo-head"><span>Working on</span><span>suggest</span></div>
-        <div class="demo-input">
-          <span class="demo-field"><span class="demo-ph">declare a task...</span><span class="demo-typed">research web framework for work</span></span>
-          <b class="demo-add">add</b>
-        </div>
-        <div class="demo-task">
-          <b>research web framework for work</b>
-          <span class="demo-time"><i>no time today</i><i>4m today · touched 10:18</i><i>10m today · touched 10:24</i><i>19m today · touched 10:33</i></span>
-          <span class="demo-tags"><em class="p">chronicle</em><em>declared</em></span>
-        </div>
-        <div class="demo-head"><span>Feed</span><span>tidy · organize</span></div>
-        <ol class="demo-feed">
-          <li class="demo-row r3">
-            <span class="demo-state placed"><time>10:24</time><i></i><b>research web framework for work</b><small>9m</small><span><em class="warn">to confirm</em> placed by a rule · you filed this window before · Google-chrome: web frameworks 2026</span></span>
-          </li>
-          <li class="demo-row r2">
-            <span class="demo-state new"><time>10:18</time><i></i><b>Google-chrome · Django vs FastAPI in 2026 — Hacker News</b><small>20s</small><span><em>new</em> waiting for the model</span></span>
-            <span class="demo-state placed"><time>10:18</time><i></i><b>research web framework for work</b><small>6m</small><span>placed by the model · Google-chrome: Django vs FastAPI in 2026 — Hacker News</span></span>
-          </li>
-          <li class="demo-row r1">
-            <span class="demo-state new"><time>10:14</time><i></i><b>Google-chrome · web frameworks 2026 — Google Search</b><small>12s</small><span><em>new</em> waiting for the model</span></span>
-            <span class="demo-state placed"><time>10:14</time><i></i><b>research web framework for work</b><small>4m</small><span>placed by the model · Google-chrome: web frameworks 2026 — Google Search</span></span>
-          </li>
-        </ol>
-      </div>
+    <figure class="panel shot">
+      <figcaption>home · dragged wide</figcaption>
+      <img src="img/home-wide.webp" loading="lazy" width="1478" height="1080" alt="Chronicle home, dragged wide: open tasks grouped by project with time today and the next step on the left, the feed of the day's placed blocks on the right">
     </figure>
   </div>
 </section>

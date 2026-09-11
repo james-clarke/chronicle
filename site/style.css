@@ -236,10 +236,7 @@ section { padding: 72px 0; }
   inset: 0;
   border-radius: 12px;
   overflow: hidden;
-  opacity: 0;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line);
-  animation: screen 16s var(--ease) infinite;
-  will-change: transform, opacity;
 }
 .hero-art .desk {
   position: absolute;
@@ -248,43 +245,19 @@ section { padding: 72px 0; }
   height: 100%;
   object-fit: cover;
   border-radius: 0;
-  animation: 16s step-end infinite;
 }
-.hero-art .desk.win { animation-name: desk-win; }
-.hero-art .desk.mac { animation-name: desk-mac; }
-.hero-art .app {
+/* the Windows desktop underneath, the macOS one fading over it every 16 s */
+.hero-art .desk.mac { animation: desk-mac 16s ease-in-out infinite; will-change: opacity; }
+@keyframes desk-mac { 0%, 42% { opacity: 0; } 50%, 92% { opacity: 1; } 100% { opacity: 0; } }
+/* the corner window, replayed on the desktop (the replay itself is the .demo block further down) */
+.hero-art.demo { padding: 0; }
+.hero-art .panel.app {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  transform-origin: 0 0;
+  right: 4%;
+  bottom: 5%;
+  width: 70%;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--line);
-  animation: app-corner 16s var(--ease) infinite;
-  will-change: transform;
 }
-/* 16 s loop: full 4 s, the window shrinks into the Windows corner over 1.1 s and sits 2 s, grows back over 1 s;
-   then the same into the macOS corner. The desktop fades in under it and settles from a slight zoom, so the
-   move reads as the camera pulling back rather than a picture appearing behind the window. */
-@keyframes app-corner {
-  0%, 25%   { transform: translate(0, 0) scale(1); animation-timing-function: cubic-bezier(0.7, 0, 0.2, 1); }
-  32%, 44%  { transform: translate(62.5%, 57.9%) scale(0.36); animation-timing-function: cubic-bezier(0.55, 0, 0.2, 1); }
-  50%, 75%  { transform: translate(0, 0) scale(1); animation-timing-function: cubic-bezier(0.7, 0, 0.2, 1); }
-  82%, 94%  { transform: translate(62.5%, 4.2%) scale(0.36); animation-timing-function: cubic-bezier(0.55, 0, 0.2, 1); }
-  100%      { transform: translate(0, 0) scale(1); }
-}
-@keyframes screen {
-  0%, 24%   { opacity: 0; transform: scale(1.06); }
-  28%       { opacity: 1; }
-  32%, 44%  { opacity: 1; transform: none; }
-  47%       { opacity: 1; }
-  50%, 74%  { opacity: 0; transform: scale(1.06); }
-  78%       { opacity: 1; }
-  82%, 94%  { opacity: 1; transform: none; }
-  97%       { opacity: 1; }
-  100%      { opacity: 0; transform: scale(1.06); }
-}
-@keyframes desk-win { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
-@keyframes desk-mac { 0%, 50% { opacity: 0; } 50.01%, 100% { opacity: 1; } }
 
 /* day band */
 .band-section { padding: 24px 0 56px; }
@@ -725,6 +698,10 @@ section { padding: 72px 0; }
   section { padding: 44px 0; }
   .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 24px; }
   .hero::before { display: none; }
+  /* one column: the replay stands on its own, no desktop behind it */
+  .hero-art { aspect-ratio: auto; }
+  .hero-art .screen { display: none; }
+  .hero-art .panel.app { position: static; width: 100%; }
   /* one column: the width of "written down." on a phone sets the size */
   h1 { font-size: clamp(2.2rem, 11vw, 4.4rem); }
   .wide-shot, .wipe { margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
