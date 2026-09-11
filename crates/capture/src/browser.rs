@@ -234,7 +234,8 @@ fn query_visits(
 }
 
 /// A profile database copied to a scratch path (plus its `-wal` sibling for
-/// Firefox, when one exists), removed on drop.
+/// Firefox, when one exists), removed on drop along with the `-shm`
+/// SQLite creates beside it.
 struct TempCopy {
     paths: Vec<PathBuf>,
 }
@@ -274,6 +275,9 @@ impl Drop for TempCopy {
         for p in &self.paths {
             let _ = std::fs::remove_file(p);
         }
+        // SQLite creates a `-shm` beside a WAL-mode copy on open; it is not
+        // in `paths`, so remove it explicitly.
+        let _ = std::fs::remove_file(with_suffix(self.db_path(), "-shm"));
     }
 }
 
