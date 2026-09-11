@@ -93,7 +93,7 @@ fi
 # --- panel lines: one span per line so the stylesheet can land them one by one ----
 
 awk '
-  /<pre><code>/ && !/--i:/ { inpre = 1; i = 0; sub(/<pre><code>/, "<pre><code>\001") }
+  /<pre[^>]*><code>/ && !/--i:/ { inpre = 1; i = 0; sub(/<code>/, "<code>\001") }
   inpre {
     line = $0; head = ""; tail = ""
     if (line ~ /\001/) { head = substr(line, 1, index(line, "\001") - 1); line = substr(line, index(line, "\001") + 1) }
@@ -105,17 +105,6 @@ awk '
   { print }
 ' "$html" > "$tmp/wrapped" && cat "$tmp/wrapped" > "$html"
 
-# --- numbers from the tree (nothing that needs a cargo build) ---------------
-
-tests=$(grep -rc '#\[test\]' crates --include='*.rs' | awk -F: '{ s += $2 } END { print s + 0 }')
-crates=$(ls -d crates/*/ | wc -l | tr -d ' ')
-migration=$(ls crates/core/migrations | sed 's/_.*//' | sort -n | tail -1)
-edition=$(sed -n 's/^edition = "\([0-9]*\)"/\1/p' Cargo.toml | head -1)
-printf '  <p class="numbers"><b>%s</b> tests · <b>%s</b> crates · migration <b>%s</b> · rust <b>%s</b> · <b>1</b> binary</p>\n' \
-  "$tests" "$crates" "$migration" "$edition" > "$tmp/numbers"
-splice numbers "$tmp/numbers"
-echo "numbers: $tests tests, $crates crates, migration $migration, edition $edition"
-
 # --- budget -----------------------------------------------------------------
 
 fail=0
@@ -126,8 +115,6 @@ third=$(grep -E '<(link|script|img|iframe|source|video|audio|object)[^>]*(src|hr
 third=$((third + $(grep -cE '(url\(["'"'"']?|@import[^;]*)https?://' "$site/style.css" || true)))
 js=$(awk 'BEGIN { RS = "</script>" } /<script/ { sub(/.*<script[^>]*>/, ""); n += length($0) } END { print n + 0 }' "$html")
 js=$((js + $(grep -oE ' on[a-z]+="[^"]*"' "$html" | wc -c | tr -d ' ')))
-printf '  <p class="proof">This page: <b>%s</b> third-party requests, <b>%s B</b> of script, no cookies, no analytics. Counted by the build, from the file you are reading.</p>\n' "$third" "$js" > "$tmp/proof"
-splice proof "$tmp/proof"
 
 grep -o '<img[^>]*>' "$html" | grep -v 'loading="lazy"' | sed -n 's/.*src="\([^"]*\)".*/\1/p' > "$tmp/fold"
 sed -n '/rel="canonical"/d; s/.*<link[^>]*href="\([^"]*\)".*/\1/p' "$html" >> "$tmp/fold"
@@ -152,4 +139,12 @@ ttotal=$(( $(bytes "$tools") + $(bytes "$site/style.css") + $(bytes "$site/img/m
 check "$tthird" 0 "tools: third-party requests" "$tthird" 0
 check "$tjs" 0 "tools: inline JS" "$tjs B" "0 B"
 check "$ttotal" 153600 "tools: page weight" "$(kb "$ttotal")" "150 KB"
+
+# --- cache busting: img/* is served immutable for a year, so every reference carries the file's hash ----
+for f in "$site"/img/*.webp; do
+  name=$(basename "$f")
+  v=$(cksum "$f" | cut -d' ' -f1)
+  sed -i.bak "s#img/$name\"#img/$name?v=$v\"#g" "$html" "$tools" && rm -f "$html.bak" "$tools.bak"
+done
+echo "images: $(grep -o 'img/[a-z-]*\.webp?v=[0-9]*' "$html" | sort -u | wc -l | tr -d ' ') references stamped"
 exit $fail

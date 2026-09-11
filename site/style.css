@@ -496,7 +496,7 @@ section { padding: 72px 0; }
 .section-lede { max-width: 40em; color: var(--soft); margin: 0 0 36px; }
 .stage-heads {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
   gap: 40px;
   padding: 0 0 14px 56px;
   margin-bottom: 28px;
@@ -527,7 +527,7 @@ section { padding: 72px 0; }
 .stage {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
   gap: 24px 40px;
   padding: 0 0 44px 56px;
   counter-increment: stage;
@@ -590,17 +590,17 @@ section { padding: 72px 0; }
 .panel pre {
   margin: 0;
   padding: 16px 18px;
-  overflow-x: auto;
   font-family: var(--mono);
-  font-size: 0.76rem;
+  font-size: 0.8rem;
   line-height: 1.65;
   color: var(--soft);
 }
 .panel code { font-size: inherit; }
 .panel code .dim { color: var(--muted); }
 /* the build wraps every panel line in a span; they land one after another once the stage scrolls in */
-.panel code:has(span[style]) { display: flex; flex-direction: column; min-width: max-content; }
-.panel code span[style] { display: block; min-height: 1.65em; }
+/* each line wraps under its own detail column: --hang on the pre is where that column starts */
+.panel code:has(span[style]) { display: flex; flex-direction: column; }
+.panel code span[style] { display: block; min-height: 1.65em; white-space: pre-wrap; padding-left: var(--hang, 0px); text-indent: calc(-1 * var(--hang, 0px)); }
 .stage.in .panel code span[style] { animation: line-in 0.35s var(--ease) both; animation-delay: calc(var(--i, 0) * 40ms); }
 .stage.in .panel code span.hit {
   animation: line-in 0.35s var(--ease) both, flash 1.4s var(--ease) both;
@@ -713,26 +713,7 @@ section { padding: 72px 0; }
 
 /* the build, in the open */
 .build { padding-top: 40px; }
-.build .section-lede { margin-bottom: 20px; }
-.build .numbers { margin: 0 0 8px; font-family: var(--mono); font-size: 0.85rem; color: var(--soft); }
-.build .numbers b { color: var(--text); font-weight: 600; }
-.build .numbers small { font-size: inherit; color: var(--muted); }
-.build .fine { margin: 14px 0 0; }
-.build .fine code { color: var(--soft); }
-
-/* footer */
-.foot {
-  max-width: var(--max);
-  margin: 0 auto;
-  padding: 40px 24px 60px;
-  border-top: 1px solid var(--line);
-  font-family: var(--mono);
-  font-size: 0.85rem;
-  color: var(--soft);
-}
-.foot p { margin: 0; }
-.foot .proof { margin-top: 6px; color: var(--muted); font-size: 0.78rem; }
-.foot .proof b { color: var(--soft); font-weight: 600; }
+.build .section-lede { margin-bottom: 0; }
 
 @media (max-width: 860px) {
   .showcase-head, .demo-grid { grid-template-columns: 1fr; gap: 10px; }
@@ -755,6 +736,7 @@ section { padding: 72px 0; }
   .stage-text h3 { min-height: 26px; }
   .stages::before { left: 12px; }
   .stage-heads { display: none; }
+  .panel code span[style] { padding-left: min(var(--hang, 0px), 8ch); text-indent: calc(-1 * min(var(--hang, 0px), 8ch)); }
   .tip { min-width: 12em; white-space: normal; }
 }
 

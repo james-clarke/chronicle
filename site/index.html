@@ -158,15 +158,15 @@
       </div>
       <figure class="panel">
         <figcaption>events · one batch</figcaption>
-        <pre><code>09:08:16  focus    Terminator  sam@workstation: ~/dev/contoso
+        <pre style="--hang:18ch"><code>09:08:16  focus    Terminator  sam@workstation: ~/dev/contoso
           place    ~/dev/contoso · repo contoso
 09:10:19  focus    Code        renewals.py — contoso
-09:23:17  focus    Chrome      The Django template language · docs.djangoproject.com
+09:23:17  focus    Chrome      Django template language · docs.djangoproject.com
 09:41:02  shell    pytest tests/test_renewals.py · 41 s · ~/dev/contoso
 10:27:08  focus    Figma       Renewal reminder email
 10:46:00  quiet    no input · Figma still in front
 10:53:00  back     away 7m
-11:09:28  focus    Chrome      [ACME-11382] contoso: membership renewal… · Jira
+11:09:28  focus    Chrome      [ACME-11382] membership renewal… · Jira
           anchor   item ACME-11382
 11:52:10  git      commit 4c1e9a2 on feat/ACME-11382 · contoso
 12:14:00  lock     away · batch closed · 9 spans</code></pre>
@@ -181,13 +181,13 @@
       </div>
       <figure class="panel">
         <figcaption>project, then evidence, then a name</figcaption>
-        <pre><code>project  ~/dev/contoso · ACME-11382 · acme.atlassian.net → contoso
+        <pre style="--hang:22ch"><code>project  ~/dev/contoso · ACME-11382 · acme.atlassian.net → contoso
          northwind-qa · #northwind-alerts               → northwind
 
 task     09:08–12:14  ACME-11382 membership renewal reminder emails
-         holds ACME-11382 · declared in contoso · 1.00
+                      holds ACME-11382 · declared in contoso · 1.00
          13:02–13:41  ACME-11390 northwind renewal batch times out
-         northwind-qa · #northwind-alerts · 0.82
+                      northwind-qa · #northwind-alerts · 0.82
          14:11–14:58  new · Meet + Figma, 47m, nothing holds it
 
 named    "Renewal emails design review" · local model · 38 s
@@ -214,7 +214,7 @@ stored   3 segments · 1 to confirm · 0 provisional rows left</code></pre>
       </div>
       <figure class="panel">
         <figcaption>same rows, four ways</figcaption>
-        <pre><code>standup   Yesterday: renewal reminder emails (ACME-11382, 5h12m),
+        <pre style="--hang:10ch"><code>standup   Yesterday: renewal reminder emails (ACME-11382, 5h12m),
           the northwind batch fix on QA (ACME-11390, 39m),
           design review (47m) · PR #415 is up
 timeline  09:08 ──────────────── 12:14  ACME-11382
@@ -231,7 +231,7 @@ chat      "what did I do before the design review?" → same rows</code></pre>
       </div>
       <figure class="panel">
         <figcaption>chronicle status · self-score</figcaption>
-        <pre><code>$ chronicle status
+        <pre style="--hang:4ch"><code>$ chronicle status
   self-score, 7 days to 2026-09-11 (computed 2026-09-11 12:09):
     coverage 98% of 36h13m active
     tasks minted 7, merged within a day 0 (0%)
@@ -345,20 +345,9 @@ chat      "what did I do before the design review?" → same rows</code></pre>
 <section class="build" id="open">
   <h2>Open source, built in the open.</h2>
   <p class="section-lede">AGPL-3.0, one repository, no contributor agreement. The code is written by Claude, working in that repository under direction and review, and the evidence for that is the record rather than the claim: every milestone starts as a plan written before the code, with a gate per chunk and a list of what was knowingly left undone, and none of them are tidied afterwards. <a href="https://github.com/james-clarke/chronicle/blob/main/docs/README.md">Start with the index.</a></p>
-  <!-- numbers -->
-  <p class="numbers">tests, crates and the migration number are read from the tree when the page is built</p>
-  <!-- /numbers -->
-  <p class="numbers"><b>46 MB</b> binary · <b>1</b> file, no runtime <small>· release build, 2026-09-11</small></p>
-  <p class="fine">Read from the source tree when the page is built. Tests are a grep for <code>#[test]</code>; the migration is the highest file in the migrations folder; the binary size is typed in with its date, because Render does not build Rust.</p>
 </section>
 
 </main>
-
-<footer class="foot">
-  <!-- proof -->
-  <p class="proof">This page: no third-party requests, a few hundred bytes of script, no cookies, no analytics. The exact numbers are written here by the build.</p>
-  <!-- /proof -->
-</footer>
 
 <script>
 var io = new IntersectionObserver(function (es) {
