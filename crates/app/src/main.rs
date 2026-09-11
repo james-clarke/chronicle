@@ -326,6 +326,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The first five minutes (m41 chunk 2): what already works on this
+    /// machine, what is one step away, and what needs an account first —
+    /// the plan the Setup view shows, printed for a headless install.
+    Setup,
     /// Print the shell hook for zsh, bash, fish or pwsh (m37): add
     /// `eval "$(chronicle shell-init zsh)"` to your rc file. It posts each
     /// command's cwd, program name and duration to the local endpoint —
@@ -506,6 +510,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Model { cmd } => model_cmd(&data_dir, cmd),
         Cmd::Task { cmd } => task_cmd(&data_dir, cmd),
         Cmd::Connections { json } => sources::connections(&data_dir, json),
+        Cmd::Setup => sources::setup(&data_dir),
         Cmd::ShellInit { shell } => sources::shell_init(&data_dir, &shell),
         Cmd::Hooks { cmd } => match cmd {
             HooksCmd::Install { repo } => sources::hooks_install(&data_dir, repo.as_deref()),

@@ -12,6 +12,7 @@ mod onboarding;
 mod projects;
 mod reports;
 mod settings;
+mod setup;
 mod tasks;
 mod theme;
 mod timeline;
@@ -144,6 +145,14 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
     {
         theme::set_density(d);
     }
+    let setup_seen = boot_conn
+        .as_ref()
+        .and_then(|c| {
+            chronicle_core::storage::get_meta(c, setup::SEEN_KEY)
+                .ok()
+                .flatten()
+        })
+        .is_some();
     drop(boot_conn);
     let composited = compositor_active();
     let pad = if composited { SHADOW_PAD } else { 0.0 };
@@ -200,6 +209,7 @@ pub fn run(data_dir: &Path) -> anyhow::Result<()> {
                     saved_size,
                     autohide,
                     zoom: text_zoom,
+                    setup_seen,
                 },
                 composited,
             )))
@@ -561,6 +571,9 @@ enum View {
     Timeline,
     Reports,
     Chat,
+    /// The first five minutes (m41 chunk 2): not a tab — shown on a fresh
+    /// profile, then from Settings' "run setup again".
+    Setup,
 }
 
 struct TimelineApp {
@@ -678,6 +691,8 @@ struct TimelineApp {
     config: Option<chronicle_core::config::Config>,
     /// Some = settings window open.
     settings: Option<SettingsPanel>,
+    /// The Setup view's state while it is open (None = load on entry).
+    setup: Option<setup::SetupState>,
     /// Some = unassigned-triage takeover open (Home → Unassigned → organize).
     triage: Option<triage::TriagePanel>,
     /// `CHRONICLE_UI_VIEW=triage`: open the takeover once tasks are loaded.
@@ -801,6 +816,8 @@ struct BootPrefs {
     autohide: bool,
     /// Zoom the window was sized for (meta `ui_zoom_factor`, 1.0 unset).
     zoom: f32,
+    /// The Setup view was finished or skipped once (meta `setup_seen`).
+    setup_seen: bool,
 }
 
 impl TimelineApp {
@@ -838,12 +855,17 @@ impl TimelineApp {
             tz,
             day,
             day_header,
-            // `CHRONICLE_UI_VIEW` picks the start tab (visual-test loop).
+            // `CHRONICLE_UI_VIEW` picks the start tab (visual-test loop);
+            // unset, a profile that has never finished or skipped setup
+            // opens on it.
             view: match std::env::var("CHRONICLE_UI_VIEW").as_deref() {
                 Ok("timeline") => View::Timeline,
                 Ok("reports") => View::Reports,
                 Ok("chat") => View::Chat,
-                _ => View::Home,
+                Ok("setup") => View::Setup,
+                Ok(_) => View::Home,
+                Err(_) if !prefs.setup_seen => View::Setup,
+                Err(_) => View::Home,
             },
             week_anchor,
             week_range,
@@ -897,6 +919,7 @@ impl TimelineApp {
             config_path,
             config: None,
             settings: None,
+            setup: None,
             triage: None,
             triage_requested: false,
             model_missing: false,
@@ -2772,7 +2795,7 @@ impl TimelineApp {
                             ui.horizontal(|ui| {
                                 match self.view {
                                     // Home is day-independent: no nav controls.
-                                    View::Home => {}
+                                    View::Home | View::Setup => {}
                                     View::Chat => {
                                         if ui.button("new chat").clicked() {
                                             self.chat_new();
@@ -2865,6 +2888,7 @@ impl TimelineApp {
             View::Home => self.home_ui(ui),
             View::Timeline => self.timeline_ui(ui),
             View::Chat => self.chat_ui(ui),
+            View::Setup => self.setup_ui(ui),
             View::Reports => {
                 self.reports_ui(ui);
                 return;

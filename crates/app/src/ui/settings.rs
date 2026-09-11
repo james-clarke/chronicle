@@ -602,6 +602,7 @@ impl TimelineApp {
         let spans_debug_now = self.spans_debug;
         let autohide_now = self.autohide;
         let mut autohide_toggle: Option<bool> = None;
+        let mut run_setup = false;
         let mut cloud_dirty = false;
         let conn = self.conn.as_ref();
         let pipeline = self.pipeline.as_ref();
@@ -676,6 +677,15 @@ impl TimelineApp {
                         .show(ui, |ui| {
                             ui.set_max_width(max_w);
                             section(ui, "Connections", true, jump);
+                            if theme::ghost_button(ui, "run setup again")
+                                .on_hover_text(
+                                    "what already works here, what is one step away, \
+                                     and what needs an account",
+                                )
+                                .clicked()
+                            {
+                                run_setup = true;
+                            }
                             panel.connections.ui(
                                 ui,
                                 conn,
@@ -973,6 +983,9 @@ impl TimelineApp {
         }
         if start_dl {
             self.start_model_download(ui.ctx(), chronicle_derive::model::default_preset());
+        }
+        if run_setup {
+            self.open_setup();
         }
     }
 }

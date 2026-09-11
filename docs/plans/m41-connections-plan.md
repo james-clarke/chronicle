@@ -256,3 +256,39 @@ surfaces demand for; per-connector OAuth beyond what M37 left open.
 3. Whether `Planned` rows should carry a rough order rather than a flat
    list. An order is a promise; the issue ranking is evidence. Start with
    evidence.
+
+## Shipped (2026-09-11, chunks 0–2)
+
+Chunks 0 and 1 landed 2026-09-10/11 as planned (`connectors.rs`,
+`health.rs`, `chronicle connections`, the Settings panel drawing the
+registry, `chronicle status`'s per-connector block). Chunk 2 landed
+2026-09-11 with these deviations:
+
+- **The grouping is one function, shared.** `core::setup::plan` sorts every
+  `Supported`/`Partial` connector: `Working` or `Connected` → *already
+  working*; a descriptor with an `Account` or `Install` step → *needs an
+  account*; anything else with steps → *one step each*. A supported tool
+  with no steps that is simply not on the machine is left out — Settings
+  still lists it, setup has nothing to offer for it. The view and
+  `chronicle setup` render the same `Vec<Item>`.
+- **Steps write config.toml directly** (`Config::save`), so the gate's "no
+  editor open on config.toml" holds, but the daemon reads the file at
+  start: the status line says so rather than pretending a switch is live.
+  "check" re-probes the row against the edited config on the spot.
+- **`git_repos` gets a scan.** Discovery walks the parents of watched
+  repos, which a fresh profile has none of, so the `Field` row carries
+  "find my repos": `~/dev`, `~/src`, `~/code`, `~/projects`, `~/work`,
+  `~/repos`, `~/git`, each hit ticked, one button to add them as `~/…`.
+- **The shell hook line follows `$SHELL`**: the descriptor names
+  `chronicle shell-init zsh`; the view and CLI show the `eval` line for
+  zsh/bash, `| source` for fish, `| Invoke-Expression` for pwsh, with the
+  rc file to put it in.
+- **First run is keyed on `meta` `setup_seen`** ("done" or "skipped"), not
+  on the model's absence, so an existing profile sees the view once and
+  `CHRONICLE_UI_VIEW=setup` opens it for the visual loop. It is not a tab;
+  Settings › Connections has "run setup again".
+- **`chronicle setup` prints and writes nothing**: the switches are
+  `config.toml` fields and the commands are the person's to run.
+
+Chunks 3–5 (what you work with, requests, the loop James sees) are open
+and wait for the first public release.

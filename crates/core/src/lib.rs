@@ -23,6 +23,7 @@ pub mod report;
 pub mod segmenter;
 pub mod self_score;
 pub mod sessionizer;
+pub mod setup;
 pub mod storage;
 pub mod timeref;
 pub mod types;

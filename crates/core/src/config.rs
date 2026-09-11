@@ -8,6 +8,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("failed to parse config: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("failed to write config: {0}")]
+    Write(#[from] toml::ser::Error),
 }
 
 // Serialize: the UI settings panel writes the whole struct back to
@@ -303,6 +305,13 @@ impl Config {
             return Ok(Self::default());
         }
         Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+    }
+
+    /// Write the whole struct back, the way the Settings panel does; the
+    /// daemon reads config.toml at start, so a change applies on its next
+    /// start.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        Ok(std::fs::write(path, toml::to_string_pretty(self)?)?)
     }
 
     /// The MCP allowlist file: `mcp_config` when set, else `mcp.toml` beside

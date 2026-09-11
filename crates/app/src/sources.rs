@@ -8,6 +8,7 @@ use chronicle_capture::hooks;
 use chronicle_core::config::Config;
 use chronicle_core::connectors::{self, ConnectKind, Platform, Support};
 use chronicle_core::health;
+use chronicle_core::setup::{self, Group};
 
 /// `chronicle connections [--json]` (m41 chunks 0 and 1): the connector
 /// registry, grouped the way Settings groups it, with what each row is
@@ -45,6 +46,51 @@ pub(crate) fn connections(data_dir: &Path, json: bool) -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// `chronicle setup` (m41 chunk 2): the Setup view's three groups, printed.
+/// Nothing is written — the switches are `config.toml` fields and the
+/// commands are the person's to run — so this is the flow for a machine
+/// with no window, and a way to see it again from any terminal.
+pub(crate) fn setup(data_dir: &Path) -> anyhow::Result<()> {
+    let config = Config::load(&data_dir.join("config.toml"))?;
+    let daemon_up = matches!(
+        crate::status::query_daemon(&crate::daemon::socket_path(data_dir)),
+        crate::status::Liveness::Running(_)
+    );
+    let env = health::Env::host(daemon_up);
+    let conn = chronicle_core::storage::open(&data_dir.join("chronicle.db")).ok();
+    let now_ms = jiff::Timestamp::now().as_millisecond();
+    let plan = setup::plan(conn.as_ref(), &config, &env, now_ms);
+    let shell = setup::shell();
+    for group in Group::ORDER {
+        let items: Vec<_> = plan.iter().filter(|i| i.group == group).collect();
+        if items.is_empty() {
+            continue;
+        }
+        println!("{}", group.label());
+        for item in items {
+            let c = item.connector;
+            println!(
+                "    {:<11} {:<38} {}",
+                health::label(c, &item.health),
+                c.name,
+                note(c, &item.health, now_ms)
+            );
+            if group != Group::Working {
+                for step in c.setup {
+                    println!("    {:<11} {:<38} {}", "", "", setup::describe(step, shell));
+                }
+            }
+        }
+    }
+    if !daemon_up {
+        println!("the daemon is not running: `chronicle run`, or `chronicle service install`");
+    }
+    println!(
+        "config.toml is read when the daemon starts; Settings › Connections flips the same switches"
+    );
     Ok(())
 }
 

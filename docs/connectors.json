@@ -422,6 +422,10 @@
       {
         "step": "toggle",
         "field": "editor_heartbeats"
+      },
+      {
+        "step": "install",
+        "url": "https://wakatime.com/plugins"
       }
     ],
     "docs": "heartbeats"

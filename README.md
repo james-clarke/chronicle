@@ -141,7 +141,9 @@ three cannot drift. `chronicle connections --json` is the same table as
 
 Most connectors need nothing: a session transcript, a git repo, a browser
 history database or an editor's recent-workspace list is read wherever it
-already is. What follows is the handful with a setup step of their own.
+already is. `chronicle setup` (and the Setup view the app opens on a fresh
+profile) sorts the rest into what is one step away and what needs an
+account first. What follows is the handful with a setup step of their own.
 Each runs on its own thread and is never load-bearing.
 
 **Google Calendar** (`google_calendar = true`, or the Local sources switch in
@@ -285,6 +287,12 @@ Panel open → spawn `chat-worker` (warm llama session over unix socket/stdio), 
 - **Task actions:** rename (header edit) → `rename` correction; per-interval "move" → `reassign` correction; task-level "merge into" (m10) → `merge` correction folding all intervals into the target. Corrections are teaching data: their span context is FTS-retrieved into future digests. Split deferred.
 - **Chat panel:** dockable right.
 - **Onboarding:** model download progress, autostart opt-in, macOS AX flow.
+- **Setup (m41):** the first five minutes — every supported connector sorted
+  into *already working*, *one step each* (the switch, the command with its
+  copy button, or the field, with a repo scan behind `git_repos`, and a
+  "check" that probes the row again) and *needs an account*. Opens on a
+  fresh profile, again from Settings › Connections; `chronicle setup`
+  prints the same plan for a headless machine.
 - **Settings:** eight cards — connections (MCP servers with a test button and
   presets, watched git repos with hook status, and every connector in the
   registry with its health), projects, model and cloud backends, capture,
@@ -377,7 +385,7 @@ Verify with `chronicle service status` (`loaded` once bootstrapped) or `launchct
 
 Order: **Linux polish first, then macOS → Windows.** Ports wait until the product shape is nailed down on Linux — porting an unfinished shape multiplies rework by three platforms. Polish bar before porting: trustworthy data, appliance feel, visible product.
 
-**M0–M39 and M41 are complete (2026-09-11); M40 Windows is the open port.**
+**M0–M39 are complete (2026-09-11); M41 has its registry, health and setup chunks (0–2) with the request path (3–5) still open; M40 Windows is the open port.**
 Each milestone has a plan doc under `docs/plans/` (`mNN-*-plan.md`, ending in
 a Shipped section that records what landed and where it deviated);
 `workflow.md` at the root is the dev/deploy entry point. The table below is

@@ -436,9 +436,14 @@ pub const REGISTRY: &[Connector] = &[
         blurb: "vim-wakatime and its siblings post to this machine once ~/.wakatime.cfg points api_url here; folded into edit spans per project",
         probes: &[Probe::endpoint("/api/heartbeat")],
         produces: &[ActivityKind::Edit],
-        setup: &[SetupStep::Toggle {
-            field: "editor_heartbeats",
-        }],
+        setup: &[
+            SetupStep::Toggle {
+                field: "editor_heartbeats",
+            },
+            SetupStep::Install {
+                url: "https://wakatime.com/plugins",
+            },
+        ],
         docs: "heartbeats",
     },
     Connector {

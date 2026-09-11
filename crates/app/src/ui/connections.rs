@@ -415,7 +415,7 @@ fn form_ui(ui: &mut egui::Ui, form: &mut ServerForm) -> FormAct {
     act
 }
 
-fn subhead(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
+pub(super) fn subhead(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(title)
