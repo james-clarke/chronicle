@@ -7,7 +7,7 @@ team and the manager in line with what needs to be done**: who is on what
 today, what is next, what drifted from the plan, what is stuck, without anyone
 typing a status. This doc is the research behind that: is the gap real, who
 pays, how to sync, what it costs in the codebase, and the order to build it
-in. Four sub-agents surveyed sync engines, competitors, business models and
+in. Four research passes surveyed sync engines, competitors, business models and
 the codebase; this is the synthesis. Sources at the end. Decisions are
 proposals until James edits them.
 

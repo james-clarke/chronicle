@@ -2,7 +2,7 @@
 
 Status: **chunk 1 built on branch `m30` (worktree `../chronicle-m30`), not
 deployed** (2026-09-03; bff636b, 6149b1e — see Shipped). Research session
-while m29 runs in another checkout: four sub-agents (capture inventory, pipeline map, live
+while m29 runs in another checkout: four research passes (capture inventory, pipeline map, live
 DB statistics, prior art) plus a check that `llama-cpp-2` 0.1.154 already
 exposes embeddings with pooling. Every "today" claim carries a `file:line`;
 every number is from the live DB (last 7 days, 2026-08-27 → 09-03) or the

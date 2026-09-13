@@ -327,7 +327,7 @@ mod tests {
         // Heroku title bleed, M7 token bleed.
         let tasks = [
             draft(
-                "verifying M7 human-verified progress in email system",
+                "verifying mailer retry backoff in email system",
                 Some("mailer"),
                 0,
                 5,

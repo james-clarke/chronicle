@@ -2,7 +2,7 @@
 
 Status: **chunks 0 + 1 shipped 2026-09-04** (branch `m31`; see "Shipped" at the end). Originally research + plan (2026-09-04). Runs after m30 completes;
 m30 chunk 2 (scorer gate) is in progress in another session and this plan
-does not touch its files. Four sub-agents (codebase seams, live DB volumes,
+does not touch its files. Four research passes (codebase seams, live DB volumes,
 Rust client crates + provider APIs, prior art + hosted-tier economics)
 plus the Claude API reference. Every "today" claim carries a `file:line`;
 every number is from the live DB (2026-08-21 → 09-04) or a cited source.
@@ -381,7 +381,7 @@ Order rationale: 0 is a number; 1 is where James feels it (chat,
 journals, no more invented next steps) and carries the security work
 that everything after depends on; 2 waits for m30; 3 is small; 4 is the
 product surface; 5 is a separate product with its own ops; 6 is polish.
-Chunks 1, 3, 4 can run as parallel agents on disjoint files (derive
+Chunks 1, 3, 4 can run in parallel on disjoint files (derive
 backend / capture-config / ui) once the trait from 1 is on main.
 
 ## Risks and open questions
@@ -422,7 +422,7 @@ backend / capture-config / ui) once the trait from 1 is on main.
 - Fine-tuning or training on user data, in any tier, ever.
 - Mac/Windows keychain storage (arrives with those ports).
 
-## Research notes (sub-agent findings, 2026-09-04)
+## Research notes (research findings, 2026-09-04)
 
 ### Rust clients and provider APIs
 

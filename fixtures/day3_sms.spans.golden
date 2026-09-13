@@ -3,21 +3,21 @@
 13:16:12–13:16:14 [context-switching]
 13:16:14–13:16:33 [focus] Google-chrome: Contoso Control Panel - Google Chrome
 13:16:33–13:16:48 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
-13:16:48–13:16:57 [focus] Terminator: ✳ M7 human-verified progress
+13:16:48–13:16:57 [focus] Terminator: ✳ mailer retry backoff
 13:16:57–13:16:59 [context-switching]
 13:16:59–13:17:31 [focus] chronicle: Chronicle
 13:17:31–13:17:34 [context-switching]
-13:17:34–13:18:00 [focus] Terminator: ✳ M7 human-verified progress
+13:17:34–13:18:00 [focus] Terminator: ✳ mailer retry backoff
 13:18:00–13:18:01 [context-switching]
 13:18:01–13:18:13 [focus] chronicle: Chronicle
 13:18:13–13:18:15 [context-switching]
-13:18:15–13:18:34 [focus] Terminator: ✳ M7 human-verified progress
+13:18:15–13:18:34 [focus] Terminator: ✳ mailer retry backoff
 13:18:34–13:18:41 [focus] Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
 13:18:41–13:18:47 [focus] Google-chrome: Extensions - Google Chrome
 13:18:47–13:18:52 [context-switching]
 13:18:52–13:19:02 [focus] Google-chrome: ActivityWatch Web Watcher - Chrome Web Store <https://chromewebstore.google.com/detail/activitywatch-web-watcher/nglaklhklhcoonedhgnpgddginnjdadi?hl=en-US&utm_source=ext_sidebar>
 13:19:02–13:19:03 [context-switching]
-13:19:03–13:19:37 [focus] Terminator: ◐ M7 human-verified progress
+13:19:03–13:19:37 [focus] Terminator: ◐ mailer retry backoff
 13:19:37–13:19:59 [focus] Google-chrome: northwind-memberships | Contoso Dashboard <https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/>
 13:19:59–13:20:10 [context-switching]
 13:20:10–13:20:33 [focus] Terminator: [No Name] - - VIM

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Cross-check the crates that do not build llama.cpp for macOS from Linux
-# (m38). A fake `clang` writes an empty object for every compile so the C
+# Cross-check the crates that do not build llama.cpp for macOS from Linux.
+# A fake `clang` writes an empty object for every compile so the C
 # build scripts (libsqlite3-sys, ring, aws-lc-sys) succeed; nothing links.
 # Needs `rustup target add x86_64-apple-darwin`.
 set -eu

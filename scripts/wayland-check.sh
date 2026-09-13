@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a Wayland focus route against a nested compositor (m39). Neither
+# Run a Wayland focus route against a nested compositor. Neither
 # route can be checked from an X11 login without one, and both Debian's
 # sway and its kwin-wayland run inside an X11 window.
 #

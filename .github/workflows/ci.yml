@@ -19,7 +19,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-  # The macOS branch (m38) has no Mac on the dev box: this is its compile gate.
+  # No Mac is available for local development; this job is the macOS compile check.
   check-macos:
     runs-on: macos-latest
     steps:

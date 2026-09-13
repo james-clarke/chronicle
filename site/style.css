@@ -705,7 +705,7 @@ a.btn { cursor: pointer; }
   .stage.in .panel code span[style], .stages::before, .demo.in * { animation: none; }
 }
 
-/* tools page (m41 chunk 5) */
+/* tools page */
 .tools-page { max-width: var(--max); margin: 0 auto; padding: 24px 24px 64px; }
 .tools-page h3 { margin: 36px 0 10px; color: var(--soft); }
 .tools { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.95rem; }

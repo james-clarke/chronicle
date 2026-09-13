@@ -1,5 +1,5 @@
 #!/bin/sh
-# Integration requests, ranked (m41 chunk 5): open issues labelled
+# Integration requests, ranked: open issues labelled
 # `integration-request`, most 👍 first, then most reactions, then oldest.
 # The top of this list is the input to the next sources milestone. The last
 # block prints the `REQUESTED` lines for crates/core/src/connectors.rs, one

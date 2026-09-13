@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The site's week: five designed days for the fixtures cast (m43 chunk 0).
+"""The site's week: five designed days for the fixtures cast.
 
 Writes `fixtures/site/<weekday>.jsonl`, one `Event` per line in the format
 the golden fixtures use, for Sam's week of 7–11 September 2026. The days are

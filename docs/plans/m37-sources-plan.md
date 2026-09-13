@@ -239,7 +239,7 @@ kubectl/k9s/Tilt, Graphite, the Windows Visual Studio MRU.
 ## Shipped (2026-09-09 evening, main 13373a0 → 0b08c4a)
 
 Written and executed in one sitting on the standing "grab next task and
-execute" instruction; six collector agents built the modules against
+execute" instruction; the six collector modules were built against
 interfaces set here, the wiring, matcher, anchors, routes, CLI, status and
 Settings were done in the main thread. 384 tests, clippy clean, daemon
 installed 21:24 and again 21:31 with two follow-up fixes.

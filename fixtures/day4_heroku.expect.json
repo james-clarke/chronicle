@@ -1,7 +1,7 @@
 {
   "open_tasks": [
     {
-      "label": "verifying M7 human-verified progress in email system",
+      "label": "verifying mailer retry backoff in email system",
       "project": "mailer"
     },
     {

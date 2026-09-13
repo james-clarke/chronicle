@@ -299,7 +299,7 @@ mod tests {
         // must land on the same existing identity.
         let open = [open(
             41,
-            "verifying M7 human-verified progress in email system",
+            "verifying mailer retry backoff in email system",
             Some("chronicle"),
             false,
         )];
@@ -308,7 +308,7 @@ mod tests {
                 draft(Some(1), None, None, 0),
                 draft(
                     None,
-                    Some("Verifying M7 human-verified progress in email system"),
+                    Some("Verifying mailer retry backoff in email system"),
                     Some("mailer"),
                     10,
                 ),

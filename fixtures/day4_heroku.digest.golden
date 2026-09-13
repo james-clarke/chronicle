@@ -17,7 +17,7 @@ active 35m58s · afk 0s · 67 switches
 cwd portfolio 19s, contoso 5s
 
 ## Documents
-northwind-memberships | Contoso Dashboard 11m46s, M7 human-verified progress 8m18s, Contoso Control Panel 6m04s, Campaign SMS sending failure 1m35s, For you - Assigned to me 55s
+northwind-memberships | Contoso Dashboard 11m46s, mailer retry backoff 8m18s, Contoso Control Panel 6m04s, Campaign SMS sending failure 1m35s, For you - Assigned to me 55s
 
 ## People
 core-dev 22s
@@ -25,11 +25,11 @@ core-dev 22s
 ## Timeline (minute offsets from window start)
 - 0–3m Google-chrome: northwind-memberships | Contoso Dashboard
 - 3–4m chronicle: Chronicle
-- 4–5m chronicle: Chronicle + Terminator: ✳ M7 human-verified progress
-- 5–7m Terminator: ✳ M7 human-verified progress
-- 7–8m Slack: core-dev (Channel) - PB - 2 new items - Slack + Terminator: ✳ M7 human-verified progress
-- 8–12m Terminator: ✳ M7 human-verified progress
-- 12–13m Google-chrome: Contoso Control Panel + Terminator: ✳ M7 human-verified progress
+- 4–5m chronicle: Chronicle + Terminator: ✳ mailer retry backoff
+- 5–7m Terminator: ✳ mailer retry backoff
+- 7–8m Slack: core-dev (Channel) - PB - 2 new items - Slack + Terminator: ✳ mailer retry backoff
+- 8–12m Terminator: ✳ mailer retry backoff
+- 12–13m Google-chrome: Contoso Control Panel + Terminator: ✳ mailer retry backoff
 - 13–14m (rapid app switching)
 - 14–15m Google-chrome: Contoso Control Panel - Google Chrome
 - 15–16m Google-chrome: Contoso Control Panel - Google Chrome + Google-chrome: northwind-memberships | Contoso Dashboard
@@ -38,8 +38,8 @@ core-dev 22s
 - 18–20m Google-chrome: Contoso Control Panel
 - 20–21m Google-chrome: northwind-memberships | Contoso Dashboard + Google-chrome: Contoso Control Panel
 - 21–24m Google-chrome: northwind-memberships | Contoso Dashboard
-- 24–25m Terminator: ✳ M7 human-verified progress + Google-chrome: northwind-memberships | Contoso Dashboard
-- 25–26m Terminator: ✳ M7 human-verified progress
+- 24–25m Terminator: ✳ mailer retry backoff + Google-chrome: northwind-memberships | Contoso Dashboard
+- 25–26m Terminator: ✳ mailer retry backoff
 - 26–27m Terminator: sam@workstation:~/dev/portfolio
 - 27–31m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
 - 31–32m Google-chrome: For you - Assigned to me - Jira + Terminator: ✳ Campaign SMS sending failure

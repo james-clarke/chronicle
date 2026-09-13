@@ -5,16 +5,16 @@
 {"ts": "2026-08-27T13:16:12.973Z", "kind": "title", "app": "Google-chrome", "title": "New Tab - Google Chrome"}
 {"ts": "2026-08-27T13:16:14.774Z", "kind": "title", "app": "Google-chrome", "title": "Contoso Control Panel - Google Chrome"}
 {"ts": "2026-08-27T13:16:33.563Z", "kind": "title", "app": "Google-chrome", "title": "northwind-memberships | Contoso Dashboard - Google Chrome"}
-{"ts": "2026-08-27T13:16:48.549Z", "kind": "focus", "app": "Terminator", "title": "✳ M7 human-verified progress"}
+{"ts": "2026-08-27T13:16:48.549Z", "kind": "focus", "app": "Terminator", "title": "✳ mailer retry backoff"}
 {"ts": "2026-08-27T13:16:57.868Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/chronicle"}
 {"ts": "2026-08-27T13:16:59.204Z", "kind": "focus", "app": "chronicle", "title": "Chronicle"}
 {"ts": "2026-08-27T13:17:31.728Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation:~/dev/chronicle"}
-{"ts": "2026-08-27T13:17:34.088Z", "kind": "title", "app": "Terminator", "title": "✳ M7 human-verified progress"}
+{"ts": "2026-08-27T13:17:34.088Z", "kind": "title", "app": "Terminator", "title": "✳ mailer retry backoff"}
 {"ts": "2026-08-27T13:18:00.238Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/chronicle"}
 {"ts": "2026-08-27T13:18:01.313Z", "kind": "focus", "app": "chronicle", "title": "Chronicle"}
 {"ts": "2026-08-27T13:18:13.129Z", "kind": "focus", "app": "Terminator", "title": "sam@workstation:~/dev/chronicle"}
-{"ts": "2026-08-27T13:18:15.037Z", "kind": "title", "app": "Terminator", "title": "✳ M7 human-verified progress"}
-{"ts": "2026-08-27T13:18:33.812Z", "kind": "title", "app": "Terminator", "title": "◐ M7 human-verified progress"}
+{"ts": "2026-08-27T13:18:15.037Z", "kind": "title", "app": "Terminator", "title": "✳ mailer retry backoff"}
+{"ts": "2026-08-27T13:18:33.812Z", "kind": "title", "app": "Terminator", "title": "◐ mailer retry backoff"}
 {"ts": "2026-08-27T13:18:34.006Z", "kind": "focus", "app": "Google-chrome", "title": "northwind-memberships | Contoso Dashboard - Google Chrome"}
 {"ts": "2026-08-27T13:18:41.777Z", "kind": "title", "app": "Google-chrome", "title": "Extensions - Google Chrome"}
 {"ts": "2026-08-27T13:18:47.388Z", "kind": "title", "app": "Google-chrome", "title": "Chrome Web Store - Google Chrome"}
@@ -23,14 +23,14 @@
 {"ts": "2026-08-27T13:18:54.470Z", "kind": "url", "app": "browser:chrome", "title": "ActivityWatch Web Watcher - Chrome Web Store", "url": "https://chromewebstore.google.com/detail/activitywatch-web-watcher/nglaklhklhcoonedhgnpgddginnjdadi?hl=en-US&utm_source=ext_sidebar"}
 {"ts": "2026-08-27T13:19:02.054Z", "kind": "url", "app": "browser:chrome_workstation", "title": "ActivityWatch Web Watcher - Chrome Web Store", "url": "https://chromewebstore.google.com/detail/activitywatch-web-watcher/nglaklhklhcoonedhgnpgddginnjdadi?hl=en-US&utm_source=ext_sidebar"}
 {"ts": "2026-08-27T13:19:02.055Z", "kind": "url", "app": "browser:chrome_workstation", "title": "Contoso Control Panel", "url": "https://staging-mailer.acmeapi.example/control_panel/"}
-{"ts": "2026-08-27T13:19:03.033Z", "kind": "focus", "app": "Terminator", "title": "◐ M7 human-verified progress"}
-{"ts": "2026-08-27T13:19:04.361Z", "kind": "title", "app": "Terminator", "title": "◑ M7 human-verified progress"}
-{"ts": "2026-08-27T13:19:05.376Z", "kind": "title", "app": "Terminator", "title": "✳ M7 human-verified progress"}
-{"ts": "2026-08-27T13:19:31.876Z", "kind": "title", "app": "Terminator", "title": "◐ M7 human-verified progress"}
+{"ts": "2026-08-27T13:19:03.033Z", "kind": "focus", "app": "Terminator", "title": "◐ mailer retry backoff"}
+{"ts": "2026-08-27T13:19:04.361Z", "kind": "title", "app": "Terminator", "title": "◑ mailer retry backoff"}
+{"ts": "2026-08-27T13:19:05.376Z", "kind": "title", "app": "Terminator", "title": "✳ mailer retry backoff"}
+{"ts": "2026-08-27T13:19:31.876Z", "kind": "title", "app": "Terminator", "title": "◐ mailer retry backoff"}
 {"ts": "2026-08-27T13:19:37.636Z", "kind": "focus", "app": "Google-chrome", "title": "Contoso Control Panel - Google Chrome"}
 {"ts": "2026-08-27T13:19:43.206Z", "kind": "url", "app": "browser:chrome_workstation", "title": "northwind-memberships | Contoso Dashboard", "url": "https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/"}
 {"ts": "2026-08-27T13:19:44.172Z", "kind": "title", "app": "Google-chrome", "title": "northwind-memberships | Contoso Dashboard - Google Chrome"}
-{"ts": "2026-08-27T13:19:59.472Z", "kind": "focus", "app": "Terminator", "title": "✳ M7 human-verified progress"}
+{"ts": "2026-08-27T13:19:59.472Z", "kind": "focus", "app": "Terminator", "title": "✳ mailer retry backoff"}
 {"ts": "2026-08-27T13:20:01.340Z", "kind": "title", "app": "Terminator", "title": "mcp.toml (~/.local/share/chronicle) - VIM"}
 {"ts": "2026-08-27T13:20:05.614Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/mailer"}
 {"ts": "2026-08-27T13:20:08.428Z", "kind": "title", "app": "Terminator", "title": "sam@workstation:~/dev/contoso"}

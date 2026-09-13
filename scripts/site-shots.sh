@@ -1,5 +1,5 @@
 #!/bin/sh
-# The site's screenshots, from the fixtures cast (m43 chunks 0 and 1).
+# The site's screenshots, from the fixtures cast.
 #
 #   scripts/site-shots.sh seed    # replay fixtures/site/*.jsonl into a sandbox
 #   scripts/site-shots.sh shots   # capture every view the page references

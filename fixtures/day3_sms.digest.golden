@@ -22,9 +22,9 @@ Aurora and RDS | us-east-1 3m08s, Campaign SMS sending failure 2m53s, northwind-
 ## Timeline (minute offsets from window start)
 - 0–1m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome
 - 1–2m Google-chrome: northwind-memberships | Contoso Dashboard - Google Chrome + Google-chrome: Contoso Control Panel - Google Chrome
-- 2–3m chronicle: Chronicle + Terminator: ✳ M7 human-verified progress
-- 3–4m Terminator: ✳ M7 human-verified progress
-- 4–5m Terminator: ◐ M7 human-verified progress + Google-chrome: northwind-memberships | Contoso Dashboard
+- 2–3m chronicle: Chronicle + Terminator: ✳ mailer retry backoff
+- 3–4m Terminator: ✳ mailer retry backoff
+- 4–5m Terminator: ◐ mailer retry backoff + Google-chrome: northwind-memberships | Contoso Dashboard
 - 5–6m Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM + Terminator: [No Name] - - VIM
 - 6–8m Terminator: ✳ Claude Code
 - 8–9m Terminator: sms.py (~/dev/contoso/contoso/mailer) - VIM + Terminator: [No Name] - - VIM

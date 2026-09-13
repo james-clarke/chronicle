@@ -82,7 +82,7 @@ Blocks fade in on arrival (theme fade helpers exist); a block moving from unmatc
 
 1. Lives on Home: the Unassigned section becomes the feed.
 2. Provisional intervals count in reports and timesheets (tinted on Home/timeline; reports show them like any interval).
-3. Eject: hard negative for the deterministic pre-pass (it would otherwise re-link the same tokens on the next tick), soft for the model (an `"X" ✗ "task"` few-shot line; the model may still choose the task when the wider context says so). Recommended by Claude, accepted pending build.
+3. Eject: hard negative for the deterministic pre-pass (it would otherwise re-link the same tokens on the next tick), soft for the model (an `"X" ✗ "task"` few-shot line; the model may still choose the task when the wider context says so). Recommended in review, accepted pending build.
 4. Pre-pass on a slower timer than the sessionizer tick (start at 60 s) so a growing block settles before it is placed.
 5. Sequenced after m21.5 presets.
 

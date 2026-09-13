@@ -4,7 +4,7 @@ James's framing: shift focus solely to developers, put Chronicle in front of
 the mass of them, and make accuracy the product: use API (frontier) models
 wherever they buy derivation accuracy, and cover the whole tool surface a
 working developer touches, including the connections those tools use to
-talk to each other. Ten sub-agents surveyed editors and AI coding agents,
+talk to each other. Ten research passes surveyed editors and AI coding agents,
 terminals and infra, VCS hosts / trackers / chat / calendar / browsers,
 observability / networking / databases / cloud / CI / git tooling,
 connection kinds and MCP, the competition and what developers say they

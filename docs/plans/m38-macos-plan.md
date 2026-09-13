@@ -211,8 +211,8 @@ unchanged (same tests, same install).
 ## Shipped (2026-09-10, main 88c61e9 → 212798e)
 
 Written and executed in one sitting on the standing "grab next task and
-execute" instruction: five chunk agents built against the interfaces set
-here, an Opus review pass over every macOS file produced one BUG-grade
+execute" instruction: the five chunks were built against the interfaces set
+here, and a review pass over every macOS file produced one BUG-grade
 and a dozen LIKELY-BUG findings, all applied in the follow-up commit. No
 Mac on this box: verification is the cross-check, the Linux tests (394)
 and clippy, and the CI job — the "Owed on a Mac" list above stands.

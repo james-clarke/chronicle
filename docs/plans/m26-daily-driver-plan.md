@@ -1,6 +1,6 @@
 # M26 — Daily driver: right for James first
 
-Status: **chunks 1–6 shipped, merged into main 2026-09-03 (81b5c23)** — chunk 1: 3e3e8ca, 496fe5b, e906918, 4f37f34; chunks 2–6 built in parallel by five agents on sibling worktrees off one scaffolding commit (ee8a387 scaffolding, a45799e shell, a59d659 heartbeats, 12100f2 calendar, f87defb intent, 90f43b9 upsert fix, cc45ebe Jira post, 09ca750 review fixes), merged linearly, worktree `../chronicle-m26` and branch `m26` removed in m28. Chunk 7 (click-tests, feed soak) is James's.
+Status: **chunks 1–6 shipped, merged into main 2026-09-03 (81b5c23)** — chunk 1: 3e3e8ca, 496fe5b, e906918, 4f37f34; chunks 2–6 built in parallel on sibling worktrees off one scaffolding commit (ee8a387 scaffolding, a45799e shell, a59d659 heartbeats, 12100f2 calendar, f87defb intent, 90f43b9 upsert fix, cc45ebe Jira post, 09ca750 review fixes), merged linearly, worktree `../chronicle-m26` and branch `m26` removed in m28. Chunk 7 (click-tests, feed soak) is James's.
 
 ## Shipped: deviations from the text below (2026-09-03)
 

@@ -1,27 +1,27 @@
 13:46:29–13:49:35 [focus] Google-chrome: northwind-memberships | Contoso Dashboard <https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/1/>
 13:49:35–13:49:44 [context-switching]
 13:49:44–13:50:35 [focus] chronicle: Chronicle
-13:50:35–13:50:51 [focus] Terminator: ✳ M7 human-verified progress
+13:50:35–13:50:51 [focus] Terminator: ✳ mailer retry backoff
 13:50:51–13:51:21 [focus] chronicle: Chronicle
-13:51:21–13:53:01 [focus] Terminator: ✳ M7 human-verified progress
+13:51:21–13:53:01 [focus] Terminator: ✳ mailer retry backoff
 13:53:01–13:53:08 [focus] chronicle: Chronicle
-13:53:08–13:53:14 [focus] Terminator: ✳ M7 human-verified progress
+13:53:08–13:53:14 [focus] Terminator: ✳ mailer retry backoff
 13:53:14–13:53:22 [context-switching]
-13:53:22–13:53:35 [focus] Terminator: ✳ M7 human-verified progress
+13:53:22–13:53:35 [focus] Terminator: ✳ mailer retry backoff
 13:53:35–13:53:36 [context-switching]
 13:53:36–13:53:41 [focus] chronicle: Chronicle
 13:53:41–13:53:48 [context-switching]
 13:53:48–13:54:11 [focus] Slack: core-dev (Channel) - PB - 2 new items - Slack
 13:54:11–13:54:16 [focus] chronicle: Chronicle
-13:54:16–13:55:43 [focus] Terminator: ✳ M7 human-verified progress
+13:54:16–13:55:43 [focus] Terminator: ✳ mailer retry backoff
 13:55:43–13:55:46 [context-switching]
-13:55:46–13:55:52 [focus] Terminator: ✳ M7 human-verified progress
+13:55:46–13:55:52 [focus] Terminator: ✳ mailer retry backoff
 13:55:52–13:55:55 [context-switching]
-13:55:55–13:56:35 [focus] Terminator: ✳ M7 human-verified progress
+13:55:55–13:56:35 [focus] Terminator: ✳ mailer retry backoff
 13:56:35–13:56:46 [focus] chronicle: Chronicle
-13:56:46–13:58:03 [focus] Terminator: ✳ M7 human-verified progress
+13:56:46–13:58:03 [focus] Terminator: ✳ mailer retry backoff
 13:58:03–13:58:09 [context-switching]
-13:58:09–13:58:46 [focus] Terminator: ✳ M7 human-verified progress
+13:58:09–13:58:46 [focus] Terminator: ✳ mailer retry backoff
 13:58:46–13:58:47 [context-switching]
 13:58:47–13:59:12 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
 13:59:12–13:59:24 [context-switching]
@@ -46,7 +46,7 @@
 14:07:02–14:07:38 [focus] Google-chrome: Contoso Control Panel <https://staging-mailer.acmeapi.example/control_panel/>
 14:07:38–14:10:45 [focus] Google-chrome: northwind-memberships | Contoso Dashboard <https://northwind-memberships.acmeapi.example/control_panel/marketing/sms_campaigns/1/>
 14:10:45–14:10:48 [context-switching]
-14:10:48–14:12:43 [focus] Terminator: ✳ M7 human-verified progress
+14:10:48–14:12:43 [focus] Terminator: ✳ mailer retry backoff
 14:12:43–14:12:54 [context-switching]
 14:12:54–14:13:13 [focus] Terminator: sam@workstation:~/dev/portfolio
 14:13:13–14:13:22 [focus] Terminator: ✳ bearblog.dev portfolio redesign

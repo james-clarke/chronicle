@@ -1,4 +1,7 @@
-# Dev workflow (post-m11: daemon is systemd-managed)
+# Dev workflow
+
+Working on a machine where Chronicle is also the daily driver. For build,
+test and PR expectations see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The daemon runs under `systemctl --user` from the installed release binary
 (`~/.cargo/bin/chronicle`), not `target/debug`. It spawns its own binary for
@@ -59,22 +62,13 @@ into `index.html` between `<!-- pulse -->`, `<!-- numbers -->` and
 total). The committed `index.html` keeps placeholders; preview a baked copy
 with `sh site/build.sh $TMPDIR/preview` rather than running it in place.
 
-First-time setup, once a GitHub remote exists (repo is proprietary, keep it
-private):
-
-```sh
-gh auth login -h github.com
-gh repo create chronicle --private --source=. --remote=origin --push
-```
-
-Then Render dashboard → New → Blueprint → pick the repo; it reads
-`render.yaml` and creates `chronicle-site`. Custom domain and HTTPS are set on
-the service afterwards. Every later `git push` of `site/**` to `main`
-redeploys; nothing else does.
+Render was set up once from the dashboard (New → Blueprint → this repo); it
+reads `render.yaml` and owns the custom domain and HTTPS. Every `git push` of
+`site/**` to `main` redeploys; nothing else does.
 
 Local check before pushing site changes: render the baked preview headless
 at 1280, 820 and 400 wide and look at it (`google-chrome --headless=new
 --screenshot=… --window-size=W,H --user-data-dir=<scratch>
-file://<preview>/index.html`; needs the tool sandbox off because Chrome
-writes under `~/.config`; strip `loading="lazy"` into a temp copy first or
+file://<preview>/index.html`; Chrome needs write access under
+`~/.config`, so run it outside any sandboxed shell; strip `loading="lazy"` into a temp copy first or
 offscreen images render as alt text).

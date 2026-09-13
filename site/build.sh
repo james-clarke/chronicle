@@ -131,7 +131,7 @@ check "$js" 2048 "inline JS" "$js B" "2 KB"
 check "$fold" 256000 "above the fold" "$(kb "$fold")" "250 KB"
 check "$total" 921600 "page weight" "$(kb "$total")" "900 KB"
 
-# --- tools page: the same rules, one file (m41 chunk 5) ---------------------
+# --- tools page: the same rules, one file ------------------------------------
 tools=$site/tools.html
 tthird=$(grep -E '<(link|script|img|iframe|source|video|audio|object)[^>]*(src|href)="https?://' "$tools" | grep -vc 'rel="canonical"' || true)
 tjs=$(awk 'BEGIN { RS = "</script>" } /<script/ { sub(/.*<script[^>]*>/, ""); n += length($0) } END { print n + 0 }' "$tools")

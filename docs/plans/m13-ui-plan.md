@@ -1,6 +1,6 @@
 # m13 — UI redesign plan (from 2026-08-31 review)
 
-Mockups (built from real Aug 31 data): https://claude.ai/code/artifact/c4942f69-69ae-4d5e-b003-984379f3ce7d
+Mockups built from real Aug 31 data were reviewed before this plan.
 Artboards: widget "Today" view (360×560), expanded window (760×600), week report (680×500), plus a low-fi tray-popover alternate. Direction not yet picked by James — default to the widget-first direction unless he says otherwise.
 
 ## Root-cause findings

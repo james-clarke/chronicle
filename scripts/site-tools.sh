@@ -1,5 +1,5 @@
 #!/bin/sh
-# Splice the registry's tools table into site/tools.html (m41 chunk 5):
+# Splice the registry's tools table into site/tools.html:
 # `chronicle connections --html` between the <!-- tools --> markers. Run
 # after any registry edit; the drift test in crates/core/tests fails until
 # you do. Uses the debug build when it is newer than the installed binary.

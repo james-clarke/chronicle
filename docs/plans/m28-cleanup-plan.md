@@ -2,7 +2,7 @@
 
 Status: **phases A–C landed 2026-09-03** (ba4ba22, 2bc2652, 83138ad, f990c64, cfcda93, d1f6166, 3e9d0d9); deploy + review notes under Shipped. Asked for as one milestone: close every loose end
 from m21–m27, put the repo in order (docs, organization, sync), then review the whole
-codebase and apply the optimizations that survive review. Run to completion by sub-agents
+codebase and apply the optimizations that survive review. Run to completion in parallel
 under one integrator; each phase lands as its own commit(s) with tests + clippy green.
 
 ## Phase A — loose ends and repo order
@@ -18,9 +18,9 @@ under one integrator; each phase lands as its own commit(s) with tests + clippy 
 4. `progress.md` gets the m27 chunks 2–7 + merge entry it is missing.
 5. Hand-test items only James can do stay listed under "Open for James".
 
-## Phase B — codebase review (read-only, sub-agents)
+## Phase B — codebase review (read-only)
 
-Five lenses, one agent each, findings as `file:line · severity · confidence · what · fix`:
+Five lenses, one pass each, findings as `file:line · severity · confidence · what · fix`:
 
 - `crates/core` (storage.rs 4056 lines, digest, replay, prepass, evidence, sessionizer).
 - `crates/app` main.rs (4510 lines: daemon, scheduler, CLI) — structure, duplicated
@@ -49,7 +49,7 @@ m26 worktree and branch removed; plan/direction docs moved to `docs/plans/` with
 
 ### Phase B — review (2026-09-03, no code)
 
-Five sonnet agents, read-only, ~110 findings. Dropped at the cut line: MCP server reuse across derives (2 s per 35-min batch, not worth a process-global runtime), describe-session prefix reuse (backfill only), `Config::validate`, moving `proposals` SQL into `storage.rs`, `prepare(&format!)` constants, card/frame chrome consolidation, grammar re-parse per generate. Correction to the brief: the daemon is a crossbeam `select!` loop on OS threads; tokio only hosts the tray, so the "blocking on the async runtime" class did not exist.
+Five read-only review passes, ~110 findings. Dropped at the cut line: MCP server reuse across derives (2 s per 35-min batch, not worth a process-global runtime), describe-session prefix reuse (backfill only), `Config::validate`, moving `proposals` SQL into `storage.rs`, `prepare(&format!)` constants, card/frame chrome consolidation, grammar re-parse per generate. Correction to the brief: the daemon is a crossbeam `select!` loop on OS threads; tokio only hosts the tray, so the "blocking on the async runtime" class did not exist.
 
 ### Phase C — applied (2026-09-03)
 

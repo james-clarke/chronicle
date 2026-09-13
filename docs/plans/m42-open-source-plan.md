@@ -149,7 +149,7 @@ Two facts that shape the work:
 
 ### 4. README, authorship and the release path
 
-- README: the AGPL section with the copyright line, and the agentically
+- README: the AGPL section with the copyright line, and the how-it-was-
   built section. Framed as evidence, not as a disclaimer: how it is built,
   what the gates are, what is still unverified. `docs/plans/` is the
   exhibit.

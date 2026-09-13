@@ -67,7 +67,7 @@ What shipped and is nowhere on the page:
 - **The corpus is the demo.** M42's invented scenario is what the app runs
   for the screenshots, so the fixtures, the site and any future demo all
   tell one story. A second, site-only fake dataset would drift.
-- **Say it is agentically built, as evidence.** A short section, below what
+- **Say how it was built, as evidence.** A short section, below what
   the product does rather than in the hero. Someone downloading a time
   tracker wants the time tracker first. The strong version is specific and
   checkable: the milestone plans, their gates, what changed while building
