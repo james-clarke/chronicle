@@ -22,7 +22,7 @@ pub fn build(name: &str, cfg: &BackendCfg) -> anyhow::Result<Box<dyn TextBackend
             cfg.base_url.as_deref(),
         )),
         BackendKind::OpenAiCompat => {
-            anyhow::bail!("backend {name}: openai_compat arrives in m31 chunk 3")
+            anyhow::bail!("backend {name}: the openai_compat backend is not implemented yet")
         }
         BackendKind::ClaudeCode => Box::new(claude_code::ClaudeCodeBackend::new(
             name,

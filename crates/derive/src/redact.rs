@@ -85,7 +85,7 @@ static PATH_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"/([A-Za-z0-9+_=-]{20,})").unwrap());
 
 /// All hex (a hash), or base64-shaped: mixed case, four or more digits and
-/// no hyphen, so `m35-project-first-plan` and `ACME-11533-export` stay.
+/// no hyphen, so `getting-started-guide` and `ACME-11533-export` stay.
 fn looks_like_token(s: &str) -> bool {
     if s.chars().all(|c| c.is_ascii_hexdigit()) {
         return true;
@@ -192,7 +192,7 @@ mod tests {
         // Long words, slugs and branch names in paths are not tokens.
         for keep in [
             "/src/internationalization/index.ts",
-            "docs/plans/m35-project-first-plan.md",
+            "docs/guides/getting-started-guide.md",
             "github.com/o/r/tree/ACME-11533-export-selected-modal",
             "/home/james/.local/share/chronicle_2026_backup_copy/",
         ] {

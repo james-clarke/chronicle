@@ -18,9 +18,10 @@ time.
 - It runs on Linux (X11 and Wayland). The macOS port compiles but has not
   been run on real hardware yet. Windows is planned.
 
-The site is [chronicled.dev](https://chronicled.dev/). Design notes for each
-milestone are under [`docs/`](docs/README.md), and
-[CONTRIBUTING.md](CONTRIBUTING.md) covers building and submitting changes.
+The site is [chronicled.dev](https://chronicled.dev/). The reference pages
+are under [`docs/`](docs/README.md): configuration, the CLI, what is stored,
+the sources and the architecture. [CONTRIBUTING.md](CONTRIBUTING.md) covers
+building and submitting changes.
 
 ## Installing
 
@@ -129,7 +130,7 @@ chronicle/
 ├── packaging/      # systemd user unit, macOS LaunchAgent plist
 ├── scripts/        # mac-check.sh, wayland-check.sh, site-shots.sh
 ├── fixtures/       # recorded event streams, golden outputs, eval expectations
-├── docs/plans/     # one design document per milestone
+├── docs/           # reference pages and the generated connector list
 └── site/           # the static site, built by site/build.sh
 ```
 
@@ -157,29 +158,23 @@ Subcommands, as `chronicle --help` lists them:
 
 Platform code sits behind four traits in `crates/capture` (`FocusProvider`,
 `AfkProvider`, `PresenceProvider`, `LockSignal`), and everything downstream
-consumes `CaptureEvent` values and nothing else. X11 goes through `x11rb`.
-Wayland uses the wlroots foreign-toplevel protocol, or a KWin script on KDE.
-macOS uses `NSWorkspace` and the Accessibility API. Windows is planned.
+consumes `CaptureEvent` values and nothing else. X11, Wayland (wlroots and
+KDE) and macOS each have an implementation. Windows is planned.
 
-The evidence collectors (git, AI session transcripts, browser history, shell
-history, editor heartbeats, calendars, microphone) each run on their own
+The evidence collectors (git, AI session transcripts, browser history, the
+shell hook, editor heartbeats, calendars, microphone) each run on their own
 thread and write rows to `activity_events`. `chronicle connections` lists
-every collector with its state on this machine. That list comes from one
-registry in `crates/core/src/connectors.rs`, which also drives the Settings
-panel and the site's tools page, and a test fails if either copy drifts.
+every collector with its state on this machine, and
+[docs/sources.md](docs/sources.md) says how to connect each one.
 
 ## Storage
 
-SQLite in WAL mode through `rusqlite` with the bundled FTS5, and 36
-migrations in `crates/core/migrations/`. The tables split into capture
-(`events`, `spans`, `activity_events`, `presence`), derivation (`batches`,
-`tasks`, `intervals`, `corrections`), evidence (`span_anchors`,
-`task_evidence`, `claims`), the model-written layer (`ai_jobs`,
-`narratives`, `journal_entries`, embeddings) and measurement (`self_score`).
-
-All timestamps are UTC unix milliseconds. Day boundaries are computed at
-query time with `jiff`, so a DST day is 23 or 25 hours long. Retention
-pruning runs in the idle gate in small batches.
+SQLite in WAL mode through `rusqlite` with the bundled FTS5, migrated on
+open. The tables split into capture, derivation, evidence, the
+model-written layer and measurement. All timestamps are UTC unix
+milliseconds, and day boundaries are computed at query time with `jiff`.
+[docs/data.md](docs/data.md) lists every table, what leaves the machine,
+and how to prune, export or delete.
 
 ## Sessionizer and digest
 
@@ -188,8 +183,9 @@ with the same app and a similar title merge into a span. Spans under 5 s fold
 into a context-switching span, and 120 s of idle time closes one. Thirty
 minutes of non-idle activity becomes a batch. Its digest is capped at 2 200
 tokens and carries the top apps, a per-minute timeline, the open tasks
-numbered so the model can refer to them by index, similar past corrections
-found through FTS, and any MCP context.
+numbered so the model can refer to them by index, similar past corrections,
+and any MCP context. The rules are in
+[docs/architecture.md](docs/architecture.md).
 
 ## Derivation
 
@@ -199,9 +195,8 @@ correction each place time without the model. What is left goes to a
 resident `derive-worker` running llama.cpp under a GBNF grammar (in
 `grammars/`, with the prompts in `prompts/`), so the model can only emit
 task JSON: intervals that reference an open task by index or propose a new
-label. The output is then sanitized, near-identical proposals are snapped
-together, adjacent pieces are coalesced and everything is clamped to the
-batch window.
+label. The output is sanitized, snapped, coalesced and clamped before it is
+stored.
 
 The scheduler derives after 5 minutes idle or locked, or when system load is
 low, and waits if the battery is under 30 %. `chronicle bench` scores model
@@ -212,32 +207,12 @@ are optional and use your own API key.
 ## MCP
 
 MCP is optional. The config is `<data_dir>/mcp.toml`, and a missing file
-means it is off. The Settings panel edits the same file, and the daemon
-reloads it on every call. `[[servers]]` entries are a stdio command or a
-URL. `[[context_calls]]` run at derive time with a 10 s timeout and about
-500 tokens of the result injected into the digest as `## Workspace context`.
-`[[fetch_calls]]` run once per task, with `{ref}` replaced by its ticket key.
-
-```toml
-[[servers]]
-name = "jira"
-command = "uvx"
-args = ["mcp-atlassian"]
-
-[[context_calls]]
-server = "jira"
-tool = "jira_search"
-args_json = '{"jql": "assignee = currentUser() AND updated >= -2d", "limit": 5}'
-
-[[fetch_calls]]
-server = "jira"
-tool = "jira_get_issue"
-args_json = '{"issue_key": "{ref}"}'
-```
-
-Everything fetched this way, like every window title and URL, is treated as
-untrusted text to label time with. The grammar is what keeps the model from
-doing anything else with it.
+means it is off. `[[servers]]` entries are a stdio command or a URL,
+`[[context_calls]]` run at derive time and feed the digest, and
+`[[fetch_calls]]` run once per task with its ticket key. Everything fetched
+this way, like every window title and URL, is treated as untrusted text to
+label time with, and the grammar is what keeps the model from doing anything
+else with it. [docs/sources.md](docs/sources.md) has the full example.
 
 ## Configuration
 
@@ -245,8 +220,8 @@ doing anything else with it.
 starts. The Settings panel writes the same file. The fields you are most
 likely to touch are `excluded_apps` and `excluded_titles` (regexes, never
 stored), `retention_days`, `git_repos`, `capture_presence`, `focus_route`
-(`auto`, `x11`, `wlr` or `kwin`), `derive_idle_secs` and `port`. The full
-list with defaults is the `Config` struct in `crates/core/src/config.rs`.
+(`auto`, `x11`, `wlr` or `kwin`), `derive_idle_secs` and `port`. Every
+field with its default is in [docs/configuration.md](docs/configuration.md).
 
 ## Conventions
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Integration requests, ranked: open issues labelled
 # `integration-request`, most 👍 first, then most reactions, then oldest.
-# The top of this list is the input to the next sources milestone. The last
+# The top of this list is what gets built next. The last
 # block prints the `REQUESTED` lines for crates/core/src/connectors.rs, one
 # per issue whose title names a registry id, so a Planned row can show its
 # issue number.

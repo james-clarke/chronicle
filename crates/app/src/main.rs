@@ -62,7 +62,7 @@ enum Cmd {
     /// Internal: egui window process, spawned by the daemon.
     #[command(hide = true)]
     Ui,
-    /// Internal: resident derivation worker (m27 chunk 3) — JSON requests on
+    /// Internal: resident derivation worker — JSON requests on
     /// stdin, replies on stdout; exits after `worker_idle_secs` idle.
     #[command(hide = true)]
     DeriveWorker,
@@ -73,7 +73,7 @@ enum Cmd {
         batch: i64,
     },
     /// Internal: load fixture event streams into the data dir the way the
-    /// daemon would have captured them (m43 chunk 0), then print the batch
+    /// daemon would have captured them, then print the batch
     /// ids they closed, one per line, for `chronicle derive --batch` to
     /// pick up.
     #[command(hide = true)]
@@ -95,7 +95,7 @@ enum Cmd {
         /// Conversation whose history seeds the model context.
         #[arg(long)]
         conversation: i64,
-        /// Scope retrieval to this task's workspace (m16).
+        /// Scope retrieval to this task's workspace.
         #[arg(long)]
         task: Option<i64>,
     },
@@ -105,7 +105,7 @@ enum Cmd {
         #[arg(long)]
         id: i64,
     },
-    /// Internal: one-off m27 coalesce of stored derived intervals (adjacent
+    /// Internal: one-off coalesce of stored derived intervals (adjacent
     /// same-task pieces join unless an AFK ≥ 5 min or a user row lies between).
     #[command(hide = true)]
     BackfillCoalesce {
@@ -116,12 +116,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Embed task labels and corrections for the example memory (m36 chunk
-    /// 2), then, with `embed_model` set, every focus span that has no vector
-    /// yet (m30 chunk 6) and the task centroids.
+    /// Embed task labels and corrections for the example memory, then, with
+    /// `embed_model` set, every focus span that has no vector yet and the
+    /// task centroids.
     BackfillEmbeddings,
     /// Internal: re-read AI session transcripts modified since a local day
-    /// and replace their rows (m32 chunk 2: prompt minutes and titles for
+    /// and replace their rows (prompt minutes and titles for
     /// rows captured before the collector kept them). Run
     /// `backfill-anchors` after it.
     #[command(hide = true)]
@@ -131,15 +131,15 @@ enum Cmd {
         since: Option<String>,
     },
     /// Internal: read every `git_repos` entry's `.remember/today-*.md` once
-    /// and upsert their `note` rows (m32 chunk 5); the daemon does the same
+    /// and upsert their `note` rows; the daemon does the same
     /// on start.
     #[command(hide = true)]
     BackfillNotes,
     /// Internal: recompute the last seven days' self-score rows now (the
-    /// daemon does it once a day) and print them (m32 chunk 6).
+    /// daemon does it once a day) and print them.
     #[command(hide = true)]
     SelfScore,
-    /// Internal: recompute span anchors (m30) for spans since a local day.
+    /// Internal: recompute span anchors for spans since a local day.
     #[command(hide = true)]
     BackfillAnchors {
         /// Spans starting on or after this local day; default: everything.
@@ -215,7 +215,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
-    /// Projects (m35): the rules that file time into a project.
+    /// Projects: the rules that file time into a project.
     Project {
         #[command(subcommand)]
         cmd: ProjectCmd,
@@ -241,14 +241,14 @@ enum Cmd {
         #[arg(long)]
         model: Option<String>,
         /// Replay through a cloud backend named in models.toml instead of a
-        /// downloaded model (m31 chunk 0 gate).
+        /// downloaded model.
         #[arg(long)]
         backend: Option<String>,
         /// Skip MCP context for --batch cases (offline; replay never gathers it).
         #[arg(long)]
         no_mcp: bool,
         /// Re-derive every batch a correction touched and score the corrected
-        /// outcome (m27 chunk 2).
+        /// outcome.
         #[arg(long)]
         replay: bool,
         /// Replay: only corrections made in the last N days.
@@ -257,13 +257,13 @@ enum Cmd {
         /// Replay: write the per-probe results as JSON here for diffing.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Score with the m30 evidence profiler instead of (or alongside) a
+        /// Score with the evidence profiler instead of (or alongside) a
         /// model: no llama load. Fixture mode: persona fixtures with
         /// `.expect.json` groups. Replay mode: scores probes against the
         /// profiler and, if a model also runs, a combined verdict.
         #[arg(long)]
         scorer: bool,
-        /// Replay with `--scorer`: ask the pairwise advisor (m36 chunk 3) on
+        /// Replay with `--scorer`: ask the pairwise advisor on
         /// every unsure verdict — through `--backend`, else the local
         /// model — and score with and without its answer.
         #[arg(long, requires = "scorer")]
@@ -274,23 +274,23 @@ enum Cmd {
         /// (merge probes span the folded task's own intervals).
         #[arg(long, default_value = "all")]
         probes: String,
-        /// With --scorer: cut each window with the m30 segmenter first and
+        /// With --scorer: cut each window with the segmenter first and
         /// score its segments (fixture mode walks the persona fixtures cold;
         /// replay mode takes the minute-weighted majority over a probe).
         #[arg(long)]
         segment: bool,
-        /// Read the segmenter's verdict log (m30 chunk 4): corrected share
+        /// Read the segmenter's verdict log: corrected share
         /// per margin bucket, and the delta at which "to confirm" covers the
         /// worst tenth of placements. Uses --since.
         #[arg(long)]
         calibrate: bool,
-        /// Re-sessionize the last --since days with and without the m32
-        /// quiet rule and print the daytime AFK gap histogram (chunk 1 gate).
+        /// Re-sessionize the last --since days with and without the quiet
+        /// rule and print the daytime AFK gap histogram.
         #[arg(long)]
         gaps: bool,
         /// Place one window the way the segmenter's reconcile would, without
         /// writing it, and print each row with its share plus the window's
-        /// split by project (m32 chunk 3 gate). Local times:
+        /// split by project. Local times:
         /// `2026-09-03T15:00..2026-09-03T16:44`.
         #[arg(long)]
         window: Option<String>,
@@ -298,47 +298,47 @@ enum Cmd {
         /// (what the daemon's tick uses), not as of the window's start.
         #[arg(long, requires = "window")]
         live: bool,
-        /// Time an embedding GGUF over recent titles (m30 chunk 6 gate:
-        /// p95 under 20 ms per title on this CPU).
+        /// Time an embedding GGUF over recent titles (the target is p95
+        /// under 20 ms per title on this CPU).
         #[arg(long)]
         embed: Option<PathBuf>,
         /// Print the past corrections a naming prompt would see for this
-        /// "app title" text (m36 chunk 2): the cosine path when vectors
+        /// "app title" text: the cosine path when vectors
         /// exist, the FTS path beside it.
         #[arg(long)]
         examples: Option<String>,
-        /// Pairwise naming judge (m36 chunk 5): name recent derived tasks
+        /// Pairwise naming judge: name recent derived tasks
         /// with and without past-correction examples on the local model
         /// and let `--backend` (else the local model) pick the better
         /// label; prints the win rate and every pair.
         #[arg(long)]
         judge: bool,
-        /// Same-day re-run drift (m36 chunk 5): yesterday's standup and a
+        /// Same-day re-run drift: yesterday's standup and a
         /// few naming prompts twice through `--backend` (else the local
         /// model); prints the word-overlap similarity per pair.
         #[arg(long)]
         drift: bool,
     },
     /// Every tool Chronicle can read, what it does with it, and what it
-    /// would take to connect it here (m41). `--json` is the same table the
+    /// would take to connect it here. `--json` is the same table the
     /// site's tools page reads.
     Connections {
         #[arg(long)]
         json: bool,
-        /// The site's tools page body (`site/tools.html`, m41 chunk 5).
+        /// The site's tools page body (`site/tools.html`).
         #[arg(long, conflicts_with = "json")]
         html: bool,
     },
-    /// The first five minutes (m41 chunk 2): what already works on this
-    /// machine, what is one step away, and what needs an account first —
-    /// the plan the Setup view shows, printed for a headless install.
+    /// The first five minutes: what already works on this machine, what is
+    /// one step away, and what needs an account first — the same list the
+    /// Setup view shows, printed for a headless install.
     Setup,
-    /// Print the shell hook for zsh, bash, fish or pwsh (m37): add
+    /// Print the shell hook for zsh, bash, fish or pwsh: add
     /// `eval "$(chronicle shell-init zsh)"` to your rc file. It posts each
     /// command's cwd, program name and duration to the local endpoint —
     /// never the command line.
     ShellInit { shell: String },
-    /// Chronicle's git hooks (m37): exact-second checkouts and commits,
+    /// Chronicle's git hooks: exact-second checkouts and commits,
     /// appended after any existing hook, opt-in per repo.
     Hooks {
         #[command(subcommand)]
@@ -361,7 +361,7 @@ enum Cmd {
         #[arg(long)]
         client_secret: Option<String>,
     },
-    /// Run Chronicle at login (m38): a systemd user unit on Linux, a
+    /// Run Chronicle at login: a systemd user unit on Linux, a
     /// LaunchAgent on macOS. The onboarding card calls the same code.
     Service {
         #[command(subcommand)]
@@ -479,7 +479,7 @@ enum TaskCmd {
         #[arg(long)]
         description: Option<String>,
     },
-    /// Make an open declared task its project's sink (m35): time in the
+    /// Make an open declared task its project's sink: time in the
     /// project goes to it over any newer declared task.
     Current {
         /// Task id, from `task list` or the UI.

@@ -54,8 +54,8 @@ child spawns (`own_exe` path).
 `site/` is static HTML + CSS, no scripts, no fonts fetched; keep it that way
 (the footer says so). Hosted on Render as a static site from `render.yaml`
 (publish path `./site`; CI ignores `site/**`). Every push to `main` rebuilds:
-`sh site/build.sh` bakes the git pulse (last push, milestone badge, commits
-today / this week, 30-day strip), the footer numbers and the sharing URLs
+`sh site/build.sh` bakes the git pulse (last push, commits today / this
+week, 30-day strip), the footer numbers and the sharing URLs
 into `index.html` between `<!-- pulse -->`, `<!-- numbers -->` and
 `<!-- og -->` markers, then fails the build if the page breaks its budget
 (0 third-party requests, ≤ 2 KB inline JS, ≤ 250 KB above the fold, ≤ 900 KB

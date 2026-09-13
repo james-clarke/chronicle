@@ -7,9 +7,8 @@
 //! below and falls back to no place when nothing matches, same as an
 //! empty `cwd`.
 //!
-//! No `sha2` dependency is available to this crate (see
-//! `docs/plans/m37-sources-plan.md`), so this is a from-scratch, from-spec
-//! SHA-256 — verified against the standard `""` and `"abc"` test vectors.
+//! This crate takes no `sha2` dependency for one hash, so this is a
+//! from-scratch, from-spec SHA-256 — verified against the standard `""` and `"abc"` test vectors.
 
 use std::path::{Path, PathBuf};
 

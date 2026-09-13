@@ -53,8 +53,9 @@ debug daemon will find the running instance, toggle its window and exit.
 Grammars are in `grammars/`, prompts in `prompts/`, recorded event streams
 and expected outputs in `fixtures/`. Every name in the fixtures is invented;
 [`fixtures/README.md`](fixtures/README.md) describes the cast so a new
-fixture can extend the same story. `docs/plans/` holds one design document
-per milestone, and [`docs/README.md`](docs/README.md) is the index.
+fixture can extend the same story. [`docs/`](docs/README.md) holds the
+reference pages: configuration, the CLI, what is stored, the sources and
+the architecture.
 
 Platform code stays behind the capture traits. Everything downstream only
 sees `CaptureEvent`, so adding a platform means adding a `#[cfg]` module and
@@ -93,10 +94,9 @@ sh scripts/site-tools.sh       # rewrites the table in site/tools.html
 ## Pull requests
 
 - One change per pull request, and a diff that matches the title.
-- Explain why you made the change as well as what changed. If it reverses a
-  decision recorded in a plan under `docs/plans/`, link the plan.
-- Larger work starts as a short design document before code. The format is
-  described in [`docs/README.md`](docs/README.md).
+- Explain why you made the change as well as what changed.
+- For larger work, open an issue first describing the change and why, so
+  the approach is agreed before the code is written.
 - Commit messages follow Conventional Commits, `type(scope): subject`, one
   line, in the style of the existing `git log`.
 - Use whatever tools you like to write the code, AI included. Patches are

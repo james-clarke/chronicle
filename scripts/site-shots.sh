@@ -36,7 +36,7 @@ seed() {
 
   # Sam's declared tasks, before the first placement so the segmenter has
   # evidence to place against. Order matters: the newest declared task of a
-  # project is its sink (m35), so the week's main work is declared last in
+  # project is its sink, so the week's main work is declared last in
   # each project. The description is the "next step" Home shows.
   "$BIN" task add "ACME-11374 staging deploys from a tag" --project contoso \
     --description "Move staging deploys off the branch push and onto a signed tag so a deploy is a decision. Workflow written; next is the GitHub environment protection rule."
@@ -67,7 +67,7 @@ seed() {
   loose=$(by 'Researching cron job')
   [ -n "$loose" ] && sql "DELETE FROM intervals WHERE task_id=$loose; UPDATE tasks SET status='closed', closed_ts=$(date +%s)000, closed_by='user' WHERE id=$loose;"
 
-  # The morning intent (m26), so Home opens on the task list rather than
+  # The morning intent, so Home opens on the task list rather than
   # the "Today I'm on…" picker.
   sql "INSERT OR REPLACE INTO meta (key, value) VALUES ('intent:$(date +%F)', '{\"task_ids\":[$(by 'ACME-11382'),$(by 'ACME-11390')],\"text\":\"PR #415 review round, then the northwind-qa run\"}');"
 
