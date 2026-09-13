@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>chronicle</title>
-  <meta name="description" content="Chronicle runs in the background and turns the windows you were in into the tasks you were actually doing. Standup, timeline, reports by project and chat from one file on your own disk. No account, no server, no telemetry. Open source, AGPL-3.0.">
+  <meta name="description" content="Chronicle runs in the background and files the time you spend in windows into the tasks you were doing. Standup, timeline, reports and chat from one file on your own disk. No account, no server, no telemetry. Open source, AGPL-3.0.">
   <meta property="og:type" content="website">
   <meta property="og:title" content="chronicle — your day, written down">
-  <meta property="og:description" content="A small window in the corner of your screen that knows what you worked on, for how long, and why. Everything stays on your own disk; a cloud model only if you bring the key.">
+  <meta property="og:description" content="A small window in the corner of your screen that keeps track of what you worked on and for how long. Everything stays on your own disk unless you bring a cloud key.">
   <link rel="canonical" href="https://chronicled.dev/">
   <meta property="og:url" content="https://chronicled.dev/">
   <meta property="og:image" content="https://chronicled.dev/img/og.webp">
@@ -30,7 +30,7 @@
 <section class="hero">
   <div class="hero-text">
     <h1>Your day,<br>written down.</h1>
-    <p class="lede">A small window in the corner of your screen that knows what you worked on, for how long, and why. Everything stays on your own disk; a cloud model only if you bring the key.</p>
+    <p class="lede">A small window in the corner of your screen that keeps track of what you worked on and for how long. Everything stays on your own disk unless you bring a cloud key.</p>
     <ul class="nos" aria-label="What Chronicle does not have">
       <li>no account</li>
       <li>no server</li>
@@ -104,13 +104,13 @@
       <li><i class="x"></i>the rest, named by the model</li>
     </ul>
   </div>
-  <p class="band-caption"><b>7h56m</b> placed · 15m loose · 54m away · 29 blocks in 6 tasks · 2 corrections. Sam's Thursday, filed while it was still happening. Hover a block.</p>
+  <p class="band-caption"><b>7h56m</b> placed · 15m loose · 54m away · 29 blocks in 6 tasks · 2 corrections. One Thursday, filed as it happened. Hover a block.</p>
 </section>
 
 <section class="showcase">
   <div class="showcase-head">
     <h2>The day, as it happened.</h2>
-    <p>On the left, what it saw: window titles with the time. On the right, what it wrote down: the day in lanes, one per task, any task open beside it. Drag the handle.</p>
+    <p>Left, the window titles it saw. Right, the same day in lanes, one per task. Drag the handle.</p>
   </div>
   <figure class="wipe">
     <div class="wipe-box">
@@ -152,7 +152,7 @@
 <section class="showcase">
   <div class="showcase-head">
     <h2>The week, added up.</h2>
-    <p>Projects first: a stacked bar per day, the week's mix, every project with its share of the hours and the tasks under it. Then deep work, the longest block, switches, the hour that fragments, and how it compares with last week. Nothing to fill in.</p>
+    <p>Hours per day and per project, the tasks under each, and how this week compares with last. It fills itself in.</p>
   </div>
   <figure class="wide-shot">
     <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars for Monday to Friday, a project mix bar, contoso, northwind and mailer with duration and share per row, and six focus tiles" loading="lazy" decoding="async">
@@ -162,7 +162,7 @@
 
 <section class="how">
   <h2>How it works</h2>
-  <p class="section-lede">One Thursday, first window to standup line. Same rows at every step.</p>
+  <p class="section-lede">One Thursday, from the first window to the standup line.</p>
 
   <div class="stage-heads" aria-hidden="true">
     <span>What happens</span>
@@ -173,9 +173,9 @@
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Sees</h3>
-        <p>Which window is in front, and when you step away. App name and title. No keystrokes, no screenshots, no clipboard.</p>
-        <p>Beside the window, the sources you switch on: the folder each shell command ran in, checkouts and commits to the second, the AI session in your terminal, browser history, the calendar you subscribe to, a microphone in use. Hands off the keyboard is quiet, not away, until the screen locks or ten minutes pass with nothing live.</p>
+        <h3>What it sees</h3>
+        <p>Which window is in front and when you step away. App name and title, nothing else. No keystrokes, no screenshots, no clipboard.</p>
+        <p>Sources you switch on add detail: the folder a shell command ran in, git checkouts and commits, AI coding sessions, browser history, a calendar, whether the microphone is on. Hands off the keyboard counts as quiet, not away, until the screen locks or ten minutes pass.</p>
       </div>
       <figure class="panel">
         <figcaption>events · one batch</figcaption>
@@ -196,9 +196,9 @@
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Places</h3>
-        <p>Project first: the repository a terminal is in, a ticket prefix, a domain, a title pattern you wrote. Then the task, from evidence: a ticket key in a tab or a branch, a window you filed before, the words a task has attracted. Every minute, deterministic, with a margin; a thin margin is marked to confirm.</p>
-        <p>What no task claims for long enough becomes a new one, and the local model's only job is to name it. Minutes it was not running are written down as not captured, never guessed.</p>
+        <h3>How it files time</h3>
+        <p>Project first, from the repository a terminal is in, a ticket prefix, a domain or a pattern you wrote. Then the task, from evidence: a ticket key in a tab or branch, a window you filed before, the words a task tends to attract. The rules run every minute and mark a close call as one to confirm.</p>
+        <p>Time nothing claims becomes a new task, and the local model's only job is to name it. Minutes it was not running are recorded as not captured, never guessed.</p>
       </div>
       <figure class="panel">
         <figcaption>project, then evidence, then a name</figcaption>
@@ -218,9 +218,9 @@ stored   3 segments · 1 to confirm · 0 provisional rows left</code></pre>
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Learns</h3>
-        <p>It will be wrong sometimes. Rename a task, move a block, throw one out; the correction is kept, embedded, and read first next time a window like it comes up. Thrown out is a hard no.</p>
-        <p>Loose time folds into runs you file in one go. Once a day, slivers tidy into their neighbours. One undo.</p>
+        <h3>When it gets it wrong</h3>
+        <p>Rename a task, move a block or throw one out, and the correction is read first the next time a similar window shows up. Thrown out stays out.</p>
+        <p>Loose time is grouped into runs you can file in one go. Once a day small slivers are tidied into their neighbours, with one undo.</p>
       </div>
       <figure class="panel shot">
         <figcaption>organize · unassigned time</figcaption>
@@ -230,8 +230,8 @@ stored   3 segments · 1 to confirm · 0 provisional rows left</code></pre>
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Writes</h3>
-        <p>Standup, timeline, task cards, reports by project, chat. One table, nothing worked out twice, nothing stored anywhere else.</p>
+        <h3>What you get</h3>
+        <p>Standup, timeline, task cards, reports by project and chat, all read from the same table.</p>
       </div>
       <figure class="panel">
         <figcaption>same rows, four ways</figcaption>
@@ -246,9 +246,9 @@ chat      "what did I do before the design review?" → same rows</code></pre>
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Shows its work</h3>
-        <p>Once a day it scores itself: how much of the active day it covered, how many placements you threw out, how many verdicts it got wrong, and how often it was confident and wrong. The numbers sit in Settings and print from <code>chronicle status</code>, per model, so a prompt change that costs accuracy is seen the next morning.</p>
-        <p>Every placement keeps its reason. Two buttons: the digest the model read, the answer it gave.</p>
+        <h3>How well it did</h3>
+        <p>Once a day it scores itself: how much of the day it covered, how many placements you threw out, how often it was confident and wrong. The numbers are in Settings and in <code>chronicle status</code>, per model, so a change that costs accuracy shows up the next morning.</p>
+        <p>Every placement keeps its reason: the digest the model read and the answer it gave.</p>
       </div>
       <figure class="panel">
         <figcaption>chronicle status · self-score</figcaption>
@@ -266,13 +266,13 @@ chat      "what did I do before the design review?" → same rows</code></pre>
 
     <li class="stage">
       <div class="stage-text">
-        <h3>Your own key, if you want</h3>
-        <p>Local until you paste an API key. Then pick what goes out: writing and chat, or everything. The key sits in one file only you can read, and the day's spend has a cap.</p>
-        <p>Storage &amp; server keeps one line saying what left the machine today. With no key it ends in “nothing else”.</p>
+        <h3>A cloud model, if you want one</h3>
+        <p>It stays local until you paste an API key. Then choose what goes out: writing and chat, or everything. The key lives in one file only you can read, and daily spend is capped.</p>
+        <p>Settings lists what left the machine today. With no key, nothing did.</p>
       </div>
       <figure class="panel shot">
         <figcaption>settings › model</figcaption>
-        <img src="img/model.webp" width="880" height="800" alt="Chronicle settings, model: cloud backends with one row, anthropic, claude-sonnet-5, tested in 1180 ms, the local model's last seven days beside it, and the routing grid with chat, narrative, standup, journal, task description, checkpoint, suggest task, name new tasks and advise placements set to anthropic, tidy day, derive batches, live tier and the night pass set to local, and a daily cap" loading="lazy" decoding="async">
+        <img src="img/model.webp" width="880" height="800" alt="Chronicle settings, model: one cloud backend beside the local model's last seven days, and the routing grid for which jobs go to which model, with a daily cap" loading="lazy" decoding="async">
       </figure>
     </li>
 
@@ -282,31 +282,31 @@ chat      "what did I do before the design review?" → same rows</code></pre>
 <section class="showcase" id="sources">
   <div class="showcase-head">
     <h2>What it can read.</h2>
-    <p>The window title is the floor. Everything else is a source you switch on, each one a row in Settings with its state, what it produced this week, and what it would take to connect. Nothing is read that is not listed there.</p>
+    <p>The window title is always there. Everything else is a source you switch on, each a row in Settings with its state and what it produced this week. Nothing is read that is not listed.</p>
   </div>
   <div class="grab">
     <div class="grab-row">
       <h3>On this machine</h3>
-      <p class="fine">Git repositories and their hooks, the folder each shell command ran in, listening ports and Compose stacks, link files beside a project, browser history, a microphone in use.</p>
+      <p class="fine">Git repositories, the folder a shell command ran in, listening ports and Compose stacks, link files beside a project, browser history, the microphone.</p>
     </div>
     <div class="grab-row">
       <h3>Your tools</h3>
-      <p class="fine">AI sessions in eight formats, Claude Code and Codex among them, editor heartbeats, pull requests through <code>gh</code>, a calendar by ICS or Google.</p>
+      <p class="fine">AI coding sessions in eight formats, editor heartbeats, pull requests through <code>gh</code>, a calendar by ICS or Google.</p>
     </div>
     <div class="grab-row">
       <h3>Elsewhere, read-only</h3>
-      <p class="fine">MCP servers, local or remote: a Jira or Linear the derivation can ask about a ticket key. Allowlisted calls, nothing written back without a confirm.</p>
+      <p class="fine">MCP servers, local or remote, so a placement can ask Jira or Linear about a ticket key. Allowlisted calls only, and nothing is written back without a confirm.</p>
     </div>
   </div>
-  <p class="fine">Each source is a row in Settings › Connections with its state on this machine, what it produced this week, and what it would take to connect. The full list, with what each one needs on Linux, macOS and Windows, is on the <a href="tools.html">tools page</a>, written from the same registry the app reads.</p>
+  <p class="fine">The full list, with what each one needs on Linux, macOS and Windows, is on the <a href="tools.html">tools page</a>.</p>
 </section>
 
 <section class="showcase" id="demo">
   <div class="demo-grid">
     <div class="demo-text">
       <h2>Set a task.<br>Go and do it.</h2>
-      <p>Install it, open it, type a task in. Then start working. The first window you open shows up in the feed within seconds, picked up and tracking, with the reason beside it.</p>
-      <p>Nothing to start, nothing to stop, nothing to tag.</p>
+      <p>Install it, open it, type in a task and start working. The first window you open shows up in the feed within seconds, with the reason it was placed there.</p>
+      <p>There is nothing to start, stop or tag.</p>
     </div>
     <figure class="panel shot">
       <figcaption>home · dragged wide</figcaption>
@@ -317,29 +317,29 @@ chat      "what did I do before the design review?" → same rows</code></pre>
 
 <section class="download" id="download">
   <h2>Get it.</h2>
-  <p class="section-lede">One binary, no runtime, no account. The language model downloads on first use, once, and never leaves the machine.</p>
+  <p class="section-lede">One binary, no runtime, no account. The language model downloads once on first use and never leaves the machine.</p>
   <div class="grab">
     <div class="grab-row">
       <h3>Linux <small>x86-64</small></h3>
       <p class="cmd"><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-installer.sh | sh</code></p>
-      <p class="fine">Puts the binary in <code>~/.local/bin</code>. Prefer to place it yourself? Take the <a href="https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-x86_64-unknown-linux-gnu.tar.xz">tarball</a>. Then <code>chronicle service install</code> starts it with your session. X11 and Wayland both, on wlroots compositors and KDE.</p>
+      <p class="fine">Installs to <code>~/.local/bin</code>, or take the <a href="https://github.com/james-clarke/chronicle/releases/latest/download/chronicle-x86_64-unknown-linux-gnu.tar.xz">tarball</a>. Then <code>chronicle service install</code> starts it with your session. X11 and Wayland, on wlroots compositors and KDE.</p>
     </div>
     <div class="grab-row">
       <h3>macOS <small>Apple silicon and Intel</small></h3>
       <p class="cmd"><code>brew install james-clarke/tap/chronicle</code></p>
-      <p class="fine">Ported and compiled for both, never yet run on a Mac, and not signed by Apple, so this is the developer route until both change. Chronicle reads the focused window&rsquo;s title through Accessibility and asks for that permission once, on the first run.</p>
+      <p class="fine">Builds for both, but it has not been run on a Mac yet and is not signed by Apple, so treat it as the developer route for now. It asks for Accessibility permission once, to read window titles.</p>
     </div>
     <div class="grab-row quiet">
       <h3>Windows</h3>
-      <p class="fine">Not yet. The capture layer is being written now, and this line changes when it ships.</p>
+      <p class="fine">Not yet. This line changes when it ships.</p>
     </div>
   </div>
   <p class="fine">Every build, with its checksum, is on the <a href="https://github.com/james-clarke/chronicle/releases">releases page</a>.</p>
 </section>
 
 <section class="build" id="open">
-  <h2>Open source, built in the open.</h2>
-  <p class="section-lede">AGPL-3.0, one repository, no contributor agreement. Every milestone starts as a plan written before the code, with a gate per chunk and a list of what was knowingly left undone, and the plans stay in the tree as the design record. <a href="https://github.com/james-clarke/chronicle/blob/main/README.md">Read the README</a>, or <a href="https://github.com/james-clarke/chronicle/blob/main/docs/README.md">start with the plans index</a>.</p>
+  <h2>Contributing</h2>
+  <p class="section-lede">Chronicle is open source under AGPL-3.0, in one repository on GitHub. If something is wrong or missing, open an issue. If you would rather fix it yourself, the <a href="https://github.com/james-clarke/chronicle/blob/main/README.md">README</a> explains how the code fits together and <a href="https://github.com/james-clarke/chronicle/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a> has the build steps and the checks a pull request has to pass. Pull requests are welcome, and there is nothing to sign.</p>
 </section>
 
 </main>
