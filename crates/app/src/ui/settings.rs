@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use super::{TimelineApp, theme};
+use super::{TimelineApp, View, theme};
 
 /// Editable view of config.toml. Numbers bind directly; list/path fields are
 /// edited as text and parsed on save. Saving rewrites the whole file (hand
@@ -37,8 +37,6 @@ pub(super) struct SettingsPanel {
     /// Dev folders, as written; edited by the Connections rows the same way
     /// `git_repos` is.
     dev_roots: Vec<String>,
-    /// Projects and their rules (m35 chunk 0).
-    projects: super::projects::ProjectsPanel,
     sources: super::connections::LocalSources,
     connections: super::connections::Connections,
     /// Cloud backends + routing (m31 c7); re-read from `models.toml` on
@@ -251,7 +249,6 @@ impl SettingsPanel {
             checkpoint_afk_secs: config.checkpoint_afk_secs,
             git_repos: config.git_repos.clone(),
             dev_roots: config.dev_roots.clone(),
-            projects: super::projects::ProjectsPanel::from_config(&config),
             digest_view: None,
             output_view: None,
             sources: super::connections::LocalSources::from_config(&config),
@@ -286,6 +283,15 @@ impl SettingsPanel {
     /// differed from the file as loaded.
     fn save(&mut self, config_path: &Path) -> Result<bool, String> {
         let mut config = self.base.clone();
+        // `[[projects]]` belongs to the Projects screen (m44 chunk 4): take
+        // it from the file as it stands, so a save here never writes back
+        // the projects this window happened to load hours ago.
+        let fresh =
+            chronicle_core::config::Config::load(config_path).unwrap_or_else(|_| self.base.clone());
+        self.base.projects = fresh.projects.clone();
+        self.base.project_join_min = fresh.project_join_min;
+        config.projects = fresh.projects;
+        config.project_join_min = fresh.project_join_min;
         config.batch_minutes = self.batch_minutes;
         config.afk_close_secs = self.afk_close_secs;
         config.quiet_secs = self.quiet_secs;
@@ -309,7 +315,6 @@ impl SettingsPanel {
         config.git_repos = self.git_repos.clone();
         config.dev_roots = self.dev_roots.clone();
         self.sources.apply(&mut config);
-        self.projects.apply(&mut config)?;
         let toml = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
         let before = toml::to_string_pretty(&self.base).map_err(|e| e.to_string())?;
         if toml == before {
@@ -613,6 +618,7 @@ impl TimelineApp {
         let autohide_now = self.autohide;
         let mut autohide_toggle: Option<bool> = None;
         let mut run_setup = false;
+        let mut open_projects = false;
         let mut cloud_dirty = false;
         let conn = self.conn.as_ref();
         let pipeline = self.pipeline.as_ref();
@@ -705,7 +711,10 @@ impl TimelineApp {
                             );
 
                             section(ui, "Projects", false, jump);
-                            panel.projects.ui(ui, conn);
+                            ui.weak("Projects moved to the Projects screen");
+                            if theme::secondary_button(ui, "open Projects").clicked() {
+                                open_projects = true;
+                            }
 
                             section(ui, "Model", false, jump);
                             ui.label("model path (empty = default preset)");
@@ -997,6 +1006,11 @@ impl TimelineApp {
         }
         if run_setup {
             self.open_setup();
+        }
+        if open_projects {
+            self.settings = None;
+            self.view = View::Projects;
+            self.loaded_at = None;
         }
     }
 }

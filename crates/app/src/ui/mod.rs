@@ -31,6 +31,7 @@ use jiff::tz::TimeZone;
 use jiff::{ToSpan, Zoned};
 use rusqlite::Connection;
 
+use chronicle_core::config::ProjectRule;
 use chronicle_core::intent::Intent;
 use chronicle_core::proposals::Proposal;
 use chronicle_core::storage::FeedBlock;
@@ -530,6 +531,15 @@ enum Action {
     /// Run the open post dialog's action call on a thread (m26). Only ever
     /// reached from the dialog's "post" button.
     Post,
+    /// Add rules to a project through the one config writer, re-file the
+    /// last 30 days and reload config (m44 chunk 3): the timeline/Home
+    /// "file into" menus and the first-sighting repo card all send this.
+    AttachRule {
+        project: String,
+        rules: Vec<ProjectRule>,
+    },
+    /// "ignore" on the first-sighting repo card: never offer it again.
+    DismissRepoCard(String),
 }
 
 /// In-flight inline edit of a workspace artifact in the detail pane.
@@ -582,6 +592,8 @@ struct WeekInsights {
 enum View {
     Home,
     Timeline,
+    /// The project tree, its rules and the unfiled time (m44 chunk 4).
+    Projects,
     Reports,
     Chat,
     /// The first five minutes (m41 chunk 2): not a tab — shown on a fresh
@@ -635,11 +647,33 @@ struct TimelineApp {
     project_collapsed: HashSet<String>,
     /// `project_collapsed` read from meta once.
     collapsed_loaded: bool,
+    /// Configured projects the "file into" menus and the repo card's
+    /// "under" picker list (m44 chunk 3): tree order with depth, discovered
+    /// ones skipped. Rebuilt with `project_groups`.
+    file_into_projects: Vec<(usize, String)>,
+    /// Rules the "file into" menus offer for the block/group now open
+    /// (m44 chunk 3), keyed by its `(start_ms, end_ms)`: one
+    /// `anchored_spans` query per block/group on screen, not per frame.
+    attach_offers: HashMap<(i64, i64), Vec<(String, ProjectRule)>>,
+    /// Discovered repos with focus time this week not yet dismissed
+    /// (m44 chunk 3): `(name, path)`, the Home first-sighting card.
+    discovered_repos: Vec<(String, String)>,
+    /// First-sighting repo cards dismissed or resolved (meta
+    /// `ui_repo_cards_seen`, one lowercased name per line).
+    repo_cards_seen: HashSet<String>,
+    /// `repo_cards_seen` read from meta once.
+    repo_cards_loaded: bool,
+    /// Transient status after a project-rule attach (m44 chunk 3): shown
+    /// at the bottom of Home for `NOTICE_SECS`.
+    notice: Option<(String, Instant)>,
     /// Next frame gives the declare label input focus ("+" on a project
     /// line pre-filled the project).
     declare_focus: bool,
     /// Some = task manager takeover open (Home › Working on › manage).
     tasks: Option<tasks::TaskManager>,
+    /// The Projects view's state (m44 chunk 4); built when the view is
+    /// entered, reloaded after a save or an attach.
+    projects_screen: Option<projects::ProjectsScreen>,
     /// `CHRONICLE_UI_VIEW=tasks`: open the manager once tasks are loaded.
     tasks_requested: bool,
     /// Reassignment targets (open tasks + today's groups, deduped): rebuilt
@@ -908,8 +942,15 @@ impl TimelineApp {
             unfiled_today_ms: 0,
             project_collapsed: HashSet::new(),
             collapsed_loaded: false,
+            file_into_projects: Vec::new(),
+            attach_offers: HashMap::new(),
+            discovered_repos: Vec::new(),
+            repo_cards_seen: HashSet::new(),
+            repo_cards_loaded: false,
+            notice: None,
             declare_focus: false,
             tasks: None,
+            projects_screen: None,
             tasks_requested: false,
             merge_candidates: Vec::new(),
             feed: Vec::new(),
@@ -1125,6 +1166,7 @@ impl TimelineApp {
                 self.closed_tasks = closed;
                 self.load_project_groups();
                 self.set_feed(feed);
+                self.load_attach_offers();
                 self.unassigned_ms = unassigned_ms;
                 self.proposals = proposals;
                 self.error = None;
@@ -1824,11 +1866,25 @@ impl TimelineApp {
                     .map(|v| v.lines().map(str::to_owned).collect())
                     .unwrap_or_default();
         }
+        if !self.repo_cards_loaded {
+            self.repo_cards_loaded = true;
+            self.repo_cards_seen = chronicle_core::storage::get_meta(conn, "ui_repo_cards_seen")
+                .ok()
+                .flatten()
+                .map(|v| v.lines().map(str::to_owned).collect())
+                .unwrap_or_default();
+        }
         let matcher = self
             .config
             .as_ref()
             .map(chronicle_core::project::Matcher::from_config)
             .unwrap_or_default();
+        self.file_into_projects = matcher
+            .tree()
+            .into_iter()
+            .filter(|(_, p)| !p.discovered)
+            .map(|(depth, p)| (depth, p.name.clone()))
+            .collect();
         let now = jiff::Timestamp::now();
         let now_ms = now.as_millisecond();
         let today = now.to_zoned(self.tz.clone()).date();
@@ -1865,6 +1921,19 @@ impl TimelineApp {
         let screen: HashSet<String> = chronicle_core::storage::span_projects_since(conn, week_lo)
             .unwrap_or_default()
             .into_iter()
+            .collect();
+        // First-sighting repo cards (m44 chunk 3): discovered repos with
+        // focus time this week, not yet dismissed or filed.
+        self.discovered_repos = matcher
+            .tree()
+            .into_iter()
+            .filter(|(_, p)| p.discovered && screen.contains(&p.name))
+            .filter(|(_, p)| !self.repo_cards_seen.contains(&p.name.to_ascii_lowercase()))
+            .filter_map(|(_, p)| {
+                p.paths
+                    .first()
+                    .map(|path| (p.name.clone(), path.display().to_string()))
+            })
             .collect();
         // Sources per project: each repo's kinds land on the project the
         // repo resolves to (its folder name is a place).
@@ -2009,6 +2078,32 @@ impl TimelineApp {
                 (!value.is_empty()).then_some(value.as_str()),
             );
         }
+    }
+
+    /// Rules the "file into" menus can offer for each block/group now on
+    /// screen (m44 chunk 3): one `anchored_spans` query per Home feed block
+    /// and per timeline group's overall range, cached until the next
+    /// reload so an open submenu never re-queries per frame.
+    fn load_attach_offers(&mut self) {
+        let Some(conn) = self.conn.as_ref() else {
+            self.attach_offers.clear();
+            return;
+        };
+        let mut offers = HashMap::new();
+        for b in &self.feed {
+            offers
+                .entry((b.start_ts, b.end_ts))
+                .or_insert_with(|| attach_offers_for(conn, b.start_ts, b.end_ts));
+        }
+        for g in &self.groups {
+            let Some((lo, hi)) = group_offer_range(g) else {
+                continue;
+            };
+            offers
+                .entry((lo, hi))
+                .or_insert_with(|| attach_offers_for(conn, lo, hi));
+        }
+        self.attach_offers = offers;
     }
 
     /// Open the task manager takeover (m35 chunk 3).
@@ -2453,6 +2548,35 @@ impl TimelineApp {
                     Err(e) => Err(e),
                 }
             }
+            Action::AttachRule { project, rules } => {
+                match crate::project::attach_and_refile(&self.data_dir, &project, &rules, 30) {
+                    Ok(outcome) => {
+                        let msg = outcome
+                            .render()
+                            .lines()
+                            .take(2)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.notice = Some((msg, Instant::now()));
+                        self.config = chronicle_core::config::Config::load(&self.config_path).ok();
+                        let key = project.trim().to_ascii_lowercase();
+                        if !key.is_empty() && self.repo_cards_seen.insert(key) {
+                            persist_repo_cards_seen(conn, &self.repo_cards_seen);
+                        }
+                        self.loaded_at = None;
+                    }
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+                return;
+            }
+            Action::DismissRepoCard(name) => {
+                let key = name.trim().to_ascii_lowercase();
+                if !key.is_empty() && self.repo_cards_seen.insert(key) {
+                    persist_repo_cards_seen(conn, &self.repo_cards_seen);
+                }
+                self.loaded_at = None;
+                return;
+            }
         };
         // In segmenter mode a correction teaches the day: re-score it now so
         // every stretch the correction speaks to moves with it.
@@ -2524,6 +2648,7 @@ impl TimelineApp {
                 // Needs the task lists (pick candidates): opens after this load.
                 Ok("triage") => self.triage_requested = true,
                 Ok("tasks") => self.tasks_requested = true,
+                Ok("projects") => self.view = View::Projects,
                 _ => {}
             }
         }
@@ -2866,6 +2991,7 @@ impl TimelineApp {
                                     for (view, label) in [
                                         (View::Home, "home"),
                                         (View::Timeline, "timeline"),
+                                        (View::Projects, "projects"),
                                         (View::Reports, "reports"),
                                         (View::Chat, "chat"),
                                     ] {
@@ -2948,12 +3074,12 @@ impl TimelineApp {
                         });
                         // Per-view controls on a second row; tabs + nav don't fit
                         // side by side at 400px.
-                        if self.view != View::Home {
+                        if !matches!(self.view, View::Home | View::Projects) {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 match self.view {
                                     // Home is day-independent: no nav controls.
-                                    View::Home | View::Setup => {}
+                                    View::Home | View::Setup | View::Projects => {}
                                     View::Chat => {
                                         if ui.button("new chat").clicked() {
                                             self.chat_new();
@@ -3045,6 +3171,7 @@ impl TimelineApp {
         match self.view {
             View::Home => self.home_ui(ui),
             View::Timeline => self.timeline_ui(ui),
+            View::Projects => self.projects_ui(ui),
             View::Chat => self.chat_ui(ui),
             View::Setup => self.setup_ui(ui),
             View::Reports => {
@@ -3113,6 +3240,105 @@ fn assign_runs(
     }
     *claimed = Some(total);
     Ok(())
+}
+
+/// A `TaskGroup`'s overall range (m44 chunk 3): min interval start, max
+/// interval end. `None` for a group with no intervals today.
+fn group_offer_range(group: &TaskGroup) -> Option<(i64, i64)> {
+    let lo = group
+        .intervals
+        .iter()
+        .map(|iv| iv.start.timestamp().as_millisecond())
+        .min()?;
+    let hi = group
+        .intervals
+        .iter()
+        .map(|iv| iv.end.timestamp().as_millisecond())
+        .max()?;
+    Some((lo, hi))
+}
+
+/// Rules a block's or group's evidence could add to a project (m44 chunk
+/// 3): one `repo` per distinct Place anchor, one `site` per distinct
+/// Domain anchor, then `title`/`app` for the app with the most time in
+/// `[lo, hi)`. Each entry is the menu label and the rule it sends.
+fn attach_offers_for(conn: &Connection, lo: i64, hi: i64) -> Vec<(String, ProjectRule)> {
+    let Ok(spans) = chronicle_core::storage::anchored_spans(conn, lo, hi) else {
+        return Vec::new();
+    };
+    let mut offers = Vec::new();
+    let mut places = HashSet::new();
+    let mut domains = HashSet::new();
+    let mut by_app_title: HashMap<(String, String), i64> = HashMap::new();
+    for s in &spans {
+        let ms = (s.end_ts.min(hi) - s.start_ts.max(lo)).max(0);
+        *by_app_title
+            .entry((s.app.clone(), s.title.clone()))
+            .or_default() += ms;
+        for a in &s.anchors {
+            match a.kind {
+                chronicle_core::extract::AnchorKind::Place if places.insert(a.value.clone()) => {
+                    offers.push((
+                        format!("repo {}", a.value),
+                        ProjectRule::Repo(a.value.clone()),
+                    ));
+                }
+                chronicle_core::extract::AnchorKind::Domain if domains.insert(a.value.clone()) => {
+                    offers.push((
+                        format!("site {}", a.value),
+                        ProjectRule::Domain(a.value.clone()),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(((app, title), _)) = by_app_title.iter().max_by_key(|(_, ms)| **ms) {
+        offers.push((
+            format!("title \u{201c}{title}\u{201d}"),
+            ProjectRule::Title(chronicle_core::config::title_rule(title)),
+        ));
+        offers.push((format!("app {app}"), ProjectRule::App(app.clone())));
+    }
+    offers
+}
+
+/// Write the first-sighting repo card's dismissal list back to meta
+/// `ui_repo_cards_seen` (m44 chunk 3), one lowercased name per line.
+fn persist_repo_cards_seen(conn: &Connection, seen: &HashSet<String>) {
+    let mut names: Vec<&str> = seen.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    let value = names.join("\n");
+    let _ = chronicle_core::storage::set_meta(conn, "ui_repo_cards_seen", Some(&value));
+}
+
+/// The "file into" submenu content next to "move to"/"assign to": every
+/// configured project (discovered ones skipped), each opening the rules
+/// this block's evidence offers it. Nothing to offer draws nothing.
+fn file_into_menu(
+    ui: &mut egui::Ui,
+    file_into: &[(usize, String)],
+    offers: &[(String, ProjectRule)],
+    pending: &mut Option<Action>,
+) {
+    if offers.is_empty() || file_into.is_empty() {
+        return;
+    }
+    ui.menu_button("file into", |ui| {
+        for (depth, project) in file_into {
+            ui.menu_button(format!("{}{project}", "  ".repeat(*depth)), |ui| {
+                for (label, rule) in offers {
+                    if ui.button(label).clicked() {
+                        *pending = Some(Action::AttachRule {
+                            project: project.clone(),
+                            rules: vec![rule.clone()],
+                        });
+                        ui.close();
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Hand the current press to the window manager as a move or resize. The WM

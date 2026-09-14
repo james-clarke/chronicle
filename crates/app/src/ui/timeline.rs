@@ -5,10 +5,12 @@ use chronicle_mcp::ActionCall;
 use eframe::egui;
 use jiff::{ToSpan, Zoned};
 
+use chronicle_core::config::ProjectRule;
 use chronicle_core::storage::AgentLane;
 
 use super::{
-    Action, EditState, SessionRow, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, fmt_dur, theme,
+    Action, EditState, SessionRow, SpanRow, TaskGroup, TimelineApp, WorkspaceEdit, file_into_menu,
+    fmt_dur, group_offer_range, theme,
 };
 
 impl TimelineApp {
@@ -51,6 +53,11 @@ impl TimelineApp {
                     let post = &mut self.post;
                     let mut close_detail = false;
                     let color = theme::task_color(group.task_id, group.project.as_deref());
+                    let file_into = &self.file_into_projects;
+                    let offers = group_offer_range(group)
+                        .and_then(|k| self.attach_offers.get(&k))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
                     if narrow {
                         // Actions pinned to the widget's bottom edge; the
                         // bottom panel must be added before the CentralPanel.
@@ -78,6 +85,8 @@ impl TimelineApp {
                                         actions,
                                         post,
                                         &mut pending,
+                                        file_into,
+                                        offers,
                                     );
                                 });
                         });
@@ -111,6 +120,8 @@ impl TimelineApp {
                                 actions,
                                 post,
                                 &mut pending,
+                                file_into,
+                                offers,
                             );
                             ui.add_space(10.0);
                             detail_actions(ui, group, edit, merge_pick, &mut pending);
@@ -1340,6 +1351,8 @@ fn detail_ui(
     actions: &[ActionCall],
     post: &mut Option<PostDialog>,
     pending: &mut Option<Action>,
+    file_into: &[(usize, String)],
+    offers: &[(String, ProjectRule)],
 ) -> bool {
     let mut close = false;
     let content_w = theme::content_width(ui);
@@ -1453,7 +1466,9 @@ fn detail_ui(
     }
 
     detail_section(ui, "Sessions", Some(n), |_| {});
-    sessions_ui(ui, content_w, group, spans, candidates, pending);
+    sessions_ui(
+        ui, content_w, group, spans, candidates, pending, file_into, offers,
+    );
 
     if !group.evidence.is_empty() {
         detail_section(ui, "Where the time went", None, |_| {});
@@ -1747,6 +1762,7 @@ const SHORT_SESSION_MS: i64 = 2 * 60_000;
 /// row's `…` menu. Hover a segment for app · title · duration. Short
 /// sessions fold into one summary row (m25) so seven rows of one-minute
 /// slivers do not bury the real ones.
+#[allow(clippy::too_many_arguments)]
 fn sessions_ui(
     ui: &mut egui::Ui,
     content_w: f32,
@@ -1754,6 +1770,8 @@ fn sessions_ui(
     spans: &[SpanRow],
     candidates: &[(i64, String)],
     pending: &mut Option<Action>,
+    file_into: &[(usize, String)],
+    offers: &[(String, ProjectRule)],
 ) {
     let longest = group
         .sessions
@@ -1786,6 +1804,7 @@ fn sessions_ui(
                     }
                 }
             });
+            file_into_menu(ui, file_into, offers, pending);
         });
     };
     for s in &group.sessions {

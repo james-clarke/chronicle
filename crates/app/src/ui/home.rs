@@ -3,14 +3,21 @@
 //! debug list).
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use eframe::egui;
 
+use chronicle_core::config::ProjectRule;
+
 use super::timeline::{matches_filter, merge_item, merge_picker};
 use super::{
-    Action, EditState, FeedBlock, OpenRow, Proposal, SpanRow, StandupRow, TimelineApp, fmt_dur,
-    theme,
+    Action, EditState, FeedBlock, OpenRow, Proposal, SpanRow, StandupRow, TimelineApp,
+    file_into_menu, fmt_dur, theme,
 };
+
+/// How long a project-rule attach's status line shows at the bottom of
+/// Home before it fades from view (m44 chunk 3).
+const NOTICE_SECS: f32 = 8.0;
 
 impl TimelineApp {
     /// "Where you left off" card: newest checkpoint since the last UI open.
@@ -326,6 +333,9 @@ impl TimelineApp {
                                     progress: self.progress.as_ref(),
                                     tidy: self.tidy,
                                     rescore: self.rescore,
+                                    attach_offers: &self.attach_offers,
+                                    file_into: &self.file_into_projects,
+                                    discovered_repos: &self.discovered_repos,
                                 },
                                 &mut self.new_label,
                                 &mut self.proposal_edit,
@@ -704,7 +714,10 @@ impl TimelineApp {
                                 candidates: &candidates,
                                 progress: self.progress.as_ref(),
                                 tidy: self.tidy,
-            rescore: self.rescore,
+                                rescore: self.rescore,
+                                attach_offers: &self.attach_offers,
+                                file_into: &self.file_into_projects,
+                                discovered_repos: &self.discovered_repos,
                             },
                             new_label,
                             proposal_edit,
@@ -733,6 +746,15 @@ impl TimelineApp {
                         });
                     }
                 });
+            if let Some((msg, at)) = &self.notice
+                && at.elapsed().as_secs_f32() < NOTICE_SECS
+            {
+                ui.add_space(theme::SPACE_XS);
+                ui.colored_label(theme::palette::ACCENT, msg);
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32(
+                    NOTICE_SECS - at.elapsed().as_secs_f32(),
+                ));
+            }
         });
         if let Some(action) = pending {
             self.apply_action(action);
@@ -1167,6 +1189,73 @@ fn proposal_card(
     ui.add_space(theme::SPACE_XS);
 }
 
+/// First-sighting card for a discovered repo with focus time this week
+/// (m44 chunk 3): file it as its own project, fold it under a configured
+/// one, or ignore it — the card is gone either way.
+fn repo_card_ui(
+    ui: &mut egui::Ui,
+    name: &str,
+    path: &str,
+    file_into: &[(usize, String)],
+    pending: &mut Option<Action>,
+) {
+    egui::Frame::new()
+        .fill(theme::palette::ACCENT.gamma_multiply(0.10))
+        .stroke(egui::Stroke::new(
+            1.0,
+            theme::palette::ACCENT.gamma_multiply(0.35),
+        ))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_MD))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(format!("New repo: {name}"))
+                    .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                    .color(theme::palette::TEXT),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(path)
+                        .text_style(egui::TextStyle::Small)
+                        .color(theme::palette::TEXT_DIM),
+                )
+                .truncate(),
+            );
+            ui.add_space(theme::SPACE_XS);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "new project")
+                    .on_hover_text("its own project, named for the folder")
+                    .clicked()
+                {
+                    *pending = Some(Action::AttachRule {
+                        project: name.to_owned(),
+                        rules: vec![ProjectRule::Repo(path.to_owned())],
+                    });
+                }
+                ui.menu_button("under", |ui| {
+                    for (depth, project) in file_into {
+                        let label = format!("{}{project}", "  ".repeat(*depth));
+                        if ui.button(label).clicked() {
+                            *pending = Some(Action::AttachRule {
+                                project: name.to_owned(),
+                                rules: vec![
+                                    ProjectRule::Repo(path.to_owned()),
+                                    ProjectRule::Parent(Some(project.clone())),
+                                ],
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+                if theme::ghost_button(ui, "ignore").clicked() {
+                    *pending = Some(Action::DismissRepoCard(name.to_owned()));
+                }
+            });
+        });
+    ui.add_space(theme::SPACE_XS);
+}
+
 /// One feed block on the row grammar: block start in the time column, a
 /// task dot (or a hollow ring while nothing claims it), the task label (or
 /// the humanised top window title), the focus time, and a menu of what the
@@ -1184,6 +1273,8 @@ fn feed_row(
     candidates: &[(i64, String)],
     new_label: &mut String,
     pending: &mut Option<Action>,
+    file_into: &[(usize, String)],
+    offers: &[(String, ProjectRule)],
 ) {
     let top = block.lines.first();
     let app = top.map(|l| l.0.as_str()).unwrap_or("");
@@ -1392,6 +1483,7 @@ fn feed_row(
                         }
                     }
                 });
+                file_into_menu(ui, file_into, offers, pending);
                 if ui.button("eject").clicked() {
                     *pending = Some(Action::EjectBlock {
                         interval_id: c.interval_id,
@@ -1418,6 +1510,7 @@ fn feed_row(
                         }
                     }
                 });
+                file_into_menu(ui, file_into, offers, pending);
             }
         });
     });
@@ -1462,6 +1555,13 @@ struct FeedSection<'a> {
     tidy: Option<Option<i64>>,
     /// The day's last same-day re-score: `(correction id, rows moved)`.
     rescore: Option<(i64, usize)>,
+    /// Rules the "file into" menus offer, by block `(start_ms, end_ms)`
+    /// (m44 chunk 3).
+    attach_offers: &'a HashMap<(i64, i64), Vec<(String, ProjectRule)>>,
+    /// Configured projects the "file into"/"under" menus list.
+    file_into: &'a [(usize, String)],
+    /// First-sighting repo cards to draw above the proposals.
+    discovered_repos: &'a [(String, String)],
 }
 
 /// A progress row older than this is a stale meta value from a dead worker.
@@ -1489,13 +1589,21 @@ fn feed_section_ui(
         progress,
         tidy,
         rescore,
+        attach_offers,
+        file_into,
+        discovered_repos,
     } = f;
     let progress = progress
         .filter(|p| jiff::Timestamp::now().as_millisecond() - p.started_ts < PROGRESS_STALE_MS);
     // The feed: the day's blocks newest first, each with who
     // placed it and why; the header carries the day's whole
     // unassigned total.
-    if !feed_vis.is_empty() || !proposals.is_empty() || unassigned_ms > 0 || progress.is_some() {
+    if !feed_vis.is_empty()
+        || !proposals.is_empty()
+        || !discovered_repos.is_empty()
+        || unassigned_ms > 0
+        || progress.is_some()
+    {
         ui.add_space(theme::SECTION_GAP);
         theme::section_header_with(ui, "Feed", None, |ui| {
             if theme::ghost_button(ui, "organize")
@@ -1539,6 +1647,9 @@ fn feed_section_ui(
                 .on_hover_ui(feed_help_ui);
         });
         ui.add_space(theme::SPACE_XS);
+        for (name, path) in discovered_repos {
+            repo_card_ui(ui, name, path, file_into, pending);
+        }
         for p in proposals {
             proposal_card(ui, tz, p, candidates, proposal_edit, pending);
         }
@@ -1564,6 +1675,11 @@ fn feed_section_ui(
                     candidates,
                     new_label,
                     pending,
+                    file_into,
+                    attach_offers
+                        .get(&(block.start_ts, block.end_ts))
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
                 );
             });
         }
