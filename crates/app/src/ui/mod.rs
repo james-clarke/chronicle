@@ -2597,29 +2597,53 @@ impl eframe::App for TimelineApp {
             );
         }
         ui.painter().rect_filled(card, radius, theme::palette::BG);
-        // Resize grip in the card's bottom-right corner: the decoration-less
-        // window has no frame to grab, so a drag here hands the WM a
-        // south-east resize (the same route the top bar uses to move).
-        // Registered BEFORE the view so any control that reaches into the
+        // Resize zones in the card's four corners: the decoration-less
+        // window has no frame to grab, so a drag here hands the WM a resize
+        // (the same route the top bar uses to move). The bottom pair is
+        // registered BEFORE the view so any control that reaches into a
         // corner (chat's send, the detail pane's close task) wins the hit
-        // test; the grip only owns the bare corner. Painted after.
-        let grip = egui::Rect::from_min_max(card.max - egui::Vec2::splat(18.0), card.max);
-        let grip_resp = ui.interact(grip, ui.id().with("resize_grip"), egui::Sense::drag());
+        // test; the top pair AFTER it, since the bar's own drag sense would
+        // otherwise win, and no wider than the bar's side margin so no
+        // button sits under them. Only the south-east zone is painted.
+        let grip_resp = resize_zone(
+            ui,
+            card,
+            egui::Align2::RIGHT_BOTTOM,
+            18.0,
+            egui::ResizeDirection::SouthEast,
+            egui::CursorIcon::ResizeSouthEast,
+        );
+        resize_zone(
+            ui,
+            card,
+            egui::Align2::LEFT_BOTTOM,
+            18.0,
+            egui::ResizeDirection::SouthWest,
+            egui::CursorIcon::ResizeSouthWest,
+        );
         let mut content = ui.new_child(egui::UiBuilder::new().max_rect(card));
         self.window_ui(&mut content);
-        if grip_resp.drag_started() {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::BeginResize(
-                    egui::ResizeDirection::SouthEast,
-                ));
-        }
+        resize_zone(
+            ui,
+            card,
+            egui::Align2::LEFT_TOP,
+            12.0,
+            egui::ResizeDirection::NorthWest,
+            egui::CursorIcon::ResizeNorthWest,
+        );
+        resize_zone(
+            ui,
+            card,
+            egui::Align2::RIGHT_TOP,
+            12.0,
+            egui::ResizeDirection::NorthEast,
+            egui::CursorIcon::ResizeNorthEast,
+        );
         let grip_color = if grip_resp.hovered() || grip_resp.dragged() {
             theme::palette::TEXT_DIM
         } else {
             theme::palette::BORDER
         };
-        let grip_resp = grip_resp.on_hover_cursor(egui::CursorIcon::ResizeSouthEast);
-        let _ = grip_resp;
         let painter = ui.painter();
         for (i, inset) in [5.0, 9.0].iter().enumerate() {
             let a = egui::pos2(card.max.x - 4.0 - inset, card.max.y - 4.0);
@@ -2877,10 +2901,10 @@ impl TimelineApp {
                 // drag (6pt moved or 0.8s held). The bar is the drag target
                 // from the press down even over a button (buttons only sense
                 // clicks), so gating on any movement let a 1px jitter mid-
-                // click give the pointer to the WM: the release never came
-                // back and the button "needed a double click".
+                // click give the pointer to the WM and the button "needed a
+                // double click". Fires once: the hand-off forgets the press.
                 if bar.response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    hand_to_wm(ui.ctx(), egui::ViewportCommand::StartDrag);
                 }
             });
 
@@ -2955,4 +2979,38 @@ fn assign_runs(
     }
     *claimed = Some(total);
     Ok(())
+}
+
+/// Hand the current press to the window manager as a move or resize. The WM
+/// grabs the pointer for the gesture, so the button release never reaches
+/// egui; forget the press here, or the widget stays "dragged" and re-hands
+/// the pointer on the next motion (the window that would not let go).
+fn hand_to_wm(ctx: &egui::Context, cmd: egui::ViewportCommand) {
+    ctx.send_viewport_cmd(cmd);
+    ctx.input_mut(|i| i.pointer = Default::default());
+}
+
+/// A `size`-square drag zone in the `corner` of `card` that starts a WM
+/// resize in `dir`. Registered where the caller wants it in the hit-test
+/// order; the response is the caller's to paint from.
+fn resize_zone(
+    ui: &mut egui::Ui,
+    card: egui::Rect,
+    corner: egui::Align2,
+    size: f32,
+    dir: egui::ResizeDirection,
+    cursor: egui::CursorIcon,
+) -> egui::Response {
+    let zone = corner.anchor_size(corner.pos_in_rect(&card), egui::Vec2::splat(size));
+    let resp = ui
+        .interact(
+            zone,
+            ui.id().with(("resize", corner.0)),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(cursor);
+    if resp.drag_started() {
+        hand_to_wm(ui.ctx(), egui::ViewportCommand::BeginResize(dir));
+    }
+    resp
 }
