@@ -315,7 +315,12 @@ impl SettingsPanel {
         if toml == before {
             return Ok(false);
         }
-        std::fs::write(config_path, toml).map_err(|e| e.to_string())?;
+        // The one writer (m44 chunk 3): the same save every attach surface
+        // ends in, then the daemon picks the projects up without a restart.
+        config.save(config_path).map_err(|e| e.to_string())?;
+        if let Some(dir) = config_path.parent() {
+            let _ = crate::send_ctrl(&crate::socket_path(dir), "reload");
+        }
         self.base = config;
         Ok(true)
     }

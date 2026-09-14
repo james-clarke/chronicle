@@ -57,6 +57,8 @@ pub(crate) enum CtrlMsg {
     Toggle,
     DeriveNow,
     Consolidate,
+    /// A surface wrote config.toml: pick up the projects and rules now.
+    Reload,
     /// Capture went blind (focus provider exit, screen lock): the ledger row
     /// ends at `ts` with `reason` (m32 chunk 0).
     CaptureLost {
@@ -79,6 +81,9 @@ pub(crate) enum CtrlCmd {
     /// Home's "tidy today": run the day tier now.
     Consolidate,
     Status,
+    /// Re-read config.toml for the parts that apply without a restart:
+    /// the projects and their rules (m44 chunk 3).
+    Reload,
 }
 
 pub(crate) fn parse_ctrl_cmd(line: &str) -> Option<CtrlCmd> {
@@ -87,6 +92,7 @@ pub(crate) fn parse_ctrl_cmd(line: &str) -> Option<CtrlCmd> {
         "derive" => Some(CtrlCmd::DeriveNow),
         "consolidate" => Some(CtrlCmd::Consolidate),
         "status" => Some(CtrlCmd::Status),
+        "reload" => Some(CtrlCmd::Reload),
         _ => None,
     }
 }
@@ -125,6 +131,7 @@ pub(crate) fn spawn_ctrl_listener(
                             CtrlCmd::Toggle => CtrlMsg::Toggle,
                             CtrlCmd::DeriveNow => CtrlMsg::DeriveNow,
                             CtrlCmd::Consolidate => CtrlMsg::Consolidate,
+                            CtrlCmd::Reload => CtrlMsg::Reload,
                             CtrlCmd::Status => unreachable!("handled above"),
                         };
                         if tx.send(msg).is_err() {
@@ -417,7 +424,7 @@ fn run_loop(
     ctrl_rx: crossbeam_channel::Receiver<CtrlMsg>,
 ) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
-    let config = Config::load(&data_dir.join("config.toml"))?;
+    let mut config = Config::load(&data_dir.join("config.toml"))?;
     let filters = Filters::new(&config)?;
     let mut conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
     // Daemon downtime must not read as focus time: mark a gap as AFK-from-the-
@@ -472,7 +479,7 @@ fn run_loop(
     }
     let mut scheduler = Scheduler::new();
     let _ = chronicle_core::storage::set_derive_progress(&conn, None);
-    let distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+    let mut distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
     // The soft tier's embedding model (m30 chunk 6), loaded on first use
     // when `embed_model` names a file that exists; `Some(None)` = tried and
     // failed, do not retry every tick.
@@ -531,6 +538,19 @@ fn run_loop(
                     Ok(CtrlMsg::Consolidate) => {
                         scheduler.consolidate_requested = true;
                         scheduler.tick(&conn, &config, data_dir, idle_since, true);
+                    }
+                    Ok(CtrlMsg::Reload) => {
+                        // The projects and their rules apply to the next
+                        // sessionize and placement; capture threads keep
+                        // the settings they started with.
+                        match Config::load(&data_dir.join("config.toml")) {
+                            Ok(fresh) => {
+                                config = fresh;
+                                distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+                                tracing::info!("config.toml reloaded: {} projects", config.projects_effective().len());
+                            }
+                            Err(e) => tracing::error!("config.toml reload failed, keeping the loaded one: {e}"),
+                        }
                     }
                     Ok(CtrlMsg::Status(reply)) => {
                         let _ = reply.send(status_json(&scheduler, idle_since, &mut ui_child, started));

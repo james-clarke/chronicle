@@ -50,7 +50,7 @@ A missing `config.toml` is not an error. Chronicle starts with the defaults belo
 |---|---|---|
 | `dev_roots` | `[]` | Folders (`~` expanded) whose immediate git-repo subdirectories are all watched, the same as if each were listed in `git_repos`; a new clone under the folder needs no config edit. |
 | `git_repos` | `[]` | Repo paths outside any dev folder, polled for branch and commit evidence (`~` expanded). Empty (with `dev_roots` also empty) means git capture is off. |
-| `projects` | `[]` | The projects in force; every focus span files into the first project whose rule matches it (repo path or place, ticket prefix, domain, title regex, app), or stays unfiled. Empty means one project per watched repo (`dev_roots` children plus `git_repos`), named after its folder. |
+| `projects` | `[]` | The projects in force; every focus span files into the first project whose rule matches it (repo path or place, ticket prefix, domain, title regex, app), or stays unfiled. Empty means one project per watched repo (`dev_roots` children plus `git_repos`), named after its folder. A declared task's ticket and pinned scope are matched between the place rules and the rest. The running daemon picks up an edit to this block when it is written through the app, the Projects screen or `project attach`; a hand edit applies at the next start or after `chronicle project rebuild`. |
 | `project_join_min` | `2` | An unfiled span shorter than this many minutes, sitting between two spans of the same project, joins that project (treats a quick tab glance as part of the surrounding work). `0` turns this off. |
 
 Each entry in `projects` is a `ProjectCfg`:

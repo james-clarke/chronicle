@@ -503,6 +503,12 @@ enum Action {
     },
     /// "Not a task": park the proposal for the day.
     DismissProposal(i64),
+    /// Merge a proposal's stretches onto an existing task instead of
+    /// declaring a new one (m44 chunk 2).
+    MergeProposal {
+        id: i64,
+        to_task: i64,
+    },
     /// Confirm a provisional feed block (m24): its interval becomes a user row.
     KeepBlock(i64),
     /// Home's "tidy today": ask the daemon for a day-tier run (m27).
@@ -621,6 +627,9 @@ struct TimelineApp {
     closed_tasks: Vec<OpenRow>,
     /// Home's project lines (m35 chunk 3), rebuilt with the reload.
     project_groups: Vec<ProjectGroup>,
+    /// Today's unassigned focus time (m44 chunk 2), rebuilt alongside
+    /// `project_groups`: the review row above them.
+    unfiled_today_ms: i64,
     /// Projects collapsed on Home (meta `ui_projects_collapsed`, one name
     /// per line; `""` is the unfiled group).
     project_collapsed: HashSet<String>,
@@ -683,6 +692,9 @@ struct TimelineApp {
     edit: Option<EditState>,
     /// Task whose inline "merge into" picker is open (from a card/row menu).
     merge_pick: Option<i64>,
+    /// A proposal card's inline label edit: `(proposal id, edited text)`
+    /// (m44 chunk 2).
+    proposal_edit: Option<(i64, String)>,
     /// In-flight journal/checkpoint inline edit (detail pane).
     ws_edit: Option<WorkspaceEdit>,
     /// Task whose detail pane is open (card click toggles).
@@ -893,6 +905,7 @@ impl TimelineApp {
             open_tasks: Vec::new(),
             closed_tasks: Vec::new(),
             project_groups: Vec::new(),
+            unfiled_today_ms: 0,
             project_collapsed: HashSet::new(),
             collapsed_loaded: false,
             declare_focus: false,
@@ -921,6 +934,7 @@ impl TimelineApp {
             new_project: String::new(),
             edit: None,
             merge_pick: None,
+            proposal_edit: None,
             ws_edit: None,
             selected_task: None,
             loaded_at: None,
@@ -1834,6 +1848,15 @@ impl TimelineApp {
                 ))
             })
             .unwrap_or((now_ms, now_ms));
+        // Today's unfiled focus minutes (m44 chunk 2): the Home review row.
+        self.unfiled_today_ms = conn
+            .query_row(
+                "SELECT COALESCE(SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)), 0) FROM spans
+                 WHERE kind='focus' AND project IS NULL AND start_ts < ?2 AND end_ts > ?1",
+                [day_lo, day_hi],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
         let live: HashSet<String> =
             chronicle_core::storage::span_projects_since(conn, now_ms - LIVE_MS)
                 .unwrap_or_default()
@@ -2024,9 +2047,36 @@ impl TimelineApp {
                 assign_runs(conn, now, &runs, to_task, &mut claimed)
             }
             Action::AcceptProposal { id, label } => {
-                chronicle_core::proposals::accept(conn, now, id, &label).map(|_| ())
+                match chronicle_core::proposals::accept(conn, now, id, &label) {
+                    Ok((task_id, _ms)) => {
+                        if let Some(cfg) = self.config.as_ref()
+                            && let Err(e) = chronicle_core::segmenter::seed_task_evidence(
+                                conn, cfg, now, task_id,
+                            )
+                        {
+                            tracing::warn!("seeding proposal task {task_id}: {e}");
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Action::DismissProposal(id) => chronicle_core::proposals::dismiss(conn, id),
+            Action::MergeProposal { id, to_task } => {
+                match chronicle_core::proposals::merge(conn, now, id, to_task) {
+                    Ok(_ms) => {
+                        if let Some(cfg) = self.config.as_ref()
+                            && let Err(e) = chronicle_core::segmenter::seed_task_evidence(
+                                conn, cfg, now, to_task,
+                            )
+                        {
+                            tracing::warn!("seeding merged task {to_task}: {e}");
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             Action::TidyToday => {
                 let _ = crate::send_ctrl(&self.sock_path, "consolidate");
                 Ok(())

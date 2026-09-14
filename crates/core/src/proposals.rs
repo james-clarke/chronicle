@@ -6,6 +6,10 @@
 //! spans; accept declares the task and claims the runs, dismiss parks the
 //! cluster for the day (no correction: "not a task" is not a teaching
 //! signal about any task).
+//!
+//! Since m44 chunk 2 the segmenter's new clusters come here too, as
+//! `segment` proposals: their time sits on the project's other work and
+//! confirming one makes the task and moves the stretches onto it.
 
 use std::collections::HashMap;
 
@@ -51,6 +55,9 @@ pub struct Cluster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Proposal {
     pub id: i64,
+    /// `runs` (unassigned runs the pre-pass could not place) or `segment`
+    /// (a cluster the segmenter would have minted a task for).
+    pub source: String,
     pub start_ts: i64,
     pub end_ts: i64,
     pub ms: i64,
@@ -222,12 +229,16 @@ pub fn refresh(
         .map(|c| c.start_ts)
         .collect();
     {
-        let mut stale = tx.prepare("SELECT start_ts FROM proposals WHERE status='open'")?;
+        let mut stale =
+            tx.prepare("SELECT start_ts FROM proposals WHERE status='open' AND source='runs'")?;
         let open: Vec<i64> = stale
             .query_map([], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         for s in open.iter().filter(|s| !heads.contains(s)) {
-            tx.execute("DELETE FROM proposals WHERE start_ts=?1", [s])?;
+            tx.execute(
+                "DELETE FROM proposals WHERE start_ts=?1 AND source='runs'",
+                [s],
+            )?;
         }
     }
     for c in clusters.iter().filter(|c| c.ms >= MIN_CLUSTER_MS) {
@@ -238,7 +249,7 @@ pub fn refresh(
              ON CONFLICT(start_ts) DO UPDATE SET
                  end_ts=excluded.end_ts, ms=excluded.ms, runs=excluded.runs,
                  project=COALESCE(proposals.project, excluded.project)
-             WHERE proposals.status='open'",
+             WHERE proposals.status='open' AND proposals.source='runs'",
             params![c.start_ts, c.end_ts, c.ms, runs_json, c.project, hi],
         )?;
     }
@@ -296,7 +307,7 @@ fn day_titles(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<(String, String
 pub fn open_proposals(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Proposal>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.start_ts, p.end_ts, p.ms, p.runs, p.project, p.label, p.description,
-                COALESCE(j.status IN ('pending', 'running'), 0)
+                COALESCE(j.status IN ('pending', 'running'), 0), p.source
          FROM proposals p LEFT JOIN ai_jobs j ON j.id = p.job_id
          WHERE p.status='open' AND p.start_ts >= ?1 AND p.start_ts < ?2
          ORDER BY p.start_ts DESC",
@@ -333,41 +344,101 @@ pub fn open_proposals(conn: &Connection, lo: i64, hi: i64) -> Result<Vec<Proposa
             label: r.get(6)?,
             description: r.get(7)?,
             naming: r.get::<_, i64>(8)? != 0,
+            source: r.get(9)?,
             lines,
         });
     }
     Ok(out)
 }
 
-/// Accept: declare `label` (the proposal's, or the user's fallback) as a
-/// user task on the proposal's project and claim every run still
-/// unassigned. Returns `(task_id, ms claimed)`.
+/// Accept: `label` (the proposal's, or the user's fallback) becomes a task
+/// on the proposal's project that takes the proposal's stretches. A
+/// `runs` proposal declares a user task and claims the runs still
+/// unassigned; a `segment` proposal makes a derived task, the same as the
+/// segmenter used to mint, and moves the stretches off the project's
+/// other work onto it as rows the person placed, so a later placement
+/// keeps them. Returns `(task_id, ms claimed)`.
 pub fn accept(
     conn: &mut Connection,
     ts: Timestamp,
     id: i64,
     label: &str,
 ) -> Result<(i64, i64), StorageError> {
-    let (runs_json, project, description): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT runs, project, description FROM proposals WHERE id=?1 AND status='open'",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
+    let (runs_json, project, description, source, start_ts): (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        i64,
+    ) = conn.query_row(
+        "SELECT runs, project, description, source, start_ts FROM proposals
+         WHERE id=?1 AND status='open'",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
     let runs: Vec<(i64, i64)> = serde_json::from_str(&runs_json).unwrap_or_default();
-    let task_id = storage::insert_user_task(conn, ts, label, project.as_deref())?;
+    let task_id = if source == "segment" {
+        conn.execute(
+            "INSERT INTO tasks (label, project, status, source, created_ts)
+             VALUES (?1, ?2, 'open', 'derived', ?3)",
+            params![label, project, start_ts],
+        )?;
+        conn.last_insert_rowid()
+    } else {
+        storage::insert_user_task(conn, ts, label, project.as_deref())?
+    };
     if description.is_some() {
         storage::set_task_description(conn, task_id, description.as_deref())?;
     }
-    let mut claimed = 0;
-    for (s, e) in runs {
-        claimed += storage::assign_unassigned(conn, ts, s, e, task_id)?;
-    }
+    let claimed = claim(conn, ts, &runs, &source, task_id)?;
     conn.execute(
         "UPDATE proposals SET status='accepted', task_id=?1, label=?2 WHERE id=?3",
         params![task_id, label, id],
     )?;
     Ok((task_id, claimed))
+}
+
+/// Merge: the proposal's stretches go to an existing task instead of a
+/// new one. Returns the ms claimed.
+pub fn merge(
+    conn: &mut Connection,
+    ts: Timestamp,
+    id: i64,
+    to_task: i64,
+) -> Result<i64, StorageError> {
+    let (runs_json, source): (String, String) = conn.query_row(
+        "SELECT runs, source FROM proposals WHERE id=?1 AND status='open'",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let runs: Vec<(i64, i64)> = serde_json::from_str(&runs_json).unwrap_or_default();
+    let claimed = claim(conn, ts, &runs, &source, to_task)?;
+    conn.execute(
+        "UPDATE proposals SET status='accepted', task_id=?1 WHERE id=?2",
+        params![to_task, id],
+    )?;
+    Ok(claimed)
+}
+
+/// The proposal's stretches onto `task_id`, by source.
+fn claim(
+    conn: &mut Connection,
+    ts: Timestamp,
+    runs: &[(i64, i64)],
+    source: &str,
+    task_id: i64,
+) -> Result<i64, StorageError> {
+    let mut claimed = 0;
+    if source == "segment" {
+        for &(s, e) in runs {
+            claimed += storage::claim_segment_range(conn, ts, s, e, task_id)?;
+        }
+    } else {
+        for &(s, e) in runs {
+            claimed += storage::assign_unassigned(conn, ts, s, e, task_id)?;
+        }
+    }
+    Ok(claimed)
 }
 
 /// "Not a task": the cluster stays unassigned and is not proposed again

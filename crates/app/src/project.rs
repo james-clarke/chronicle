@@ -94,6 +94,8 @@ pub(crate) fn rebuild(data_dir: &Path, days: Option<u32>) -> anyhow::Result<()> 
         Timestamp::now().as_millisecond() - i64::from(d) * 86_400_000
     });
     let matcher = Matcher::from_config(&config);
+    // A hand edit applies to the daemon from here on, too.
+    let _ = crate::send_ctrl(&crate::socket_path(data_dir), "reload");
     let n = storage::file_spans(&mut conn, lo, hi, &matcher, config.project_join_min)?;
     println!(
         "filed {n} focus spans{}",
@@ -119,7 +121,126 @@ pub(crate) fn rebuild(data_dir: &Path, days: Option<u32>) -> anyhow::Result<()> 
             println!("  {id:>5}  {project:<16}  {label}");
         }
     }
+    // Derived tasks nobody confirmed, renamed or placed time on become
+    // proposals (m44 chunk 2): their time sits on the project's other
+    // work until the card is confirmed.
+    let converted =
+        storage::derived_tasks_to_proposals(&mut conn, Timestamp::now().as_millisecond())?;
+    if !converted.is_empty() {
+        println!(
+            "{} derived tasks became proposals to review:",
+            converted.len()
+        );
+        for (id, label) in &converted {
+            println!("  {id:>5}  {label}");
+        }
+    }
     Ok(())
+}
+
+/// Add rules to a project through the one config writer, tell the daemon,
+/// re-file the last `days` and print what moved (m44 chunk 3). The same
+/// path the UI menus and the repo card take.
+pub(crate) fn attach(
+    data_dir: &Path,
+    name: &str,
+    rules: &[chronicle_core::config::ProjectRule],
+    days: u32,
+) -> anyhow::Result<()> {
+    if rules.is_empty() {
+        anyhow::bail!(
+            "nothing to attach: give --repo, --ticket, --domain, --title, --app or --parent"
+        );
+    }
+    let outcome = attach_and_refile(data_dir, name, rules, days)?;
+    print!("{}", outcome.render());
+    Ok(())
+}
+
+/// What an attach did, for the CLI and the UI status line alike.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AttachOutcome {
+    pub project: String,
+    pub rules: Vec<String>,
+    pub days: u32,
+    pub moved: Vec<storage::Moved>,
+    pub unchanged: bool,
+}
+
+impl AttachOutcome {
+    pub(crate) fn render(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        if self.unchanged {
+            let _ = writeln!(out, "{}: every rule was already there", self.project);
+            return out;
+        }
+        let _ = writeln!(out, "{}: {}", self.project, self.rules.join(", "));
+        if self.moved.is_empty() {
+            let _ = writeln!(out, "nothing moved over the last {} days", self.days);
+            return out;
+        }
+        let _ = writeln!(out, "over the last {} days:", self.days);
+        let min = |ms: i64| ms as f64 / 60_000.0;
+        for m in &self.moved {
+            let _ = writeln!(
+                out,
+                "{:>7.1} \u{2192} {:<7.1} min  {}",
+                min(m.before_ms),
+                min(m.after_ms),
+                m.project.as_deref().unwrap_or("(unfiled)")
+            );
+        }
+        out
+    }
+}
+
+/// Write the rules, poke the daemon so it files with them from now on,
+/// re-file the last `days`. Returns what moved.
+pub(crate) fn attach_and_refile(
+    data_dir: &Path,
+    name: &str,
+    rules: &[chronicle_core::config::ProjectRule],
+    days: u32,
+) -> anyhow::Result<AttachOutcome> {
+    use chronicle_core::config::{attach_rules, write_projects};
+    let path = data_dir.join("config.toml");
+    let config = Config::load(&path)?;
+    let (projects, changed) = attach_rules(&config, name, rules);
+    let project = projects
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(name.trim()))
+        .map_or_else(|| name.trim().to_owned(), |p| p.name.clone());
+    let described: Vec<String> = rules
+        .iter()
+        .map(|r| match r {
+            chronicle_core::config::ProjectRule::Parent(None) => "top level".to_owned(),
+            r => format!("{} {}", r.kind(), r.value()),
+        })
+        .collect();
+    if !changed {
+        return Ok(AttachOutcome {
+            project,
+            rules: described,
+            days,
+            moved: Vec::new(),
+            unchanged: true,
+        });
+    }
+    let config = write_projects(&path, projects, None)?;
+    let _ = crate::send_ctrl(&crate::socket_path(data_dir), "reload");
+    let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
+    let lo = Timestamp::now().as_millisecond() - i64::from(days) * 86_400_000;
+    let matcher = Matcher::from_config(&config);
+    let moved =
+        storage::file_spans_report(&mut conn, lo, i64::MAX, &matcher, config.project_join_min)?;
+    Ok(AttachOutcome {
+        project,
+        rules: described,
+        days,
+        moved,
+        unchanged: false,
+    })
 }
 
 /// `name`'s own filed ms plus every descendant's (m44 chunk 0): a parent's

@@ -63,6 +63,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/035_backend_score.sql")),
         M::up(include_str!("../migrations/036_repo_links_workspaces.sql")),
         M::up(include_str!("../migrations/037_task_scope.sql")),
+        M::up(include_str!("../migrations/038_proposal_source.sql")),
     ])
 });
 
@@ -911,6 +912,60 @@ pub fn file_spans(
     }
     tx.commit()?;
     Ok(n)
+}
+
+/// Focus minutes per project (`None` = unfiled) over `[lo, hi)`, from
+/// the stored `spans.project` column, biggest first.
+pub fn project_ms(
+    conn: &Connection,
+    lo: i64,
+    hi: i64,
+) -> Result<Vec<(Option<String>, i64)>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT project, SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)) FROM spans
+         WHERE kind='focus' AND start_ts < ?2 AND end_ts > ?1
+         GROUP BY project ORDER BY 2 DESC",
+    )?;
+    let rows = stmt.query_map([lo, hi], |r| Ok((r.get(0)?, r.get::<_, i64>(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// One project's minutes before and after a re-file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// `None` is unfiled.
+    pub project: Option<String>,
+    pub before_ms: i64,
+    pub after_ms: i64,
+}
+
+/// [`file_spans`] over `[lo, hi)` and what moved (m44 chunk 3): every
+/// project whose minutes changed, biggest change first, so a surface that
+/// just wrote a rule can say what it did.
+pub fn file_spans_report(
+    conn: &mut Connection,
+    lo: i64,
+    hi: i64,
+    matcher: &crate::project::Matcher,
+    join_min: u32,
+) -> Result<Vec<Moved>, StorageError> {
+    let hi_q = if hi == i64::MAX { i64::MAX / 2 } else { hi };
+    let before = project_ms(conn, lo, hi_q)?;
+    file_spans(conn, lo, hi, matcher, join_min)?;
+    let after = project_ms(conn, lo, hi_q)?;
+    let mut out: Vec<Moved> = Vec::new();
+    for (project, _) in before.iter().chain(after.iter()) {
+        if !out.iter().any(|m| m.project == *project) {
+            out.push(Moved {
+                project: project.clone(),
+                before_ms: before.iter().find(|b| b.0 == *project).map_or(0, |b| b.1),
+                after_ms: after.iter().find(|a| a.0 == *project).map_or(0, |a| a.1),
+            });
+        }
+    }
+    out.retain(|m| m.before_ms != m.after_ms);
+    out.sort_by_key(|m| std::cmp::Reverse((m.after_ms - m.before_ms).abs()));
+    Ok(out)
 }
 
 /// The project per span of `spans` (time order): the matcher with the
@@ -3662,6 +3717,57 @@ pub fn assign_unassigned(
     Ok(claimed)
 }
 
+/// Move one stretch of a segment proposal onto `to_task` (m44 chunk 2):
+/// the placement rows inside `[start_ts, end_ts)` (the project's other
+/// work, as the segmenter left them) go, and one row the person placed
+/// takes their place, so the next placement of the window keeps it. An
+/// `assign` correction records the move. Returns the ms claimed.
+pub fn claim_segment_range(
+    conn: &mut Connection,
+    ts: jiff::Timestamp,
+    start_ts: i64,
+    end_ts: i64,
+    to_task: i64,
+) -> Result<i64, StorageError> {
+    if end_ts <= start_ts {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    let already: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM intervals WHERE source='user' AND start_ts < ?2 AND end_ts > ?1",
+        [start_ts, end_ts],
+        |r| r.get(0),
+    )?;
+    if already > 0 {
+        // The person placed something here since: theirs wins.
+        return Ok(0);
+    }
+    tx.execute(
+        "DELETE FROM intervals WHERE source <> 'user' AND start_ts >= ?1 AND end_ts <= ?2",
+        [start_ts, end_ts],
+    )?;
+    tx.execute(
+        "INSERT INTO intervals (task_id, batch_id, start_ts, end_ts, confidence, source, reason, origin_task_id)
+         VALUES (?1, (SELECT id FROM batches WHERE start_ts <= ?2 AND end_ts > ?2), ?2, ?3, 1.0, 'user', 'confirmed', ?1)",
+        params![to_task, start_ts, end_ts],
+    )?;
+    let interval_id = tx.last_insert_rowid();
+    let (label, project): (String, Option<String>) = tx.query_row(
+        "SELECT label, project FROM tasks WHERE id=?1",
+        [to_task],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let ctx = span_ctx(&tx, start_ts, end_ts)?;
+    tx.execute(
+        "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind, interval_id)
+         VALUES (?1, ?2, '(proposed)', ?3, NULL, ?4, ?5, 'assign', ?6)",
+        params![ts_to_ms(ts), to_task, label, project, ctx, interval_id],
+    )?;
+    tx.execute(DELETE_ORPHAN_TASKS, [])?;
+    tx.commit()?;
+    Ok(end_ts - start_ts)
+}
+
 /// Pull `[start_ts, end_ts)` out of an interval ('eject' correction): the
 /// interval shrinks to what lies outside the block (the surviving left piece
 /// keeps the id; a right remainder becomes a new row of the same task,
@@ -3955,38 +4061,41 @@ pub fn store_segments(
         .query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
     let mut touched: Vec<i64> = Vec::new();
-    let mut created: Vec<(i64, i64, i64, String)> = Vec::new();
-    let mut by_cluster: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+    let created: Vec<(i64, i64, i64, String)> = Vec::new();
+    // New clusters become proposals, not tasks (m44 chunk 2): the time
+    // sits on the project's other work, the proposal remembers the
+    // stretches, and confirming it makes the task. Unfiled new work stays
+    // unplaced and is proposed all the same.
+    let mut proposals: Vec<SegmentProposal> = Vec::new();
     for p in placements {
         let task_id = match &p.target {
             Target::Existing(id) => *id,
             Target::General(project) => general_task(&tx, project, p.lo)?,
             Target::New {
-                label,
-                project,
-                cluster,
-            } => match by_cluster.get(cluster) {
-                Some(id) => {
-                    // The cluster's task already exists: the naming job
-                    // sees the whole cluster's range.
-                    if let Some(c) = created.iter_mut().find(|c| c.0 == *id) {
-                        c.1 = c.1.min(p.lo);
-                        c.2 = c.2.max(p.hi);
+                project, cluster, ..
+            } => {
+                let ranges = subtract_ranges(p.lo, p.hi, &user_rows);
+                if ranges.is_empty() {
+                    continue;
+                }
+                let prop = match proposals.iter_mut().find(|c| c.cluster == *cluster) {
+                    Some(c) => c,
+                    None => {
+                        proposals.push(SegmentProposal {
+                            cluster: *cluster,
+                            project: project.clone(),
+                            runs: Vec::new(),
+                        });
+                        proposals.last_mut().expect("just pushed")
                     }
-                    *id
-                }
-                None => {
-                    tx.execute(
-                        "INSERT INTO tasks (label, project, status, source, created_ts)
-                         VALUES (?1, ?2, 'open', 'derived', ?3)",
-                        params![label, project, p.lo],
-                    )?;
-                    let id = tx.last_insert_rowid();
-                    by_cluster.insert(*cluster, id);
-                    created.push((id, p.lo, p.hi, label.clone()));
-                    id
-                }
-            },
+                };
+                prop.runs
+                    .extend(ranges.iter().map(|(s, e)| (*s, *e, p.share)));
+                let Some(project) = project else {
+                    continue;
+                };
+                general_task(&tx, project, p.lo)?
+            }
         };
         let mut wrote = false;
         for (s, e) in subtract_ranges(p.lo, p.hi, &user_rows) {
@@ -4034,16 +4143,167 @@ pub fn store_segments(
                 [task_id],
             )?;
         }
-        // A general task never scores, so its evidence is never refreshed.
-        if wrote && !touched.contains(&task_id) && !matches!(p.target, Target::General(_)) {
+        // A general task never scores, so its evidence is never refreshed;
+        // a new cluster's rows sit on one too.
+        if wrote
+            && !touched.contains(&task_id)
+            && !matches!(p.target, Target::General(_) | Target::New { .. })
+        {
             touched.push(task_id);
         }
     }
+    store_segment_proposals(&tx, lo, hi, &proposals)?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
-    // A task created for a range the user rows swallowed whole is gone again.
-    created.retain(|(id, ..)| touched.contains(id));
     Ok((touched, created))
+}
+
+/// One new cluster of a placement run, on its way to a `proposals` row.
+struct SegmentProposal {
+    cluster: usize,
+    project: Option<String>,
+    /// `(start_ts, end_ts, share)` of every stretch written.
+    runs: Vec<(i64, i64, f64)>,
+}
+
+/// Rewrite the open segment proposals of `[lo, hi)`: the window is placed
+/// whole, so its clusters are, too. A cluster is keyed by its earliest
+/// stretch; a proposal the person dismissed or confirmed keeps its row
+/// and is not proposed again.
+fn store_segment_proposals(
+    tx: &rusqlite::Transaction,
+    lo: i64,
+    hi: i64,
+    proposals: &[SegmentProposal],
+) -> Result<(), StorageError> {
+    let mut heads: Vec<i64> = Vec::new();
+    let mut rows: Vec<(i64, i64, i64, String, Option<String>)> = Vec::new();
+    for p in proposals {
+        let mut runs: Vec<(i64, i64)> = p.runs.iter().map(|(s, e, _)| (*s, *e)).collect();
+        runs.sort_unstable();
+        runs.dedup();
+        let Some(&(start_ts, _)) = runs.first() else {
+            continue;
+        };
+        let end_ts = runs.iter().map(|r| r.1).max().unwrap_or(start_ts);
+        let ms: i64 = p
+            .runs
+            .iter()
+            .map(|(s, e, share)| ((e - s) as f64 * share).round() as i64)
+            .sum();
+        let runs_json = serde_json::to_string(&runs).unwrap_or_else(|_| "[]".into());
+        heads.push(start_ts);
+        rows.push((start_ts, end_ts, ms, runs_json, p.project.clone()));
+    }
+    // A cluster of an earlier placement of the window that this one no
+    // longer has drops its row; one still there keeps its name and job.
+    let stale: Vec<i64> = tx
+        .prepare(
+            "SELECT start_ts FROM proposals WHERE source='segment' AND status='open'
+               AND start_ts >= ?1 AND start_ts < ?2",
+        )?
+        .query_map([lo, hi], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for s in stale.iter().filter(|s| !heads.contains(s)) {
+        tx.execute(
+            "DELETE FROM proposals WHERE start_ts=?1 AND source='segment' AND status='open'",
+            [s],
+        )?;
+    }
+    for (start_ts, end_ts, ms, runs_json, project) in rows {
+        // The label stays empty until the naming job runs; the card shows
+        // the cluster's top title meanwhile.
+        tx.execute(
+            "INSERT INTO proposals (start_ts, end_ts, ms, runs, project, source, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'segment', ?6)
+             ON CONFLICT(start_ts) DO UPDATE SET
+                 end_ts=excluded.end_ts, ms=excluded.ms, runs=excluded.runs,
+                 project=COALESCE(proposals.project, excluded.project)
+             WHERE proposals.status='open' AND proposals.source='segment'",
+            params![start_ts, end_ts, ms, runs_json, project, hi],
+        )?;
+    }
+    Ok(())
+}
+
+/// Open derived tasks nobody touched become proposals (m44 chunk 2): the
+/// task's stretches move to its project's other work (or go unplaced when
+/// it has none), a `segment` proposal remembers them under the task's
+/// label, and the task row goes. A task with a correction, a row the
+/// person placed, or a proposal that confirmed it is theirs and stays; so
+/// does every closed task. Returns `(task id, label)` per conversion.
+pub fn derived_tasks_to_proposals(
+    conn: &mut Connection,
+    now_ms: i64,
+) -> Result<Vec<(i64, String)>, StorageError> {
+    let tx = conn.transaction()?;
+    let candidates: Vec<(i64, String, Option<String>)> = tx
+        .prepare(
+            "SELECT id, label, project FROM tasks t
+             WHERE source='derived' AND status='open'
+               AND NOT EXISTS (SELECT 1 FROM corrections c WHERE c.task_id = t.id)
+               AND NOT EXISTS (SELECT 1 FROM proposals p WHERE p.task_id = t.id)
+               AND NOT EXISTS (SELECT 1 FROM intervals i WHERE i.task_id = t.id AND i.source='user')
+             ORDER BY id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut done = Vec::new();
+    for (id, label, project) in candidates {
+        let runs: Vec<(i64, i64, f64)> = tx
+            .prepare(
+                "SELECT start_ts, end_ts, share FROM intervals WHERE task_id=?1 ORDER BY start_ts",
+            )?
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        let Some(&(start_ts, ..)) = runs.first() else {
+            continue;
+        };
+        if tx
+            .query_row(
+                "SELECT 1 FROM proposals WHERE start_ts=?1",
+                [start_ts],
+                |_| Ok(()),
+            )
+            .is_ok()
+        {
+            continue;
+        }
+        match &project {
+            Some(p) => {
+                let general = general_task(&tx, p, start_ts)?;
+                tx.execute(
+                    "UPDATE intervals SET task_id=?2 WHERE task_id=?1",
+                    [id, general],
+                )?;
+            }
+            None => {
+                tx.execute("DELETE FROM intervals WHERE task_id=?1", [id])?;
+            }
+        }
+        let end_ts = runs.iter().map(|r| r.1).max().unwrap_or(start_ts);
+        let ms: i64 = runs
+            .iter()
+            .map(|(s, e, share)| ((e - s) as f64 * share).round() as i64)
+            .sum();
+        let ranges: Vec<(i64, i64)> = runs.iter().map(|(s, e, _)| (*s, *e)).collect();
+        let runs_json = serde_json::to_string(&ranges).unwrap_or_else(|_| "[]".into());
+        tx.execute(
+            "INSERT INTO proposals (start_ts, end_ts, ms, runs, project, label, source, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'segment', ?7)",
+            params![start_ts, end_ts, ms, runs_json, project, label, now_ms],
+        )?;
+        // The rows `delete_derived_task` clears, minus the intervals
+        // (moved above); evidence, context, journals and checkpoints
+        // cascade.
+        tx.execute("DELETE FROM verdict_log WHERE task_id=?1", [id])?;
+        tx.execute("DELETE FROM task_embeddings WHERE task_id=?1", [id])?;
+        tx.execute("DELETE FROM tasks WHERE id=?1", [id])?;
+        done.push((id, label));
+    }
+    tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
+    tx.commit()?;
+    Ok(done)
 }
 
 /// The profiles the scorer sees. Every open task's, plus labels for the
@@ -8275,5 +8535,304 @@ mod tests {
             .query_row("SELECT DISTINCT task_id FROM intervals", [], |r| r.get(0))
             .unwrap();
         assert_eq!(owner, id);
+    }
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use rusqlite::Connection;
+
+    use crate::segmenter::{Placement, Target};
+
+    fn db() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    fn new_row(lo: i64, hi: i64, project: Option<&str>, cluster: usize) -> Placement {
+        Placement {
+            lo,
+            hi,
+            target: Target::New {
+                label: "new work".into(),
+                project: project.map(str::to_owned),
+                cluster,
+            },
+            confidence: 0.4,
+            confident: false,
+            reason: "new".into(),
+            margin: 0.0,
+            runner_up: None,
+            kind: "author".into(),
+            share: 1.0,
+        }
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// A new cluster is a proposal over the project's other work, never a
+    /// task (m44 chunk 2); an unfiled one is a proposal over nothing.
+    #[test]
+    fn new_clusters_become_proposals_not_tasks() {
+        let mut conn = db();
+        let rows = [
+            new_row(0, 100_000, Some("acme"), 0),
+            new_row(300_000, 400_000, Some("acme"), 0),
+            new_row(600_000, 700_000, None, 1),
+        ];
+        let (touched, created) =
+            super::store_segments(&mut conn, 0, 1_000_000, None, &rows).unwrap();
+        assert!(created.is_empty());
+        assert!(touched.is_empty(), "{touched:?}");
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM tasks WHERE source='derived'"),
+            0
+        );
+        let general = super::general_task(&conn, "acme", 0).unwrap();
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM intervals"),
+            2,
+            "the unfiled cluster stays unplaced"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={general}")
+            ),
+            2
+        );
+        let props = crate::proposals::open_proposals(&conn, 0, 1_000_000).unwrap();
+        assert_eq!(props.len(), 2, "{props:?}");
+        // Newest first.
+        assert_eq!(props[0].start_ts, 600_000);
+        assert_eq!(props[0].project, None);
+        assert_eq!(props[1].source, "segment");
+        assert_eq!(props[1].runs, [(0, 100_000), (300_000, 400_000)]);
+        assert_eq!(props[1].ms, 200_000);
+        assert_eq!(props[1].project.as_deref(), Some("acme"));
+        assert!(
+            props[1].label.is_none(),
+            "named by the job, not the placeholder"
+        );
+
+        // A second placement of the window with the same clusters keeps
+        // the rows; one without the unfiled cluster drops it.
+        conn.execute("UPDATE proposals SET label='named' WHERE start_ts=0", [])
+            .unwrap();
+        super::store_segments(&mut conn, 0, 1_000_000, None, &rows[..2]).unwrap();
+        let props = crate::proposals::open_proposals(&conn, 0, 1_000_000).unwrap();
+        assert_eq!(props.len(), 1, "{props:?}");
+        assert_eq!(props[0].label.as_deref(), Some("named"));
+
+        // Dismiss: the time stays on other work and the cluster is not
+        // proposed again.
+        crate::proposals::dismiss(&conn, props[0].id).unwrap();
+        super::store_segments(&mut conn, 0, 1_000_000, None, &rows[..2]).unwrap();
+        assert!(
+            crate::proposals::open_proposals(&conn, 0, 1_000_000)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={general}")
+            ),
+            2
+        );
+    }
+
+    /// Confirming makes the task and moves exactly the cluster's stretches
+    /// onto it as rows the person placed; the next placement keeps them.
+    #[test]
+    fn confirm_claims_the_clusters_stretches() {
+        let mut conn = db();
+        let ts = crate::types::ms_to_ts(900_000);
+        let rows = [
+            new_row(0, 100_000, Some("acme"), 0),
+            new_row(300_000, 400_000, Some("acme"), 0),
+            Placement {
+                target: Target::General("acme".into()),
+                ..new_row(500_000, 550_000, Some("acme"), 9)
+            },
+        ];
+        super::store_segments(&mut conn, 0, 1_000_000, None, &rows).unwrap();
+        let general = super::general_task(&conn, "acme", 0).unwrap();
+        let p = &crate::proposals::open_proposals(&conn, 0, 1_000_000).unwrap()[0];
+        let (task, claimed) = crate::proposals::accept(&mut conn, ts, p.id, "acme login").unwrap();
+        assert_eq!(claimed, 200_000);
+        let (label, project, source): (String, String, String) = conn
+            .query_row(
+                "SELECT label, project, source FROM tasks WHERE id=?1",
+                [task],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (label.as_str(), project.as_str(), source.as_str()),
+            ("acme login", "acme", "derived")
+        );
+        let mine: Vec<(i64, i64, String)> = conn
+            .prepare(
+                "SELECT start_ts, end_ts, source FROM intervals WHERE task_id=?1 ORDER BY start_ts",
+            )
+            .unwrap()
+            .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            mine,
+            [
+                (0, 100_000, "user".to_owned()),
+                (300_000, 400_000, "user".to_owned())
+            ]
+        );
+        // Other work keeps the stretch that was not in the cluster.
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={general}")
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM corrections WHERE kind='assign'"
+            ),
+            2
+        );
+        let (status, linked): (String, i64) = conn
+            .query_row(
+                "SELECT status, task_id FROM proposals WHERE id=?1",
+                [p.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), linked), ("accepted", task));
+        // Re-placing the window: the user rows stand, the cluster is not
+        // proposed again, and the confirmed task is not converted back.
+        super::store_segments(&mut conn, 0, 1_000_000, None, &rows).unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={task}")
+            ),
+            2
+        );
+        assert!(
+            crate::proposals::open_proposals(&conn, 0, 1_000_000)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::derived_tasks_to_proposals(&mut conn, 950_000)
+                .unwrap()
+                .is_empty()
+        );
+
+        // Merge: a second cluster's stretch goes onto the existing task.
+        let more = [new_row(700_000, 760_000, Some("acme"), 3)];
+        super::store_segments(&mut conn, 700_000, 800_000, None, &more).unwrap();
+        let p = &crate::proposals::open_proposals(&conn, 0, 1_000_000).unwrap()[0];
+        assert_eq!(
+            crate::proposals::merge(&mut conn, ts, p.id, task).unwrap(),
+            60_000
+        );
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={task}")
+            ),
+            3
+        );
+    }
+
+    /// Open derived tasks nobody touched become proposals on the rebuild;
+    /// one with a correction, one closed, and a declared task stay.
+    #[test]
+    fn untouched_derived_tasks_convert_to_proposals() {
+        let mut conn = db();
+        let ts = crate::types::ms_to_ts(1_000);
+        let task = |label: &str, project: Option<&str>, status: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO tasks (label, project, status, source, created_ts)
+                 VALUES (?1, ?2, ?3, 'derived', 0)",
+                rusqlite::params![label, project, status],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let plain = task("acme · new work", Some("acme"), "open");
+        let unfiled = task("new work", None, "open");
+        let renamed = task("kept", Some("acme"), "open");
+        let closed = task("old", Some("acme"), "closed");
+        let declared = super::insert_user_task(&conn, ts, "mine", Some("acme")).unwrap();
+        for (t, lo, hi) in [
+            (plain, 0, 100_000),
+            (plain, 200_000, 260_000),
+            (unfiled, 300_000, 400_000),
+            (renamed, 500_000, 600_000),
+            (closed, 700_000, 800_000),
+            (declared, 900_000, 950_000),
+        ] {
+            conn.execute(
+                "INSERT INTO intervals (task_id, start_ts, end_ts, confidence, source, origin_task_id)
+                 VALUES (?1, ?2, ?3, 0.5, 'segment', ?1)",
+                rusqlite::params![t, lo, hi],
+            )
+            .unwrap();
+        }
+        super::insert_correction(&mut conn, ts, renamed, "kept", Some("acme")).unwrap();
+        let done = super::derived_tasks_to_proposals(&mut conn, 2_000).unwrap();
+        assert_eq!(
+            done,
+            [
+                (plain, "acme · new work".to_owned()),
+                (unfiled, "new work".to_owned())
+            ]
+        );
+        let general = super::general_task(&conn, "acme", 0).unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={general}")
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM intervals WHERE task_id={unfiled}")
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                &format!("SELECT COUNT(*) FROM tasks WHERE id IN ({plain},{unfiled})")
+            ),
+            0
+        );
+        for t in [renamed, closed, declared] {
+            assert_eq!(
+                count(&conn, &format!("SELECT COUNT(*) FROM tasks WHERE id={t}")),
+                1
+            );
+        }
+        let props = crate::proposals::open_proposals(&conn, 0, 1_000_000).unwrap();
+        assert_eq!(props.len(), 2, "{props:?}");
+        assert_eq!(props[1].label.as_deref(), Some("acme · new work"));
+        assert_eq!(props[1].runs, [(0, 100_000), (200_000, 260_000)]);
+        assert_eq!(props[1].source, "segment");
+        assert!(
+            super::derived_tasks_to_proposals(&mut conn, 3_000)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

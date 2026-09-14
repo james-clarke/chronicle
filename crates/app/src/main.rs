@@ -432,6 +432,33 @@ enum ProjectCmd {
         #[arg(long)]
         days: Option<u32>,
     },
+    /// Add a rule to a project and re-file the last N days: a name no
+    /// project has becomes a new project. Each flag repeats.
+    Attach {
+        /// The project's configured name.
+        name: String,
+        /// A repo or folder path (`~` allowed); its worktrees count.
+        #[arg(long)]
+        repo: Vec<String>,
+        /// A work-item key prefix.
+        #[arg(long)]
+        ticket: Vec<String>,
+        /// A site; its subdomains count.
+        #[arg(long)]
+        domain: Vec<String>,
+        /// A window-title regex (find anywhere).
+        #[arg(long)]
+        title: Vec<String>,
+        /// A whole app, by name.
+        #[arg(long)]
+        app: Vec<String>,
+        /// Put the project under this one; an empty string lifts it out.
+        #[arg(long)]
+        parent: Option<String>,
+        /// How many days back to re-file under the new rule.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
 }
 
 #[derive(Subcommand)]
@@ -563,6 +590,30 @@ fn main() -> anyhow::Result<()> {
             ProjectCmd::List => project::list(&data_dir),
             ProjectCmd::Test { days, top } => project::test(&data_dir, days, top),
             ProjectCmd::Rebuild { days } => project::rebuild(&data_dir, days),
+            ProjectCmd::Attach {
+                name,
+                repo,
+                ticket,
+                domain,
+                title,
+                app,
+                parent,
+                days,
+            } => {
+                use chronicle_core::config::ProjectRule;
+                let mut rules: Vec<ProjectRule> = Vec::new();
+                rules.extend(repo.into_iter().map(ProjectRule::Repo));
+                rules.extend(ticket.into_iter().map(ProjectRule::Ticket));
+                rules.extend(domain.into_iter().map(ProjectRule::Domain));
+                rules.extend(title.into_iter().map(ProjectRule::Title));
+                rules.extend(app.into_iter().map(ProjectRule::App));
+                if let Some(p) = parent {
+                    rules.push(ProjectRule::Parent(
+                        Some(p).filter(|p| !p.trim().is_empty()),
+                    ));
+                }
+                project::attach(&data_dir, &name, &rules, days)
+            }
         },
         Cmd::Bench {
             fixtures,

@@ -46,7 +46,7 @@ The tables that turn raw spans into what you were doing.
 - **task_scope**: what a declared task covers besides its ticket: repos, branches, document names, sites and work-item keys you pinned to it. A span carrying one files to the task's project ahead of the project rules and lands on the task, for as long as the task is open.
 - **intervals**: the time slices assigned to a task, with start and end, confidence, who placed it (model, you, pre-pass, segmenter), a one-line reason for a rule placement, and a share when two tasks split one stretch, such as two AI sessions writing at once.
 - **corrections**: every rename, reassignment or merge you make by hand. Kept forever, because they teach the next derivation. Each carries a searchable snapshot of the titles and apps around it.
-- **proposals**: unassigned runs of activity that share distinctive title words or a repo, clustered into a card the feed shows until you accept or dismiss it, with the time ranges behind the cluster.
+- **proposals**: work the feed shows as a card until you confirm, merge or dismiss it, with the time ranges behind it. Two sources: unassigned runs of activity that share distinctive title words or a repo, and clusters the placement would once have minted a task for on its own. A cluster's time sits on its project's other work until you confirm the card, which creates the task and moves the time onto it.
 
 ### Evidence
 

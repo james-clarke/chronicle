@@ -277,7 +277,28 @@ Re-files stored spans after a config edit.
 chronicle project rebuild --days 30
 ```
 
-Output: a count of spans re-filed.
+Output: a count of spans re-filed, any tasks whose project was renamed to a configured one, open tasks in a project no rule knows, and any derived tasks that became proposals because nobody had confirmed, renamed or placed time on them.
+
+#### project attach
+
+Adds rules to a project, writes them to `config.toml`, tells the running daemon to pick them up, and re-files the last N days so the change shows at once. A name no project has becomes a new project. The timeline and Home menus and the Projects screen write rules the same way.
+
+| Argument/Flag | Type | Default | Meaning |
+|---|---|---|---|
+| `name` (positional) | string | required | The project's configured name. |
+| `--repo` | string, repeatable | | A repo or folder path (`~` allowed); its worktrees count. |
+| `--ticket` | string, repeatable | | A work-item key prefix. |
+| `--domain` | string, repeatable | | A site; its subdomains count. |
+| `--title` | string, repeatable | | A window-title regex, matched anywhere. |
+| `--app` | string, repeatable | | A whole app, by name. |
+| `--parent` | string, optional | unchanged | Put the project under this one; an empty string lifts it to the top. |
+| `--days` | integer | `30` | How many days back to re-file. |
+
+```sh
+chronicle project attach acme-web --repo ~/dev/web --parent acme
+```
+
+Output: the rules added, then minutes per project before and after the re-file for every project whose minutes changed.
 
 ## Models
 

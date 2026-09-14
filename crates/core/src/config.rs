@@ -368,6 +368,129 @@ impl Config {
     }
 }
 
+/// The one place the `[[projects]]` block is written (m44 chunk 3): the
+/// file as it stands with `projects` and `project_join_min` replaced,
+/// validated, then saved whole. Every surface that adds a rule (the
+/// Settings editor, the timeline and Home menus, `project attach`, the
+/// repo card) goes through here. A missing file starts from the defaults.
+pub fn write_projects(
+    path: &Path,
+    projects: Vec<ProjectCfg>,
+    join_min: Option<u32>,
+) -> Result<Config, ConfigError> {
+    validate_projects(&projects).map_err(ConfigError::Invalid)?;
+    for p in &projects {
+        for t in &p.titles {
+            regex::Regex::new(t).map_err(|e| {
+                ConfigError::Invalid(format!("project `{}`: title regex {t}: {e}", p.name))
+            })?;
+        }
+    }
+    let mut config = Config::load(path)?;
+    config.projects = projects;
+    if let Some(j) = join_min {
+        config.project_join_min = j;
+    }
+    config.save(path)?;
+    Ok(config)
+}
+
+/// One rule to add to a project by name (m44 chunk 3), from any surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectRule {
+    Repo(String),
+    Ticket(String),
+    Domain(String),
+    Title(String),
+    App(String),
+    /// Put the project under this one (`None` lifts it to the top).
+    Parent(Option<String>),
+}
+
+impl ProjectRule {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ProjectRule::Repo(_) => "repo",
+            ProjectRule::Ticket(_) => "ticket",
+            ProjectRule::Domain(_) => "domain",
+            ProjectRule::Title(_) => "title",
+            ProjectRule::App(_) => "app",
+            ProjectRule::Parent(_) => "parent",
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        match self {
+            ProjectRule::Repo(v)
+            | ProjectRule::Ticket(v)
+            | ProjectRule::Domain(v)
+            | ProjectRule::Title(v)
+            | ProjectRule::App(v) => v,
+            ProjectRule::Parent(p) => p.as_deref().unwrap_or(""),
+        }
+    }
+}
+
+/// Add `rules` to the project named `name` in the effective projects
+/// (m44 chunk 3): a name no project has becomes a new `[[projects]]`
+/// entry at the end. Names compare case-insensitively; a rule already
+/// listed is not listed twice. Returns the projects to write and whether
+/// anything changed.
+pub fn attach_rules(config: &Config, name: &str, rules: &[ProjectRule]) -> (Vec<ProjectCfg>, bool) {
+    let mut projects = config.projects_effective();
+    let name = name.trim();
+    let at = match projects
+        .iter()
+        .position(|p| p.name.trim().eq_ignore_ascii_case(name))
+    {
+        Some(i) => i,
+        None => {
+            projects.push(ProjectCfg {
+                name: name.to_owned(),
+                ..ProjectCfg::default()
+            });
+            projects.len() - 1
+        }
+    };
+    let mut changed = config.projects.is_empty();
+    let push = |list: &mut Vec<String>, v: &str, changed: &mut bool| {
+        let v = v.trim();
+        if v.is_empty() || list.iter().any(|x| x.trim().eq_ignore_ascii_case(v)) {
+            return;
+        }
+        list.push(v.to_owned());
+        *changed = true;
+    };
+    for rule in rules {
+        let p = &mut projects[at];
+        match rule {
+            ProjectRule::Repo(v) => push(&mut p.repos, v, &mut changed),
+            ProjectRule::Ticket(v) => push(&mut p.tickets, &v.to_ascii_uppercase(), &mut changed),
+            ProjectRule::Domain(v) => push(&mut p.domains, &v.to_ascii_lowercase(), &mut changed),
+            ProjectRule::Title(v) => push(&mut p.titles, v, &mut changed),
+            ProjectRule::App(v) => push(&mut p.apps, v, &mut changed),
+            ProjectRule::Parent(parent) => {
+                let parent = parent
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                if p.parent != parent {
+                    p.parent = parent;
+                    changed = true;
+                }
+            }
+        }
+    }
+    (projects, changed)
+}
+
+/// A title as a rule that matches it and nothing much else: the exact
+/// text, regex-escaped, anchored at both ends.
+pub fn title_rule(title: &str) -> String {
+    format!("^{}$", regex::escape(title.trim()))
+}
+
 /// The project tree is well formed: every `parent` names a configured
 /// project, no project is its own ancestor, and no two projects share a
 /// name. Names compare case-insensitively, as `Matcher::resolve` does.
@@ -553,6 +676,67 @@ mod tests {
         assert!(err.contains("loops back"), "{err}");
         let err = validate_projects(&[named("a", None), named("A", None)]).unwrap_err();
         assert!(err.contains("listed twice"), "{err}");
+    }
+
+    #[test]
+    fn attach_rules_adds_once_and_creates_a_missing_project() {
+        let cfg = Config {
+            projects: vec![ProjectCfg {
+                name: "acme".into(),
+                domains: vec!["acme.com".into()],
+                ..ProjectCfg::default()
+            }],
+            ..Config::default()
+        };
+        let (projects, changed) = attach_rules(
+            &cfg,
+            "Acme",
+            &[
+                ProjectRule::Domain("ACME.com".into()),
+                ProjectRule::Ticket("acme".into()),
+                ProjectRule::Title(title_rule(" Board (1) ")),
+            ],
+        );
+        assert!(changed);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].domains, ["acme.com"]);
+        assert_eq!(projects[0].tickets, ["ACME"]);
+        assert_eq!(projects[0].titles, ["^Board \\(1\\)$"]);
+        let (_, changed) = attach_rules(&cfg, "acme", &[ProjectRule::Domain("acme.com".into())]);
+        assert!(!changed);
+        let (projects, changed) = attach_rules(
+            &cfg,
+            "acme-web",
+            &[
+                ProjectRule::Repo("~/dev/web".into()),
+                ProjectRule::Parent(Some("acme".into())),
+            ],
+        );
+        assert!(changed);
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[1].name, "acme-web");
+        assert_eq!(projects[1].repos, ["~/dev/web"]);
+        assert_eq!(projects[1].parent.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn write_projects_validates_and_keeps_the_rest_of_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "port = 5601\n[[projects]]\nname = \"a\"\n").unwrap();
+        let err = write_projects(&path, vec![named("b", Some("zz"))], None).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
+        let cfg = write_projects(
+            &path,
+            vec![named("b", None), named("c", Some("b"))],
+            Some(4),
+        )
+        .unwrap();
+        assert_eq!(cfg.port, 5601);
+        let back = Config::load(&path).unwrap();
+        assert_eq!(back.project_join_min, 4);
+        assert_eq!(back.projects.len(), 2);
+        assert_eq!(back.projects[1].parent.as_deref(), Some("b"));
     }
 
     #[test]

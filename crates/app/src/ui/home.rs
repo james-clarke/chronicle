@@ -328,6 +328,7 @@ impl TimelineApp {
                                     rescore: self.rescore,
                                 },
                                 &mut self.new_label,
+                                &mut self.proposal_edit,
                                 &mut pending,
                                 &mut open_triage,
                             );
@@ -365,10 +366,12 @@ impl TimelineApp {
                     let feed_ejected = &self.feed_ejected;
                     let tz = &self.tz;
                     let unassigned_ms = self.unassigned_ms;
+                    let unfiled_today_ms = self.unfiled_today_ms;
                     let show_closed = &mut self.show_closed;
                     let new_label = &mut self.new_label;
                     let new_project = &mut self.new_project;
                     let merge_pick = &mut self.merge_pick;
+                    let proposal_edit = &mut self.proposal_edit;
                     let edit = &mut self.edit;
                     let suggestion = &self.suggestion;
                     let declare_conflict = &mut self.declare_conflict;
@@ -457,6 +460,26 @@ impl TimelineApp {
                     if open_tasks.is_empty() && q.is_empty() && project_groups.len() <= 1 {
                         ui.add_space(theme::SPACE_XS);
                         ui.weak("no open tasks yet \u{2014} declare one above, or accept what the feed proposes");
+                    }
+                    // Review row (m44 chunk 2): what still needs a look
+                    // before the project lines, when there is any.
+                    let proposal_count = proposals.len();
+                    if proposal_count > 0 || unfiled_today_ms > 0 {
+                        ui.add_space(theme::SPACE_XS);
+                        ui.horizontal(|ui| {
+                            if proposal_count > 0 {
+                                ui.weak(format!(
+                                    "{proposal_count} proposal{} to review",
+                                    if proposal_count == 1 { "" } else { "s" }
+                                ));
+                            }
+                            if proposal_count > 0 && unfiled_today_ms > 0 {
+                                ui.weak("\u{b7}");
+                            }
+                            if unfiled_today_ms > 0 {
+                                ui.weak(format!("{} unfiled today", fmt_dur(unfiled_today_ms)));
+                            }
+                        });
                     }
                     // One line per project (m35 chunk 3), its tasks under
                     // it; the unfiled group last and only when it has any.
@@ -684,6 +707,7 @@ impl TimelineApp {
             rescore: self.rescore,
                             },
                             new_label,
+                            proposal_edit,
                             &mut pending,
                             &mut open_triage,
                         );
@@ -974,10 +998,17 @@ fn working_subtitle(task: &OpenRow) -> String {
 /// A proposed task: the cluster's suggested label (a spinner while the
 /// naming job runs, the top title when there is no name), project chip,
 /// span + focus time, its app/title lines, and accept / not a task.
+///
+/// Since m44 chunk 2 a `segment` proposal reads "new work" (its time
+/// already sits on the project's other work; confirming makes it a task
+/// of its own), and either source can merge into an existing task instead
+/// of declaring a new one, or have its label edited in place first.
 fn proposal_card(
     ui: &mut egui::Ui,
     tz: &jiff::tz::TimeZone,
     p: &Proposal,
+    candidates: &[(i64, String)],
+    proposal_edit: &mut Option<(i64, String)>,
     pending: &mut Option<Action>,
 ) {
     let fmt = |ms: i64| {
@@ -998,6 +1029,8 @@ fn proposal_card(
         })
         .unwrap_or_else(|| "unnamed".to_owned());
     let label = p.label.clone().unwrap_or_else(|| fallback.clone());
+    let is_segment = p.source == "segment";
+    let editing_here = proposal_edit.as_ref().is_some_and(|(id, _)| *id == p.id);
     egui::Frame::new()
         .fill(theme::palette::ACCENT.gamma_multiply(0.10))
         .stroke(egui::Stroke::new(
@@ -1010,9 +1043,13 @@ fn proposal_card(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("proposed task")
-                        .text_style(egui::TextStyle::Small)
-                        .color(theme::palette::ACCENT),
+                    egui::RichText::new(if is_segment {
+                        "new work"
+                    } else {
+                        "proposed task"
+                    })
+                    .text_style(egui::TextStyle::Small)
+                    .color(theme::palette::ACCENT),
                 );
                 if p.naming && p.label.is_none() {
                     ui.add(egui::Spinner::new().size(10.0));
@@ -1033,14 +1070,38 @@ fn proposal_card(
                 });
             });
             ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&label)
-                            .family(egui::FontFamily::Name(theme::MEDIUM.into()))
-                            .color(theme::palette::TEXT),
-                    )
-                    .truncate(),
-                );
+                if editing_here {
+                    let want_commit = {
+                        let (_, text) = proposal_edit.as_mut().expect("checked above");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(text)
+                                .desired_width(ui.available_width() - 60.0),
+                        );
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    };
+                    if want_commit {
+                        let (id, text) = proposal_edit.take().expect("checked above");
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            *pending = Some(Action::AcceptProposal {
+                                id,
+                                label: text.to_owned(),
+                            });
+                        }
+                    }
+                } else {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&label)
+                                .family(egui::FontFamily::Name(theme::MEDIUM.into()))
+                                .color(theme::palette::TEXT),
+                        )
+                        .truncate(),
+                    );
+                    if theme::ghost_button(ui, "rename").clicked() {
+                        *proposal_edit = Some((p.id, label.clone()));
+                    }
+                }
                 if let Some(project) = &p.project {
                     theme::badge(ui, project, theme::palette::ACCENT);
                 }
@@ -1063,15 +1124,41 @@ fn proposal_card(
             }
             ui.add_space(theme::SPACE_XS);
             ui.horizontal(|ui| {
-                if theme::primary_button(ui, "accept")
-                    .on_hover_text("declare this task and assign the stretches to it")
+                let (accept_text, accept_hover) = if is_segment {
+                    ("confirm", "make this a task and move its time onto it")
+                } else {
+                    ("accept", "declare this task and assign the stretches to it")
+                };
+                if theme::primary_button(ui, accept_text)
+                    .on_hover_text(accept_hover)
                     .clicked()
                 {
-                    *pending = Some(Action::AcceptProposal {
-                        id: p.id,
-                        label: label.clone(),
-                    });
+                    let text = if editing_here {
+                        proposal_edit
+                            .take()
+                            .map_or_else(|| label.clone(), |(_, t)| t)
+                    } else {
+                        label.clone()
+                    };
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        *pending = Some(Action::AcceptProposal {
+                            id: p.id,
+                            label: text.to_owned(),
+                        });
+                    }
                 }
+                ui.menu_button("merge into", |ui| {
+                    for (task_id, cand_label) in candidates {
+                        if ui.button(cand_label).clicked() {
+                            *pending = Some(Action::MergeProposal {
+                                id: p.id,
+                                to_task: *task_id,
+                            });
+                            ui.close();
+                        }
+                    }
+                });
                 if theme::ghost_button(ui, "not a task").clicked() {
                     *pending = Some(Action::DismissProposal(p.id));
                 }
@@ -1380,11 +1467,13 @@ struct FeedSection<'a> {
 /// A progress row older than this is a stale meta value from a dead worker.
 const PROGRESS_STALE_MS: i64 = 10 * 60_000;
 
+#[allow(clippy::too_many_arguments)]
 fn feed_section_ui(
     ui: &mut egui::Ui,
     content_w: f32,
     f: FeedSection<'_>,
     new_label: &mut String,
+    proposal_edit: &mut Option<(i64, String)>,
     pending: &mut Option<Action>,
     open_triage: &mut bool,
 ) {
@@ -1451,7 +1540,7 @@ fn feed_section_ui(
         });
         ui.add_space(theme::SPACE_XS);
         for p in proposals {
-            proposal_card(ui, tz, p, pending);
+            proposal_card(ui, tz, p, candidates, proposal_edit, pending);
         }
         if let Some(p) = progress {
             progress_row(ui, content_w, tz, p);
