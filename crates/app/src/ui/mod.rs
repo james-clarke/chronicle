@@ -2580,7 +2580,18 @@ impl eframe::App for TimelineApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.reload_if_stale();
+        // Input first. A press is what wakes an idle window, and a synchronous
+        // reload ahead of that frame held the hand-off to the WM past the
+        // release: the move or resize then began with the button already up
+        // and stuck to the cursor until the next click. Reload on a frame
+        // with no button down; the wake-up timer brings one soon enough.
+        let pointer_busy = ui
+            .input(|i| i.pointer.any_down() || i.pointer.any_pressed() || i.pointer.any_released());
+        if pointer_busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        } else {
+            self.reload_if_stale();
+        }
         self.poll_post();
 
         // m19 window chrome: one rounded card with border + shadow, painted
@@ -2992,10 +3003,14 @@ fn assign_runs(
 
 /// Hand the current press to the window manager as a move or resize. The WM
 /// grabs the pointer for the gesture, so the button release never reaches
-/// egui; forget the press here, or the widget stays "dragged" and re-hands
-/// the pointer on the next motion (the window that would not let go).
+/// egui; end the drag here, or the widget stays "dragged", the next press
+/// cannot start one, and the bar re-hands the pointer on the next motion
+/// (the window that would not let go).
 fn hand_to_wm(ctx: &egui::Context, cmd: egui::ViewportCommand) {
     ctx.send_viewport_cmd(cmd);
+    // Both halves matter: the snapshot's dragged id survives any pointer
+    // state until a release event, and the stale press would suppress hover.
+    ctx.stop_dragging();
     ctx.input_mut(|i| i.pointer = Default::default());
 }
 

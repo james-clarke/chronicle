@@ -537,21 +537,25 @@ fn activity_by_task(
     task_id: Option<i64>,
     kinds: &str,
 ) -> Result<Vec<(i64, ActivityEvent)>, StorageError> {
+    // `task_repos` must stay self-contained: naming the outer `v` inside it
+    // (a cwd row once skipped the repo test that way) turned the CTE into a
+    // per-row subquery and the day's load into a 360 ms stall on the UI
+    // thread. The cwd exemption lives in the outer filter instead.
     let mut stmt = conn.prepare(&format!(
-        "WITH task_repos AS (
+        "WITH task_repos AS MATERIALIZED (
            SELECT DISTINCT t.id AS task_id, a.repo FROM tasks t
            JOIN activity_events a ON a.repo != ''
             AND (LOWER(a.repo) = LOWER(t.project)
                  OR (t.external_ref IS NOT NULL AND {VCS_KINDS_A}
                      AND instr(a.branch, t.external_ref) > 0))
-           WHERE v.kind != 'cwd' AND t.id IN (SELECT task_id FROM intervals
+           WHERE t.id IN (SELECT task_id FROM intervals
                           WHERE start_ts < ?2 AND end_ts >= ?1)
          )
          SELECT DISTINCT i.task_id, {ACTIVITY_COLS_V} FROM activity_events v
          JOIN intervals i ON v.ts < i.end_ts AND COALESCE(v.end_ts, v.ts) >= i.start_ts
          WHERE {kinds} AND v.ts < ?2 AND COALESCE(v.end_ts, v.ts) >= ?1
            AND (?3 IS NULL OR i.task_id = ?3)
-           AND (v.repo = ''
+           AND (v.kind = 'cwd' OR v.repo = ''
                 OR NOT EXISTS (SELECT 1 FROM task_repos r WHERE r.task_id = i.task_id)
                 OR EXISTS (SELECT 1 FROM task_repos r
                            WHERE r.task_id = i.task_id AND r.repo = v.repo))
