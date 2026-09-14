@@ -743,6 +743,10 @@ struct TimelineApp {
     /// Last persisted card size (meta `ui_window_size`, logical px, shadow
     /// pad excluded); written when a resize settles.
     saved_size: Option<egui::Vec2>,
+    /// Outer rect as of the previous frame. A WM move/resize is "settled"
+    /// when a frame repeats it: the pointer is no guide, since the press is
+    /// forgotten the moment the WM takes the gesture (`hand_to_wm`).
+    outer_seen: Option<egui::Rect>,
     /// Zoom factor as of the previous frame; a change (Settings' text size,
     /// Ctrl +/\u{2212}/0) resizes the window to keep the card's point size.
     zoom_seen: f32,
@@ -941,6 +945,7 @@ impl TimelineApp {
             positioned: false,
             saved_pos: prefs.saved_pos,
             saved_size: prefs.saved_size,
+            outer_seen: None,
             zoom_seen: prefs.zoom,
             zoom_saved: prefs.zoom,
             chat_task_request: None,
@@ -2514,12 +2519,16 @@ impl eframe::App for TimelineApp {
             ));
             self.positioned = true;
         }
-        // Persist the position once a drag settles (pointer up, moved since
-        // the last save). Skipped until a frame after placement ran so
-        // neither the WM's initial spot nor a stale pre-park rect is saved.
+        // Persist the position once a drag settles (rect unchanged for a
+        // frame, moved since the last save). Skipped until a frame after
+        // placement ran so neither the WM's initial spot nor a stale
+        // pre-park rect is saved.
+        let outer = ctx.input(|i| i.viewport().outer_rect);
+        let settled = outer.is_some() && outer == self.outer_seen;
+        self.outer_seen = outer;
         if placed_before
-            && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
-            && !ctx.input(|i| i.pointer.any_down())
+            && settled
+            && let Some(rect) = outer
             && let pos = (rect.min.to_vec2() / to_points).to_pos2()
             && self.saved_pos.is_none_or(|p| (p - pos).length_sq() > 4.0)
             && let Some(conn) = self.conn.as_ref()
@@ -2530,8 +2539,8 @@ impl eframe::App for TimelineApp {
         }
         // Likewise the card size once a resize settles (same unit dance).
         if placed_before
-            && let Some(rect) = ctx.input(|i| i.viewport().outer_rect)
-            && !ctx.input(|i| i.pointer.any_down())
+            && settled
+            && let Some(rect) = outer
             && let size = rect.size() / to_points - egui::Vec2::splat(2.0 * self.shadow_pad())
             && size.x >= WIDGET_W * zoom - 1.0
             && size.y >= WIDGET_H * zoom - 1.0
