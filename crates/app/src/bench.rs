@@ -305,9 +305,11 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
                 id: t.id,
                 project: t.project.clone(),
                 current: false,
+                created_ts: t.created_ts,
+                closed_ts: t.closed_ts,
             })
             .collect();
-        let sinks = segmenter::Sinks::build(&declared, &projects, &matcher);
+        let sinks = segmenter::Sinks::build(&declared, &projects, &matcher, HashMap::new());
         let segs = segmenter::segment(&aspans, &distractions, &sp);
         let placements = segmenter::decide(
             &aspans,
@@ -1048,7 +1050,7 @@ pub(crate) fn window(data_dir: &Path, spec: &str, live: bool) -> anyhow::Result<
     // evidence that existed then, not what was learned since. With
     // `live`, the cache as the daemon's tick reads it.
     let (profiles, labels, projects) = if live {
-        let (profiles, labels) = storage::live_profiles(&conn)?;
+        let (profiles, labels) = storage::window_profiles(&conn, lo)?;
         (profiles, labels, storage::task_projects(&conn)?)
     } else {
         let rows = storage::replay_rows(&conn, 0)?;

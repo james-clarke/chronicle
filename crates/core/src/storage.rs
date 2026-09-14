@@ -1163,30 +1163,65 @@ pub fn task_projects(
         .collect::<Result<_, _>>()?)
 }
 
-/// An open declared task, for the project sinks (m35 chunk 1).
+/// A declared task, for the project sinks (m35 chunk 1): open, or closed
+/// by the person inside the window being placed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredTask {
     pub id: i64,
     pub project: Option<String>,
     /// The person marked it current in its project.
     pub current: bool,
+    pub created_ts: i64,
+    /// When the person closed it; `None` while open.
+    pub closed_ts: Option<i64>,
 }
 
 /// Every open declared task, oldest first.
 pub fn open_declared(conn: &Connection) -> Result<Vec<DeclaredTask>, StorageError> {
+    declared(conn, None)
+}
+
+/// Every declared task open or closed by the person at or after `lo`,
+/// oldest first: a close is scoped by time, so the task still takes its
+/// own stretch of a window that reaches back before it.
+pub fn window_declared(conn: &Connection, lo: i64) -> Result<Vec<DeclaredTask>, StorageError> {
+    declared(conn, Some(lo))
+}
+
+fn declared(conn: &Connection, lo: Option<i64>) -> Result<Vec<DeclaredTask>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT id, project, current FROM tasks
-         WHERE status='open' AND source='user'
+        "SELECT id, project, current, created_ts, closed_ts FROM tasks
+         WHERE source='user'
+           AND (status='open' OR (closed_by='user' AND closed_ts >= ?1))
          ORDER BY created_ts, id",
     )?;
-    let rows = stmt.query_map([], |r| {
+    // With no floor the closed arm never matches.
+    let rows = stmt.query_map([lo.unwrap_or(i64::MAX)], |r| {
         Ok(DeclaredTask {
             id: r.get(0)?,
             project: r.get(1)?,
             current: r.get::<_, i64>(2)? != 0,
+            created_ts: r.get(3)?,
+            closed_ts: r.get(4)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Tasks the person closed at or after `lo`, with when: task id to
+/// `closed_ts`. The placement admits each for the segments before its
+/// close only.
+pub fn closed_user_tasks(
+    conn: &Connection,
+    lo: i64,
+) -> Result<std::collections::HashMap<i64, i64>, StorageError> {
+    Ok(conn
+        .prepare(
+            "SELECT id, closed_ts FROM tasks
+             WHERE status='closed' AND closed_by='user' AND closed_ts >= ?1",
+        )?
+        .query_map([lo], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<Result<_, _>>()?)
 }
 
 /// Mark an open declared task current in its project (m35 chunk 1): the
@@ -2533,7 +2568,10 @@ pub fn insert_user_task(
 }
 
 /// A close the person made sticks: the task neither scores nor reopens
-/// until they reopen it (m35 fix 2).
+/// until they reopen it (m35 fix 2), except for the stretch before the
+/// close inside the window that holds it ([`window_profiles`]). A merge
+/// stamps `closed_by='merged'` so the placement never brings the folded
+/// task back.
 pub fn close_task(
     conn: &Connection,
     ts: jiff::Timestamp,
@@ -3898,31 +3936,42 @@ pub fn store_segments(
     Ok((touched, created))
 }
 
+/// The profiles the scorer sees. Every open task's, plus labels for the
+/// segmenter's "between A and B" reason line.
+pub type Profiles = (
+    Vec<profile::Profile>,
+    std::collections::HashMap<i64, String>,
+);
+
 /// Every open task's profile from the `task_evidence` cache, plus labels
 /// for the segmenter's "between A and B" reason line.
-#[allow(clippy::type_complexity)]
-pub fn live_profiles(
-    conn: &Connection,
-) -> Result<
-    (
-        Vec<profile::Profile>,
-        std::collections::HashMap<i64, String>,
-    ),
-    StorageError,
-> {
+pub fn live_profiles(conn: &Connection) -> Result<Profiles, StorageError> {
+    profiles(conn, None)
+}
+
+/// [`live_profiles`] plus the tasks the person closed at or after `lo`:
+/// they score for the segments before their close (the placement holds
+/// them out of the later ones).
+pub fn window_profiles(conn: &Connection, lo: i64) -> Result<Profiles, StorageError> {
+    profiles(conn, Some(lo))
+}
+
+fn profiles(conn: &Connection, lo: Option<i64>) -> Result<Profiles, StorageError> {
     // Autoclosed tasks stay scoreable on their strong anchors only: an
     // item, commit or event coming back reopens the task; a shared place,
     // the repo's branch or a stray word does not. A task the person closed
-    // is out of the running until they reopen it.
+    // is out of the running until they reopen it, except inside the
+    // window that holds the close.
     let mut stmt = conn.prepare(
         "SELECT e.task_id, e.kind, e.value, e.source, e.minutes, e.first_ts, e.last_ts
          FROM task_evidence e JOIN tasks t ON t.id = e.task_id
          WHERE t.source <> 'project'
            AND (t.status = 'open'
-                OR (t.closed_by = 'auto' AND e.kind IN ('item', 'change', 'event')))",
+                OR (t.closed_by = 'auto' AND e.kind IN ('item', 'change', 'event'))
+                OR (t.closed_by = 'user' AND t.closed_ts >= ?1))",
     )?;
     let mut rows = Vec::new();
-    for row in stmt.query_map([], |r| {
+    for row in stmt.query_map([lo.unwrap_or(i64::MAX)], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -5231,7 +5280,7 @@ pub fn consolidate_apply(
             params![into, from],
         )?;
         tx.execute(
-            "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user' WHERE id=?2",
+            "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='merged' WHERE id=?2",
             params![ts_to_ms(ts), from],
         )?;
         before.merges.push(MergeBefore {
@@ -5809,7 +5858,7 @@ pub fn merge_task(
         params![to_task, from_task],
     )?;
     tx.execute(
-        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='user' WHERE id=?2",
+        "UPDATE tasks SET status='closed', closed_ts=?1, closed_by='merged' WHERE id=?2",
         params![ts_to_ms(ts), from_task],
     )?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
@@ -7900,6 +7949,94 @@ mod tests {
         let flags: Vec<(i64, bool)> = declared.iter().map(|d| (d.id, d.current)).collect();
         assert_eq!(flags, [(a, false), (b, true), (c, true)]);
         assert_eq!(declared[0].project.as_deref(), Some("acme"));
+    }
+
+    // A close is scoped by time: the window queries admit a task the
+    // person closed at or after the window's floor, and only that; a
+    // placement on it leaves it closed; a merge is not such a close.
+    #[test]
+    fn a_close_is_scoped_by_time_inside_its_window() {
+        use crate::segmenter::{Placement, Target};
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let ts = |ms: i64| jiff::Timestamp::from_millisecond(ms).unwrap();
+        let old = super::insert_user_task(&conn, ts(500), "old", Some("acme")).unwrap();
+        let x = super::insert_user_task(&conn, ts(1_000), "x", Some("acme")).unwrap();
+        let y = super::insert_user_task(&conn, ts(2_000), "y", Some("acme")).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, label, project, status, source, created_ts, closed_ts, closed_by)
+             VALUES (50, 'derived', 'acme', 'closed', 'derived', 3_000, 30_000, 'auto')",
+            [],
+        )
+        .unwrap();
+        for id in [old, x, y, 50] {
+            conn.execute(
+                "INSERT INTO task_evidence (task_id, kind, value, source, minutes, first_ts, last_ts)
+                 VALUES (?1, 'place', 'acme', 'interval', 9.0, 0, 0)",
+                [id],
+            )
+            .unwrap();
+        }
+        super::close_task(&conn, ts(5_000), old).unwrap();
+        super::close_task(&conn, ts(20_000), x).unwrap();
+        let ids = |ds: &[super::DeclaredTask]| ds.iter().map(|d| d.id).collect::<Vec<_>>();
+        assert_eq!(ids(&super::open_declared(&conn).unwrap()), [y]);
+        let window = super::window_declared(&conn, 10_000).unwrap();
+        assert_eq!(ids(&window), [x, y]);
+        assert_eq!(window[0].closed_ts, Some(20_000));
+        assert_eq!(window[0].created_ts, 1_000);
+        assert_eq!(window[1].closed_ts, None);
+        assert_eq!(
+            super::closed_user_tasks(&conn, 10_000).unwrap(),
+            std::collections::HashMap::from([(x, 20_000)])
+        );
+        let scored = |ps: &[crate::profile::Profile]| {
+            let mut ids: Vec<i64> = ps.iter().map(|p| p.task_id).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(scored(&super::live_profiles(&conn).unwrap().0), [y]);
+        assert_eq!(
+            scored(&super::window_profiles(&conn, 10_000).unwrap().0),
+            [x, y]
+        );
+        // Rows landing on the closed task leave it closed.
+        super::store_segments(
+            &mut conn,
+            0,
+            10_000,
+            None,
+            &[Placement {
+                lo: 0,
+                hi: 10_000,
+                target: Target::Existing(x),
+                confidence: 0.8,
+                confident: true,
+                reason: "declared in acme".into(),
+                margin: 0.3,
+                runner_up: None,
+                kind: "read".into(),
+                share: 1.0,
+            }],
+        )
+        .unwrap();
+        let (status, by): (String, String) = conn
+            .query_row(
+                "SELECT status, closed_by FROM tasks WHERE id=?1",
+                [x],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), by.as_str()), ("closed", "user"));
+        // A merge closes the source for good: no window admits it.
+        super::merge_task(&mut conn, ts(25_000), y, x).unwrap();
+        assert_eq!(ids(&super::window_declared(&conn, 10_000).unwrap()), [x]);
+        assert!(
+            super::closed_user_tasks(&conn, 10_000)
+                .unwrap()
+                .get(&y)
+                .is_none()
+        );
     }
 
     // m35 chunk 1: tasks from before the config named a repo folder; the

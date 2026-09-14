@@ -559,24 +559,37 @@ pub struct Sinks {
     pub current: HashMap<String, i64>,
     /// Lowercased projects configured `derive = false`.
     pub no_derive: HashSet<String>,
+    /// Tasks the person closed inside the window: id to `closed_ts`. A
+    /// close is scoped by time: the task is a candidate, and its
+    /// project's sink, for the segments before it and out of the running
+    /// after.
+    pub closed: HashMap<i64, i64>,
+    /// Per project, its declared tasks oldest first, so the sink is
+    /// answered as of each segment; `current` is the answer when none
+    /// of them was open at the segment.
+    pub history: HashMap<String, Vec<storage::DeclaredTask>>,
 }
 
 impl Sinks {
     /// `declared` oldest first; `projects` is every task's project as
-    /// [`crate::project::normalize_projects`] leaves it.
+    /// [`crate::project::normalize_projects`] leaves it; `closed` the
+    /// tasks the person closed inside the window.
     pub fn build(
         declared: &[storage::DeclaredTask],
         projects: &HashMap<i64, Option<String>>,
         matcher: &Matcher,
+        closed: HashMap<i64, i64>,
     ) -> Sinks {
         let mut current = HashMap::new();
         let mut flagged: HashSet<String> = HashSet::new();
+        let mut history: HashMap<String, Vec<storage::DeclaredTask>> = HashMap::new();
         for d in declared {
             let Some(Some(project)) = projects.get(&d.id) else {
                 continue;
             };
             let key = project.to_ascii_lowercase();
-            if flagged.contains(&key) {
+            history.entry(key.clone()).or_default().push(d.clone());
+            if d.closed_ts.is_some() || flagged.contains(&key) {
                 continue;
             }
             current.insert(key.clone(), d.id);
@@ -590,11 +603,66 @@ impl Sinks {
             .filter(|p| !p.derive)
             .map(|p| p.name.to_ascii_lowercase())
             .collect();
-        Sinks { current, no_derive }
+        Sinks {
+            current,
+            no_derive,
+            closed,
+            history,
+        }
     }
 
-    pub fn current_in(&self, project: &str) -> Option<i64> {
-        self.current.get(&project.to_ascii_lowercase()).copied()
+    /// The project's sink for a segment over `[lo, hi)`: among its
+    /// declared tasks open at the segment's midpoint (declared by then,
+    /// not closed before it), the flagged one, else the newest; with
+    /// none, the project's current task, so a task declared late still
+    /// takes the work before it when no other declared task was open.
+    pub fn current_in(&self, project: &str, lo: i64, hi: i64) -> Option<i64> {
+        let key = project.to_ascii_lowercase();
+        let mid = midpoint(lo, hi);
+        let open: Vec<&storage::DeclaredTask> = self
+            .history
+            .get(&key)
+            .map(|h| {
+                h.iter()
+                    .filter(|d| d.created_ts <= mid && d.closed_ts.is_none_or(|c| c >= mid))
+                    .collect()
+            })
+            .unwrap_or_default();
+        open.iter()
+            .find(|d| d.current)
+            .or(open.last())
+            .map(|d| d.id)
+            .or_else(|| self.current.get(&key).copied())
+    }
+
+    /// Whether `task` may take a segment over `[lo, hi)`: always, unless
+    /// the person closed it before the segment's midpoint. A segment is
+    /// one content-continuous stretch, so one mostly after the close is
+    /// work that went on past it.
+    pub fn admits(&self, task: i64, lo: i64, hi: i64) -> bool {
+        self.closed
+            .get(&task)
+            .is_none_or(|&c| midpoint(lo, hi) <= c)
+    }
+
+    /// `candidates` less the tasks closed before `[lo, hi)`; borrowed
+    /// when no close is in the window.
+    fn admitted<'a>(
+        &self,
+        candidates: &'a [Profile],
+        lo: i64,
+        hi: i64,
+    ) -> std::borrow::Cow<'a, [Profile]> {
+        if self.closed.is_empty() {
+            return std::borrow::Cow::Borrowed(candidates);
+        }
+        std::borrow::Cow::Owned(
+            candidates
+                .iter()
+                .filter(|pr| self.admits(pr.task_id, lo, hi))
+                .cloned()
+                .collect(),
+        )
     }
 
     pub fn derives(&self, project: &str) -> bool {
@@ -623,6 +691,10 @@ fn by_project(
 /// The scorer's ranking stays underneath (confidence and margin still
 /// describe its view, so the row reads as uncertain when it disagreed and
 /// the runner-up stays one click away).
+fn midpoint(lo: i64, hi: i64) -> i64 {
+    lo + (hi - lo) / 2
+}
+
 fn crown(v: &mut Verdict, task: i64) {
     let score = v
         .ranked
@@ -686,7 +758,7 @@ fn sink_order(
         .cloned()
         .collect();
     let holder = holder(v, candidates, &items);
-    if let Some(cur) = sinks.current_in(project) {
+    if let Some(cur) = sinks.current_in(project, seg.start_ts, seg.end_ts) {
         let cur_holds = candidates
             .iter()
             .any(|pr| pr.task_id == cur && items.iter().any(|k| pr.minutes.contains_key(k)));
@@ -794,8 +866,9 @@ pub fn decide(
             } else {
                 (mine / all).clamp(0.0, 1.0)
             };
-            let mut v = profile::score(&evidence, candidates, params);
-            let reason = sink_order(&mut v, &evidence, candidates, project.as_deref(), sinks);
+            let candidates = sinks.admitted(candidates, seg.lo, seg.hi);
+            let mut v = profile::score(&evidence, &candidates, params);
+            let reason = sink_order(&mut v, &evidence, &candidates, project.as_deref(), sinks);
             about.push((project.clone(), reason));
             part.push(pi);
             scored.push((seg, evidence, v));
@@ -1040,7 +1113,7 @@ pub fn split_concurrent(
             out.push(p);
             continue;
         }
-        let candidates = buckets.get(&project).unwrap_or(&none);
+        let candidates = sinks.admitted(buckets.get(&project).unwrap_or(&none), p.lo, p.hi);
         let mut weights: Vec<f64> = live
             .iter()
             .map(|s| s.prompts.iter().filter(|t| within(t)).count() as f64)
@@ -1068,13 +1141,14 @@ pub fn split_concurrent(
                 continue;
             }
             let verdict =
-                session_verdict(s, &owned[i], p.lo, p.hi, candidates, params, distractions);
+                session_verdict(s, &owned[i], p.lo, p.hi, &candidates, params, distractions);
             let target = session_target(
                 s,
                 &owned[i],
                 verdict.as_ref(),
                 &p.target,
-                candidates,
+                &candidates,
+                (p.lo, p.hi),
                 project.as_deref(),
                 sinks,
                 &mut opened,
@@ -1180,6 +1254,7 @@ fn session_target(
     verdict: Option<&Verdict>,
     fallback: &Target,
     candidates: &[Profile],
+    (lo, hi): (i64, i64),
     project: Option<&str>,
     sinks: &Sinks,
     opened: &mut Vec<(String, String)>,
@@ -1200,7 +1275,7 @@ fn session_target(
     };
     let holder = holder(verdict.unwrap_or(&empty), candidates, &items);
     if let Some(project) = project
-        && let Some(cur) = sinks.current_in(project)
+        && let Some(cur) = sinks.current_in(project, lo, hi)
     {
         let cur_holds = candidates
             .iter()
@@ -1469,7 +1544,12 @@ pub fn place_dry(
     let matcher = Matcher::from_config(config);
     let mut projects = projects.clone();
     crate::project::normalize_projects(&mut projects, &matcher);
-    let sinks = Sinks::build(&storage::open_declared(conn)?, &projects, &matcher);
+    let sinks = Sinks::build(
+        &storage::window_declared(conn, lo)?,
+        &projects,
+        &matcher,
+        storage::closed_user_tasks(conn, lo)?,
+    );
     let placements = decide(
         &spans,
         lo,
@@ -1520,11 +1600,18 @@ fn place_window(
     if !unseeded.is_empty() {
         storage::refresh_task_evidence(conn, &ticket_re, &params, ts_to_ms(now), &unseeded)?;
     }
-    let (profiles, labels) = storage::live_profiles(conn)?;
+    // A task the person closed inside the window takes its own stretch
+    // and no later one.
+    let (profiles, labels) = storage::window_profiles(conn, lo)?;
     let matcher = Matcher::from_config(config);
     let mut projects = storage::task_projects(conn)?;
     crate::project::normalize_projects(&mut projects, &matcher);
-    let sinks = Sinks::build(&storage::open_declared(conn)?, &projects, &matcher);
+    let sinks = Sinks::build(
+        &storage::window_declared(conn, lo)?,
+        &projects,
+        &matcher,
+        storage::closed_user_tasks(conn, lo)?,
+    );
     let placements = decide(
         &spans,
         lo,
@@ -2540,6 +2627,8 @@ mod tests {
             id,
             project: Some(project.to_owned()),
             current,
+            created_ts: id,
+            closed_ts: None,
         };
         let rows = vec![
             declared(1, "contoso", false),
@@ -2551,6 +2640,8 @@ mod tests {
                 id: 6,
                 project: None,
                 current: true,
+                created_ts: 6,
+                closed_ts: None,
             },
         ];
         let matcher = Matcher::new(&[
@@ -2574,13 +2665,195 @@ mod tests {
         projects.insert(1, Some("acme".into()));
         projects.insert(2, Some("acme".into()));
         projects.insert(3, Some("acme".into()));
-        let sinks = Sinks::build(&rows, &projects, &matcher);
-        assert_eq!(sinks.current_in("acme"), Some(2));
-        assert_eq!(sinks.current_in("Chronicle"), Some(5));
-        assert_eq!(sinks.current_in("sprog"), None);
+        let sinks = Sinks::build(&rows, &projects, &matcher, HashMap::new());
+        assert_eq!(sinks.current_in("acme", 0, M), Some(2));
+        assert_eq!(sinks.current_in("Chronicle", 0, M), Some(5));
+        assert_eq!(sinks.current_in("sprog", 0, M), None);
         assert!(!sinks.derives("acme"));
         assert!(sinks.derives("chronicle"));
         assert!(sinks.derives("sprog"));
+    }
+
+    /// A close is scoped by time: the task the person closed at T takes
+    /// the project's segments before T as its declared sink and none
+    /// after; with a task declared later, the sink before T is the one
+    /// open then, after T the new one.
+    #[test]
+    fn decide_scopes_a_close_by_time() {
+        use storage::DeclaredTask;
+        let contoso = |id: i64, lo: i64, hi: i64| {
+            let mut s = span(
+                id,
+                lo,
+                hi,
+                "Code",
+                "tasks.py - contoso",
+                &[(AnchorKind::Place, "contoso")],
+            );
+            s.project = Some("acme".into());
+            s
+        };
+        let seeded = || {
+            let mut m = HashMap::new();
+            m.insert(Key::Anchor(AnchorKind::Place, "contoso".into()), 10.0);
+            m
+        };
+        let profile = |task_id: i64| Profile {
+            task_id,
+            minutes: seeded(),
+            last_ts: None,
+            vec: None,
+        };
+        let labels = HashMap::from([(9, "x".to_owned()), (11, "y".to_owned())]);
+        let projects = HashMap::from([(9, Some("acme".to_owned())), (11, Some("acme".to_owned()))]);
+        let matcher = Matcher::default();
+        let x = DeclaredTask {
+            id: 9,
+            project: Some("acme".into()),
+            current: false,
+            created_ts: M,
+            closed_ts: Some(13 * M),
+        };
+        let closed = HashMap::from([(9, 13 * M)]);
+        // An AFK gap either side of the close: two segments.
+        let spans = [contoso(1, 0, 10), contoso(2, 16, 26)];
+        let run = |profiles: &[Profile], sinks: &Sinks| {
+            decide(
+                &spans,
+                0,
+                30 * M,
+                profiles,
+                &labels,
+                &projects,
+                sinks,
+                &[],
+                &Params::default(),
+                &SegParams::default(),
+            )
+        };
+        let sinks = Sinks::build(&[x.clone()], &projects, &matcher, closed.clone());
+        assert!(sinks.admits(9, 0, 10 * M));
+        assert!(!sinks.admits(9, 16 * M, 26 * M));
+        assert!(sinks.admits(11, 16 * M, 26 * M));
+        let out = run(&[profile(9)], &sinks);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!((out[0].lo, out[0].hi), (0, 10 * M));
+        assert_eq!(out[0].target, Target::Existing(9));
+        assert_eq!(out[0].reason, "declared in acme");
+        assert_eq!((out[1].lo, out[1].hi), (16 * M, 26 * M));
+        assert_ne!(out[1].target, Target::Existing(9), "{out:?}");
+        // Y declared after the close: the sink before T is X, after T Y.
+        let y = DeclaredTask {
+            id: 11,
+            project: Some("acme".into()),
+            current: false,
+            created_ts: 14 * M,
+            closed_ts: None,
+        };
+        let sinks = Sinks::build(&[x, y], &projects, &matcher, closed);
+        assert_eq!(sinks.current_in("acme", 0, 10 * M), Some(9));
+        assert_eq!(sinks.current_in("acme", 16 * M, 26 * M), Some(11));
+        let out = run(&[profile(9), profile(11)], &sinks);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(9));
+        assert_eq!(out[1].target, Target::Existing(11));
+        assert!(
+            out.iter().all(|p| p.reason == "declared in acme"),
+            "{out:?}"
+        );
+    }
+
+    /// The session split under a close scoped by time: a session with
+    /// no ticket goes to the sink as of the row, the task closed at T
+    /// before T and the one declared after it afterwards.
+    #[test]
+    fn split_concurrent_scopes_a_close_by_time() {
+        use storage::DeclaredTask;
+        let with = |items: &[&str]| {
+            let mut m = HashMap::new();
+            m.insert(Key::Anchor(AnchorKind::Place, "chronicle".into()), 60.0);
+            for i in items {
+                m.insert(Key::Anchor(AnchorKind::Item, (*i).to_owned()), 60.0);
+            }
+            m
+        };
+        let profiles = vec![
+            Profile {
+                task_id: 85,
+                minutes: with(&["ACME-1"]),
+                last_ts: Some(0),
+                vec: None,
+            },
+            Profile {
+                task_id: 86,
+                minutes: with(&[]),
+                last_ts: Some(0),
+                vec: None,
+            },
+            Profile {
+                task_id: 87,
+                minutes: with(&["ACME-3"]),
+                last_ts: Some(0),
+                vec: None,
+            },
+        ];
+        let projects: HashMap<i64, Option<String>> = [85, 86, 87]
+            .into_iter()
+            .map(|id| (id, Some("chronicle".to_owned())))
+            .collect();
+        let declared = |id: i64, created_ts: i64, closed_ts: Option<i64>| DeclaredTask {
+            id,
+            project: Some("chronicle".into()),
+            current: false,
+            created_ts,
+            closed_ts,
+        };
+        let sinks = Sinks::build(
+            &[declared(85, 0, Some(13 * M)), declared(86, 14 * M, None)],
+            &projects,
+            &Matcher::default(),
+            HashMap::from([(85, 13 * M)]),
+        );
+        let mut spans = vec![
+            agent_span(1, 0, 10, "s1", "chronicle"),
+            agent_span(2, 0, 10, "s3", "chronicle"),
+            agent_span(3, 16, 26, "s1", "chronicle"),
+            agent_span(4, 16, 26, "s3", "chronicle"),
+        ];
+        file_by_place(&mut spans);
+        let sessions = [
+            live("s1", &[2, 8, 18, 24], &[1, 17], &[]),
+            live(
+                "s3",
+                &[3, 7, 19, 23],
+                &[2, 18],
+                &[(AnchorKind::Session, "s3"), (AnchorKind::Item, "ACME-3")],
+            ),
+        ];
+        let split = |row: Placement| -> Vec<i64> {
+            let mut ids: Vec<i64> = split_concurrent(
+                vec![row],
+                &spans,
+                &sessions,
+                &profiles,
+                &projects,
+                &sinks,
+                &Matcher::default(),
+                &Params::default(),
+                &SegParams::default(),
+                &[],
+            )
+            .iter()
+            .filter_map(|p| match p.target {
+                Target::Existing(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(split(whole(0, 10, 85, "agent")), [85, 87]);
+        assert_eq!(split(whole(16, 26, 85, "agent")), [86, 87]);
     }
 
     /// Sessions share only rows of their own project (m35 chunk 2): a
