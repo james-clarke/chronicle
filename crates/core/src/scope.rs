@@ -112,10 +112,11 @@ impl TaskScope {
                     }
                 }
                 AnchorKind::Doc | AnchorKind::Link => {
-                    let have = a.value.to_ascii_lowercase();
-                    if let Some(v) =
-                        self.entry(ScopeKind::Doc, |v| have.contains(&v.to_ascii_lowercase()))
-                    {
+                    // The pinned value starts the name, whole words: "Agent
+                    // design" takes "agent design v2.md", "notes" does not
+                    // take "Sticky Notes" or "release-notes.md".
+                    let have = a.value.trim();
+                    if let Some(v) = self.entry(ScopeKind::Doc, |v| starts_with_words(have, v)) {
                         return Some(v);
                     }
                 }
@@ -131,7 +132,24 @@ impl TaskScope {
             .find(|(k, v)| *k == kind && pred(v))
             .map(|(_, v)| v.clone())
     }
+}
 
+/// `name` begins with `prefix` (ASCII case-insensitive) and the match ends
+/// at a word boundary: the end of `name`, or a character that is not a
+/// letter or digit.
+fn starts_with_words(name: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    if prefix.is_empty() || name.len() < prefix.len() || !name.is_char_boundary(prefix.len()) {
+        return false;
+    }
+    name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && name[prefix.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+}
+
+impl TaskScope {
     /// Whether the scope holds at `ts`: from the task's day on, and before
     /// the close once closed.
     pub fn holds_at(&self, ts: i64) -> bool {
@@ -224,6 +242,12 @@ mod tests {
             m(AnchorKind::Doc, "agent design v2.md").as_deref(),
             Some("Agent design")
         );
+        assert_eq!(
+            m(AnchorKind::Doc, "Agent design").as_deref(),
+            Some("Agent design")
+        );
+        assert_eq!(m(AnchorKind::Doc, "Agent designs.md"), None);
+        assert_eq!(m(AnchorKind::Doc, "Notes on agent design"), None);
         assert_eq!(m(AnchorKind::People, "bob"), None);
     }
 

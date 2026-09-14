@@ -476,6 +476,11 @@ pub(crate) fn report(
     .as_millisecond();
     let tasks = chronicle_core::storage::tasks_in_range(&conn, lo, hi)?;
     let mut r = chronicle_core::report::build(&tasks, days, &tz)?;
+    let config = chronicle_core::config::Config::load(&data_dir.join("config.toml"))?;
+    chronicle_core::report::nest(
+        &mut r,
+        &chronicle_core::project::Matcher::from_config(&config),
+    );
     let now = Timestamp::now().as_millisecond();
     let (ledger_start, runs) = chronicle_core::storage::runs_for_report(&conn, lo, hi)?;
     r.gaps = chronicle_core::report::capture_gaps(&runs, ledger_start, lo, hi.min(now));

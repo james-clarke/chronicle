@@ -1283,12 +1283,7 @@ pub fn task_scopes(
          ORDER BY created_ts, id",
     )?;
     let tz = jiff::tz::TimeZone::system();
-    let day_start = |ms: i64| {
-        crate::types::ms_to_ts(ms)
-            .to_zoned(tz.clone())
-            .start_of_day()
-            .map_or(ms, |z| z.timestamp().as_millisecond())
-    };
+    let day_start = |ms: i64| crate::timeref::day_start_ms(ms_to_ts(ms), &tz);
     let mut out: Vec<TaskScope> = stmt
         .query_map([lo.unwrap_or(i64::MAX)], |r| {
             Ok(TaskScope {
@@ -1579,6 +1574,17 @@ pub fn delete_derived_task(conn: &mut Connection, task_id: i64) -> Result<bool, 
     if !derived {
         return Ok(false);
     }
+    delete_derived_rows(&tx, task_id)?;
+    tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// The rows a derived task owns, then the task: verdicts, corrections,
+/// intervals, embedding, the proposal link, its pending jobs and claims.
+/// task_evidence, task_context, journal_entries and checkpoints cascade; a
+/// task-scoped conversation keeps its messages and loses the link.
+fn delete_derived_rows(tx: &rusqlite::Transaction, task_id: i64) -> Result<(), StorageError> {
     tx.execute(
         "DELETE FROM verdict_log WHERE task_id=?1 OR interval_id IN
              (SELECT id FROM intervals WHERE task_id=?1)",
@@ -1595,12 +1601,15 @@ pub fn delete_derived_task(conn: &mut Connection, task_id: i64) -> Result<bool, 
         "UPDATE proposals SET task_id=NULL WHERE task_id=?1",
         [task_id],
     )?;
-    // task_evidence, task_context, journal_entries and checkpoints cascade;
-    // a task-scoped conversation keeps its messages and loses the link.
+    // Jobs and claims keyed by the task id are not linked by key.
+    tx.execute(
+        "DELETE FROM ai_jobs WHERE status='pending'
+           AND json_extract(payload, '$.task_id') = ?1",
+        [task_id],
+    )?;
+    tx.execute("DELETE FROM claims WHERE key = CAST(?1 AS TEXT)", [task_id])?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_id])?;
-    tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
-    tx.commit()?;
-    Ok(true)
+    Ok(())
 }
 
 /// Declared tasks with no row in the evidence cache: declared before the
@@ -2718,6 +2727,21 @@ pub fn reopen_task(conn: &Connection, task_id: i64) -> Result<(), StorageError> 
 }
 
 /// Declare a task the user is working on. Returns its id.
+/// An open derived task created at `created_ts`; its id.
+pub fn insert_derived_task(
+    conn: &Connection,
+    label: &str,
+    project: Option<&str>,
+    created_ts: i64,
+) -> Result<i64, StorageError> {
+    conn.execute(
+        "INSERT INTO tasks (label, project, status, source, created_ts)
+         VALUES (?1, ?2, 'open', 'derived', ?3)",
+        params![label, project, created_ts],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 pub fn insert_user_task(
     conn: &Connection,
     ts: jiff::Timestamp,
@@ -3395,12 +3419,12 @@ pub fn store_derivation(
                     ids.push(None);
                     continue;
                 };
-                tx.execute(
-                    "INSERT INTO tasks (label, project, status, source, created_ts)
-                     VALUES (?1, ?2, 'open', 'derived', ?3)",
-                    params![label, project, created],
-                )?;
-                ids.push(Some(tx.last_insert_rowid()));
+                ids.push(Some(insert_derived_task(
+                    &tx,
+                    label,
+                    project.as_deref(),
+                    created,
+                )?));
             }
         }
     }
@@ -3985,12 +4009,7 @@ pub fn insert_live_interval(
     let task_id = match slot {
         TaskSlot::Existing(id) => *id,
         TaskSlot::New { label, project } => {
-            tx.execute(
-                "INSERT INTO tasks (label, project, status, source, created_ts)
-                 VALUES (?1, ?2, 'open', 'derived', ?3)",
-                params![label, project, lo],
-            )?;
-            tx.last_insert_rowid()
+            insert_derived_task(&tx, label, project.as_deref(), lo)?
         }
     };
     clear_prepass(&tx, lo, hi)?;
@@ -4051,7 +4070,7 @@ pub fn store_segments(
     hi: i64,
     batch_id: Option<i64>,
     placements: &[crate::segmenter::Placement],
-) -> Result<(Vec<i64>, Vec<(i64, i64, i64, String)>), StorageError> {
+) -> Result<Vec<i64>, StorageError> {
     use crate::segmenter::Target;
     let tx = conn.transaction()?;
     tx.execute(
@@ -4064,7 +4083,6 @@ pub fn store_segments(
         .query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
     let mut touched: Vec<i64> = Vec::new();
-    let created: Vec<(i64, i64, i64, String)> = Vec::new();
     // New clusters become proposals, not tasks (m44 chunk 2): the time
     // sits on the project's other work, the proposal remembers the
     // stretches, and confirming it makes the task. Unfiled new work stays
@@ -4159,7 +4177,7 @@ pub fn store_segments(
     store_segment_proposals(&tx, lo, hi, &proposals)?;
     tx.execute(DELETE_ORPHAN_TASKS, [])?;
     tx.commit()?;
-    Ok((touched, created))
+    Ok(touched)
 }
 
 /// One new cluster of a placement run, on its way to a `proposals` row.
@@ -4298,19 +4316,8 @@ pub fn derived_tasks_to_proposals(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'task', ?7)",
             params![start_ts, end_ts, ms, runs_json, project, label, now_ms],
         )?;
-        // The rows `delete_derived_task` clears, minus the intervals
-        // (moved above); evidence, context, journals and checkpoints
-        // cascade.
-        tx.execute("DELETE FROM verdict_log WHERE task_id=?1", [id])?;
-        tx.execute("DELETE FROM task_embeddings WHERE task_id=?1", [id])?;
-        // Jobs and claims keyed by the task id are not linked by key.
-        tx.execute(
-            "DELETE FROM ai_jobs WHERE status='pending'
-               AND json_extract(payload, '$.task_id') = ?1",
-            [id],
-        )?;
-        tx.execute("DELETE FROM claims WHERE key = CAST(?1 AS TEXT)", [id])?;
-        tx.execute("DELETE FROM tasks WHERE id=?1", [id])?;
+        // The intervals moved above; the rest goes as a delete does.
+        delete_derived_rows(&tx, id)?;
         done.push((id, label));
     }
     tx.execute(DELETE_ORPHAN_NAME_JOBS, [])?;
@@ -4846,12 +4853,7 @@ pub fn advisor_mint_task(
     reason: &str,
 ) -> Result<i64, StorageError> {
     let tx = conn.transaction()?;
-    tx.execute(
-        "INSERT INTO tasks (label, project, status, source, created_ts)
-         VALUES (?1, ?2, 'open', 'derived', ?3)",
-        params![label, project, case.start_ts],
-    )?;
-    let id = tx.last_insert_rowid();
+    let id = insert_derived_task(&tx, label, project, case.start_ts)?;
     tx.execute(
         "UPDATE intervals SET task_id=?2, reason=?3, confident=1 WHERE id=?1 AND task_id=?4",
         params![case.interval_id, id, reason, case.task_id],
@@ -8520,7 +8522,7 @@ mod tests {
             kind: "read".into(),
             share: 1.0,
         };
-        let (touched, created) = super::store_segments(
+        let touched = super::store_segments(
             &mut conn,
             0,
             1_000_000,
@@ -8532,7 +8534,6 @@ mod tests {
             touched.is_empty(),
             "a general task never refreshes: {touched:?}"
         );
-        assert!(created.is_empty());
         let (n_tasks, n_rows): (i64, i64) = conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM tasks WHERE source='project'),
@@ -8596,9 +8597,7 @@ mod proposal_tests {
             new_row(600_000, 700_000, None, 1),
             new_row(800_000, 850_000, Some("acme"), 2),
         ];
-        let (touched, created) =
-            super::store_segments(&mut conn, 0, 1_000_000, None, &rows).unwrap();
-        assert!(created.is_empty());
+        let touched = super::store_segments(&mut conn, 0, 1_000_000, None, &rows).unwrap();
         assert!(touched.is_empty(), "{touched:?}");
         assert_eq!(
             count(&conn, "SELECT COUNT(*) FROM tasks WHERE source='derived'"),
@@ -8625,7 +8624,7 @@ mod proposal_tests {
         );
         // Newest first.
         assert_eq!(props[0].start_ts, 800_000);
-        assert_eq!(props[1].source, "segment");
+        assert_eq!(props[1].source, crate::proposals::ProposalSource::Segment);
         assert_eq!(props[1].runs, [(0, 100_000), (300_000, 400_000)]);
         assert_eq!(props[1].ms, 200_000);
         assert_eq!(props[1].project.as_deref(), Some("acme"));
@@ -8844,7 +8843,7 @@ mod proposal_tests {
         assert_eq!(props.len(), 2, "{props:?}");
         assert_eq!(props[1].label.as_deref(), Some("acme · new work"));
         assert_eq!(props[1].runs, [(0, 100_000), (200_000, 260_000)]);
-        assert_eq!(props[1].source, "task");
+        assert_eq!(props[1].source, crate::proposals::ProposalSource::Task);
         // A placement of the window leaves the converted proposal alone.
         super::store_segments(&mut conn, 0, 1_000_000, None, &[]).unwrap();
         assert_eq!(

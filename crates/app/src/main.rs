@@ -534,7 +534,7 @@ enum TaskCmd {
         /// A branch name.
         #[arg(long)]
         branch: Vec<String>,
-        /// Part of a document, page or file name.
+        /// The start of a document, page or file name, whole words.
         #[arg(long)]
         doc: Vec<String>,
         /// A site; its subdomains count.
@@ -714,13 +714,6 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Local midnight of the day holding `ts`, in ms.
-fn day_start_ms(ts: jiff::Timestamp) -> i64 {
-    ts.to_zoned(jiff::tz::TimeZone::system())
-        .start_of_day()
-        .map_or(ts.as_millisecond(), |z| z.timestamp().as_millisecond())
-}
-
 /// Re-file the spans from `since` on under the config and the declared
 /// tasks' scope, the way a config edit does; returns how many filed.
 fn refile_since(
@@ -861,7 +854,11 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
             chronicle_core::segmenter::seed_task_evidence(&mut conn, &config, now, id)?;
             // Spans already on screen today that carry the ticket move to
             // the task's project now rather than at the next config edit.
-            refile_since(&mut conn, &config, day_start_ms(now))?;
+            refile_since(
+                &mut conn,
+                &config,
+                chronicle_core::timeref::day_start_ms(now, &jiff::tz::TimeZone::system()),
+            )?;
             println!("task {id}: {label} [{}]", project.unwrap_or("-"));
             Ok(())
         }
@@ -910,7 +907,10 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
             let filed = refile_since(
                 &mut conn,
                 &config,
-                day_start_ms(chronicle_core::types::ms_to_ts(since)),
+                chronicle_core::timeref::day_start_ms(
+                    chronicle_core::types::ms_to_ts(since),
+                    &jiff::tz::TimeZone::system(),
+                ),
             )?;
             println!("re-filed {filed} spans since the task was declared");
             Ok(())

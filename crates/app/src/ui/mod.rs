@@ -1905,13 +1905,13 @@ impl TimelineApp {
             })
             .unwrap_or((now_ms, now_ms));
         // Today's unfiled focus minutes (m44 chunk 2): the Home review row.
-        self.unfiled_today_ms = conn
-            .query_row(
-                "SELECT COALESCE(SUM(MIN(end_ts, ?2) - MAX(start_ts, ?1)), 0) FROM spans
-                 WHERE kind='focus' AND project IS NULL AND start_ts < ?2 AND end_ts > ?1",
-                [day_lo, day_hi],
-                |r| r.get(0),
-            )
+        self.unfiled_today_ms = chronicle_core::storage::project_ms(conn, day_lo, day_hi)
+            .map(|per| {
+                per.iter()
+                    .filter(|(p, _)| p.is_none())
+                    .map(|(_, ms)| ms)
+                    .sum()
+            })
             .unwrap_or(0);
         let live: HashSet<String> =
             chronicle_core::storage::span_projects_since(conn, now_ms - LIVE_MS)
@@ -2334,10 +2334,7 @@ impl TimelineApp {
                     // Today's spans that carry the ticket move to the
                     // task's project now, not at the next config edit.
                     if let Some(cfg) = self.config.as_ref() {
-                        let day = now
-                            .to_zoned(self.tz.clone())
-                            .start_of_day()
-                            .map_or(now.as_millisecond(), |z| z.timestamp().as_millisecond());
+                        let day = chronicle_core::timeref::day_start_ms(now, &self.tz);
                         let matcher = chronicle_core::project::Matcher::from_config(cfg);
                         if let Err(e) = chronicle_core::storage::file_spans(
                             conn,
@@ -2562,6 +2559,13 @@ impl TimelineApp {
                         let key = project.trim().to_ascii_lowercase();
                         if !key.is_empty() && self.repo_cards_seen.insert(key) {
                             persist_repo_cards_seen(conn, &self.repo_cards_seen);
+                        }
+                        // An idle Projects screen picks the change up; one
+                        // mid-edit finds it at save.
+                        if let Some(screen) = self.projects_screen.as_mut()
+                            && screen.unchanged()
+                        {
+                            screen.dirty = true;
                         }
                         self.loaded_at = None;
                     }

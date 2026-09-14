@@ -266,19 +266,32 @@ impl Matcher {
     /// The names under `name`, depth-first, as `tree` orders them;
     /// empty for a childless or unknown project.
     pub fn descendants(&self, name: &str) -> Vec<&str> {
-        let tree = self.tree();
-        let Some(at) = tree
-            .iter()
-            .position(|(_, p)| p.name.eq_ignore_ascii_case(name))
-        else {
-            return Vec::new();
-        };
-        let depth = tree[at].0;
-        tree[at + 1..]
-            .iter()
-            .take_while(|(d, _)| *d > depth)
-            .map(|(_, p)| p.name.as_str())
-            .collect()
+        fn walk<'a>(m: &'a Matcher, p: &'a Project, depth: usize, out: &mut Vec<&'a str>) {
+            if depth >= 8 {
+                return;
+            }
+            for child in &p.children {
+                if let Some(c) = m.get(child) {
+                    out.push(c.name.as_str());
+                    walk(m, c, depth + 1, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if let Some(p) = self.get(name) {
+            walk(self, p, 0, &mut out);
+        }
+        out
+    }
+
+    /// `own(name)` plus `own` of every descendant (m44 chunk 0): a parent's
+    /// total covers the shared furniture it files directly and the work
+    /// its children do.
+    pub fn subtree_ms(&self, name: &str, own: impl Fn(&str) -> i64) -> i64 {
+        std::iter::once(name)
+            .chain(self.descendants(name))
+            .map(own)
+            .sum()
     }
 
     /// Every project in tree order: each top-level project in config order,

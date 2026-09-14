@@ -5,6 +5,14 @@ use jiff::civil::{Date, Weekday};
 use jiff::tz::TimeZone;
 use jiff::{ToSpan, Zoned};
 
+/// Local midnight of the day holding `ts`, in ms; `ts` itself when the
+/// zone has no midnight for it.
+pub fn day_start_ms(ts: jiff::Timestamp, tz: &TimeZone) -> i64 {
+    ts.to_zoned(tz.clone())
+        .start_of_day()
+        .map_or(ts.as_millisecond(), |z| z.timestamp().as_millisecond())
+}
+
 /// Parse a time reference out of `text`. Returns a half-open UTC ms range,
 /// or None when the question carries no recognizable time reference.
 pub fn parse(text: &str, now: &Zoned) -> Option<(i64, i64)> {

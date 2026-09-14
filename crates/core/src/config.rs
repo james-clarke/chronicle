@@ -342,14 +342,22 @@ impl Config {
             .collect()
     }
 
-    /// Missing file = defaults. A present-but-invalid file is an error, not a silent fallback.
+    /// Missing file = defaults. A present-but-invalid file is an error, not
+    /// a silent fallback. A malformed project tree is not: the file loads,
+    /// [`Config::project_issue`] names the fault, and the next write of
+    /// `[[projects]]` has to fix it (`Matcher` drops a parent it cannot
+    /// resolve).
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
-        validate_projects(&cfg.projects).map_err(ConfigError::Invalid)?;
-        Ok(cfg)
+        Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+    }
+
+    /// What [`validate_projects`] rejects in the tree as loaded, if
+    /// anything; the daemon logs it at start and reload.
+    pub fn project_issue(&self) -> Option<String> {
+        validate_projects(&self.projects).err()
     }
 
     /// Write the whole struct back, the way the Settings panel does; the
@@ -378,21 +386,7 @@ pub fn write_projects(
     projects: Vec<ProjectCfg>,
     join_min: Option<u32>,
 ) -> Result<Config, ConfigError> {
-    validate_projects(&projects).map_err(ConfigError::Invalid)?;
-    for p in &projects {
-        for t in &p.titles {
-            regex::Regex::new(t).map_err(|e| {
-                ConfigError::Invalid(format!("project `{}`: title regex {t}: {e}", p.name))
-            })?;
-        }
-    }
-    let mut config = Config::load(path)?;
-    config.projects = projects;
-    if let Some(j) = join_min {
-        config.project_join_min = j;
-    }
-    config.save(path)?;
-    Ok(config)
+    edit_config(path, |_| projects, join_min)
 }
 
 /// [`write_projects`] from a fresh read: `edit` sees the file as it is
@@ -402,8 +396,16 @@ pub fn edit_projects(
     path: &Path,
     edit: impl FnOnce(&Config) -> Vec<ProjectCfg>,
 ) -> Result<Config, ConfigError> {
-    let current = Config::load(path)?;
-    let projects = edit(&current);
+    edit_config(path, edit, None)
+}
+
+fn edit_config(
+    path: &Path,
+    edit: impl FnOnce(&Config) -> Vec<ProjectCfg>,
+    join_min: Option<u32>,
+) -> Result<Config, ConfigError> {
+    let mut config = Config::load(path)?;
+    let projects = edit(&config);
     validate_projects(&projects).map_err(ConfigError::Invalid)?;
     for p in &projects {
         for t in &p.titles {
@@ -412,8 +414,10 @@ pub fn edit_projects(
             })?;
         }
     }
-    let mut config = current;
     config.projects = projects;
+    if let Some(j) = join_min {
+        config.project_join_min = j;
+    }
     config.save(path)?;
     Ok(config)
 }
@@ -462,6 +466,7 @@ impl ProjectRule {
 pub fn attach_rules(config: &Config, name: &str, rules: &[ProjectRule]) -> (Vec<ProjectCfg>, bool) {
     let mut projects = config.projects_effective();
     let name = name.trim();
+    let mut changed = false;
     let at = match projects
         .iter()
         .position(|p| p.name.trim().eq_ignore_ascii_case(name))
@@ -472,10 +477,10 @@ pub fn attach_rules(config: &Config, name: &str, rules: &[ProjectRule]) -> (Vec<
                 name: name.to_owned(),
                 ..ProjectCfg::default()
             });
+            changed = true;
             projects.len() - 1
         }
     };
-    let mut changed = config.projects.is_empty();
     let push = |list: &mut Vec<String>, v: &str, changed: &mut bool| {
         let v = v.trim();
         if v.is_empty() || list.iter().any(|x| x.trim().eq_ignore_ascii_case(v)) {
@@ -727,6 +732,22 @@ mod tests {
         assert_eq!(projects[0].titles, ["^Board \\(1\\)$"]);
         let (_, changed) = attach_rules(&cfg, "acme", &[ProjectRule::Domain("acme.com".into())]);
         assert!(!changed);
+        // A rule the discovered project already implies changes nothing,
+        // so a discovery-only config is not materialised for it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("widget").join(".git")).unwrap();
+        let discovered = Config {
+            dev_roots: vec![dir.path().display().to_string()],
+            ..Config::default()
+        };
+        assert!(discovered.projects.is_empty());
+        let repo = dir.path().join("widget").display().to_string();
+        let (_, changed) = attach_rules(&discovered, "widget", &[ProjectRule::Repo(repo)]);
+        assert!(!changed);
+        let (projects, changed) =
+            attach_rules(&discovered, "widget", &[ProjectRule::Ticket("wid".into())]);
+        assert!(changed);
+        assert_eq!(projects.len(), 1);
         let (projects, changed) = attach_rules(
             &cfg,
             "acme-web",
@@ -763,11 +784,15 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_a_parent_no_project_has() {
+    fn load_keeps_a_parent_no_project_has_and_the_writers_refuse_it() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, "[[projects]]\nname = \"web\"\nparent = \"acme\"\n").unwrap();
-        let err = Config::load(&path).unwrap_err();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.projects.len(), 1);
+        let issue = cfg.project_issue().unwrap();
+        assert!(issue.contains("parent `acme`"), "{issue}");
+        let err = write_projects(&path, cfg.projects.clone(), None).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
     }
 

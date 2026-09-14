@@ -497,6 +497,10 @@ impl TimelineApp {
                     // (m44 chunk 0): project_groups is tree order, so once
                     // a collapsed group's depth is seen, everything deeper
                     // than it is skipped until the depth returns to it.
+                    let parents: std::collections::HashSet<&str> = project_groups
+                        .iter()
+                        .filter_map(|g| g.parent.as_deref())
+                        .collect();
                     let mut hide_from: Option<usize> = None;
                     for group in project_groups {
                         if let Some(d) = hide_from {
@@ -516,10 +520,7 @@ impl TimelineApp {
                             continue;
                         }
                         let open = !collapsed.contains(&key);
-                        let is_parent = group.name.is_some()
-                            && project_groups
-                                .iter()
-                                .any(|g| g.parent.as_deref() == group.name.as_deref());
+                        let is_parent = group.name.as_deref().is_some_and(|n| parents.contains(n));
                         ui.add_space(theme::SPACE_SM);
                         match project_header(ui, group, open_tasks, open, is_parent, &mut pending) {
                             HeaderClick::Toggle => toggle_collapse = Some(key.clone()),
@@ -1051,7 +1052,7 @@ fn proposal_card(
         })
         .unwrap_or_else(|| "unnamed".to_owned());
     let label = p.label.clone().unwrap_or_else(|| fallback.clone());
-    let is_segment = p.source != "runs";
+    let makes_task = p.source.materializes_task();
     let editing_here = proposal_edit.as_ref().is_some_and(|(id, _)| *id == p.id);
     egui::Frame::new()
         .fill(theme::palette::ACCENT.gamma_multiply(0.10))
@@ -1065,7 +1066,7 @@ fn proposal_card(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(if is_segment {
+                    egui::RichText::new(if makes_task {
                         "new work"
                     } else {
                         "proposed task"
@@ -1146,7 +1147,7 @@ fn proposal_card(
             }
             ui.add_space(theme::SPACE_XS);
             ui.horizontal(|ui| {
-                let (accept_text, accept_hover) = if is_segment {
+                let (accept_text, accept_hover) = if makes_task {
                     ("confirm", "make this a task and move its time onto it")
                 } else {
                     ("accept", "declare this task and assign the stretches to it")

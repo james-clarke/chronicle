@@ -54,14 +54,57 @@ pub struct Cluster {
     pub lines: Vec<(String, String, i64)>,
 }
 
+/// Where a proposal came from; what confirming it does follows from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalSource {
+    /// Unassigned runs the pre-pass could not place: accepting declares a
+    /// user task and assigns the runs to it.
+    Runs,
+    /// A cluster the segmenter would have minted a task for.
+    Segment,
+    /// A derived task the rebuild converted.
+    Task,
+}
+
+impl ProposalSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Runs => "runs",
+            Self::Segment => "segment",
+            Self::Task => "task",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "runs" => Some(Self::Runs),
+            "segment" => Some(Self::Segment),
+            "task" => Some(Self::Task),
+            _ => None,
+        }
+    }
+
+    /// Confirming makes a derived task and moves the stretches' segments
+    /// onto it; `Runs` declares a user task over the runs instead.
+    pub fn materializes_task(self) -> bool {
+        !matches!(self, Self::Runs)
+    }
+}
+
+impl rusqlite::types::FromSql for ProposalSource {
+    fn column_result(v: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let s = v.as_str()?;
+        Self::parse(s).ok_or_else(|| {
+            rusqlite::types::FromSqlError::Other(format!("unknown proposal source {s:?}").into())
+        })
+    }
+}
+
 /// A proposal as the feed shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Proposal {
     pub id: i64,
-    /// `runs` (unassigned runs the pre-pass could not place), `segment`
-    /// (a cluster the segmenter would have minted a task for) or `task`
-    /// (a derived task the rebuild converted).
-    pub source: String,
+    pub source: ProposalSource,
     pub start_ts: i64,
     pub end_ts: i64,
     pub ms: i64,
@@ -372,7 +415,7 @@ pub fn accept(
         String,
         Option<String>,
         Option<String>,
-        String,
+        ProposalSource,
         i64,
     ) = conn.query_row(
         "SELECT runs, project, description, source, start_ts FROM proposals
@@ -381,20 +424,15 @@ pub fn accept(
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let runs: Vec<(i64, i64)> = serde_json::from_str(&runs_json).unwrap_or_default();
-    let task_id = if source != "runs" {
-        conn.execute(
-            "INSERT INTO tasks (label, project, status, source, created_ts)
-             VALUES (?1, ?2, 'open', 'derived', ?3)",
-            params![label, project, start_ts],
-        )?;
-        conn.last_insert_rowid()
+    let task_id = if source.materializes_task() {
+        storage::insert_derived_task(conn, label, project.as_deref(), start_ts)?
     } else {
         storage::insert_user_task(conn, ts, label, project.as_deref())?
     };
     if description.is_some() {
         storage::set_task_description(conn, task_id, description.as_deref())?;
     }
-    let claimed = claim(conn, ts, &runs, &source, task_id)?;
+    let claimed = claim(conn, ts, &runs, source, task_id)?;
     conn.execute(
         "UPDATE proposals SET status='accepted', task_id=?1, label=?2 WHERE id=?3",
         params![task_id, label, id],
@@ -410,13 +448,13 @@ pub fn merge(
     id: i64,
     to_task: i64,
 ) -> Result<i64, StorageError> {
-    let (runs_json, source): (String, String) = conn.query_row(
+    let (runs_json, source): (String, ProposalSource) = conn.query_row(
         "SELECT runs, source FROM proposals WHERE id=?1 AND status='open'",
         [id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let runs: Vec<(i64, i64)> = serde_json::from_str(&runs_json).unwrap_or_default();
-    let claimed = claim(conn, ts, &runs, &source, to_task)?;
+    let claimed = claim(conn, ts, &runs, source, to_task)?;
     conn.execute(
         "UPDATE proposals SET status='accepted', task_id=?1 WHERE id=?2",
         params![to_task, id],
@@ -429,11 +467,11 @@ fn claim(
     conn: &mut Connection,
     ts: Timestamp,
     runs: &[(i64, i64)],
-    source: &str,
+    source: ProposalSource,
     task_id: i64,
 ) -> Result<i64, StorageError> {
     let mut claimed = 0;
-    if source != "runs" {
+    if source.materializes_task() {
         for &(s, e) in runs {
             claimed += storage::claim_segment_range(conn, ts, s, e, task_id)?;
         }

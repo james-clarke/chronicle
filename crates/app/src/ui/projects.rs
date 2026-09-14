@@ -213,10 +213,7 @@ impl ProjectsScreen {
             .into_iter()
             .map(|(depth, p)| TreeRow {
                 depth,
-                ms: std::iter::once(p.name.as_str())
-                    .chain(matcher.descendants(&p.name))
-                    .map(own_ms)
-                    .sum(),
+                ms: matcher.subtree_ms(&p.name, own_ms),
                 discovered: p.discovered,
                 row: rows
                     .iter()
@@ -291,7 +288,7 @@ impl ProjectsScreen {
     }
 
     /// Nothing differs from the file as loaded.
-    fn unchanged(&self) -> bool {
+    pub(super) fn unchanged(&self) -> bool {
         self.join_min == self.loaded_join && self.cfgs() == self.loaded
     }
 
@@ -441,7 +438,25 @@ impl TimelineApp {
             return;
         }
         let (cfgs, join_min) = (screen.cfgs(), screen.join_min);
+        let (loaded, loaded_join) = (screen.loaded.clone(), screen.loaded_join);
         let path = self.config_path.clone();
+        // The rows replace `[[projects]]` whole, so a change another
+        // surface wrote since this screen loaded (a Home card, a timeline
+        // menu, `project attach`) would go with them: reload instead and
+        // ask for the edit again.
+        if let Ok(fresh) = Config::load(&path)
+            && (fresh.projects_effective() != loaded || fresh.project_join_min != loaded_join)
+        {
+            if let Some(screen) = self.projects_screen.as_mut() {
+                screen.reload(self.conn.as_ref(), &fresh, &self.tz);
+                screen.status_line = Some(Err(
+                    "config.toml changed since this screen loaded; reloaded it, apply your edit again"
+                        .to_owned(),
+                ));
+            }
+            self.config = Some(fresh);
+            return;
+        }
         let written = match chronicle_core::config::write_projects(&path, cfgs, Some(join_min)) {
             Ok(c) => c,
             Err(e) => {
@@ -461,7 +476,14 @@ impl TimelineApp {
             }
             None => Ok(Vec::new()),
         };
-        let status = moved.map(|m| format!("saved \u{b7} {}", moved_line(&m, REFILE_DAYS)));
+        let status = moved.map(|m| {
+            format!(
+                "saved \u{b7} {}",
+                crate::project::moved_lines(&m, REFILE_DAYS)
+                    .trim_end()
+                    .replace('\n', " \u{b7} ")
+            )
+        });
         if let Some(screen) = self.projects_screen.as_mut() {
             screen.status_line = Some(status);
             screen.reload(self.conn.as_ref(), &written, &self.tz);
@@ -777,7 +799,18 @@ fn form_ui(
         screen.arm_remove = true;
     }
     if remove {
+        // Its children move up to its parent: a save with a dangling
+        // `parent` is refused and would leave the rows ahead of the file.
+        let gone = screen.rows[i].name.trim().to_owned();
+        let up = screen.rows[i].parent.clone();
         screen.rows.remove(i);
+        if !gone.is_empty() {
+            for r in &mut screen.rows {
+                if r.parent.trim().eq_ignore_ascii_case(&gone) {
+                    r.parent = up.clone();
+                }
+            }
+        }
         screen.arm_remove = false;
         screen.pick = if screen.rows.is_empty() {
             Pick::Unfiled
@@ -943,24 +976,4 @@ fn unfiled_ui(ui: &mut egui::Ui, width: f32, screen: &ProjectsScreen, op: &mut O
         ui.add_space(theme::SPACE_SM);
         ui.weak("nothing unfiled this week");
     }
-}
-
-/// What a re-file moved, for the status line.
-fn moved_line(moved: &[storage::Moved], days: u32) -> String {
-    if moved.is_empty() {
-        return format!("nothing moved over the last {days} days");
-    }
-    let min = |ms: i64| ms as f64 / 60_000.0;
-    let rows: Vec<String> = moved
-        .iter()
-        .map(|m| {
-            format!(
-                "{:.0} \u{2192} {:.0} min {}",
-                min(m.before_ms),
-                min(m.after_ms),
-                m.project.as_deref().unwrap_or("(unfiled)")
-            )
-        })
-        .collect();
-    format!("over the last {days} days: {}", rows.join(" \u{b7} "))
 }

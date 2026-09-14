@@ -176,23 +176,32 @@ impl AttachOutcome {
             return out;
         }
         let _ = writeln!(out, "{}: {}", self.project, self.rules.join(", "));
-        if self.moved.is_empty() {
-            let _ = writeln!(out, "nothing moved over the last {} days", self.days);
-            return out;
-        }
-        let _ = writeln!(out, "over the last {} days:", self.days);
-        let min = |ms: i64| ms as f64 / 60_000.0;
-        for m in &self.moved {
-            let _ = writeln!(
-                out,
-                "{:>7.1} \u{2192} {:<7.1} min  {}",
-                min(m.before_ms),
-                min(m.after_ms),
-                m.project.as_deref().unwrap_or("(unfiled)")
-            );
-        }
+        out.push_str(&moved_lines(&self.moved, self.days));
         out
     }
+}
+
+/// What a re-file moved over the last `days`: a line per project with its
+/// minutes before and after, or one line saying nothing did.
+pub(crate) fn moved_lines(moved: &[storage::Moved], days: u32) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if moved.is_empty() {
+        let _ = writeln!(out, "nothing moved over the last {days} days");
+        return out;
+    }
+    let _ = writeln!(out, "over the last {days} days:");
+    let min = |ms: i64| ms as f64 / 60_000.0;
+    for m in moved {
+        let _ = writeln!(
+            out,
+            "{:>7.1} \u{2192} {:<7.1} min  {}",
+            min(m.before_ms),
+            min(m.after_ms),
+            m.project.as_deref().unwrap_or("(unfiled)")
+        );
+    }
+    out
 }
 
 /// Write the rules, poke the daemon so it files with them from now on,
@@ -243,16 +252,6 @@ pub(crate) fn attach_and_refile(
         moved,
         unchanged: false,
     })
-}
-
-/// `name`'s own filed ms plus every descendant's (m44 chunk 0): a parent's
-/// total covers the shared furniture it files directly and the work its
-/// children do.
-fn descendant_ms(matcher: &Matcher, per: &BTreeMap<&str, i64>, name: &str) -> i64 {
-    std::iter::once(name)
-        .chain(matcher.descendants(name))
-        .map(|n| per.get(n).copied().unwrap_or(0))
-        .sum()
 }
 
 /// What `project test` prints; the Settings card renders the same lines.
@@ -315,7 +314,7 @@ impl Report {
             .map(|(depth, p)| {
                 (
                     p.name.clone(),
-                    descendant_ms(&matcher, &per, &p.name),
+                    matcher.subtree_ms(&p.name, |n| per.get(n).copied().unwrap_or(0)),
                     depth,
                 )
             })

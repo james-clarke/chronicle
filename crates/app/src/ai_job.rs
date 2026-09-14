@@ -229,10 +229,7 @@ pub(crate) fn span_query_text(spans: &[SpanDraft]) -> String {
 
 /// Local midnight, epoch ms: the daily cap's window.
 pub(crate) fn day_start_ms() -> i64 {
-    Zoned::now()
-        .start_of_day()
-        .map(|z| z.timestamp().as_millisecond())
-        .unwrap_or(0)
+    chronicle_core::timeref::day_start_ms(Timestamp::now(), &TimeZone::system())
 }
 
 /// Which engine answers the describer family for one job.

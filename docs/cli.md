@@ -223,7 +223,7 @@ Pins what a declared task covers besides its ticket. Time that carries a pinned 
 | `id` (positional) | integer | Task id, from `task list` or the UI. |
 | `--repo` | string, repeatable | A repo path or folder name. |
 | `--branch` | string, repeatable | A branch name. |
-| `--doc` | string, repeatable | Part of a document, page or file name. |
+| `--doc` | string, repeatable | The start of a document, page or file name, whole words. |
 | `--domain` | string, repeatable | A site; its subdomains count. |
 | `--item` | string, repeatable | A work-item key besides the task's own. |
 | `--remove` | boolean | Unpin the given values instead. |

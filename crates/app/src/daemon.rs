@@ -417,6 +417,14 @@ pub(crate) fn run(data_dir: &Path) -> anyhow::Result<()> {
     }
 }
 
+/// A tick more than the interval plus the idle threshold late on the wall
+/// clock is a suspend: the ledger row ends there (the AFK poller marks the
+/// idle stretch on its own). From `config` each tick, so a reload's
+/// `afk_close_secs` counts.
+fn sleep_gap_ms(config: &Config) -> i64 {
+    SESSIONIZE_EVERY.as_millis() as i64 + i64::from(config.afk_close_secs) * 1000
+}
+
 fn run_loop(
     data_dir: &Path,
     listener: std::os::unix::net::UnixListener,
@@ -425,6 +433,9 @@ fn run_loop(
 ) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
     let mut config = Config::load(&data_dir.join("config.toml"))?;
+    if let Some(issue) = config.project_issue() {
+        tracing::warn!("config.toml [[projects]]: {issue}");
+    }
     let mut filters = Filters::new(&config)?;
     let mut conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
     // Daemon downtime must not read as focus time: mark a gap as AFK-from-the-
@@ -491,12 +502,7 @@ fn run_loop(
     let mut next_refresh = Instant::now() + SESSIONIZE_EVERY;
     let mut next_sources = Instant::now();
     let mut last_prepass = Instant::now();
-    // A tick more than the interval plus the idle threshold late on the wall
-    // clock is a suspend: the ledger row ends there (the AFK poller marks
-    // the idle stretch on its own).
     let mut last_tick = Timestamp::now();
-    let sleep_gap_ms =
-        SESSIONIZE_EVERY.as_millis() as i64 + i64::from(config.afk_close_secs) * 1000;
     let exit_reason = 'daemon: loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
         // Cloned per iteration so the select borrow does not pin the scheduler.
@@ -546,6 +552,9 @@ fn run_loop(
                         match Config::load(&data_dir.join("config.toml")) {
                             Ok(fresh) => {
                                 config = fresh;
+                                if let Some(issue) = config.project_issue() {
+                                    tracing::warn!("config.toml [[projects]]: {issue}");
+                                }
                                 match Filters::new(&config) {
                                     Ok(f) => filters = f,
                                     Err(e) => tracing::error!("exclusion filters not reloaded: {e:#}"),
@@ -579,7 +588,7 @@ fn run_loop(
             }
             default(timeout) => {
                 let now = Timestamp::now();
-                if now.as_millisecond() - last_tick.as_millisecond() > sleep_gap_ms
+                if now.as_millisecond() - last_tick.as_millisecond() > sleep_gap_ms(&config)
                     && let Some(id) = run_id.take()
                 {
                     tracing::info!(since = %last_tick, "wall clock jumped: machine slept");

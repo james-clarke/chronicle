@@ -1688,19 +1688,9 @@ fn place_window(
         &sp,
         distractions,
     );
-    let (touched, new_tasks) = storage::store_segments(conn, lo, hi, batch_id, &placements)?;
+    let touched = storage::store_segments(conn, lo, hi, batch_id, &placements)?;
     if !touched.is_empty() {
         storage::refresh_task_evidence(conn, &ticket_re, &params, ts_to_ms(now), &touched)?;
-    }
-    for (task_id, plo, phi, placeholder) in new_tasks {
-        let payload = serde_json::json!({
-            "task_id": task_id,
-            "lo": plo,
-            "hi": phi,
-            "placeholder": placeholder,
-        })
-        .to_string();
-        storage::enqueue_ai_job(conn, now, "name_task", 0, &payload)?;
     }
     Ok(placements)
 }

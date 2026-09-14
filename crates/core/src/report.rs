@@ -63,14 +63,6 @@ pub fn project_totals(tasks: &[Task], lo: i64, hi: i64) -> Vec<ProjectTotal> {
     totals
 }
 
-/// Own ms plus every descendant's, recursively over `matcher`'s tree.
-fn subtree_ms(matcher: &Matcher, name: &str, own: &HashMap<String, i64>) -> i64 {
-    std::iter::once(name)
-        .chain(matcher.descendants(name))
-        .map(|n| own.get(n).copied().unwrap_or(0))
-        .sum()
-}
-
 /// Re-order `totals` into tree order (m44 chunk 0): every top-level project
 /// in `matcher.tree()` order that has time in the range — itself or any
 /// descendant — followed by its children depth-first, then names no
@@ -86,7 +78,7 @@ pub fn nest_totals(totals: &mut Vec<ProjectTotal>, matcher: &Matcher) {
     let mut out: Vec<ProjectTotal> = Vec::new();
     for (depth, proj) in matcher.tree() {
         used.insert(proj.name.clone());
-        let ms = subtree_ms(matcher, &proj.name, &own);
+        let ms = matcher.subtree_ms(&proj.name, |n| own.get(n).copied().unwrap_or(0));
         if ms == 0 {
             continue;
         }
