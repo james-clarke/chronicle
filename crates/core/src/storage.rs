@@ -3742,8 +3742,11 @@ pub fn claim_segment_range(
         // The person placed something here since: theirs wins.
         return Ok(0);
     }
+    // Only the other-work rows the segmenter left: another task's row
+    // sitting inside the stretch is that task's, not the proposal's.
     tx.execute(
-        "DELETE FROM intervals WHERE source <> 'user' AND start_ts >= ?1 AND end_ts <= ?2",
+        "DELETE FROM intervals WHERE source <> 'user' AND start_ts >= ?1 AND end_ts <= ?2
+           AND task_id IN (SELECT id FROM tasks WHERE source='project')",
         [start_ts, end_ts],
     )?;
     tx.execute(
@@ -4065,7 +4068,8 @@ pub fn store_segments(
     // New clusters become proposals, not tasks (m44 chunk 2): the time
     // sits on the project's other work, the proposal remembers the
     // stretches, and confirming it makes the task. Unfiled new work stays
-    // unplaced and is proposed all the same.
+    // unplaced; the pre-pass clusters unassigned runs into proposals of
+    // its own, so it is not proposed twice.
     let mut proposals: Vec<SegmentProposal> = Vec::new();
     for p in placements {
         let task_id = match &p.target {
@@ -4075,6 +4079,9 @@ pub fn store_segments(
                 project, cluster, ..
             } => {
                 let ranges = subtract_ranges(p.lo, p.hi, &user_rows);
+                let Some(project) = project else {
+                    continue;
+                };
                 if ranges.is_empty() {
                     continue;
                 }
@@ -4083,7 +4090,7 @@ pub fn store_segments(
                     None => {
                         proposals.push(SegmentProposal {
                             cluster: *cluster,
-                            project: project.clone(),
+                            project: Some(project.clone()),
                             runs: Vec::new(),
                         });
                         proposals.last_mut().expect("just pushed")
@@ -4091,9 +4098,6 @@ pub fn store_segments(
                 };
                 prop.runs
                     .extend(ranges.iter().map(|(s, e)| (*s, *e, p.share)));
-                let Some(project) = project else {
-                    continue;
-                };
                 general_task(&tx, project, p.lo)?
             }
         };
@@ -4216,10 +4220,10 @@ fn store_segment_proposals(
         tx.execute(
             "INSERT INTO proposals (start_ts, end_ts, ms, runs, project, source, ts)
              VALUES (?1, ?2, ?3, ?4, ?5, 'segment', ?6)
-             ON CONFLICT(start_ts) DO UPDATE SET
+             ON CONFLICT(source, start_ts) DO UPDATE SET
                  end_ts=excluded.end_ts, ms=excluded.ms, runs=excluded.runs,
                  project=COALESCE(proposals.project, excluded.project)
-             WHERE proposals.status='open' AND proposals.source='segment'",
+             WHERE proposals.status='open'",
             params![start_ts, end_ts, ms, runs_json, project, hi],
         )?;
     }
@@ -4261,7 +4265,7 @@ pub fn derived_tasks_to_proposals(
         };
         if tx
             .query_row(
-                "SELECT 1 FROM proposals WHERE start_ts=?1",
+                "SELECT 1 FROM proposals WHERE source='segment' AND start_ts=?1",
                 [start_ts],
                 |_| Ok(()),
             )
@@ -4298,6 +4302,13 @@ pub fn derived_tasks_to_proposals(
         // cascade.
         tx.execute("DELETE FROM verdict_log WHERE task_id=?1", [id])?;
         tx.execute("DELETE FROM task_embeddings WHERE task_id=?1", [id])?;
+        // Jobs and claims keyed by the task id are not linked by key.
+        tx.execute(
+            "DELETE FROM ai_jobs WHERE status='pending'
+               AND json_extract(payload, '$.task_id') = ?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM claims WHERE key = CAST(?1 AS TEXT)", [id])?;
         tx.execute("DELETE FROM tasks WHERE id=?1", [id])?;
         done.push((id, label));
     }
@@ -8582,6 +8593,7 @@ mod proposal_tests {
             new_row(0, 100_000, Some("acme"), 0),
             new_row(300_000, 400_000, Some("acme"), 0),
             new_row(600_000, 700_000, None, 1),
+            new_row(800_000, 850_000, Some("acme"), 2),
         ];
         let (touched, created) =
             super::store_segments(&mut conn, 0, 1_000_000, None, &rows).unwrap();
@@ -8594,7 +8606,7 @@ mod proposal_tests {
         let general = super::general_task(&conn, "acme", 0).unwrap();
         assert_eq!(
             count(&conn, "SELECT COUNT(*) FROM intervals"),
-            2,
+            3,
             "the unfiled cluster stays unplaced"
         );
         assert_eq!(
@@ -8602,13 +8614,16 @@ mod proposal_tests {
                 &conn,
                 &format!("SELECT COUNT(*) FROM intervals WHERE task_id={general}")
             ),
-            2
+            3
         );
         let props = crate::proposals::open_proposals(&conn, 0, 1_000_000).unwrap();
-        assert_eq!(props.len(), 2, "{props:?}");
+        assert_eq!(
+            props.len(),
+            2,
+            "the unfiled cluster is the pre-pass's to propose: {props:?}"
+        );
         // Newest first.
-        assert_eq!(props[0].start_ts, 600_000);
-        assert_eq!(props[0].project, None);
+        assert_eq!(props[0].start_ts, 800_000);
         assert_eq!(props[1].source, "segment");
         assert_eq!(props[1].runs, [(0, 100_000), (300_000, 400_000)]);
         assert_eq!(props[1].ms, 200_000);
@@ -8619,7 +8634,7 @@ mod proposal_tests {
         );
 
         // A second placement of the window with the same clusters keeps
-        // the rows; one without the unfiled cluster drops it.
+        // the rows; one without the second cluster drops it.
         conn.execute("UPDATE proposals SET label='named' WHERE start_ts=0", [])
             .unwrap();
         super::store_segments(&mut conn, 0, 1_000_000, None, &rows[..2]).unwrap();

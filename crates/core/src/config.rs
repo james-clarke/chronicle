@@ -395,6 +395,29 @@ pub fn write_projects(
     Ok(config)
 }
 
+/// [`write_projects`] from a fresh read: `edit` sees the file as it is
+/// now and returns the projects to write, so two surfaces writing in
+/// turn each build on the other's change.
+pub fn edit_projects(
+    path: &Path,
+    edit: impl FnOnce(&Config) -> Vec<ProjectCfg>,
+) -> Result<Config, ConfigError> {
+    let current = Config::load(path)?;
+    let projects = edit(&current);
+    validate_projects(&projects).map_err(ConfigError::Invalid)?;
+    for p in &projects {
+        for t in &p.titles {
+            regex::Regex::new(t).map_err(|e| {
+                ConfigError::Invalid(format!("project `{}`: title regex {t}: {e}", p.name))
+            })?;
+        }
+    }
+    let mut config = current;
+    config.projects = projects;
+    config.save(path)?;
+    Ok(config)
+}
+
 /// One rule to add to a project by name (m44 chunk 3), from any surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectRule {

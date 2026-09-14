@@ -246,10 +246,10 @@ pub fn refresh(
         tx.execute(
             "INSERT INTO proposals (start_ts, end_ts, ms, runs, project, ts)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(start_ts) DO UPDATE SET
+             ON CONFLICT(source, start_ts) DO UPDATE SET
                  end_ts=excluded.end_ts, ms=excluded.ms, runs=excluded.runs,
                  project=COALESCE(proposals.project, excluded.project)
-             WHERE proposals.status='open' AND proposals.source='runs'",
+             WHERE proposals.status='open'",
             params![c.start_ts, c.end_ts, c.ms, runs_json, c.project, hi],
         )?;
     }

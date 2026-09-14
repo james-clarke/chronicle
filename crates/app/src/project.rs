@@ -203,7 +203,7 @@ pub(crate) fn attach_and_refile(
     rules: &[chronicle_core::config::ProjectRule],
     days: u32,
 ) -> anyhow::Result<AttachOutcome> {
-    use chronicle_core::config::{attach_rules, write_projects};
+    use chronicle_core::config::{attach_rules, edit_projects};
     let path = data_dir.join("config.toml");
     let config = Config::load(&path)?;
     let (projects, changed) = attach_rules(&config, name, rules);
@@ -227,7 +227,9 @@ pub(crate) fn attach_and_refile(
             unchanged: true,
         });
     }
-    let config = write_projects(&path, projects, None)?;
+    // Written from a fresh read, so a change another surface made since
+    // the load above is kept.
+    let config = edit_projects(&path, |fresh| attach_rules(fresh, name, rules).0)?;
     let _ = crate::send_ctrl(&crate::socket_path(data_dir), "reload");
     let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
     let lo = Timestamp::now().as_millisecond() - i64::from(days) * 86_400_000;

@@ -34,7 +34,7 @@ A missing `config.toml` is not an error. Chronicle starts with the defaults belo
 | `title_similarity` | `0.8` | Consecutive same-app events merge into one span when normalized title similarity is at least this (absorbs jitter such as an unread-count prefix changing). |
 | `retention_days` | `180` | Rows older than this are pruned daily. `0` keeps rows forever. Corrections are always kept regardless of this setting. |
 | `task_autoclose_days` | `3` | Open derived tasks with no interval for this many days are closed automatically each day. `0` turns this off; declared tasks only close by hand either way. |
-| `derive_mode` | `"model"` | How the live tail gets placed. `model` runs the deterministic pre-pass, then the resident model every `live_secs`, then a model batch derive. `segmenter` does deterministic segmentation over span anchors scored against task evidence, reduces the batch tier to a re-score, and only asks the model to name new tasks. |
+| `derive_mode` | `"model"` | How the live tail gets placed. `model` runs the deterministic pre-pass, then the resident model every `live_secs`, then a model batch derive. `segmenter` does deterministic segmentation over span anchors scored against task evidence, reduces the batch tier to a re-score, and only asks the model to name the work it proposes. |
 | `segment_switch_min` | `3` | Segmenter only: minutes a run of unrelated spans must last before it becomes its own segment; shorter excursions fold into the surrounding one. |
 | `segment_new_task_min` | `10` | Segmenter only: minutes a stretch the scorer calls new must last before a task gets created for it. |
 | `embed_model` | `None` | Embedding model for the soft tier: a file name inside the models directory (from `chronicle model pull bge-small`) or a full path. Unset means no vectors; title words alone carry the soft tier. |
@@ -63,7 +63,7 @@ Each entry in `projects` is a `ProjectCfg`:
 | `domains` | `[]` | Sites (for example `contoso.atlassian.net`); a subdomain of a listed site matches too. |
 | `titles` | `[]` | Window-title regexes, matched anywhere in the title. |
 | `apps` | `[]` | Whole apps, matched case-insensitively by app name. |
-| `derive` | `true` | Whether derived sub-tasks are minted inside this project. |
+| `derive` | `true` | Whether new work inside this project is proposed as a task of its own. Off, it stays on the project's other work. |
 | `parent` | unset | The project this one sits under, by name. A client's shared tools (its issue tracker, chat, calendar) go on the parent; each code project under it is a child with its own repos and prefixes. A span is matched against the rules of every project without children first, then against the parents, so a parent's rules are the fallback. A project with children never mints derived tasks; its own rules land time on its other work. Reports roll children into their parent. |
 
 ### Sources and integrations

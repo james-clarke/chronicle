@@ -425,7 +425,7 @@ fn run_loop(
 ) -> anyhow::Result<()> {
     let _guard = init_logging(data_dir)?;
     let mut config = Config::load(&data_dir.join("config.toml"))?;
-    let filters = Filters::new(&config)?;
+    let mut filters = Filters::new(&config)?;
     let mut conn = chronicle_core::storage::open(&data_dir.join("chronicle.db"))?;
     // Daemon downtime must not read as focus time: mark a gap as AFK-from-the-
     // last-event; the AFK poller's initial state announcement closes it.
@@ -546,6 +546,10 @@ fn run_loop(
                         match Config::load(&data_dir.join("config.toml")) {
                             Ok(fresh) => {
                                 config = fresh;
+                                match Filters::new(&config) {
+                                    Ok(f) => filters = f,
+                                    Err(e) => tracing::error!("exclusion filters not reloaded: {e:#}"),
+                                }
                                 distractions = chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
                                 tracing::info!("config.toml reloaded: {} projects", config.projects_effective().len());
                             }
