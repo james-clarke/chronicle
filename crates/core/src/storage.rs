@@ -4578,14 +4578,16 @@ pub fn record_rescore(
     conn: &Connection,
     now: jiff::Timestamp,
     day: &str,
+    anchor: i64,
     before: &[SegmentRow],
     moved: usize,
 ) -> Result<i64, StorageError> {
     let ctx = serde_json::to_string(before).unwrap_or_default();
+    // `task_id` references `tasks`: a task the re-score moved rows onto.
     conn.execute(
         "INSERT INTO corrections (ts, task_id, old_label, new_label, old_project, new_project, ctx, kind)
-         VALUES (?1, 0, ?2, '', NULL, NULL, ?3, 'rescore')",
-        params![ts_to_ms(now), format!("moved {moved}"), ctx],
+         VALUES (?1, ?2, ?3, '', NULL, NULL, ?4, 'rescore')",
+        params![ts_to_ms(now), anchor, format!("moved {moved}"), ctx],
     )?;
     let id = conn.last_insert_rowid();
     set_meta(

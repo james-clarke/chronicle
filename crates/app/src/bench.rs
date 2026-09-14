@@ -1207,6 +1207,14 @@ pub(crate) fn window(data_dir: &Path, spec: &str, live: bool) -> anyhow::Result<
     println!("cross-project whole rows: {crossed} of {checked} with a project on both sides");
     let sessions = storage::live_sessions(&conn, lo, hi, &re)?;
     println!("sessions live around the window ({}):", sessions.len());
+    // The scorer's view over the tasks the window admits at its middle.
+    let closed = storage::closed_user_tasks(&conn, lo)?;
+    let mid = lo + (hi - lo) / 2;
+    let profiles: Vec<_> = profiles
+        .iter()
+        .filter(|p| closed.get(&p.task_id).is_none_or(|&c| mid <= c))
+        .cloned()
+        .collect();
     for s in &sessions {
         let owned: Vec<_> = spans
             .iter()

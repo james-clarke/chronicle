@@ -465,6 +465,15 @@ enum TaskCmd {
         /// Task id, from `task list` or the UI.
         id: i64,
     },
+    /// Re-score a day's placements with the tasks as they stand now, the
+    /// way a keep or move does: batches sealed before a task was declared
+    /// or closed take it up. Rows you placed yourself are untouched, and
+    /// the re-score is one undoable correction.
+    Rescore {
+        /// Local day, `YYYY-MM-DD`; today when omitted.
+        #[arg(long)]
+        day: Option<String>,
+    },
     /// Change a task's label, project or description. Label and project
     /// edits are kept as a correction the model reads first next time.
     Rename {
@@ -740,6 +749,36 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
             };
             storage::close_task(&conn, jiff::Timestamp::now(), id)?;
             println!("task {id}: {label} closed");
+            Ok(())
+        }
+        TaskCmd::Rescore { day } => {
+            let config = chronicle_core::config::Config::load(&data_dir.join("config.toml"))?;
+            if config.derive_mode != "segmenter" {
+                bail!("task rescore needs derive_mode = \"segmenter\"");
+            }
+            let tz = jiff::tz::TimeZone::system();
+            let now = jiff::Timestamp::now();
+            let day = match day {
+                Some(d) => d.parse::<jiff::civil::Date>().context("--day")?,
+                None => now.to_zoned(tz.clone()).date(),
+            };
+            let lo = day.to_zoned(tz)?.timestamp().as_millisecond();
+            let hi = lo + 86_400_000;
+            let distractions =
+                chronicle_core::evidence::compile_patterns(&config.distraction_patterns);
+            let moved = chronicle_core::segmenter::rescore_day(
+                &mut conn,
+                &config,
+                now,
+                &distractions,
+                &day.to_string(),
+                lo,
+                hi,
+            )?;
+            match moved {
+                Some((id, n)) => println!("{day}: {n} rows moved (correction {id})"),
+                None => println!("{day}: nothing moved"),
+            }
             Ok(())
         }
         TaskCmd::Rename {

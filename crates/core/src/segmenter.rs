@@ -1470,15 +1470,17 @@ pub fn rescore_day(
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(t, _)| t)
     };
-    let moved = after
+    let moved: Vec<i64> = after
         .iter()
         .filter(|r| owner_before(r.start_ts, r.end_ts).is_some_and(|t| t != r.task_id))
-        .count();
-    if moved == 0 {
+        .map(|r| r.task_id)
+        .collect();
+    // The correction row needs a task: the first one rows moved onto.
+    let Some(&anchor) = moved.first() else {
         return Ok(None);
-    }
-    let id = storage::record_rescore(conn, now, day, &before, moved)?;
-    Ok(Some((id, moved)))
+    };
+    let id = storage::record_rescore(conn, now, day, anchor, &before, moved.len())?;
+    Ok(Some((id, moved.len())))
 }
 
 /// Once a day in segmenter mode: verdicts left alone become right, the
