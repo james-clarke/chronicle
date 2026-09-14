@@ -601,10 +601,12 @@ impl Sinks {
                 flagged.insert(key);
             }
         }
+        // As configured, and never for a parent (m44 chunk 0): its own
+        // rules catch the client's shared furniture as its other work.
         let no_derive = matcher
             .projects
             .iter()
-            .filter(|p| !p.derive)
+            .filter(|p| !matcher.derives(&p.name))
             .map(|p| p.name.to_ascii_lowercase())
             .collect();
         Sinks {
@@ -2721,6 +2723,21 @@ mod tests {
         assert!(!sinks.derives("acme"));
         assert!(sinks.derives("chronicle"));
         assert!(sinks.derives("sprog"));
+        // A parent never mints, whatever its own `derive` says.
+        let tree = Matcher::new(&[
+            crate::config::ProjectCfg {
+                name: "client".into(),
+                ..Default::default()
+            },
+            crate::config::ProjectCfg {
+                name: "client-web".into(),
+                parent: Some("client".into()),
+                ..Default::default()
+            },
+        ]);
+        let sinks = Sinks::build(&[], &HashMap::new(), &tree, HashMap::new());
+        assert!(!sinks.derives("client"));
+        assert!(sinks.derives("client-web"));
     }
 
     /// A close is scoped by time: the task the person closed at T takes
