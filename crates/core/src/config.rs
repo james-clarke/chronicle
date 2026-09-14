@@ -11,6 +11,8 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("failed to write config: {0}")]
     Write(#[from] toml::ser::Error),
+    #[error("invalid config: {0}")]
+    Invalid(String),
 }
 
 // Serialize: the UI settings panel writes the whole struct back to
@@ -266,8 +268,16 @@ pub struct ProjectCfg {
     pub titles: Vec<String>,
     /// Whole apps (case-insensitive app name).
     pub apps: Vec<String>,
-    /// Mint derived sub-tasks inside this project.
+    /// Mint derived sub-tasks inside this project. A project with children
+    /// never mints: its own rules catch the client's furniture (the board,
+    /// the chat, the calendar) as its other work.
     pub derive: bool,
+    /// The project this one sits under (m44 chunk 0): a client above its
+    /// code projects. Rules on a child run before rules on any parent, so a
+    /// ticket prefix or site listed on the parent is the fallback for a span
+    /// no child claims. Reports roll children into their parent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl Default for ProjectCfg {
@@ -280,6 +290,7 @@ impl Default for ProjectCfg {
             titles: Vec::new(),
             apps: Vec::new(),
             derive: true,
+            parent: None,
         }
     }
 }
@@ -336,7 +347,9 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+        let cfg: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
+        validate_projects(&cfg.projects).map_err(ConfigError::Invalid)?;
+        Ok(cfg)
     }
 
     /// Write the whole struct back, the way the Settings panel does; the
@@ -353,6 +366,58 @@ impl Config {
             .clone()
             .unwrap_or_else(|| data_dir.join("mcp.toml"))
     }
+}
+
+/// The project tree is well formed: every `parent` names a configured
+/// project, no project is its own ancestor, and no two projects share a
+/// name. Names compare case-insensitively, as `Matcher::resolve` does.
+pub fn validate_projects(projects: &[ProjectCfg]) -> Result<(), String> {
+    let name_of = |p: &ProjectCfg| p.name.trim().to_owned();
+    let parent_of = |name: &str| -> Option<String> {
+        projects
+            .iter()
+            .find(|q| name_of(q).eq_ignore_ascii_case(name))
+            .and_then(|q| q.parent.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    for (i, p) in projects.iter().enumerate() {
+        let name = name_of(p);
+        if name.is_empty() {
+            continue;
+        }
+        if projects[..i]
+            .iter()
+            .any(|q| name_of(q).eq_ignore_ascii_case(&name))
+        {
+            return Err(format!("project `{name}` is listed twice"));
+        }
+        let Some(parent) = p.parent.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if !projects
+            .iter()
+            .any(|q| name_of(q).eq_ignore_ascii_case(parent))
+        {
+            return Err(format!(
+                "project `{name}`: parent `{parent}` is not a project"
+            ));
+        }
+        let mut cur = parent.to_owned();
+        for _ in 0..=projects.len() {
+            if cur.eq_ignore_ascii_case(&name) {
+                return Err(format!(
+                    "project `{name}`: its parent chain loops back to it"
+                ));
+            }
+            match parent_of(&cur) {
+                Some(next) => cur = next,
+                None => break,
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A `.git` directory only: a linked worktree or submodule carries a `.git`
@@ -467,6 +532,36 @@ mod tests {
             cfg.watched_repos(),
             vec![outside, root.join("beta"), root.join("alpha")]
         );
+    }
+
+    fn named(name: &str, parent: Option<&str>) -> ProjectCfg {
+        ProjectCfg {
+            name: name.into(),
+            parent: parent.map(str::to_owned),
+            ..ProjectCfg::default()
+        }
+    }
+
+    #[test]
+    fn validate_projects_checks_parents_and_cycles() {
+        assert!(validate_projects(&[named("acme", None), named("web", Some("Acme"))]).is_ok());
+        let err = validate_projects(&[named("web", Some("acme"))]).unwrap_err();
+        assert!(err.contains("parent `acme` is not a project"), "{err}");
+        let err = validate_projects(&[named("a", Some("b")), named("b", Some("a"))]).unwrap_err();
+        assert!(err.contains("loops back"), "{err}");
+        let err = validate_projects(&[named("a", Some("a"))]).unwrap_err();
+        assert!(err.contains("loops back"), "{err}");
+        let err = validate_projects(&[named("a", None), named("A", None)]).unwrap_err();
+        assert!(err.contains("listed twice"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_a_parent_no_project_has() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[[projects]]\nname = \"web\"\nparent = \"acme\"\n").unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
     }
 
     #[test]

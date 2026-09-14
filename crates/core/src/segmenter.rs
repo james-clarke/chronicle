@@ -568,6 +568,10 @@ pub struct Sinks {
     /// answered as of each segment; `current` is the answer when none
     /// of them was open at the segment.
     pub history: HashMap<String, Vec<storage::DeclaredTask>>,
+    /// What each declared task covers (m44 chunk 1): its ticket and the
+    /// values pinned to it. A segment carrying one goes to that task ahead
+    /// of the project's current task, for as long as the task held.
+    pub scopes: Vec<crate::scope::TaskScope>,
 }
 
 impl Sinks {
@@ -608,7 +612,19 @@ impl Sinks {
             no_derive,
             closed,
             history,
+            scopes: Vec::new(),
         }
+    }
+
+    pub fn with_scopes(mut self, scopes: Vec<crate::scope::TaskScope>) -> Sinks {
+        self.scopes = scopes;
+        self
+    }
+
+    /// The declared task whose scope the anchors carry at `ts`, with what
+    /// matched, as it reads in the reason.
+    fn scoped(&self, anchors: &[Anchor], ts: i64) -> Option<(i64, String)> {
+        crate::scope::holder(&self.scopes, anchors, ts).map(|(s, what)| (s.task_id, what))
     }
 
     /// The project's sink for a segment over `[lo, hi)`: among its
@@ -695,6 +711,19 @@ fn midpoint(lo: i64, hi: i64) -> i64 {
     lo + (hi - lo) / 2
 }
 
+/// The anchor keys of a segment as anchors, for the scope match.
+fn anchors_of(keys: &HashMap<Key, f64>) -> Vec<Anchor> {
+    keys.keys()
+        .filter_map(|k| match k {
+            Key::Anchor(kind, value) => Some(Anchor {
+                kind: *kind,
+                value: value.clone(),
+            }),
+            Key::Term(_) => None,
+        })
+        .collect()
+}
+
 fn crown(v: &mut Verdict, task: i64) {
     let score = v
         .ranked
@@ -737,7 +766,8 @@ fn holder(v: &Verdict, candidates: &[Profile], items: &[Key]) -> Option<(i64, St
         })
 }
 
-/// The sink order inside a project (m35 chunk 1): the current declared
+/// The sink order inside a project (m35 chunk 1): the declared task whose
+/// scope the segment carries (m44 chunk 1); else the current declared
 /// task, unless the segment carries a ticket it does not hold and another
 /// task of the project does; else the task holding that ticket; else
 /// whatever the scorer ranked first among the project's tasks — and when
@@ -750,6 +780,12 @@ fn sink_order(
     project: Option<&str>,
     sinks: &Sinks,
 ) -> Option<String> {
+    if let Some((task, what)) =
+        sinks.scoped(&anchors_of(&seg.keys), midpoint(seg.start_ts, seg.end_ts))
+    {
+        crown(v, task);
+        return Some(format!("scoped to {what}"));
+    }
     let project = project?;
     let items: Vec<Key> = seg
         .keys
@@ -1273,6 +1309,15 @@ fn session_target(
         margin: 0.0,
         confident: false,
     };
+    let anchors: Vec<Anchor> = s
+        .anchors
+        .iter()
+        .chain(owned.iter().flat_map(|sp| sp.anchors.iter()))
+        .cloned()
+        .collect();
+    if let Some((task, _)) = sinks.scoped(&anchors, midpoint(lo, hi)) {
+        return Target::Existing(task);
+    }
     let holder = holder(verdict.unwrap_or(&empty), candidates, &items);
     if let Some(project) = project
         && let Some(cur) = sinks.current_in(project, lo, hi)
@@ -1551,7 +1596,8 @@ pub fn place_dry(
         &projects,
         &matcher,
         storage::closed_user_tasks(conn, lo)?,
-    );
+    )
+    .with_scopes(storage::task_scopes(conn, Some(lo))?);
     let placements = decide(
         &spans,
         lo,
@@ -1598,7 +1644,7 @@ fn place_window(
     }
     // A declared task the cache never saw (declared before seeding
     // existed, or through a path that does not seed) gets its rows now.
-    let unseeded = storage::unseeded_user_tasks(conn)?;
+    let unseeded = storage::unseeded_user_tasks(conn, lo)?;
     if !unseeded.is_empty() {
         storage::refresh_task_evidence(conn, &ticket_re, &params, ts_to_ms(now), &unseeded)?;
     }
@@ -1613,7 +1659,8 @@ fn place_window(
         &projects,
         &matcher,
         storage::closed_user_tasks(conn, lo)?,
-    );
+    )
+    .with_scopes(storage::task_scopes(conn, Some(lo))?);
     let placements = decide(
         &spans,
         lo,
@@ -2733,7 +2780,12 @@ mod tests {
                 &SegParams::default(),
             )
         };
-        let sinks = Sinks::build(&[x.clone()], &projects, &matcher, closed.clone());
+        let sinks = Sinks::build(
+            std::slice::from_ref(&x),
+            &projects,
+            &matcher,
+            closed.clone(),
+        );
         assert!(sinks.admits(9, 0, 10 * M));
         assert!(!sinks.admits(9, 16 * M, 26 * M));
         assert!(sinks.admits(11, 16 * M, 26 * M));
@@ -2763,6 +2815,88 @@ mod tests {
             out.iter().all(|p| p.reason == "declared in acme"),
             "{out:?}"
         );
+    }
+
+    /// Declared scope beats the rules (m44 chunk 1): the ticket a
+    /// declared task holds sends the segment to that task, even when the
+    /// project's current task is another, and only until its close.
+    #[test]
+    fn decide_sends_a_scoped_ticket_to_its_task_until_the_close() {
+        use crate::scope::TaskScope;
+        use storage::DeclaredTask;
+        let board = |id: i64, lo: i64, hi: i64| {
+            let mut s = span(
+                id,
+                lo,
+                hi,
+                "firefox",
+                "[ACME-11342] Agent backend - Jira",
+                &[(AnchorKind::Item, "ACME-11342")],
+            );
+            s.project = Some("acme-ai".into());
+            s
+        };
+        let profile = |task_id: i64, key: Key| Profile {
+            task_id,
+            minutes: HashMap::from([(key, 10.0)]),
+            last_ts: None,
+            vec: None,
+        };
+        // 183 holds the ticket; 190 is the project's current task and
+        // scores on the same place the segment also carries.
+        let profiles = [
+            profile(183, Key::Anchor(AnchorKind::Item, "ACME-11342".into())),
+            profile(190, Key::Term("agent".into())),
+        ];
+        let labels = HashMap::from([(183, "ticket".to_owned()), (190, "current".to_owned())]);
+        let projects = HashMap::from([
+            (183, Some("acme-ai".to_owned())),
+            (190, Some("acme-ai".to_owned())),
+        ]);
+        let declared = |id: i64, current: bool, closed_ts: Option<i64>| DeclaredTask {
+            id,
+            project: Some("acme-ai".into()),
+            current,
+            created_ts: 0,
+            closed_ts,
+        };
+        let scope = TaskScope {
+            task_id: 183,
+            project: Some("acme-ai".into()),
+            ticket: Some("ACME-11342".into()),
+            since: 0,
+            closed_ts: Some(25 * M),
+            entries: Vec::new(),
+        };
+        let sinks = Sinks::build(
+            &[
+                declared(183, false, Some(25 * M)),
+                declared(190, true, None),
+            ],
+            &projects,
+            &Matcher::default(),
+            HashMap::from([(183, 25 * M)]),
+        )
+        .with_scopes(vec![scope]);
+        let spans = [board(1, 0, 10), board(2, 30, 40)];
+        let out = decide(
+            &spans,
+            0,
+            45 * M,
+            &profiles,
+            &labels,
+            &projects,
+            &sinks,
+            &[],
+            &Params::default(),
+            &SegParams::default(),
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].target, Target::Existing(183), "{out:?}");
+        assert_eq!(out[0].reason, "scoped to ACME-11342");
+        // After the close the scope no longer holds: the current task.
+        assert_eq!(out[1].target, Target::Existing(190), "{out:?}");
+        assert_eq!(out[1].reason, "declared in acme-ai");
     }
 
     /// The session split under a close scoped by time: a session with

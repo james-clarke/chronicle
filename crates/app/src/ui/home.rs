@@ -460,7 +460,18 @@ impl TimelineApp {
                     }
                     // One line per project (m35 chunk 3), its tasks under
                     // it; the unfiled group last and only when it has any.
+                    // A collapsed parent hides its descendant groups too
+                    // (m44 chunk 0): project_groups is tree order, so once
+                    // a collapsed group's depth is seen, everything deeper
+                    // than it is skipped until the depth returns to it.
+                    let mut hide_from: Option<usize> = None;
                     for group in project_groups {
+                        if let Some(d) = hide_from {
+                            if group.depth > d {
+                                continue;
+                            }
+                            hide_from = None;
+                        }
                         let vis: Vec<usize> = group
                             .tasks
                             .iter()
@@ -472,8 +483,12 @@ impl TimelineApp {
                             continue;
                         }
                         let open = !collapsed.contains(&key);
+                        let is_parent = group.name.is_some()
+                            && project_groups
+                                .iter()
+                                .any(|g| g.parent.as_deref() == group.name.as_deref());
                         ui.add_space(theme::SPACE_SM);
-                        match project_header(ui, group, open_tasks, open, &mut pending) {
+                        match project_header(ui, group, open_tasks, open, is_parent, &mut pending) {
                             HeaderClick::Toggle => toggle_collapse = Some(key.clone()),
                             HeaderClick::Declare => {
                                 *new_project = key.clone();
@@ -482,6 +497,7 @@ impl TimelineApp {
                             HeaderClick::None => {}
                         }
                         if !open {
+                            hide_from = Some(group.depth);
                             continue;
                         }
                         if vis.is_empty() {
@@ -730,12 +746,14 @@ enum HeaderClick {
 /// a window of it is on screen now, today's minutes and "+"; under it,
 /// when expanded, the current task with its picker and "n not on a task",
 /// then the sources that fed it this week. The unfiled group is a plain
-/// header; an unconfigured name wears a chip saying so.
+/// header; an unconfigured name wears a chip saying so. A child project is
+/// indented by its depth in the project tree (m44 chunk 0).
 fn project_header(
     ui: &mut egui::Ui,
     group: &super::ProjectGroup,
     open_tasks: &[OpenRow],
     open: bool,
+    is_parent: bool,
     pending: &mut Option<Action>,
 ) -> HeaderClick {
     let mut click = HeaderClick::None;
@@ -749,6 +767,7 @@ fn project_header(
             let hovered = ui.response().hovered();
             ui.style_mut().interaction.selectable_labels = false;
             ui.horizontal(|ui| {
+                ui.add_space(group.depth as f32 * 16.0);
                 let caret = if open {
                     theme::icon::CARET_DOWN
                 } else {
@@ -794,8 +813,13 @@ fn project_header(
                         click = HeaderClick::Declare;
                     }
                     if group.today_ms > 0 {
+                        let hover = if is_parent {
+                            "today, with its projects"
+                        } else {
+                            "today, across its tasks"
+                        };
                         ui.label(theme::num(fmt_dur(group.today_ms)))
-                            .on_hover_text("today, across its tasks");
+                            .on_hover_text(hover);
                     }
                 });
             });

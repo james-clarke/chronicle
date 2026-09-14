@@ -62,6 +62,7 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
         M::up(include_str!("../migrations/034_claims.sql")),
         M::up(include_str!("../migrations/035_backend_score.sql")),
         M::up(include_str!("../migrations/036_repo_links_workspaces.sql")),
+        M::up(include_str!("../migrations/037_task_scope.sql")),
     ])
 });
 
@@ -897,7 +898,8 @@ pub fn file_spans(
     join_min: u32,
 ) -> Result<usize, StorageError> {
     let spans = anchored_spans(conn, lo, hi)?;
-    let filed = filed_spans(&spans, matcher, join_min);
+    let scopes = task_scopes(conn, Some(lo))?;
+    let filed = filed_spans(&spans, matcher, join_min, &scopes);
     let tx = conn.transaction()?;
     let mut n = 0;
     {
@@ -911,11 +913,13 @@ pub fn file_spans(
     Ok(n)
 }
 
-/// The project per span of `spans` (time order), matcher then join rule.
+/// The project per span of `spans` (time order): the matcher with the
+/// declared tasks' scope, then the join rule.
 pub fn filed_spans(
     spans: &[profile::AnchoredSpan],
     matcher: &crate::project::Matcher,
     join_min: u32,
+    scopes: &[crate::scope::TaskScope],
 ) -> Vec<Option<String>> {
     let mut rows: Vec<(i64, i64, Option<String>)> = spans
         .iter()
@@ -924,8 +928,8 @@ pub fn filed_spans(
                 s.start_ts,
                 s.end_ts,
                 matcher
-                    .file(&s.app, &s.title, &s.anchors)
-                    .map(str::to_owned),
+                    .file_scoped(&s.app, &s.title, &s.anchors, scopes, s.start_ts)
+                    .project,
             )
         })
         .collect();
@@ -1208,6 +1212,108 @@ fn declared(conn: &Connection, lo: Option<i64>) -> Result<Vec<DeclaredTask>, Sto
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// The scope of every declared task open or closed by the person at or
+/// after `lo` (m44 chunk 1), oldest first: its ticket and the values
+/// pinned to it, holding from the local day it was declared. With no
+/// floor, the open ones only.
+pub fn task_scopes(
+    conn: &Connection,
+    lo: Option<i64>,
+) -> Result<Vec<crate::scope::TaskScope>, StorageError> {
+    use crate::scope::{ScopeKind, TaskScope};
+    let mut stmt = conn.prepare(
+        "SELECT id, project, external_ref, closed_ts, created_ts FROM tasks
+         WHERE source='user'
+           AND (status='open' OR (closed_by='user' AND closed_ts >= ?1))
+         ORDER BY created_ts, id",
+    )?;
+    let tz = jiff::tz::TimeZone::system();
+    let day_start = |ms: i64| {
+        crate::types::ms_to_ts(ms)
+            .to_zoned(tz.clone())
+            .start_of_day()
+            .map_or(ms, |z| z.timestamp().as_millisecond())
+    };
+    let mut out: Vec<TaskScope> = stmt
+        .query_map([lo.unwrap_or(i64::MAX)], |r| {
+            Ok(TaskScope {
+                task_id: r.get(0)?,
+                project: r.get(1)?,
+                ticket: r.get(2)?,
+                closed_ts: r.get(3)?,
+                since: day_start(r.get(4)?),
+                entries: Vec::new(),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut rows =
+        conn.prepare("SELECT task_id, kind, value FROM task_scope ORDER BY task_id, kind, value")?;
+    for row in rows.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })? {
+        let (task_id, kind, value) = row?;
+        let Some(kind) = ScopeKind::parse(&kind) else {
+            continue;
+        };
+        if let Some(s) = out.iter_mut().find(|s| s.task_id == task_id) {
+            s.entries.push((kind, value));
+        }
+    }
+    Ok(out)
+}
+
+/// Pin `value` to the task's scope; `Ok(false)` when it was there already.
+pub fn add_task_scope(
+    conn: &Connection,
+    task_id: i64,
+    kind: crate::scope::ScopeKind,
+    value: &str,
+) -> Result<bool, StorageError> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO task_scope (task_id, kind, value) VALUES (?1, ?2, ?3)",
+        params![task_id, kind.as_str(), value.trim()],
+    )?;
+    Ok(n > 0)
+}
+
+/// Unpin `value` from the task's scope; `Ok(false)` when it was not there.
+pub fn remove_task_scope(
+    conn: &Connection,
+    task_id: i64,
+    kind: crate::scope::ScopeKind,
+    value: &str,
+) -> Result<bool, StorageError> {
+    let n = conn.execute(
+        "DELETE FROM task_scope WHERE task_id=?1 AND kind=?2 AND value=?3",
+        params![task_id, kind.as_str(), value.trim()],
+    )?;
+    Ok(n > 0)
+}
+
+/// One task's pinned values, kind order then value.
+pub fn task_scope_entries(
+    conn: &Connection,
+    task_id: i64,
+) -> Result<Vec<(crate::scope::ScopeKind, String)>, StorageError> {
+    let mut stmt =
+        conn.prepare("SELECT kind, value FROM task_scope WHERE task_id=?1 ORDER BY kind, value")?;
+    let rows = stmt.query_map([task_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (kind, value) = row?;
+        if let Some(kind) = crate::scope::ScopeKind::parse(&kind) {
+            out.push((kind, value));
+        }
+    }
+    Ok(out)
+}
+
 /// Tasks the person closed at or after `lo`, with when: task id to
 /// `closed_ts`. The placement admits each for the segments before its
 /// close only.
@@ -1442,15 +1548,19 @@ pub fn delete_derived_task(conn: &mut Connection, task_id: i64) -> Result<bool, 
     Ok(true)
 }
 
-/// Open declared tasks with no row in the evidence cache: declared before
-/// the cache was seeded on declare, or through a path that does not seed.
-pub fn unseeded_user_tasks(conn: &Connection) -> Result<Vec<i64>, StorageError> {
+/// Declared tasks with no row in the evidence cache: declared before the
+/// cache was seeded on declare, or through a path that does not seed.
+/// Open ones, and the ones the person closed at or after `lo`, since a
+/// close is scoped by time and the task still competes for the window
+/// that holds it.
+pub fn unseeded_user_tasks(conn: &Connection, lo: i64) -> Result<Vec<i64>, StorageError> {
     Ok(conn
         .prepare(
-            "SELECT id FROM tasks t WHERE status='open' AND source='user'
+            "SELECT id FROM tasks t WHERE source='user'
+               AND (status='open' OR (closed_by='user' AND closed_ts >= ?1))
                AND NOT EXISTS (SELECT 1 FROM task_evidence e WHERE e.task_id = t.id)",
         )?
-        .query_map([], |r| r.get(0))?
+        .query_map([lo], |r| r.get(0))?
         .collect::<Result<_, _>>()?)
 }
 
@@ -7956,6 +8066,39 @@ mod tests {
     // A close is scoped by time: the window queries admit a task the
     // person closed at or after the window's floor, and only that; a
     // placement on it leaves it closed; a merge is not such a close.
+    /// Scope rows round-trip and come back on the open tasks and the ones
+    /// closed inside the window (m44 chunk 1).
+    #[test]
+    fn task_scopes_follow_open_and_window_closed_tasks() {
+        use crate::scope::ScopeKind;
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::test_migrate(&mut conn);
+        let ts = |ms: i64| crate::types::ms_to_ts(ms);
+        let a = super::insert_user_task(&conn, ts(1_000), "a", Some("acme")).unwrap();
+        let b = super::insert_user_task(&conn, ts(2_000), "b", Some("acme")).unwrap();
+        assert!(super::set_task_external_ref(&conn, a, "ACME-1").unwrap());
+        assert!(super::add_task_scope(&conn, a, ScopeKind::Repo, " ~/dev/web ").unwrap());
+        assert!(!super::add_task_scope(&conn, a, ScopeKind::Repo, "~/dev/web").unwrap());
+        assert!(super::add_task_scope(&conn, b, ScopeKind::Doc, "Design").unwrap());
+        super::close_task(&conn, ts(5_000), b).unwrap();
+        let open = super::task_scopes(&conn, None).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].task_id, a);
+        assert_eq!(open[0].ticket.as_deref(), Some("ACME-1"));
+        assert!(open[0].since <= 1_000 && open[0].since > 1_000 - 86_400_000);
+        assert_eq!(open[0].entries, [(ScopeKind::Repo, "~/dev/web".to_owned())]);
+        let window = super::task_scopes(&conn, Some(4_000)).unwrap();
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[1].task_id, b);
+        assert_eq!(window[1].closed_ts, Some(5_000));
+        assert!(super::task_scopes(&conn, Some(6_000)).unwrap().len() == 1);
+        assert!(super::remove_task_scope(&conn, a, ScopeKind::Repo, "~/dev/web").unwrap());
+        assert!(super::task_scope_entries(&conn, a).unwrap().is_empty());
+        // A closed task with no evidence rows is unseeded inside its window.
+        assert_eq!(super::unseeded_user_tasks(&conn, 4_000).unwrap(), [a, b]);
+        assert_eq!(super::unseeded_user_tasks(&conn, 6_000).unwrap(), [a]);
+    }
+
     #[test]
     fn a_close_is_scoped_by_time_inside_its_window() {
         use crate::segmenter::{Placement, Target};
@@ -8034,10 +8177,9 @@ mod tests {
         super::merge_task(&mut conn, ts(25_000), y, x).unwrap();
         assert_eq!(ids(&super::window_declared(&conn, 10_000).unwrap()), [x]);
         assert!(
-            super::closed_user_tasks(&conn, 10_000)
+            !super::closed_user_tasks(&conn, 10_000)
                 .unwrap()
-                .get(&y)
-                .is_none()
+                .contains_key(&y)
         );
     }
 

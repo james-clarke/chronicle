@@ -313,6 +313,8 @@ mod tests {
                 .map(|(p, ms)| crate::report::ProjectTotal {
                     project: p.into(),
                     total_ms: ms,
+                    depth: 0,
+                    parent: None,
                 })
                 .collect(),
             grand_total_ms: total,

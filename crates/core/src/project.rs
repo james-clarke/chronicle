@@ -12,6 +12,15 @@ use regex::Regex;
 
 use crate::config::{Config, ProjectCfg, expand_home};
 use crate::extract::{self, Anchor, AnchorKind};
+use crate::scope::TaskScope;
+
+/// Where one span files (m44 chunk 1): its project, and the declared
+/// task whose scope it carries when that is what decided.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Filing {
+    pub project: Option<String>,
+    pub task: Option<i64>,
+}
 
 /// One project compiled for matching.
 #[derive(Debug, Clone)]
@@ -37,6 +46,13 @@ pub struct Project {
     pub links: Vec<String>,
     /// Found under a configured repo's parent, not configured (m37 chunk 2).
     pub discovered: bool,
+    /// The configured project this one sits under (m44 chunk 0), by its
+    /// canonical name. Rules on a project with no children run before rules
+    /// on a parent, so the parent's rules are the fallback for the client's
+    /// shared furniture; a parent never mints.
+    pub parent: Option<String>,
+    /// The projects whose `parent` this is, config order.
+    pub children: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,12 +110,19 @@ impl Matcher {
                 apps: Vec::new(),
                 links,
                 discovered: true,
+                parent: None,
+                children: Vec::new(),
             });
         }
     }
 
     pub fn new(cfgs: &[ProjectCfg]) -> Self {
-        let projects = cfgs
+        let names: Vec<String> = cfgs
+            .iter()
+            .map(|c| c.name.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .collect();
+        let mut projects: Vec<Project> = cfgs
             .iter()
             .filter(|c| !c.name.trim().is_empty())
             .map(|c| {
@@ -127,11 +150,21 @@ impl Matcher {
                     .map(|n| n.to_string_lossy().to_ascii_lowercase())
                     .collect();
                 let links = link_patterns(&paths);
+                let name = c.name.trim().to_owned();
+                let parent = c
+                    .parent
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case(&name))
+                    .and_then(|p| names.iter().find(|n| n.eq_ignore_ascii_case(p)))
+                    .cloned();
                 Project {
-                    name: c.name.trim().to_owned(),
+                    name,
                     derive: c.derive,
                     links,
                     discovered: false,
+                    parent,
+                    children: Vec::new(),
                     paths,
                     places,
                     slugs,
@@ -157,6 +190,15 @@ impl Matcher {
                 }
             })
             .collect();
+        for i in 0..projects.len() {
+            let Some(parent) = projects[i].parent.clone() else {
+                continue;
+            };
+            let child = projects[i].name.clone();
+            if let Some(p) = projects.iter_mut().find(|p| p.name == parent) {
+                p.children.push(child);
+            }
+        }
         Self { projects }
     }
 
@@ -187,13 +229,83 @@ impl Matcher {
             .map(|p| p.name.as_str())
     }
 
-    /// Whether `name` mints derived tasks: as configured, and yes for a
-    /// project no rule knows (unfiled time keeps deriving).
+    /// Whether `name` mints derived tasks: as configured, never for a
+    /// project with children, and yes for a project no rule knows (unfiled
+    /// time keeps deriving).
     pub fn derives(&self, name: &str) -> bool {
         self.projects
             .iter()
             .find(|p| p.name.eq_ignore_ascii_case(name))
-            .is_none_or(|p| p.derive)
+            .is_none_or(|p| p.derive && p.children.is_empty())
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Project> {
+        self.projects
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The configured parent of `name`, if any.
+    pub fn parent_of(&self, name: &str) -> Option<&str> {
+        self.get(name)?.parent.as_deref()
+    }
+
+    /// The top of `name`'s parent chain: itself when it has no parent. A
+    /// name no project knows is its own root.
+    pub fn root_of<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut cur = name;
+        for _ in 0..self.projects.len() {
+            match self.parent_of(cur) {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+        self.get(cur).map_or(cur, |p| p.name.as_str())
+    }
+
+    /// The names under `name`, depth-first, as `tree` orders them;
+    /// empty for a childless or unknown project.
+    pub fn descendants(&self, name: &str) -> Vec<&str> {
+        let tree = self.tree();
+        let Some(at) = tree
+            .iter()
+            .position(|(_, p)| p.name.eq_ignore_ascii_case(name))
+        else {
+            return Vec::new();
+        };
+        let depth = tree[at].0;
+        tree[at + 1..]
+            .iter()
+            .take_while(|(d, _)| *d > depth)
+            .map(|(_, p)| p.name.as_str())
+            .collect()
+    }
+
+    /// Every project in tree order: each top-level project in config order,
+    /// followed by its children depth-first, with the depth (0 for a top-
+    /// level project). What `project list` and the Home grouping print.
+    pub fn tree(&self) -> Vec<(usize, &Project)> {
+        fn walk<'a>(
+            m: &'a Matcher,
+            p: &'a Project,
+            depth: usize,
+            out: &mut Vec<(usize, &'a Project)>,
+        ) {
+            out.push((depth, p));
+            if depth >= 8 {
+                return;
+            }
+            for child in &p.children {
+                if let Some(c) = m.get(child) {
+                    walk(m, c, depth + 1, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for p in self.projects.iter().filter(|p| p.parent.is_none()) {
+            walk(self, p, 0, &mut out);
+        }
+        out
     }
 }
 
@@ -216,10 +328,79 @@ pub fn normalize_projects(
 impl Matcher {
     /// The project a span files into, by the first rule that matches:
     /// a path the title shows under an instance path, a place or branch
-    /// anchor naming an instance folder, an item key with a listed ticket
-    /// prefix (or a branch carrying one, or `org/repo#n` of a remote), a
-    /// domain anchor under a listed site, a title regex, the app.
+    /// anchor naming an instance folder, then, on the projects with no
+    /// children first and on the parents after them, an item key with a
+    /// listed ticket prefix (or a branch carrying one, or `org/repo#n` of a
+    /// remote), a domain anchor under a listed site, a link pattern, a title
+    /// regex, the app.
     pub fn file(&self, app: &str, title: &str, anchors: &[Anchor]) -> Option<&str> {
+        if let Some(p) = self.by_path_or_place(title, anchors) {
+            return Some(&p.name);
+        }
+        self.by_rules(app, title, anchors)
+    }
+
+    /// [`Matcher::file`] with the declared tasks' scope between the place
+    /// rules and the project rules (m44 chunk 1): a span carrying a task's
+    /// ticket or a value pinned to it files to that task's project, and
+    /// names the task, while the task holds at the span's start. A span
+    /// under a project's own path or folder still files by that.
+    pub fn file_scoped(
+        &self,
+        app: &str,
+        title: &str,
+        anchors: &[Anchor],
+        scopes: &[TaskScope],
+        ts: i64,
+    ) -> Filing {
+        if let Some(p) = self.by_path_or_place(title, anchors) {
+            return Filing {
+                project: Some(p.name.clone()),
+                task: None,
+            };
+        }
+        if let Some((s, _)) = crate::scope::holder(scopes, anchors, ts) {
+            return Filing {
+                project: s
+                    .project
+                    .as_deref()
+                    .and_then(|p| self.resolve(p))
+                    .map(str::to_owned)
+                    .or_else(|| s.project.clone()),
+                task: Some(s.task_id),
+            };
+        }
+        Filing {
+            project: self.by_rules(app, title, anchors).map(str::to_owned),
+            task: None,
+        }
+    }
+
+    /// The rule kinds after path and place, leaves first, then parents.
+    fn by_rules(&self, app: &str, title: &str, anchors: &[Anchor]) -> Option<&str> {
+        if self.projects.is_empty() {
+            return None;
+        }
+        let leaves: Vec<&Project> = self
+            .projects
+            .iter()
+            .filter(|p| p.children.is_empty())
+            .collect();
+        if let Some(p) = file_by_rules(&leaves, app, title, anchors) {
+            return Some(&p.name);
+        }
+        let parents: Vec<&Project> = self
+            .projects
+            .iter()
+            .filter(|p| !p.children.is_empty())
+            .collect();
+        file_by_rules(&parents, app, title, anchors).map(|p| p.name.as_str())
+    }
+
+    /// Steps one and two: a path the title shows under an instance path
+    /// (longest wins), then a place or branch anchor naming an instance
+    /// folder.
+    fn by_path_or_place(&self, title: &str, anchors: &[Anchor]) -> Option<&Project> {
         if self.projects.is_empty() {
             return None;
         }
@@ -239,7 +420,7 @@ impl Matcher {
                 }
             }
             if let Some((_, proj)) = best {
-                return Some(&proj.name);
+                return Some(proj);
             }
         }
         let places = anchors.iter().filter_map(|a| match a.kind {
@@ -252,81 +433,93 @@ impl Matcher {
         });
         for place in places {
             if let Some(p) = self.projects.iter().find(|p| p.places.contains(&place)) {
-                return Some(&p.name);
+                return Some(p);
             }
         }
-        for a in anchors {
-            match a.kind {
-                AnchorKind::Item | AnchorKind::Change => {
-                    if let Some(p) = self.by_key(&a.value) {
-                        return Some(&p.name);
-                    }
-                }
-                AnchorKind::Branch => {
-                    let branch = a.value.split_once('@').map_or(a.value.as_str(), |(_, b)| b);
-                    if let Some(p) = self.by_branch(branch) {
-                        return Some(&p.name);
-                    }
-                }
-                _ => {}
-            }
-        }
-        for a in anchors.iter().filter(|a| a.kind == AnchorKind::Domain) {
-            let host = a.value.to_ascii_lowercase();
-            if let Some(p) = self.projects.iter().find(|p| {
-                p.domains.iter().any(|d| {
-                    host == *d
-                        || host
-                            .strip_suffix(d.as_str())
-                            .is_some_and(|r| r.ends_with('.'))
-                })
-            }) {
-                return Some(&p.name);
-            }
-        }
-        for a in anchors.iter().filter(|a| a.kind == AnchorKind::Link) {
-            if let Some(p) = self.projects.iter().find(|p| {
-                p.links
-                    .iter()
-                    .any(|pat| extract::link_matches(pat, &a.value))
-            }) {
-                return Some(&p.name);
-            }
-        }
-        if let Some(p) = self
-            .projects
-            .iter()
-            .find(|p| p.titles.iter().any(|re| re.is_match(title)))
-        {
-            return Some(&p.name);
-        }
-        let app_l = app.to_ascii_lowercase();
-        self.projects
-            .iter()
-            .find(|p| p.apps.contains(&app_l))
-            .map(|p| p.name.as_str())
+        None
     }
+}
 
-    /// `ACME-123` by prefix; `org/repo#123` by the remote slug or folder.
-    fn by_key(&self, key: &str) -> Option<&Project> {
-        if let Some((repo, n)) = key.split_once('#')
-            && n.chars().all(|c| c.is_ascii_digit())
-        {
-            let repo = repo.to_ascii_lowercase();
-            let folder = repo.rsplit('/').next().unwrap_or(&repo).to_owned();
-            return self
-                .projects
+/// The rule kinds after path and place, over one pool of projects in
+/// config order: ticket key or branch, domain, link, title, app.
+fn file_by_rules<'a>(
+    pool: &[&'a Project],
+    app: &str,
+    title: &str,
+    anchors: &[Anchor],
+) -> Option<&'a Project> {
+    if pool.is_empty() {
+        return None;
+    }
+    for a in anchors {
+        match a.kind {
+            AnchorKind::Item | AnchorKind::Change => {
+                if let Some(p) = by_key(pool, &a.value) {
+                    return Some(p);
+                }
+            }
+            AnchorKind::Branch => {
+                let branch = a.value.split_once('@').map_or(a.value.as_str(), |(_, b)| b);
+                if let Some(p) = by_branch(pool, branch) {
+                    return Some(p);
+                }
+            }
+            _ => {}
+        }
+    }
+    for a in anchors.iter().filter(|a| a.kind == AnchorKind::Domain) {
+        let host = a.value.to_ascii_lowercase();
+        if let Some(p) = pool.iter().find(|p| {
+            p.domains.iter().any(|d| {
+                host == *d
+                    || host
+                        .strip_suffix(d.as_str())
+                        .is_some_and(|r| r.ends_with('.'))
+            })
+        }) {
+            return Some(p);
+        }
+    }
+    for a in anchors.iter().filter(|a| a.kind == AnchorKind::Link) {
+        if let Some(p) = pool.iter().find(|p| {
+            p.links
                 .iter()
-                .find(|p| p.slugs.contains(&repo) || p.places.contains(&folder));
+                .any(|pat| extract::link_matches(pat, &a.value))
+        }) {
+            return Some(p);
         }
-        let prefix = key.split_once('-')?.0.to_ascii_uppercase();
-        self.projects.iter().find(|p| p.tickets.contains(&prefix))
     }
+    if let Some(p) = pool
+        .iter()
+        .find(|p| p.titles.iter().any(|re| re.is_match(title)))
+    {
+        return Some(p);
+    }
+    let app_l = app.to_ascii_lowercase();
+    pool.iter().find(|p| p.apps.contains(&app_l)).copied()
+}
 
-    /// A branch name carrying `<prefix>-<n>` in any case.
-    fn by_branch(&self, branch: &str) -> Option<&Project> {
-        let upper = branch.to_ascii_uppercase();
-        self.projects.iter().find(|p| {
+/// `ACME-123` by prefix; `org/repo#123` by the remote slug or folder.
+fn by_key<'a>(pool: &[&'a Project], key: &str) -> Option<&'a Project> {
+    if let Some((repo, n)) = key.split_once('#')
+        && n.chars().all(|c| c.is_ascii_digit())
+    {
+        let repo = repo.to_ascii_lowercase();
+        let folder = repo.rsplit('/').next().unwrap_or(&repo).to_owned();
+        return pool
+            .iter()
+            .find(|p| p.slugs.contains(&repo) || p.places.contains(&folder))
+            .copied();
+    }
+    let prefix = key.split_once('-')?.0.to_ascii_uppercase();
+    pool.iter().find(|p| p.tickets.contains(&prefix)).copied()
+}
+
+/// A branch name carrying `<prefix>-<n>` in any case.
+fn by_branch<'a>(pool: &[&'a Project], branch: &str) -> Option<&'a Project> {
+    let upper = branch.to_ascii_uppercase();
+    pool.iter()
+        .find(|p| {
             p.tickets.iter().any(|t| {
                 upper.match_indices(t.as_str()).any(|(i, _)| {
                     let rest = &upper[i + t.len()..];
@@ -342,7 +535,7 @@ impl Matcher {
                 })
             })
         })
-    }
+        .copied()
 }
 
 /// Apply the join rule over one ordered run of focus spans: an unfiled span
@@ -879,5 +1072,215 @@ mod tests {
         assert_eq!(projects[&1].as_deref(), Some("acme"));
         assert_eq!(projects[&2], None);
         assert_eq!(projects[&3], None);
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use crate::config::ProjectCfg;
+
+    fn anchor(kind: AnchorKind, value: &str) -> Anchor {
+        Anchor {
+            kind,
+            value: value.into(),
+        }
+    }
+
+    // A client above two code projects: the ticket prefix and the chat
+    // title live on the parent, each child owns its repo and its own
+    // prefix.
+    fn tree() -> Matcher {
+        Matcher::new(&[
+            ProjectCfg {
+                name: "acme".into(),
+                tickets: vec!["ACME".into()],
+                domains: vec!["acme.atlassian.net".into()],
+                titles: vec!["(?i) - AC - ".into()],
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "acme-web".into(),
+                parent: Some("Acme".into()),
+                repos: vec!["/no/such/web".into()],
+                domains: vec!["web.acme.atlassian.net".into()],
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "acme-ai".into(),
+                parent: Some("acme".into()),
+                repos: vec!["/no/such/ai".into()],
+                tickets: vec!["ACAI".into()],
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "solo".into(),
+                titles: vec!["(?i)solo".into()],
+                ..ProjectCfg::default()
+            },
+        ])
+    }
+
+    #[test]
+    fn parent_and_children_resolve_from_config() {
+        let m = tree();
+        assert_eq!(m.parent_of("acme-web"), Some("acme"));
+        assert_eq!(m.parent_of("ACME-AI"), Some("acme"));
+        assert_eq!(m.parent_of("acme"), None);
+        assert_eq!(m.get("acme").unwrap().children, ["acme-web", "acme-ai"]);
+        assert_eq!(m.root_of("acme-ai"), "acme");
+        assert_eq!(m.root_of("solo"), "solo");
+        assert_eq!(m.root_of("nobody"), "nobody");
+        assert_eq!(m.descendants("acme"), ["acme-web", "acme-ai"]);
+        assert!(m.descendants("acme-web").is_empty());
+        assert!(m.descendants("nobody").is_empty());
+        let tree: Vec<(usize, &str)> = m
+            .tree()
+            .iter()
+            .map(|(d, p)| (*d, p.name.as_str()))
+            .collect();
+        assert_eq!(
+            tree,
+            [(0, "acme"), (1, "acme-web"), (1, "acme-ai"), (0, "solo")]
+        );
+    }
+
+    #[test]
+    fn a_parent_never_mints() {
+        let m = tree();
+        assert!(!m.derives("acme"));
+        assert!(m.derives("acme-web"));
+        assert!(m.derives("solo"));
+    }
+
+    #[test]
+    fn child_rules_run_before_parent_rules() {
+        let m = tree();
+        // The child's own prefix wins over the parent's prefix.
+        assert_eq!(
+            m.file("firefox", "board", &[anchor(AnchorKind::Item, "ACAI-7")]),
+            Some("acme-ai")
+        );
+        // A prefix only the parent lists files to the parent: shared
+        // furniture, never a child.
+        assert_eq!(
+            m.file("firefox", "board", &[anchor(AnchorKind::Item, "ACME-7")]),
+            Some("acme")
+        );
+        // The child's deeper domain beats the parent's site, even though
+        // the parent's rule would also match and is listed first.
+        assert_eq!(
+            m.file(
+                "firefox",
+                "x",
+                &[anchor(AnchorKind::Domain, "web.acme.atlassian.net")]
+            ),
+            Some("acme-web")
+        );
+        assert_eq!(
+            m.file(
+                "firefox",
+                "x",
+                &[anchor(AnchorKind::Domain, "acme.atlassian.net")]
+            ),
+            Some("acme")
+        );
+        // A later rule kind on a leaf beats an earlier kind on a parent:
+        // the title regex on `solo` over the parent's ticket.
+        assert_eq!(
+            m.file(
+                "firefox",
+                "solo work",
+                &[anchor(AnchorKind::Item, "ACME-9")]
+            ),
+            Some("solo")
+        );
+        // The parent's chat title files to the parent.
+        assert_eq!(m.file("slack", "Bob - AC - Slack", &[]), Some("acme"));
+        // A place anchor on a child instance still wins outright.
+        assert_eq!(
+            m.file(
+                "Alacritty",
+                "zsh",
+                &[
+                    anchor(AnchorKind::Item, "ACME-1"),
+                    anchor(AnchorKind::Place, "ai")
+                ]
+            ),
+            Some("acme-ai")
+        );
+    }
+
+    /// Declared scope sits between the place rules and the project
+    /// rules (m44 chunk 1): a ticket a sibling's task holds files to the
+    /// sibling, a place on a child instance still files by the place,
+    /// and a closed task's scope holds only before the close.
+    #[test]
+    fn scope_files_between_place_and_rules() {
+        use crate::scope::{ScopeKind, TaskScope};
+        let m = tree();
+        let scopes = [TaskScope {
+            task_id: 183,
+            project: Some("ACME-AI".into()),
+            ticket: Some("ACME-11342".into()),
+            since: 100,
+            closed_ts: Some(1_000),
+            entries: vec![(ScopeKind::Domain, "wiki.example.com".into())],
+        }];
+        let ticket = [anchor(AnchorKind::Item, "acme-11342")];
+        // By rule the parent's prefix would take it; the scope sends it
+        // to the task's project, resolved to the configured name.
+        let f = m.file_scoped("firefox", "board", &ticket, &scopes, 500);
+        assert_eq!(f.project.as_deref(), Some("acme-ai"));
+        assert_eq!(f.task, Some(183));
+        for ts in [2_000, 50] {
+            assert_eq!(
+                m.file_scoped("firefox", "board", &ticket, &scopes, ts),
+                Filing {
+                    project: Some("acme".into()),
+                    task: None
+                },
+                "after the close and before the task's day: by rule"
+            );
+        }
+        let site = [anchor(AnchorKind::Domain, "wiki.example.com")];
+        assert_eq!(
+            m.file_scoped("firefox", "x", &site, &scopes, 100).task,
+            Some(183)
+        );
+        let place = [
+            anchor(AnchorKind::Item, "acme-11342"),
+            anchor(AnchorKind::Place, "web"),
+        ];
+        assert_eq!(
+            m.file_scoped("Code", "x", &place, &scopes, 100),
+            Filing {
+                project: Some("acme-web".into()),
+                task: None
+            }
+        );
+        assert_eq!(
+            m.file_scoped("firefox", "news", &[], &scopes, 0),
+            Filing::default()
+        );
+    }
+
+    #[test]
+    fn a_parent_naming_itself_or_nobody_is_dropped() {
+        let m = Matcher::new(&[
+            ProjectCfg {
+                name: "a".into(),
+                parent: Some("a".into()),
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "b".into(),
+                parent: Some("ghost".into()),
+                ..ProjectCfg::default()
+            },
+        ]);
+        assert_eq!(m.parent_of("a"), None);
+        assert_eq!(m.parent_of("b"), None);
+        assert!(m.derives("a"));
     }
 }

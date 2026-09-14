@@ -16,6 +16,7 @@ const TEST_TOP: usize = 12;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Row {
     name: String,
+    parent: String,
     repos: String,
     tickets: String,
     domains: String,
@@ -28,6 +29,7 @@ impl Row {
     fn from_cfg(c: &ProjectCfg) -> Self {
         Self {
             name: c.name.clone(),
+            parent: c.parent.clone().unwrap_or_default(),
             repos: c.repos.join(", "),
             tickets: c.tickets.join(", "),
             domains: c.domains.join(", "),
@@ -45,8 +47,10 @@ impl Row {
                 .map(str::to_owned)
                 .collect()
         };
+        let parent = self.parent.trim();
         ProjectCfg {
             name: self.name.trim().to_owned(),
+            parent: (!parent.is_empty()).then(|| parent.to_owned()),
             repos: list(&self.repos),
             tickets: list(&self.tickets),
             domains: list(&self.domains),
@@ -100,11 +104,7 @@ impl ProjectsPanel {
                     .map_err(|e| format!("project {}: title regex {t}: {e}", c.name))?;
             }
         }
-        let mut names: Vec<&str> = cfgs.iter().map(|c| c.name.as_str()).collect();
-        names.sort_unstable();
-        if let Some(w) = names.windows(2).find(|w| w[0] == w[1]) {
-            return Err(format!("two projects named {}", w[0]));
-        }
+        chronicle_core::config::validate_projects(&cfgs)?;
         config.project_join_min = self.join_min;
         let defaults = config.projects_effective();
         config.projects = if self.defaulted && cfgs == defaults {
@@ -118,7 +118,8 @@ impl ProjectsPanel {
     pub(super) fn ui(&mut self, ui: &mut egui::Ui, conn: Option<&rusqlite::Connection>) {
         ui.weak(
             "every focus span files into the first project a rule matches: repo path or \
-             folder, ticket prefix, site, title regex, app; lists are comma-separated",
+             folder, ticket prefix, site, title regex, app; lists are comma-separated, rules \
+             on a project with a parent run before the parent's",
         );
         let width = ui.available_width();
         let mut remove: Option<usize> = None;
@@ -159,6 +160,7 @@ impl ProjectsPanel {
                         );
                         ui.end_row();
                     };
+                    field(ui, "parent", &mut row.parent, "client or umbrella project");
                     field(
                         ui,
                         "repos",
@@ -215,10 +217,10 @@ impl ProjectsPanel {
         };
         let hi = Timestamp::now().as_millisecond();
         let lo = hi - i64::from(TEST_DAYS) * 86_400_000;
+        let scopes = chronicle_core::storage::task_scopes(conn, Some(lo)).unwrap_or_default();
         match chronicle_core::storage::anchored_spans(conn, lo, hi) {
-            Ok(spans) => {
-                crate::project::Report::build(&config, &spans, lo, hi, TEST_TOP).render(TEST_DAYS)
-            }
+            Ok(spans) => crate::project::Report::build(&config, &spans, &scopes, lo, hi, TEST_TOP)
+                .render(TEST_DAYS),
             Err(e) => format!("test failed: {e}"),
         }
     }

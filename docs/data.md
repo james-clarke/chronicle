@@ -43,6 +43,7 @@ The tables that turn raw spans into what you were doing.
 
 - **batches**: 30-minute windows of non-AFK activity, the unit sent to the model, with timing and token counts per run.
 - **tasks**: what work gets filed under, each with a label, an optional project, open or closed, declared by you or derived by the model, a ticket reference, a description, and whether it is the current task in its project. Labels and descriptions usually come from window titles but can be anything you or the model wrote.
+- **task_scope**: what a declared task covers besides its ticket: repos, branches, document names, sites and work-item keys you pinned to it. A span carrying one files to the task's project ahead of the project rules and lands on the task, for as long as the task is open.
 - **intervals**: the time slices assigned to a task, with start and end, confidence, who placed it (model, you, pre-pass, segmenter), a one-line reason for a rule placement, and a share when two tasks split one stretch, such as two AI sessions writing at once.
 - **corrections**: every rename, reassignment or merge you make by hand. Kept forever, because they teach the next derivation. Each carries a searchable snapshot of the titles and apps around it.
 - **proposals**: unassigned runs of activity that share distinctive title words or a repo, clustered into a card the feed shows until you accept or dismiss it, with the time ranges behind the cluster.

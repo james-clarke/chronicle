@@ -702,6 +702,7 @@ pub(crate) fn run_ai_job(
     engine: &Engine,
     job: &chronicle_core::storage::AiJobRow,
 ) -> anyhow::Result<String> {
+    use chronicle_core::project::Matcher;
     use chronicle_core::{insights, report, storage};
     let payload: serde_json::Value = serde_json::from_str(&job.payload)?;
     if job.kind == "fetch_context" {
@@ -1139,7 +1140,8 @@ pub(crate) fn run_ai_job(
             let tz = TimeZone::system();
             let days = civil_days(lo, hi, &tz)?;
             let tasks = storage::tasks_in_range(conn, lo, hi)?;
-            let r = report::build(&tasks, days.clone(), &tz)?;
+            let mut r = report::build(&tasks, days.clone(), &tz)?;
+            report::nest(&mut r, &Matcher::from_config(config));
             if r.grand_total_ms == 0 {
                 bail!("no activity in range to narrate");
             }
@@ -1155,7 +1157,8 @@ pub(crate) fn run_ai_job(
                     .timestamp()
                     .as_millisecond();
                 let ptasks = storage::tasks_in_range(conn, plo, lo).ok()?;
-                let pr = report::build(&ptasks, pd, &tz).ok()?;
+                let mut pr = report::build(&ptasks, pd, &tz).ok()?;
+                report::nest(&mut pr, &Matcher::from_config(config));
                 (pr.grand_total_ms > 0).then(|| insights::delta(&r, &pr))
             });
             let digest = insights::narrative_digest(&r, &metrics, &apps, delta.as_ref());
@@ -1212,11 +1215,12 @@ pub(crate) fn run_ai_job(
             }
             // Project-major (m35 chunk 4): the draft's blocks come out
             // grouped as the DATA is ordered — configured projects first,
-            // then the rest by name, no project last.
-            let order: Vec<String> = config
-                .projects_effective()
+            // in tree order so a child follows its parent, then the rest
+            // by name, no project last.
+            let order: Vec<String> = Matcher::from_config(config)
+                .tree()
                 .iter()
-                .map(|p| p.name.clone())
+                .map(|(_, p)| p.name.clone())
                 .collect();
             rows.sort_by_key(|r| match &r.project {
                 Some(p) => (

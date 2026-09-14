@@ -151,7 +151,7 @@ Lists open tasks by project (id, project, label).
 chronicle task list --project chronicle
 ```
 
-Output: tasks grouped under a project heading, each line showing id, label, and markers such as `declared`, `current`, `closed`.
+Output: tasks grouped under a project heading, each line showing id, label, and markers such as `declared`, `current`, `closed`. A declared task with pinned scope shows it on the next line.
 
 #### task add
 
@@ -213,6 +213,26 @@ chronicle task current 42
 ```
 
 Output: `task <id>: <label> is current in <project>`.
+
+#### task attach
+
+Pins what a declared task covers besides its ticket. Time that carries a pinned value files to the task's project ahead of the project rules, and lands on the task, for as long as the task is open. Use it when a ticket prefix is shared by sibling projects, or when the work lives in a repo, branch, document or site the project rules do not name.
+
+| Argument/Flag | Type | Meaning |
+|---|---|---|
+| `id` (positional) | integer | Task id, from `task list` or the UI. |
+| `--repo` | string, repeatable | A repo path or folder name. |
+| `--branch` | string, repeatable | A branch name. |
+| `--doc` | string, repeatable | Part of a document, page or file name. |
+| `--domain` | string, repeatable | A site; its subdomains count. |
+| `--item` | string, repeatable | A work-item key besides the task's own. |
+| `--remove` | boolean | Unpin the given values instead. |
+
+```sh
+chronicle task attach 183 --repo ~/dev/agent-backend --branch feat/ACME-11342-agent
+```
+
+Output: a line per value pinned or unpinned, then the number of spans re-filed since the task was declared.
 
 ### project
 

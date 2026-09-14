@@ -27,16 +27,25 @@ pub(crate) fn list(data_dir: &Path) -> anyhow::Result<()> {
         );
     }
     let matcher = Matcher::from_config(&config);
-    for p in &matcher.projects {
+    for (depth, p) in matcher.tree() {
+        let indent = "    ".repeat(depth);
         let remotes: Vec<String> = p
             .paths
             .iter()
             .filter_map(|r| project::remote_of(r))
             .collect();
+        // A project with children never mints, so it wears `(parent)`
+        // where `(derive off)` would go (m44 chunk 0).
+        let flag = if !p.children.is_empty() {
+            "  (parent)"
+        } else if !p.derive {
+            "  (derive off)"
+        } else {
+            ""
+        };
         println!(
-            "{}{}{}  {}",
+            "{indent}{}{flag}{}  {}",
             p.name,
-            if p.derive { "" } else { "  (derive off)" },
             if p.discovered { "  (discovered)" } else { "" },
             if remotes.is_empty() {
                 "no remote".to_owned()
@@ -45,11 +54,11 @@ pub(crate) fn list(data_dir: &Path) -> anyhow::Result<()> {
             }
         );
         for path in &p.paths {
-            println!("    {}", path.display());
+            println!("{indent}    {}", path.display());
         }
         let rule = |label: &str, items: &[String]| {
             if !items.is_empty() {
-                println!("    {label}: {}", items.join(", "));
+                println!("{indent}    {label}: {}", items.join(", "));
             }
         };
         rule("tickets", &p.tickets);
@@ -71,7 +80,8 @@ pub(crate) fn test(data_dir: &Path, days: u32, top: usize) -> anyhow::Result<()>
     let hi = Timestamp::now().as_millisecond();
     let lo = hi - i64::from(days) * 86_400_000;
     let spans = storage::anchored_spans(&conn, lo, hi)?;
-    let report = Report::build(&config, &spans, lo, hi, top);
+    let scopes = storage::task_scopes(&conn, Some(lo))?;
+    let report = Report::build(&config, &spans, &scopes, lo, hi, top);
     print!("{}", report.render(days));
     Ok(())
 }
@@ -112,12 +122,23 @@ pub(crate) fn rebuild(data_dir: &Path, days: Option<u32>) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// `name`'s own filed ms plus every descendant's (m44 chunk 0): a parent's
+/// total covers the shared furniture it files directly and the work its
+/// children do.
+fn descendant_ms(matcher: &Matcher, per: &BTreeMap<&str, i64>, name: &str) -> i64 {
+    std::iter::once(name)
+        .chain(matcher.descendants(name))
+        .map(|n| per.get(n).copied().unwrap_or(0))
+        .sum()
+}
+
 /// What `project test` prints; the Settings card renders the same lines.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Report {
     pub focus_ms: i64,
-    /// Per project in config order, minutes filed.
-    pub projects: Vec<(String, i64)>,
+    /// Per project in tree order: name, ms (own filed ms plus every
+    /// descendant's), depth.
+    pub projects: Vec<(String, i64, usize)>,
     pub unfiled_ms: i64,
     /// `(app, title, ms)` of the unfiled spans, most time first.
     pub titles: Vec<(String, String, i64)>,
@@ -132,12 +153,13 @@ impl Report {
     pub(crate) fn build(
         config: &Config,
         spans: &[AnchoredSpan],
+        scopes: &[chronicle_core::scope::TaskScope],
         lo: i64,
         hi: i64,
         top: usize,
     ) -> Self {
         let matcher = Matcher::from_config(config);
-        let filed = storage::filed_spans(spans, &matcher, config.project_join_min);
+        let filed = storage::filed_spans(spans, &matcher, config.project_join_min, scopes);
         let mut per: BTreeMap<&str, i64> = BTreeMap::new();
         let mut titles: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut places: BTreeMap<String, i64> = BTreeMap::new();
@@ -165,12 +187,13 @@ impl Report {
             }
         }
         let projects = matcher
-            .projects
-            .iter()
-            .map(|p| {
+            .tree()
+            .into_iter()
+            .map(|(depth, p)| {
                 (
                     p.name.clone(),
-                    per.get(p.name.as_str()).copied().unwrap_or(0),
+                    descendant_ms(&matcher, &per, &p.name),
+                    depth,
                 )
             })
             .collect();
@@ -212,8 +235,9 @@ impl Report {
             min(self.focus_ms),
             self.filed_pct()
         );
-        for (name, ms) in &self.projects {
-            let _ = writeln!(out, "{:>7.1} min  {name}", min(*ms));
+        for (name, ms, depth) in &self.projects {
+            let indent = "  ".repeat(*depth);
+            let _ = writeln!(out, "{:>7.1} min  {indent}{name}", min(*ms));
         }
         let _ = writeln!(out, "{:>7.1} min  (unfiled)", min(self.unfiled_ms));
         if !self.places.is_empty() {

@@ -64,6 +64,7 @@ Each entry in `projects` is a `ProjectCfg`:
 | `titles` | `[]` | Window-title regexes, matched anywhere in the title. |
 | `apps` | `[]` | Whole apps, matched case-insensitively by app name. |
 | `derive` | `true` | Whether derived sub-tasks are minted inside this project. |
+| `parent` | unset | The project this one sits under, by name. A client's shared tools (its issue tracker, chat, calendar) go on the parent; each code project under it is a child with its own repos and prefixes. A span is matched against the rules of every project without children first, then against the parents, so a parent's rules are the fallback. A project with children never mints derived tasks; its own rules land time on its other work. Reports roll children into their parent. |
 
 ### Sources and integrations
 

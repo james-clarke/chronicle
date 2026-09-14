@@ -6,6 +6,7 @@
 //! bucketing whole durations by start day would double-count them in
 //! adjacent reports.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use jiff::Timestamp;
@@ -13,6 +14,7 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 
 use crate::digest::fmt_dur;
+use crate::project::Matcher;
 use crate::sessionizer::AFK_SPLIT_MINS;
 use crate::storage::DaemonRun;
 use crate::types::Task;
@@ -23,6 +25,12 @@ pub const UNTAGGED: &str = "(none)";
 pub struct ProjectTotal {
     pub project: String,
     pub total_ms: i64,
+    /// Nesting depth (m44 chunk 0): 0 for a top-level project or one
+    /// `nest`/`nest_totals` has not touched, deeper for a child rolled
+    /// under its parent.
+    pub depth: usize,
+    /// The parent this row sits under, set by `nest`/`nest_totals`.
+    pub parent: Option<String>,
 }
 
 /// Interval duration clamped to `[lo, hi)` — the fetch query returns rows
@@ -46,11 +54,69 @@ pub fn project_totals(tasks: &[Task], lo: i64, hi: i64) -> Vec<ProjectTotal> {
             None => totals.push(ProjectTotal {
                 project: name.to_string(),
                 total_ms: ms,
+                depth: 0,
+                parent: None,
             }),
         }
     }
     totals.sort_by_key(|p| std::cmp::Reverse(p.total_ms));
     totals
+}
+
+/// Own ms plus every descendant's, recursively over `matcher`'s tree.
+fn subtree_ms(matcher: &Matcher, name: &str, own: &HashMap<String, i64>) -> i64 {
+    std::iter::once(name)
+        .chain(matcher.descendants(name))
+        .map(|n| own.get(n).copied().unwrap_or(0))
+        .sum()
+}
+
+/// Re-order `totals` into tree order (m44 chunk 0): every top-level project
+/// in `matcher.tree()` order that has time in the range — itself or any
+/// descendant — followed by its children depth-first, then names no
+/// project knows (as before, biggest first), then [`UNTAGGED`] last. A
+/// parent's `total_ms` becomes its own plus every descendant's, so a parent
+/// with no rows of its own still gets a row once a child has time.
+pub fn nest_totals(totals: &mut Vec<ProjectTotal>, matcher: &Matcher) {
+    let own: HashMap<String, i64> = totals
+        .iter()
+        .map(|p| (p.project.clone(), p.total_ms))
+        .collect();
+    let mut used: HashSet<String> = HashSet::new();
+    let mut out: Vec<ProjectTotal> = Vec::new();
+    for (depth, proj) in matcher.tree() {
+        used.insert(proj.name.clone());
+        let ms = subtree_ms(matcher, &proj.name, &own);
+        if ms == 0 {
+            continue;
+        }
+        out.push(ProjectTotal {
+            project: proj.name.clone(),
+            total_ms: ms,
+            depth,
+            parent: matcher.parent_of(&proj.name).map(str::to_owned),
+        });
+    }
+    let mut untagged: Option<ProjectTotal> = None;
+    let mut rest: Vec<ProjectTotal> = Vec::new();
+    for p in totals.drain(..) {
+        if used.contains(&p.project) {
+            continue;
+        }
+        if p.project == UNTAGGED {
+            untagged = Some(p);
+        } else {
+            rest.push(p);
+        }
+    }
+    rest.sort_by_key(|p| std::cmp::Reverse(p.total_ms));
+    out.extend(rest);
+    if let Some(mut u) = untagged {
+        u.depth = 0;
+        u.parent = None;
+        out.push(u);
+    }
+    *totals = out;
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +396,24 @@ pub fn build(tasks: &[Task], days: Vec<Date>, tz: &TimeZone) -> Result<RangeRepo
     })
 }
 
+/// Roll `r.projects` into tree order (m44 chunk 0), see [`nest_totals`],
+/// then re-sort `r.tasks` to follow: project-major, in the new project
+/// order, biggest task first inside each — as `build` does, but by tree
+/// order rather than by size.
+pub fn nest(r: &mut RangeReport, matcher: &Matcher) {
+    nest_totals(&mut r.projects, matcher);
+    let order = &r.projects;
+    r.tasks.sort_by_key(|t| {
+        (
+            order
+                .iter()
+                .position(|p| p.project == t.project)
+                .unwrap_or(usize::MAX),
+            std::cmp::Reverse(t.total_ms),
+        )
+    });
+}
+
 /// "deploying 40m, on-call 12m" for one project's modes (m37 chunk 4), or
 /// empty. Under a minute is left out.
 pub fn modes_line(modes: &[(String, String, i64)], project: &str) -> String {
@@ -372,6 +456,33 @@ pub fn to_csv(r: &RangeReport) -> String {
     out
 }
 
+/// Whether `project` is `ancestor` or sits under it, walking `r.projects`'
+/// `parent` chain (m44 chunk 0).
+fn is_under(r: &RangeReport, project: &str, ancestor: &str) -> bool {
+    let mut cur = project;
+    loop {
+        if cur == ancestor {
+            return true;
+        }
+        let Some(row) = r.projects.iter().find(|p| p.project == cur) else {
+            return false;
+        };
+        match row.parent.as_deref() {
+            Some(parent) => cur = parent,
+            None => return false,
+        }
+    }
+}
+
+/// Every task row filed to `p.project`, or, for a project with rolled-up
+/// descendants, to one of them: what a parent's day cells sum over.
+fn under<'a>(r: &'a RangeReport, p: &ProjectTotal) -> Vec<&'a TaskRow> {
+    r.tasks
+        .iter()
+        .filter(|t| is_under(r, &t.project, &p.project))
+        .collect()
+}
+
 /// Markdown timesheet: pipe table plus per-project totals.
 pub fn to_md(r: &RangeReport) -> String {
     let mut out = String::from("| project | task |");
@@ -388,14 +499,15 @@ pub fn to_md(r: &RangeReport) -> String {
     // (its name, the day sums, its total), its tasks follow with the
     // project column blank; the rows are already in that order.
     for p in &r.projects {
-        let _ = write!(out, "| {} | |", p.project);
+        let name = if p.depth > 0 {
+            format!("\u{21b3} {}", p.project)
+        } else {
+            p.project.clone()
+        };
+        let _ = write!(out, "| {name} | |");
+        let group = under(r, p);
         for d in 0..r.days.len() {
-            let ms: i64 = r
-                .tasks
-                .iter()
-                .filter(|t| t.project == p.project)
-                .map(|t| t.by_day[d])
-                .sum();
+            let ms: i64 = group.iter().map(|t| t.by_day[d]).sum();
             let _ = write!(out, " {} |", cell(ms));
         }
         let _ = writeln!(out, " {} |", fmt_dur(p.total_ms));
@@ -461,6 +573,7 @@ pub fn self_line(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProjectCfg;
     use jiff::civil;
 
     fn task(id: i64, project: Option<&str>, start: jiff::Zoned, mins: i64) -> Task {
@@ -527,6 +640,85 @@ mod tests {
         assert_eq!(totals[0].total_ms, 90 * 60_000);
         assert_eq!(totals[1].project, "chronicle");
         assert_eq!(totals[1].total_ms, 60 * 60_000);
+    }
+
+    fn client_matcher() -> Matcher {
+        Matcher::new(&[
+            ProjectCfg {
+                name: "acme".into(),
+                ..ProjectCfg::default()
+            },
+            ProjectCfg {
+                name: "acme-web".into(),
+                parent: Some("acme".into()),
+                ..ProjectCfg::default()
+            },
+        ])
+    }
+
+    // m44 chunk 0: a parent's row rolls up its children's ms even when the
+    // parent has none of its own; unknown names and UNTAGGED sort after the
+    // tree, in that order.
+    #[test]
+    fn nest_totals_rolls_children_into_parent_order() {
+        let m = client_matcher();
+        let mut totals = vec![
+            ProjectTotal {
+                project: "acme-web".into(),
+                total_ms: 30 * 60_000,
+                depth: 0,
+                parent: None,
+            },
+            ProjectTotal {
+                project: "mystery".into(),
+                total_ms: 10 * 60_000,
+                depth: 0,
+                parent: None,
+            },
+            ProjectTotal {
+                project: UNTAGGED.into(),
+                total_ms: 5 * 60_000,
+                depth: 0,
+                parent: None,
+            },
+        ];
+        nest_totals(&mut totals, &m);
+        let rows: Vec<(&str, i64, usize, Option<&str>)> = totals
+            .iter()
+            .map(|p| (p.project.as_str(), p.total_ms, p.depth, p.parent.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("acme", 30 * 60_000, 0, None),
+                ("acme-web", 30 * 60_000, 1, Some("acme")),
+                ("mystery", 10 * 60_000, 0, None),
+                (UNTAGGED, 5 * 60_000, 0, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_md_nests_a_child_under_its_parent() {
+        let m = client_matcher();
+        let d = civil::date(2026, 8, 24);
+        let tasks = vec![
+            task(1, Some("acme"), at(d, 9, 0), 30),
+            task(2, Some("acme-web"), at(d, 10, 0), 20),
+        ];
+        let mut r = build(&tasks, vec![d], &TimeZone::UTC).unwrap();
+        nest(&mut r, &m);
+        assert_eq!(
+            to_md(&r),
+            "| project | task | 2026-08-24 | total |\n\
+             |---|---|---|---|\n\
+             | acme | | 50m00s | 50m00s |\n\
+             | | task1 | 30m00s | 30m00s |\n\
+             | \u{21b3} acme-web | | 20m00s | 20m00s |\n\
+             | | task2 | 20m00s | 20m00s |\n\
+             \n## Totals\n\
+             - total: 50m00s\n"
+        );
     }
 
     fn week(monday: Date) -> Vec<Date> {

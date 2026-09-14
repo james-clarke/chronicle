@@ -494,6 +494,32 @@ enum TaskCmd {
         /// Task id, from `task list` or the UI.
         id: i64,
     },
+    /// Pin what a declared task covers besides its ticket: repos,
+    /// branches, document names, sites, work-item keys. Time carrying one
+    /// files to the task's project ahead of the project rules and lands
+    /// on the task. Each flag repeats.
+    Attach {
+        /// Task id, from `task list` or the UI.
+        id: i64,
+        /// A repo path or folder name.
+        #[arg(long)]
+        repo: Vec<String>,
+        /// A branch name.
+        #[arg(long)]
+        branch: Vec<String>,
+        /// Part of a document, page or file name.
+        #[arg(long)]
+        doc: Vec<String>,
+        /// A site; its subdomains count.
+        #[arg(long)]
+        domain: Vec<String>,
+        /// A work-item key besides the task's own.
+        #[arg(long)]
+        item: Vec<String>,
+        /// Unpin the values instead.
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -637,6 +663,30 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Local midnight of the day holding `ts`, in ms.
+fn day_start_ms(ts: jiff::Timestamp) -> i64 {
+    ts.to_zoned(jiff::tz::TimeZone::system())
+        .start_of_day()
+        .map_or(ts.as_millisecond(), |z| z.timestamp().as_millisecond())
+}
+
+/// Re-file the spans from `since` on under the config and the declared
+/// tasks' scope, the way a config edit does; returns how many filed.
+fn refile_since(
+    conn: &mut rusqlite::Connection,
+    config: &Config,
+    since: i64,
+) -> anyhow::Result<usize> {
+    let matcher = chronicle_core::project::Matcher::from_config(config);
+    Ok(chronicle_core::storage::file_spans(
+        conn,
+        since,
+        i64::MAX,
+        &matcher,
+        config.project_join_min,
+    )?)
+}
+
 fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
     use chronicle_core::storage;
     let mut conn = storage::open(&data_dir.join("chronicle.db"))?;
@@ -658,16 +708,15 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
                         .is_none_or(|w| t.project.as_deref() == Some(w))
                 })
                 .collect();
-            // Project-major: configured order, then the names no rule
-            // knows, then no project; newest activity first inside each.
+            // Project-major: tree order, then the names no rule knows, then
+            // no project; newest activity first inside each.
+            let tree = matcher.tree();
             let rank = |p: Option<&str>| -> (usize, String) {
                 match p {
                     Some(p) => (
-                        matcher
-                            .projects
-                            .iter()
-                            .position(|q| q.name == p)
-                            .unwrap_or(matcher.projects.len()),
+                        tree.iter()
+                            .position(|(_, q)| q.name == p)
+                            .unwrap_or(tree.len()),
                         p.to_owned(),
                     ),
                     None => (usize::MAX, String::new()),
@@ -677,7 +726,16 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
             let mut last: Option<Option<String>> = None;
             for t in &rows {
                 if last.as_ref() != Some(&t.project) {
-                    println!("{}", t.project.as_deref().unwrap_or("(no project)"));
+                    match t.project.as_deref() {
+                        Some(name) => {
+                            let depth = tree
+                                .iter()
+                                .find(|(_, q)| q.name == name)
+                                .map_or(0, |(d, _)| *d);
+                            println!("{}{name}", "  ".repeat(depth));
+                        }
+                        None => println!("(no project)"),
+                    }
                     last = Some(t.project.clone());
                 }
                 let mut marks: Vec<&str> = Vec::new();
@@ -700,6 +758,16 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
                         format!("  ({})", marks.join(", "))
                     }
                 );
+                if t.declared {
+                    let scope = storage::task_scope_entries(&conn, t.id)?;
+                    if !scope.is_empty() {
+                        let items: Vec<String> = scope
+                            .iter()
+                            .map(|(k, v)| format!("{} {v}", k.as_str()))
+                            .collect();
+                        println!("         scope: {}", items.join(", "));
+                    }
+                }
             }
             Ok(())
         }
@@ -740,7 +808,60 @@ fn task_cmd(data_dir: &Path, cmd: TaskCmd) -> anyhow::Result<()> {
                 storage::set_task_external_ref(&conn, id, key)?;
             }
             chronicle_core::segmenter::seed_task_evidence(&mut conn, &config, now, id)?;
+            // Spans already on screen today that carry the ticket move to
+            // the task's project now rather than at the next config edit.
+            refile_since(&mut conn, &config, day_start_ms(now))?;
             println!("task {id}: {label} [{}]", project.unwrap_or("-"));
+            Ok(())
+        }
+        TaskCmd::Attach {
+            id,
+            repo,
+            branch,
+            doc,
+            domain,
+            item,
+            remove,
+        } => {
+            use chronicle_core::scope::ScopeKind;
+            let Some((label, _, _)) = storage::task_identity(&conn, id)? else {
+                bail!("no task {id}");
+            };
+            let config = Config::load(&data_dir.join("config.toml"))?;
+            let groups = [
+                (ScopeKind::Repo, repo),
+                (ScopeKind::Branch, branch),
+                (ScopeKind::Doc, doc),
+                (ScopeKind::Domain, domain),
+                (ScopeKind::Item, item),
+            ];
+            let mut n = 0;
+            for (kind, values) in &groups {
+                for value in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+                    let changed = if remove {
+                        storage::remove_task_scope(&conn, id, *kind, value)?
+                    } else {
+                        storage::add_task_scope(&conn, id, *kind, value)?
+                    };
+                    n += usize::from(changed);
+                    println!(
+                        "task {id}: {label}: {} {} {value}",
+                        if remove { "unpinned" } else { "pinned" },
+                        kind.as_str()
+                    );
+                }
+            }
+            if n == 0 {
+                println!("nothing changed");
+                return Ok(());
+            }
+            let since = storage::task_created_ts(&conn, id)?;
+            let filed = refile_since(
+                &mut conn,
+                &config,
+                day_start_ms(chronicle_core::types::ms_to_ts(since)),
+            )?;
+            println!("re-filed {filed} spans since the task was declared");
             Ok(())
         }
         TaskCmd::Close { id } => {

@@ -20,6 +20,7 @@ pub mod project;
 pub mod proposals;
 pub mod replay;
 pub mod report;
+pub mod scope;
 pub mod segmenter;
 pub mod self_score;
 pub mod sessionizer;

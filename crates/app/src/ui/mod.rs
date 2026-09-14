@@ -388,11 +388,18 @@ struct ProjectGroup {
     /// Named in `[[projects]]`; an unconfigured name is one a task still
     /// carries from before the config existed, or typed on declare.
     configured: bool,
-    /// A focus span of the project ended inside the last two minutes.
+    /// Depth in the project tree (m44 chunk 0): 0 for a top-level project.
+    depth: usize,
+    /// The configured parent's name (m44 chunk 0), for rolling a child's
+    /// minutes up and for hiding descendants when the parent collapses.
+    parent: Option<String>,
+    /// A focus span of the project or any of its descendants ended inside
+    /// the last two minutes.
     live: bool,
-    /// Interval time inside today across its tasks and general task.
+    /// Interval time inside today across its tasks and general task, plus
+    /// its descendants' today_ms (m44 chunk 0).
     today_ms: i64,
-    /// Today's time on the project's general task ("not on a task").
+    /// Today's time on the project's own general task ("not on a task").
     general_ms: i64,
     /// The current declared task (`tasks.current`).
     current: Option<i64>,
@@ -1368,7 +1375,13 @@ impl TimelineApp {
                 .timestamp()
                 .as_millisecond();
             let ptasks = storage::tasks_in_range(conn, plo, lo).ok()?;
-            let pr = chronicle_core::report::build(&ptasks, pd, &self.tz).ok()?;
+            let mut pr = chronicle_core::report::build(&ptasks, pd, &self.tz).ok()?;
+            if let Some(cfg) = self.config.as_ref() {
+                chronicle_core::report::nest(
+                    &mut pr,
+                    &chronicle_core::project::Matcher::from_config(cfg),
+                );
+            }
             (pr.grand_total_ms > 0).then(|| insights::delta(r, &pr))
         });
         let hash = insights::report_data_hash(r);
@@ -1421,6 +1434,12 @@ impl TimelineApp {
         let conn = self.conn.as_ref().expect("connection opened by load_spans");
         let tasks = chronicle_core::storage::tasks_in_range(conn, lo, hi)?;
         let mut r = chronicle_core::report::build(&tasks, days, &self.tz)?;
+        if let Some(cfg) = self.config.as_ref() {
+            chronicle_core::report::nest(
+                &mut r,
+                &chronicle_core::project::Matcher::from_config(cfg),
+            );
+        }
         r.self_ms = chronicle_core::storage::self_window_ms(conn, lo, hi)?;
         r.modes = chronicle_core::storage::mode_ms(conn, lo, hi)?;
         Ok(r)
@@ -1772,11 +1791,12 @@ impl TimelineApp {
     }
 
     /// Home's project lines from the loaded open tasks (m35 chunk 3):
-    /// configured projects in config order, then names no rule knows,
-    /// then the unfiled group; each with today's minutes (tasks plus the
-    /// general task), the live flag, its current task and this week's
-    /// sources. A configured project with nothing at all still shows,
-    /// collapsed to its line.
+    /// configured projects in tree order (m44 chunk 0: a parent before its
+    /// children), then names no rule knows, then the unfiled group; each
+    /// with today's minutes (tasks plus the general task, rolled up into
+    /// every ancestor), the live flag (also rolled up), its current task
+    /// and this week's sources. A configured project with nothing at all
+    /// still shows, collapsed to its line.
     fn load_project_groups(&mut self) {
         let Some(conn) = self.conn.as_ref() else {
             return;
@@ -1869,25 +1889,26 @@ impl TimelineApp {
             .collect();
         // A discovered project (m37 chunk 2) wears the "not configured"
         // chip: it files time, but a `[[projects]]` entry would name it.
-        let mut order: Vec<(Option<String>, bool)> = matcher
-            .projects
-            .iter()
-            .map(|p| (Some(p.name.clone()), !p.discovered))
+        // Tree order (m44 chunk 0) so a parent's line precedes its children.
+        let mut order: Vec<(Option<String>, bool, usize, Option<String>)> = matcher
+            .tree()
+            .into_iter()
+            .map(|(depth, p)| (Some(p.name.clone()), !p.discovered, depth, p.parent.clone()))
             .collect();
         for t in &self.open_tasks {
             let key = t.project.clone().filter(|p| !p.trim().is_empty());
-            if !order.iter().any(|(n, _)| *n == key) {
-                order.push((key, false));
+            if !order.iter().any(|(n, ..)| *n == key) {
+                order.push((key, false, 0, None));
             }
         }
         // The unfiled group closes the list even when it is empty today.
-        if !order.iter().any(|(n, _)| n.is_none()) {
-            order.push((None, false));
+        if !order.iter().any(|(n, ..)| n.is_none()) {
+            order.push((None, false, 0, None));
         }
-        order.sort_by_key(|(n, _)| n.is_none());
+        order.sort_by_key(|(n, ..)| n.is_none());
         self.project_groups = order
             .into_iter()
-            .map(|(name, configured)| {
+            .map(|(name, configured, depth, parent)| {
                 let tasks: Vec<usize> = self
                     .open_tasks
                     .iter()
@@ -1920,9 +1941,34 @@ impl TimelineApp {
                     tasks,
                     name,
                     configured,
+                    depth,
+                    parent,
                 }
             })
             .collect();
+        // Roll each group's own minutes and live flag up into every
+        // ancestor's line (m44 chunk 0): a parent's total is its own plus
+        // its descendants', walking the parent chain so a grandchild's time
+        // reaches the grandparent too.
+        let own_today_ms: Vec<i64> = self.project_groups.iter().map(|g| g.today_ms).collect();
+        let own_live: Vec<bool> = self.project_groups.iter().map(|g| g.live).collect();
+        for i in 0..self.project_groups.len() {
+            let mut parent = self.project_groups[i].parent.clone();
+            while let Some(p) = parent {
+                let Some(j) = self
+                    .project_groups
+                    .iter()
+                    .position(|g| g.name.as_deref() == Some(p.as_str()))
+                else {
+                    break;
+                };
+                self.project_groups[j].today_ms += own_today_ms[i];
+                if own_live[i] {
+                    self.project_groups[j].live = true;
+                }
+                parent = self.project_groups[j].parent.clone();
+            }
+        }
     }
 
     /// Flip a project line's collapsed state and persist the set.
@@ -2139,6 +2185,24 @@ impl TimelineApp {
                             chronicle_core::segmenter::seed_task_evidence(conn, cfg, now, task_id)
                     {
                         tracing::warn!("seeding declared task {task_id}: {e}");
+                    }
+                    // Today's spans that carry the ticket move to the
+                    // task's project now, not at the next config edit.
+                    if let Some(cfg) = self.config.as_ref() {
+                        let day = now
+                            .to_zoned(self.tz.clone())
+                            .start_of_day()
+                            .map_or(now.as_millisecond(), |z| z.timestamp().as_millisecond());
+                        let matcher = chronicle_core::project::Matcher::from_config(cfg);
+                        if let Err(e) = chronicle_core::storage::file_spans(
+                            conn,
+                            day,
+                            i64::MAX,
+                            &matcher,
+                            cfg.project_join_min,
+                        ) {
+                            tracing::warn!("re-filing spans for task {task_id}: {e}");
+                        }
                     }
                 }
                 result.map(|_| ())

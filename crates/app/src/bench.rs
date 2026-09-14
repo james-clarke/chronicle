@@ -287,7 +287,7 @@ fn segment_fixture_eval(cases: &[Case], config: &Config) -> anyhow::Result<()> {
         // the newest declared task per project is its sink.
         let matcher = chronicle_core::project::Matcher::from_config(config);
         let filed =
-            chronicle_core::storage::filed_spans(&aspans, &matcher, config.project_join_min);
+            chronicle_core::storage::filed_spans(&aspans, &matcher, config.project_join_min, &[]);
         let aspans: Vec<_> = aspans
             .into_iter()
             .zip(filed)
