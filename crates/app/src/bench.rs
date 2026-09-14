@@ -2205,9 +2205,9 @@ pub(crate) fn self_score(data_dir: &Path) -> anyhow::Result<()> {
 
 pub(crate) fn backfill_notes(data_dir: &Path) -> anyhow::Result<()> {
     use chronicle_capture::notes::NotesProvider;
-    use chronicle_core::{config::expand_home, storage};
+    use chronicle_core::storage;
     let config = Config::load(&data_dir.join("config.toml"))?;
-    let repos: Vec<PathBuf> = config.git_repos.iter().map(|p| expand_home(p)).collect();
+    let repos: Vec<PathBuf> = config.watched_repos();
     let conn = storage::open(&data_dir.join("chronicle.db"))?;
     let mut n = 0;
     for e in NotesProvider::new(&repos).poll() {

@@ -129,9 +129,7 @@ pub fn probe_passes(env: &Env, cfg: &Config, p: &Probe) -> bool {
             } else {
                 // A relative pattern (`.sentryclirc`) is a file inside a
                 // watched repo.
-                cfg.git_repos
-                    .iter()
-                    .any(|r| expand(env, r).join(&path).exists())
+                cfg.watched_repos().iter().any(|r| r.join(&path).exists())
             }
         }
         ProbeKind::Endpoint { .. } => env.daemon_up,

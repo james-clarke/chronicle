@@ -30,7 +30,7 @@
       {
         "step": "field",
         "field": "git_repos",
-        "hint": "repo paths, ~ expanded; repo discovery fills this in for you"
+        "hint": "a dev folder watches every repo under it; add one, or a repo path directly (~ expanded)"
       }
     ],
     "docs": "git"

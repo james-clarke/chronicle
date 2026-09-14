@@ -47,20 +47,22 @@ pub struct Matcher {
 impl Matcher {
     pub fn from_config(config: &Config) -> Self {
         let mut m = Self::new(&config.projects_effective());
-        if config.discover_repos {
-            m.discover();
-        }
+        m.discover(config);
         m
     }
 
-    /// Append every git repo found one level under a configured repo's
-    /// parent that no project claims, as a discovered project named after
-    /// its folder (m37 chunk 2): time in `~/dev/continental` files without
-    /// a config edit. A folder whose name a configured project already has
-    /// is skipped.
-    pub fn discover(&mut self) {
+    /// Append every git repo found one level under a `dev_roots` entry, plus
+    /// (when `discover_repos` is on) one level under a configured repo's
+    /// parent, that no project already claims, as a discovered project named
+    /// after its folder (m37 chunk 2): time in `~/dev/continental` files
+    /// without a config edit. A folder whose name a configured project
+    /// already has is skipped.
+    pub fn discover(&mut self, config: &Config) {
         let known: Vec<PathBuf> = self.projects.iter().flat_map(|p| p.paths.clone()).collect();
-        let parents = parents_of(&known);
+        let mut parents: Vec<PathBuf> = config.dev_roots.iter().map(|r| expand_home(r)).collect();
+        if config.discover_repos {
+            parents.extend(parents_of(&known));
+        }
         for repo in discover_repos(&parents, &known) {
             if self
                 .projects
@@ -591,12 +593,36 @@ mod discover_tests {
             ..Default::default()
         };
         let mut m = super::Matcher::new(&[cfg]);
-        m.discover();
-        m.discover();
+        let config = crate::config::Config::default();
+        m.discover(&config);
+        m.discover(&config);
         let names: Vec<&str> = m.projects.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["known", "found"]);
         assert!(m.projects[1].discovered && m.projects[1].derive);
         assert_eq!(m.resolve("found"), Some("found"));
+    }
+
+    #[test]
+    fn matcher_discovers_dev_root_children_without_discover_repos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dev");
+        std::fs::create_dir_all(root.join("widget").join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("claimed").join(".git")).unwrap();
+        let claim = crate::config::ProjectCfg {
+            name: "gadget".into(),
+            repos: vec![root.join("claimed").display().to_string()],
+            ..Default::default()
+        };
+        let mut m = super::Matcher::new(&[claim]);
+        let config = crate::config::Config {
+            dev_roots: vec![root.display().to_string()],
+            discover_repos: false,
+            ..Default::default()
+        };
+        m.discover(&config);
+        let names: Vec<&str> = m.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["gadget", "widget"]);
+        assert!(m.projects[1].discovered);
     }
 
     use super::*;

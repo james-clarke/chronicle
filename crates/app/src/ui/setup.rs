@@ -7,6 +7,7 @@
 //! `chronicle setup`. Skipping is one click and is remembered in `meta`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use eframe::egui;
 use jiff::Timestamp;
@@ -35,6 +36,9 @@ pub(super) struct SetupState {
     drafts: HashMap<&'static str, String>,
     /// "find my repos" results with their ticks; None until asked.
     scan: Option<Vec<(DiscoveredRepo, bool)>>,
+    /// Dev-folder candidates the same scan turned up (path, repo count,
+    /// ticked); offered only while `dev_roots` is empty, None until asked.
+    root_scan: Option<Vec<(PathBuf, usize, bool)>>,
     status: Option<Result<String, String>>,
 }
 
@@ -65,6 +69,7 @@ impl TimelineApp {
             shell: setup::shell(),
             drafts: HashMap::new(),
             scan: None,
+            root_scan: None,
             status: None,
         };
         st.replan(self.conn.as_ref());
@@ -295,9 +300,11 @@ fn step_ui(ui: &mut egui::Ui, width: f32, step: &SetupStep, st: &mut SetupState,
     }
 }
 
-/// "find my repos": the usual parent folders, each hit a tick, one button
-/// to add the ticked ones — the fresh-profile route to `git_repos` with no
-/// editor open.
+/// "find my repos": each usual parent folder that holds at least one repo
+/// offers itself as a dev folder first — ticking one covers every repo
+/// under it with no further edit — then the individual repos still outside
+/// every ticked root get their own tick rows. The fresh-profile route to
+/// `git_repos` / `dev_roots` with no editor open.
 fn repo_scan_ui(ui: &mut egui::Ui, st: &mut SetupState, save: &mut bool) {
     const INDENT: f32 = 16.0;
     let home = st.env.home.clone();
@@ -310,17 +317,67 @@ fn repo_scan_ui(ui: &mut egui::Ui, st: &mut SetupState, save: &mut bool) {
             ))
             .clicked()
         {
-            let found = setup::scan_repos(&home, &st.config.git_repos);
+            if st.config.dev_roots.is_empty() {
+                let roots: Vec<(PathBuf, usize, bool)> = setup::REPO_PARENTS
+                    .iter()
+                    .map(|p| home.join(p))
+                    .filter_map(|p| {
+                        let n =
+                            chronicle_core::project::discover_repos(std::slice::from_ref(&p), &[])
+                                .len();
+                        (n > 0).then_some((p, n, true))
+                    })
+                    .collect();
+                st.root_scan = (!roots.is_empty()).then_some(roots);
+            }
+            let found = setup::scan_repos(&home, &st.config.git_repos, &st.config.dev_roots);
             st.scan = Some(found.into_iter().map(|r| (r, true)).collect());
         }
     });
+    if let Some(roots) = st.root_scan.as_mut() {
+        for (path, count, tick) in roots.iter_mut() {
+            ui.horizontal(|ui| {
+                ui.add_space(INDENT);
+                ui.checkbox(
+                    tick,
+                    format!(
+                        "use {} as a dev folder ({count} repo{})",
+                        tilde(path, &home),
+                        if *count == 1 { "" } else { "s" }
+                    ),
+                );
+            });
+        }
+        let picked: Vec<String> = roots
+            .iter()
+            .filter(|(_, _, tick)| *tick)
+            .map(|(p, _, _)| tilde(p, &home))
+            .collect();
+        ui.horizontal(|ui| {
+            ui.add_space(INDENT);
+            let label = match picked.len() {
+                1 => "add 1 dev folder".to_owned(),
+                n => format!("add {n} dev folders"),
+            };
+            if theme::primary_button_enabled(ui, !picked.is_empty(), &label).clicked() {
+                for p in picked {
+                    if !st.config.dev_roots.contains(&p) {
+                        st.config.dev_roots.push(p);
+                    }
+                }
+                st.root_scan = None;
+                st.scan = None;
+                *save = true;
+            }
+        });
+    }
     let Some(scan) = st.scan.as_mut() else {
         return;
     };
     if scan.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(INDENT);
-            dim(ui, "no new repos under the usual folders; add a path above");
+            dim(ui, "no more repos outside a dev folder; add a path above");
         });
         return;
     }

@@ -16,11 +16,15 @@ pub(crate) fn list(data_dir: &Path) -> anyhow::Result<()> {
     let config = Config::load(&data_dir.join("config.toml"))?;
     let cfgs = config.projects_effective();
     if cfgs.is_empty() {
-        println!("no projects: add [[projects]] to config.toml or git_repos for the default");
+        println!(
+            "no projects: add [[projects]] to config.toml, or dev_roots / git_repos for the default"
+        );
         return Ok(());
     }
     if config.projects.is_empty() {
-        println!("(defaults: one project per git_repos entry; none written to config.toml)");
+        println!(
+            "(defaults: one project per watched repo, from dev_roots and git_repos; none written to config.toml)"
+        );
     }
     let matcher = Matcher::from_config(&config);
     for p in &matcher.projects {

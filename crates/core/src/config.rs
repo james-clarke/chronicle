@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -102,8 +103,13 @@ pub struct Config {
     /// or a ticket ref never collapse.
     pub background_minutes: u32,
     /// Repo paths polled for branch/commit evidence (`~` expanded).
-    /// Empty = git capture off.
+    /// Empty = git capture off. Repos under a `dev_roots` entry do not need
+    /// to be listed here too.
     pub git_repos: Vec<String>,
+    /// Folders (`~` expanded) whose immediate git-repo subdirectories are
+    /// all watched, the same as if each were listed in `git_repos`: no
+    /// config edit for a new clone. See `Config::watched_repos`.
+    pub dev_roots: Vec<String>,
     /// Projects (m35 chunk 0): every focus span is filed into the first
     /// project whose rule matches it (repo path or place, ticket prefix,
     /// domain, title regex, app), else left unfiled. Empty = one project per
@@ -215,6 +221,7 @@ impl Default for Config {
             distraction_patterns: Vec::new(),
             background_minutes: 10,
             git_repos: Vec::new(),
+            dev_roots: Vec::new(),
             projects: Vec::new(),
             project_join_min: 2,
             ai_session_dirs: vec!["~/.claude/projects".into()],
@@ -278,21 +285,46 @@ impl Default for ProjectCfg {
 }
 
 impl Config {
+    /// Every repo path in force: `git_repos` as written (in order), then the
+    /// immediate git-repo children of each `dev_roots` entry (by name), `~`
+    /// expanded, deduped by canonical path. Hidden folders are skipped.
+    pub fn watched_repos(&self) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for repo in &self.git_repos {
+            let path = expand_home(repo);
+            let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if seen.insert(canon) {
+                out.push(path);
+            }
+        }
+        for root in &self.dev_roots {
+            for child in children_repos(&expand_home(root)) {
+                let canon = std::fs::canonicalize(&child).unwrap_or_else(|_| child.clone());
+                if seen.insert(canon) {
+                    out.push(child);
+                }
+            }
+        }
+        out
+    }
+
     /// The projects in force: `projects` as written, else one per
-    /// `git_repos` entry named after its folder (the first-run default).
+    /// `watched_repos()` entry named after its folder (the first-run
+    /// default).
     pub fn projects_effective(&self) -> Vec<ProjectCfg> {
         if !self.projects.is_empty() {
             return self.projects.clone();
         }
-        self.git_repos
+        self.watched_repos()
             .iter()
             .filter_map(|p| {
-                let name = expand_home(p)
+                let name = p
                     .file_name()
                     .map(|n| n.to_string_lossy().to_ascii_lowercase())?;
                 Some(ProjectCfg {
                     name,
-                    repos: vec![p.clone()],
+                    repos: vec![p.display().to_string()],
                     ..ProjectCfg::default()
                 })
             })
@@ -321,6 +353,38 @@ impl Config {
             .clone()
             .unwrap_or_else(|| data_dir.join("mcp.toml"))
     }
+}
+
+/// A `.git` directory only: a linked worktree or submodule carries a `.git`
+/// file, and either belongs to a repo that is watched in its own right.
+fn is_main_repo(path: &Path) -> bool {
+    path.join(".git").is_dir()
+}
+
+/// Immediate children of `root` that are git repos, hidden folders skipped,
+/// sorted by name. A root that does not exist yields no children. Kept here
+/// rather than in `project`, which this module cannot depend on without a
+/// cycle (`project` already depends on `config`).
+fn children_repos(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if name.starts_with('.') || !is_main_repo(&path) {
+            continue;
+        }
+        out.push(path);
+    }
+    out.sort();
+    out
 }
 
 /// `~/x` → `$HOME/x`; anything else passes through unchanged. Config paths
@@ -367,5 +431,59 @@ mod tests {
         assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
         assert_eq!(expand_home("relative"), PathBuf::from("relative"));
         assert_eq!(expand_home("~"), PathBuf::from("~"));
+    }
+
+    #[test]
+    fn watched_repos_orders_dedupes_and_skips_hidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dev");
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(root.join(name).join(".git")).unwrap();
+        }
+        std::fs::create_dir_all(root.join(".hidden").join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        std::fs::create_dir_all(root.join("linked")).unwrap();
+        std::fs::write(
+            root.join("linked").join(".git"),
+            "gitdir: ../alpha/.git/worktrees/linked",
+        )
+        .unwrap();
+        let outside = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(outside.join(".git")).unwrap();
+
+        let cfg = Config {
+            git_repos: vec![
+                outside.display().to_string(),
+                root.join("beta").display().to_string(),
+            ],
+            dev_roots: vec![root.display().to_string()],
+            ..Config::default()
+        };
+        // `git_repos` as written, then unclaimed root children by name;
+        // `beta` is both, so it appears once, at its `git_repos` position,
+        // and the hidden, plain (non-git) and linked-worktree folders never
+        // show.
+        assert_eq!(
+            cfg.watched_repos(),
+            vec![outside, root.join("beta"), root.join("alpha")]
+        );
+    }
+
+    #[test]
+    fn projects_effective_names_dev_root_children_when_projects_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dev");
+        std::fs::create_dir_all(root.join("widget").join(".git")).unwrap();
+        let cfg = Config {
+            dev_roots: vec![root.display().to_string()],
+            ..Config::default()
+        };
+        let cfgs = cfg.projects_effective();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "widget");
+        assert_eq!(
+            cfgs[0].repos,
+            vec![root.join("widget").display().to_string()]
+        );
     }
 }

@@ -219,7 +219,7 @@ else with it. [docs/sources.md](docs/sources.md) has the full example.
 `config.toml` lives in the data directory and is read when the daemon
 starts. The Settings panel writes the same file. The fields you are most
 likely to touch are `excluded_apps` and `excluded_titles` (regexes, never
-stored), `retention_days`, `git_repos`, `capture_presence`, `focus_route`
+stored), `retention_days`, `dev_roots`, `git_repos`, `capture_presence`, `focus_route`
 (`auto`, `x11`, `wlr` or `kwin`), `derive_idle_secs` and `port`. Every
 field with its default is in [docs/configuration.md](docs/configuration.md).
 

@@ -34,6 +34,9 @@ pub(super) struct SettingsPanel {
     checkpoint_afk_secs: u32,
     /// As written in config.toml (`~` kept); edited by the Connections rows.
     git_repos: Vec<String>,
+    /// Dev folders, as written; edited by the Connections rows the same way
+    /// `git_repos` is.
+    dev_roots: Vec<String>,
     /// Projects and their rules (m35 chunk 0).
     projects: super::projects::ProjectsPanel,
     sources: super::connections::LocalSources,
@@ -247,6 +250,7 @@ impl SettingsPanel {
             distraction_patterns: config.distraction_patterns.join("\n"),
             checkpoint_afk_secs: config.checkpoint_afk_secs,
             git_repos: config.git_repos.clone(),
+            dev_roots: config.dev_roots.clone(),
             projects: super::projects::ProjectsPanel::from_config(&config),
             digest_view: None,
             output_view: None,
@@ -303,6 +307,7 @@ impl SettingsPanel {
         config.distraction_patterns = regex_lines(&self.distraction_patterns)?;
         config.checkpoint_afk_secs = self.checkpoint_afk_secs;
         config.git_repos = self.git_repos.clone();
+        config.dev_roots = self.dev_roots.clone();
         self.sources.apply(&mut config);
         self.projects.apply(&mut config)?;
         let toml = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -690,6 +695,7 @@ impl TimelineApp {
                                 ui,
                                 conn,
                                 &mut panel.git_repos,
+                                &mut panel.dev_roots,
                                 &mut panel.sources,
                             );
 

@@ -270,11 +270,7 @@ pub(crate) fn spawn_gitlab_capture(
         tracing::warn!("gitlab_mrs = true but `glab` is not on PATH");
         return Ok(());
     };
-    let repos: Vec<PathBuf> = config
-        .git_repos
-        .iter()
-        .map(|p| chronicle_core::config::expand_home(p))
-        .collect();
+    let repos = config.watched_repos();
     let provider = GitlabProvider::new(glab, &repos);
     if provider.is_empty() {
         tracing::warn!("gitlab_mrs = true but no configured repo has a GitLab remote");
@@ -471,15 +467,11 @@ pub(crate) fn spawn_mic_capture(config: &Config, tx: Sender<CaptureEvent>) -> an
 pub(crate) fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
     use chronicle_capture::git::GitProvider;
 
-    let repos: Vec<PathBuf> = config
-        .git_repos
-        .iter()
-        .map(|p| chronicle_core::config::expand_home(p))
-        .collect();
+    let repos = config.watched_repos();
     let git = GitProvider::new(&repos);
     if git.is_empty() {
         if !repos.is_empty() {
-            tracing::warn!("git_repos configured but none resolved to a git dir");
+            tracing::warn!("watched repos configured but none resolved to a git dir");
         }
         return Ok(());
     }
@@ -498,17 +490,12 @@ pub(crate) fn spawn_git_capture(config: &Config, tx: Sender<CaptureEvent>) -> an
     spawn_provider_thread("git", "git provider", git, tx)
 }
 
-/// Notes reader (m32 chunk 5): every `git_repos` entry's
-/// `.remember/today-*.md`; optional, never load-bearing — same contract
-/// as git.
+/// Notes reader (m32 chunk 5): every watched repo's `.remember/today-*.md`;
+/// optional, never load-bearing — same contract as git.
 pub(crate) fn spawn_notes_capture(config: &Config, tx: Sender<CaptureEvent>) -> anyhow::Result<()> {
     use chronicle_capture::notes::NotesProvider;
 
-    let repos: Vec<PathBuf> = config
-        .git_repos
-        .iter()
-        .map(|p| chronicle_core::config::expand_home(p))
-        .collect();
+    let repos = config.watched_repos();
     let notes = NotesProvider::new(&repos);
     if notes.is_empty() {
         return Ok(());
@@ -605,11 +592,7 @@ pub(crate) fn spawn_shell_capture(config: &Config, tx: Sender<CaptureEvent>) -> 
         tracing::warn!("shell_history = true but {} is missing", db.display());
         return Ok(());
     }
-    let repos: Vec<PathBuf> = config
-        .git_repos
-        .iter()
-        .map(|p| chronicle_core::config::expand_home(p))
-        .collect();
+    let repos = config.watched_repos();
     let provider = ShellProvider::new(db, &repos);
     spawn_provider_thread("shell", "shell provider", provider, tx)
 }

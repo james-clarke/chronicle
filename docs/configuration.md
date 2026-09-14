@@ -48,8 +48,9 @@ A missing `config.toml` is not an error. Chronicle starts with the defaults belo
 
 | Field | Default | Meaning |
 |---|---|---|
-| `git_repos` | `[]` | Repo paths polled for branch and commit evidence (`~` expanded). Empty means git capture is off. |
-| `projects` | `[]` | The projects in force; every focus span files into the first project whose rule matches it (repo path or place, ticket prefix, domain, title regex, app), or stays unfiled. Empty means one project per `git_repos` entry, named after its folder. |
+| `dev_roots` | `[]` | Folders (`~` expanded) whose immediate git-repo subdirectories are all watched, the same as if each were listed in `git_repos`; a new clone under the folder needs no config edit. |
+| `git_repos` | `[]` | Repo paths outside any dev folder, polled for branch and commit evidence (`~` expanded). Empty (with `dev_roots` also empty) means git capture is off. |
+| `projects` | `[]` | The projects in force; every focus span files into the first project whose rule matches it (repo path or place, ticket prefix, domain, title regex, app), or stays unfiled. Empty means one project per watched repo (`dev_roots` children plus `git_repos`), named after its folder. |
 | `project_join_min` | `2` | An unfiled span shorter than this many minutes, sitting between two spans of the same project, joins that project (treats a quick tab glance as part of the surrounding work). `0` turns this off. |
 
 Each entry in `projects` is a `ProjectCfg`:
@@ -76,7 +77,7 @@ Each entry in `projects` is a `ProjectCfg`:
 | `shell_history` | `false` | Fold atuin shell history into shell spans, keyed by repo (cwd, `argv[0]`, and duration only). |
 | `editor_heartbeats` | `true` | Accept WakaTime-style heartbeats from editor plugins on the local endpoint and fold them into edit spans. Off makes the route answer 403. |
 | `shell_hook` | `true` | Accept posts from the `chronicle shell-init` precmd hook (cwd, program, duration; never the command line) on the local endpoint and fold them into shell spans. Off makes the route answer 403. |
-| `discover_repos` | `true` | Scan the parents of `git_repos` entries for git repos no configured project claims, and file them as discovered projects. |
+| `discover_repos` | `true` | Scan the parents of watched repos (siblings, not `dev_roots` children, which are always watched) for git repos no configured project claims, and file them as discovered projects. |
 | `browser_history` | `true` | Read the browsers' history databases (a copy, read-only; query strings dropped) into `browse` rows so a tab's real URL anchors the span. |
 | `calendars` | `[]` | ICS calendars (URLs or file paths) polled for meeting spans, no OAuth required. |
 

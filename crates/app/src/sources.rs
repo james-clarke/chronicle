@@ -126,8 +126,8 @@ pub(crate) fn shell_init(data_dir: &Path, shell: &str) -> anyhow::Result<()> {
     }
 }
 
-/// The repos `hooks install|remove|status` act on: the one given, else
-/// every configured project's repo paths and worktrees.
+/// The repos `hooks install|remove|status` act on: the one given, else every
+/// watched repo and its worktrees.
 fn hook_repos(data_dir: &Path, repo: Option<&str>) -> anyhow::Result<Vec<PathBuf>> {
     if let Some(r) = repo {
         let p = chronicle_core::config::expand_home(r);
@@ -137,15 +137,18 @@ fn hook_repos(data_dir: &Path, repo: Option<&str>) -> anyhow::Result<Vec<PathBuf
         return Ok(vec![p]);
     }
     let config = Config::load(&data_dir.join("config.toml"))?;
-    let matcher = chronicle_core::project::Matcher::from_config(&config);
-    let mut out: Vec<PathBuf> = matcher
-        .projects
-        .iter()
-        .filter(|p| !p.discovered)
-        .flat_map(|p| p.paths.clone())
-        .filter(|p| chronicle_capture::git::resolve_git_dir(p).is_some())
-        .collect();
-    out.dedup();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for repo in config.watched_repos() {
+        for wt in chronicle_core::project::worktrees_of(&repo) {
+            if !out.contains(&wt) {
+                out.push(wt);
+            }
+        }
+        if !out.contains(&repo) {
+            out.push(repo);
+        }
+    }
+    out.retain(|p| chronicle_capture::git::resolve_git_dir(p).is_some());
     Ok(out)
 }
 

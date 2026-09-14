@@ -165,14 +165,40 @@ pub fn describe(step: &SetupStep, shell: &str) -> String {
 pub const REPO_PARENTS: &[&str] = &["dev", "src", "code", "projects", "work", "repos", "git"];
 
 /// Git repos under the usual parent folders that `git_repos` does not
-/// already name — the scan behind "find my repos" on a fresh profile,
-/// where discovery has no watched repo to start from.
-pub fn scan_repos(home: &Path, git_repos: &[String]) -> Vec<DiscoveredRepo> {
+/// already name and no `dev_roots` entry already covers — the scan behind
+/// "find my repos" on a fresh profile, where discovery has no watched repo
+/// to start from.
+pub fn scan_repos(home: &Path, git_repos: &[String], dev_roots: &[String]) -> Vec<DiscoveredRepo> {
     let parents: Vec<PathBuf> = REPO_PARENTS
         .iter()
         .map(|p| home.join(p))
         .filter(|p| p.is_dir())
         .collect();
-    let known: Vec<PathBuf> = git_repos.iter().map(|r| config::expand_home(r)).collect();
+    let mut known: Vec<PathBuf> = git_repos.iter().map(|r| config::expand_home(r)).collect();
+    let roots: Vec<PathBuf> = dev_roots.iter().map(|r| config::expand_home(r)).collect();
+    known.extend(
+        project::discover_repos(&roots, &known)
+            .into_iter()
+            .map(|r| r.path),
+    );
     project::discover_repos(&parents, &known)
+}
+
+#[cfg(test)]
+mod scan_repos_tests {
+    use super::*;
+
+    #[test]
+    fn scan_repos_skips_repos_under_a_ticked_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("dev/widget/.git")).unwrap();
+
+        let found = scan_repos(home, &[], &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "widget");
+
+        let root = home.join("dev").display().to_string();
+        assert!(scan_repos(home, &[], &[root]).is_empty());
+    }
 }

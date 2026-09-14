@@ -26,7 +26,7 @@ Set `focus_route` (`auto`, `x11`, `wlr`, `kwin`) in `config.toml` to force a rou
 
 ### Git repos and hooks
 
-Repos named in `git_repos`, or found by discovery below, are polled every 20 seconds for the current branch and new commits. `chronicle hooks install` appends one backgrounded, silenced line to each repo's `post-checkout`, `post-commit` and `post-rewrite` hooks, marked with a trailing `# chronicle` comment and never replacing an existing hook, so a checkout or commit is timestamped exactly rather than caught on the next poll. `chronicle hooks remove` strips that line, `chronicle hooks status` shows which repos have it, and `chronicle hooks backfill` reads the reflog for checkouts the poller never saw.
+Point `dev_roots` at a folder such as `~/dev` and every git repo directly under it is watched: a new clone shows up on the daemon's next start, no config edit. Repos elsewhere are named one by one in `git_repos`. Watched repos are polled every 20 seconds for the current branch and new commits; a repo that only discovery below found is filed as a project but not polled. `chronicle hooks install` appends one backgrounded, silenced line to each repo's `post-checkout`, `post-commit` and `post-rewrite` hooks, marked with a trailing `# chronicle` comment and never replacing an existing hook, so a checkout or commit is timestamped exactly rather than caught on the next poll. `chronicle hooks remove` strips that line, `chronicle hooks status` shows which repos have it, and `chronicle hooks backfill` reads the reflog for checkouts the poller never saw.
 
 Stored: the repo's directory name (not the full path), the branch name, the commit hash and the subject line. Not stored: diffs, the files a commit touched, or anything past the subject line.
 
@@ -48,7 +48,7 @@ Chronicle copies a Chromium or Firefox profile's history database, including Fir
 
 ### Repo discovery and link files
 
-With `discover_repos` on, the default, git repos found next to the ones you already watch are filed as discovered projects instead of showing up as unfiled time. Separately, each watched repo's deploy files (`.vercel/project.json`, `fly.toml`, `.sentryclirc` and similar) are read for the service name and id they declare, never their contents, so a project can be matched by the host it deploys to.
+A `dev_roots` child is filed as its own project the moment it is watched, with no discovery step needed. With `discover_repos` on, the default, git repos found next to the ones you already watch are filed as discovered projects instead of showing up as unfiled time. Separately, each watched repo's deploy files (`.vercel/project.json`, `fly.toml`, `.sentryclirc` and similar) are read for the service name and id they declare, never their contents, so a project can be matched by the host it deploys to.
 
 ### Repo notes
 
@@ -115,7 +115,7 @@ calendars = ["https://calendar.example.com/secret/basic.ics"]
 
 ### Git repos, named by hand
 
-If discovery does not find a repo, add its path to `git_repos` directly.
+If a repo sits outside every dev folder and discovery does not find it, add its path to `git_repos` directly.
 
 ## Needs an install or an account
 

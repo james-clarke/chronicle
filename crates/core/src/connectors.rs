@@ -238,7 +238,7 @@ pub const REGISTRY: &[Connector] = &[
         produces: &[ActivityKind::Checkout, ActivityKind::Commit],
         setup: &[SetupStep::Field {
             field: "git_repos",
-            hint: "repo paths, ~ expanded; repo discovery fills this in for you",
+            hint: "a dev folder watches every repo under it; add one, or a repo path directly (~ expanded)",
         }],
         docs: "git",
     },
@@ -717,7 +717,7 @@ pub fn enabled(cfg: &Config, c: &Connector) -> Option<bool> {
 /// `Config` probe.
 pub fn config_on(cfg: &Config, field: &str) -> Option<bool> {
     match field {
-        "git_repos" => Some(!cfg.git_repos.is_empty()),
+        "git_repos" => Some(!cfg.watched_repos().is_empty()),
         "ai_session_dirs" => Some(!cfg.ai_session_dirs.is_empty()),
         "calendars" => Some(!cfg.calendars.is_empty()),
         "github_prs" => Some(cfg.github_prs),

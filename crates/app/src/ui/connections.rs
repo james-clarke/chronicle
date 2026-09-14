@@ -187,6 +187,18 @@ fn repo_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// `~/…` for a path under home, the way config.toml keeps a dev folder.
+fn tilde(path: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) => match path.strip_prefix(&home) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    }
+}
+
 struct ServerForm {
     /// Name of the server being edited; None = adding.
     original: Option<String>,
@@ -728,6 +740,9 @@ pub(super) struct Connections {
     repo_add: String,
     repo_error: Option<String>,
     repo_arm_remove: Option<usize>,
+    root_add: String,
+    root_error: Option<String>,
+    root_arm_remove: Option<usize>,
     /// `google.toml` as found at load: `None` = not signed in, the string is
     /// the account (empty when the login could not read it).
     google_account: Option<String>,
@@ -738,7 +753,9 @@ pub(super) struct Connections {
     session_formats: Vec<&'static str>,
     /// Browser profiles with a history DB (m37 chunk 4), by browser name.
     browser_profiles: Vec<String>,
-    /// Chronicle git hooks installed per repo path (m37 chunk 2).
+    /// Chronicle git hooks installed per watched repo, keyed by its
+    /// expanded absolute path so a `dev_roots` child looks up the same way
+    /// as a `git_repos` entry (m37 chunk 2).
     repo_hooks: BTreeMap<String, Vec<&'static str>>,
     /// Discovered projects the matcher added (m37 chunk 2).
     discovered: Vec<String>,
@@ -825,6 +842,9 @@ impl Connections {
             repo_add: String::new(),
             repo_error: None,
             repo_arm_remove: None,
+            root_add: String::new(),
+            root_error: None,
+            root_arm_remove: None,
             google_account: chronicle_capture::gcal::Tokens::load(
                 &chronicle_capture::gcal::token_path(data_dir),
             )
@@ -851,11 +871,14 @@ impl Connections {
                     v
                 })
                 .unwrap_or_default(),
-            repo_hooks: git_repos
+            repo_hooks: config
+                .watched_repos()
                 .iter()
                 .map(|r| {
-                    let st = chronicle_capture::hooks::status(&expand_home(r));
-                    (r.clone(), st.installed)
+                    (
+                        r.display().to_string(),
+                        chronicle_capture::hooks::status(r).installed,
+                    )
                 })
                 .collect(),
             discovered,
@@ -897,13 +920,16 @@ impl Connections {
         ui: &mut egui::Ui,
         conn: Option<&Connection>,
         git_repos: &mut Vec<String>,
+        dev_roots: &mut Vec<String>,
         sources: &mut LocalSources,
     ) {
         self.poll_probes(conn);
         self.servers_ui(ui, conn);
         self.actions_ui(ui);
         ui.add_space(theme::SPACE_SM);
-        self.repos_ui(ui, git_repos);
+        self.dev_roots_ui(ui, dev_roots);
+        ui.add_space(theme::SPACE_SM);
+        self.repos_ui(ui, git_repos, dev_roots);
         ui.add_space(theme::SPACE_SM);
         self.sources_ui(ui, sources);
         self.worklist_ui(ui, conn);
@@ -1371,9 +1397,79 @@ impl Connections {
         caption(ui, "posts only when you click".to_owned(), None);
     }
 
-    fn repos_ui(&mut self, ui: &mut egui::Ui, git_repos: &mut Vec<String>) {
+    /// Dev folders: every immediate git-repo child is watched like a
+    /// `git_repos` entry, with no edit per clone. Same add/remove pattern as
+    /// the repo list below.
+    fn dev_roots_ui(&mut self, ui: &mut egui::Ui, dev_roots: &mut Vec<String>) {
+        subhead(ui, "Dev folders", |_| {});
+        if dev_roots.is_empty() {
+            ui.weak(
+                "every git repo one level under a dev folder is watched, no path added by hand",
+            );
+        }
+        let width = ui.available_width();
+        let mut remove: Option<usize> = None;
+        let mut arm: Option<usize> = None;
+        for (i, path) in dev_roots.iter().enumerate() {
+            let armed = self.root_arm_remove == Some(i);
+            theme::ListRow::new(path).show(ui, width, |ui| {
+                let label = if armed { "delete?" } else { "\u{d7}" };
+                if theme::ghost_button(ui, label).clicked() {
+                    if armed {
+                        remove = Some(i);
+                    } else {
+                        arm = Some(i);
+                    }
+                }
+            });
+        }
+        if let Some(i) = arm {
+            self.root_arm_remove = Some(i);
+        }
+        if let Some(i) = remove {
+            dev_roots.remove(i);
+            self.root_arm_remove = None;
+        }
+        ui.horizontal(|ui| {
+            let w = ui.available_width();
+            ui.add(
+                egui::TextEdit::singleline(&mut self.root_add)
+                    .desired_width(w - 56.0)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text("~/dev"),
+            );
+            if theme::secondary_button(ui, "add").clicked() {
+                self.root_error = self.add_root(dev_roots).err();
+            }
+        });
+        if let Some(e) = &self.root_error {
+            ui.colored_label(palette::RED, e);
+        }
+    }
+
+    fn add_root(&mut self, dev_roots: &mut Vec<String>) -> Result<(), String> {
+        let raw = self.root_add.trim().trim_end_matches('/').to_owned();
+        if raw.is_empty() {
+            return Err("enter a path".into());
+        }
+        let expanded = expand_home(&raw);
+        if !expanded.is_dir() {
+            return Err(format!("not a folder: {}", expanded.display()));
+        }
+        if dev_roots.iter().any(|p| expand_home(p) == expanded) {
+            return Err("already a dev folder".into());
+        }
+        dev_roots.push(raw);
+        self.root_add.clear();
+        Ok(())
+    }
+
+    fn repos_ui(&mut self, ui: &mut egui::Ui, git_repos: &mut Vec<String>, dev_roots: &[String]) {
         subhead(ui, "Git repos", |_| {});
-        if git_repos.is_empty() {
+        let roots: Vec<PathBuf> = dev_roots.iter().map(|r| expand_home(r)).collect();
+        let known: Vec<PathBuf> = git_repos.iter().map(|p| expand_home(p)).collect();
+        let derived = chronicle_core::project::discover_repos(&roots, &known);
+        if git_repos.is_empty() && derived.is_empty() {
             ui.weak("no repos watched \u{2014} commits and branch switches become task evidence");
         }
         let width = ui.available_width();
@@ -1400,7 +1496,11 @@ impl Connections {
                 Some(ev) => format!("{path} \u{b7} {}", ev.branch),
                 None => path.clone(),
             };
-            let hooks = self.repo_hooks.get(path).cloned().unwrap_or_default();
+            let hooks = self
+                .repo_hooks
+                .get(&expanded.display().to_string())
+                .cloned()
+                .unwrap_or_default();
             let armed = self.repo_arm_remove == Some(i);
             theme::ListRow::new(&name)
                 .emphasis()
@@ -1448,7 +1548,8 @@ impl Connections {
             match result {
                 Ok(_) => {
                     let st = chronicle_capture::hooks::status(&repo);
-                    self.repo_hooks.insert(path.clone(), st.installed);
+                    self.repo_hooks
+                        .insert(repo.display().to_string(), st.installed);
                 }
                 Err(e) => self.repo_error = Some(format!("hooks: {e}")),
             }
@@ -1458,6 +1559,64 @@ impl Connections {
             self.repo_arm_remove = None;
             self.refresh_repo_status(git_repos);
         }
+
+        // Repos found under a dev folder: watched the same as a `git_repos`
+        // entry, but with no path stored to remove — drop the folder above,
+        // or claim the repo with a `[[projects]]` entry, to pull one out.
+        let mut derived_hook_toggle: Option<(PathBuf, bool)> = None;
+        for repo in &derived {
+            let last = self.repo_last.get(&repo.name);
+            let (dot, chip, color) = match last {
+                Some(ev) => (
+                    palette::GREEN,
+                    format!("{} {}", ev.kind.as_str(), ago(ev.ts.as_millisecond())),
+                    palette::TEXT_DIM,
+                ),
+                None => (palette::AMBER, "no activity yet".to_owned(), palette::AMBER),
+            };
+            let root_tag = repo.path.parent().map(tilde).unwrap_or_default();
+            let hooks = self
+                .repo_hooks
+                .get(&repo.path.display().to_string())
+                .cloned()
+                .unwrap_or_default();
+            theme::ListRow::new(&repo.name)
+                .emphasis()
+                .dot(dot)
+                .chip(chip, color)
+                .chip(root_tag, palette::TEXT_DIM)
+                .show(ui, width, |ui| {
+                    let (label, hover) = if hooks.is_empty() {
+                        ("hooks", "install post-checkout, post-commit and post-rewrite hooks (appended after any existing hook)")
+                    } else {
+                        ("hooks \u{2713}", "remove chronicle's git hooks")
+                    };
+                    if theme::ghost_button(ui, label).on_hover_text(hover).clicked() {
+                        derived_hook_toggle = Some((repo.path.clone(), hooks.is_empty()));
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                caption(ui, repo.path.display().to_string(), None);
+            });
+        }
+        if let Some((repo, install)) = derived_hook_toggle {
+            let result = if install {
+                std::env::current_exe()
+                    .and_then(|exe| chronicle_capture::hooks::install(&repo, &exe))
+            } else {
+                chronicle_capture::hooks::remove(&repo)
+            };
+            match result {
+                Ok(_) => {
+                    let st = chronicle_capture::hooks::status(&repo);
+                    self.repo_hooks
+                        .insert(repo.display().to_string(), st.installed);
+                }
+                Err(e) => self.repo_error = Some(format!("hooks: {e}")),
+            }
+        }
+
         ui.horizontal(|ui| {
             let w = ui.available_width();
             ui.add(
