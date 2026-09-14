@@ -4232,8 +4232,9 @@ fn store_segment_proposals(
 
 /// Open derived tasks nobody touched become proposals (m44 chunk 2): the
 /// task's stretches move to its project's other work (or go unplaced when
-/// it has none), a `segment` proposal remembers them under the task's
-/// label, and the task row goes. A task with a correction, a row the
+/// it has none), a `task` proposal remembers them under the task's label
+/// (a placement of the window neither rewrites nor drops it, unlike a
+/// `segment` one), and the task row goes. A task with a correction, a row the
 /// person placed, or a proposal that confirmed it is theirs and stays; so
 /// does every closed task. Returns `(task id, label)` per conversion.
 pub fn derived_tasks_to_proposals(
@@ -4265,7 +4266,7 @@ pub fn derived_tasks_to_proposals(
         };
         if tx
             .query_row(
-                "SELECT 1 FROM proposals WHERE source='segment' AND start_ts=?1",
+                "SELECT 1 FROM proposals WHERE source='task' AND start_ts=?1",
                 [start_ts],
                 |_| Ok(()),
             )
@@ -4294,7 +4295,7 @@ pub fn derived_tasks_to_proposals(
         let runs_json = serde_json::to_string(&ranges).unwrap_or_else(|_| "[]".into());
         tx.execute(
             "INSERT INTO proposals (start_ts, end_ts, ms, runs, project, label, source, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'segment', ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'task', ?7)",
             params![start_ts, end_ts, ms, runs_json, project, label, now_ms],
         )?;
         // The rows `delete_derived_task` clears, minus the intervals
@@ -8843,7 +8844,15 @@ mod proposal_tests {
         assert_eq!(props.len(), 2, "{props:?}");
         assert_eq!(props[1].label.as_deref(), Some("acme · new work"));
         assert_eq!(props[1].runs, [(0, 100_000), (200_000, 260_000)]);
-        assert_eq!(props[1].source, "segment");
+        assert_eq!(props[1].source, "task");
+        // A placement of the window leaves the converted proposal alone.
+        super::store_segments(&mut conn, 0, 1_000_000, None, &[]).unwrap();
+        assert_eq!(
+            crate::proposals::open_proposals(&conn, 0, 1_000_000)
+                .unwrap()
+                .len(),
+            2
+        );
         assert!(
             super::derived_tasks_to_proposals(&mut conn, 3_000)
                 .unwrap()

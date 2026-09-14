@@ -1051,7 +1051,7 @@ fn proposal_card(
         })
         .unwrap_or_else(|| "unnamed".to_owned());
     let label = p.label.clone().unwrap_or_else(|| fallback.clone());
-    let is_segment = p.source == "segment";
+    let is_segment = p.source != "runs";
     let editing_here = proposal_edit.as_ref().is_some_and(|(id, _)| *id == p.id);
     egui::Frame::new()
         .fill(theme::palette::ACCENT.gamma_multiply(0.10))

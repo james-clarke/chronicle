@@ -9,7 +9,10 @@
 //!
 //! Since m44 chunk 2 the segmenter's new clusters come here too, as
 //! `segment` proposals: their time sits on the project's other work and
-//! confirming one makes the task and moves the stretches onto it.
+//! confirming one makes the task and moves the stretches onto it. A
+//! `task` proposal is a derived task from before that the rebuild
+//! converted; it reads and confirms like a `segment` one but no placement
+//! rewrites or drops it.
 
 use std::collections::HashMap;
 
@@ -55,8 +58,9 @@ pub struct Cluster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Proposal {
     pub id: i64,
-    /// `runs` (unassigned runs the pre-pass could not place) or `segment`
-    /// (a cluster the segmenter would have minted a task for).
+    /// `runs` (unassigned runs the pre-pass could not place), `segment`
+    /// (a cluster the segmenter would have minted a task for) or `task`
+    /// (a derived task the rebuild converted).
     pub source: String,
     pub start_ts: i64,
     pub end_ts: i64,
@@ -377,7 +381,7 @@ pub fn accept(
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let runs: Vec<(i64, i64)> = serde_json::from_str(&runs_json).unwrap_or_default();
-    let task_id = if source == "segment" {
+    let task_id = if source != "runs" {
         conn.execute(
             "INSERT INTO tasks (label, project, status, source, created_ts)
              VALUES (?1, ?2, 'open', 'derived', ?3)",
@@ -429,7 +433,7 @@ fn claim(
     task_id: i64,
 ) -> Result<i64, StorageError> {
     let mut claimed = 0;
-    if source == "segment" {
+    if source != "runs" {
         for &(s, e) in runs {
             claimed += storage::claim_segment_range(conn, ts, s, e, task_id)?;
         }
