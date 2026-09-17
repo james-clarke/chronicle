@@ -136,10 +136,19 @@ shot() {
 shots() {
   mkdir -p "$OUT"
   task=$(sqlq "select id from tasks where label like 'ACME-11382%' limit 1")
+  # What a later run on another day would otherwise hit: the Setup view
+  # (never dismissed in a sandbox), the intent picker (the seed's intent row
+  # is keyed by its own date), and the band mode the timeline remembers.
+  sql "INSERT OR REPLACE INTO meta (key, value) VALUES ('setup_seen', '1'); INSERT OR REPLACE INTO meta (key, value) VALUES ('ui_band_mode', 'lanes');"
+  sql "INSERT OR REPLACE INTO meta (key, value) VALUES ('intent:$(date +%F)', (SELECT value FROM meta WHERE key LIKE 'intent:%' ORDER BY key DESC LIMIT 1));"
   shot home-wide 900,700
   # The wipe shows a whole day, so the timeline opens on Thursday.
   shot timeline-wide 900,700 CHRONICLE_UI_VIEW=timeline CHRONICLE_UI_DAY=2026-09-10 CHRONICLE_UI_TASK="$task"
   shot reports-wide 900,700 CHRONICLE_UI_VIEW=reports
+  # The phone variants of the three wide shots: the corner window at its
+  # own size, so a phone shows the app as it is rather than a shrunk desktop.
+  shot timeline-tall 400,640 CHRONICLE_UI_VIEW=timeline CHRONICLE_UI_DAY=2026-09-10
+  shot reports-tall 400,640 CHRONICLE_UI_VIEW=reports CHRONICLE_UI_DAY=2026-09-10
   shot triage 400,640 CHRONICLE_UI_VIEW=triage
   # Settings is tall; a lower scale fits the Model section on a 1080 px screen.
   SCALE=1.2 shot settings-model 900,880 CHRONICLE_UI_VIEW=settings CHRONICLE_UI_SETTINGS=Model
@@ -173,8 +182,17 @@ webp() {
   for n in home-wide timeline-wide reports-wide og; do
     magick "$OUT/$n.png" -quality $q "$root/site/img/$n.webp"
   done
+  for n in timeline-tall reports-tall; do
+    magick "$OUT/$n.png" -quality $q "$root/site/img/$n.webp"
+  done
+  # Home reads the clock, so a capture on any day outside the cast week says
+  # "no time today" on every task; the wide capture's left pane is the same
+  # list on the Thursday itself.
+  magick "$OUT/home-wide.png" -crop 748x1080+0+0 +repage -quality $q "$root/site/img/home.webp"
   magick "$OUT/triage.png" -crop 678x470+0+0 +repage -quality $q "$root/site/img/triage.webp"
   magick "$OUT/settings-model.png" -crop "${MODEL_CROP:-880x800+300+275}" +repage -quality $q "$root/site/img/model.webp"
+  # the phone crop: the routing grid alone, so its rows stay legible at 340 px
+  magick "$OUT/settings-model.png" -crop "${MODEL_TALL_CROP:-560x600+300+452}" +repage -quality $q "$root/site/img/model-tall.webp"
   ls -l "$root"/site/img/*.webp | awk '{print $5, $9}'
 }
 
