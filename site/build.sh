@@ -119,6 +119,7 @@ js=$((js + $(grep -oE ' on[a-z]+="[^"]*"' "$html" | wc -c | tr -d ' ')))
 grep -o '<img[^>]*>' "$html" | grep -v 'loading="lazy"' | sed -n 's/.*src="\([^"]*\)".*/\1/p' > "$tmp/fold"
 sed -n '/rel="canonical"/d; s/.*<link[^>]*href="\([^"]*\)".*/\1/p' "$html" >> "$tmp/fold"
 grep -o '<img[^>]*>' "$html" | sed -n 's/.*src="\([^"]*\)".*/\1/p' > "$tmp/all"
+grep -o '<source[^>]*>' "$html" | sed -n 's/.*srcset="\([^"]*\)".*/\1/p' >> "$tmp/all"
 cat "$tmp/fold" >> "$tmp/all"
 fold=$(( $(bytes "$html") + $(cd "$site" && sort -u "$tmp/fold" | xargs cat | wc -c) ))
 total=$(( $(bytes "$html") + $(cd "$site" && sort -u "$tmp/all" | xargs cat | wc -c) ))

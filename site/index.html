@@ -104,7 +104,7 @@
       <li><i class="x"></i>the rest, named by the model</li>
     </ul>
   </div>
-  <p class="band-caption"><b>7h56m</b> placed · 15m loose · 54m away · 29 blocks in 6 tasks · 2 corrections. One Thursday, filed as it happened. Hover a block.</p>
+  <p class="band-caption"><b>7h56m</b> placed · 15m loose · 54m away · 29 blocks in 6 tasks · 2 corrections. One Thursday, filed as it happened. <span class="fine-pointer">Hover a block.</span><span class="coarse-pointer">Tap a block.</span></p>
 </section>
 
 <section class="showcase">
@@ -142,7 +142,10 @@
 17:03:47  focus    Google-chrome   Membership renewal reminder emails by sam · Pull Request #415 · acme/contoso
 17:18:46  focus    Code            notes.md — scratch
 17:24:00  away</pre></div>
-      <img class="wipe-after" src="img/timeline-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across a Thursday, a card per task underneath, and the renewal emails task open on the right with its sessions and where the time went" loading="lazy" decoding="async">
+      <picture>
+        <source media="(max-width: 760px)" srcset="img/timeline-tall.webp" width="678" height="1062">
+        <img class="wipe-after" src="img/timeline-wide.webp" width="1478" height="1080" alt="Chronicle timeline, wide: one lane per task across a Thursday, a card per task underneath, and the renewal emails task open on the right with its sessions and where the time went" loading="lazy" decoding="async">
+      </picture>
     </div>
     <input class="wipe-handle" type="range" min="0" max="100" value="0" aria-label="Drag to compare: raw window titles on the left, the placed timeline on the right" oninput="this.parentNode.style.setProperty('--x',this.value+'%')">
     <figcaption><span>what it saw</span><span>what it wrote down</span></figcaption>
@@ -155,7 +158,10 @@
     <p>Hours per day and per project, the tasks under each, and how this week compares with last. It fills itself in.</p>
   </div>
   <figure class="wide-shot">
-    <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars for Monday to Friday, a project mix bar, contoso, northwind and mailer with duration and share per row, and six focus tiles" loading="lazy" decoding="async">
+    <picture>
+      <source media="(max-width: 760px)" srcset="img/reports-tall.webp" width="678" height="1062">
+      <img src="img/reports-wide.webp" width="1478" height="1080" alt="Chronicle weekly report, wide: per-day stacked bars for Monday to Friday, a project mix bar, contoso, northwind and mailer with duration and share per row, and six focus tiles" loading="lazy" decoding="async">
+    </picture>
     <figcaption><span>reports · this week</span><span>7 – 11 sep</span></figcaption>
   </figure>
 </section>
@@ -272,7 +278,10 @@ chat      "what did I do before the design review?" → same rows</code></pre>
       </div>
       <figure class="panel shot">
         <figcaption>settings › model</figcaption>
-        <img src="img/model.webp" width="880" height="800" alt="Chronicle settings, model: one cloud backend beside the local model's last seven days, and the routing grid for which jobs go to which model, with a daily cap" loading="lazy" decoding="async">
+        <picture>
+          <source media="(max-width: 760px)" srcset="img/model-tall.webp" width="560" height="600">
+          <img src="img/model.webp" width="880" height="800" alt="Chronicle settings, model: one cloud backend beside the local model's last seven days, and the routing grid for which jobs go to which model, with a daily cap" loading="lazy" decoding="async">
+        </picture>
       </figure>
     </li>
 
@@ -310,7 +319,10 @@ chat      "what did I do before the design review?" → same rows</code></pre>
     </div>
     <figure class="panel shot">
       <figcaption>home · dragged wide</figcaption>
-      <img src="img/home-wide.webp" loading="lazy" width="1478" height="1080" alt="Chronicle home, dragged wide: open tasks grouped by project with time today and the next step on the left, the feed of the day's placed blocks on the right">
+      <picture>
+        <source media="(max-width: 760px)" srcset="img/home.webp" width="748" height="1080">
+        <img src="img/home-wide.webp" loading="lazy" width="1478" height="1080" alt="Chronicle home, dragged wide: open tasks grouped by project with time today and the next step on the left, the feed of the day's placed blocks on the right">
+      </picture>
     </figure>
   </div>
 </section>

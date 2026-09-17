@@ -348,6 +348,13 @@ section { padding: 72px 0; }
 .legend i { width: 10px; height: 10px; border-radius: 3px; }
 .band-caption { margin: 18px 0 0; color: var(--soft); font-size: 0.95rem; }
 .band-caption b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+/* "hover" on a mouse, "tap" on a touch screen, where a tap focuses the block */
+.coarse-pointer { display: none; }
+@media (hover: none) {
+  .fine-pointer { display: none; }
+  .coarse-pointer { display: inline; }
+  .blk:focus .tip { opacity: 1; transform: none; }
+}
 
 /* wide showcases */
 .showcase { padding-top: 56px; }
@@ -559,6 +566,7 @@ section { padding: 72px 0; }
 }
 @keyframes draw { from { transform: scaleY(0); } }
 .panel.shot img { display: block; width: 100%; height: auto; }
+picture { display: block; }
 
 /* set a task, go and do it: the corner window replayed, 18 s loop */
 .demo { padding-bottom: 40px; }
@@ -666,24 +674,6 @@ section { padding: 72px 0; }
   .nos li { white-space: normal; }
 }
 
-@media (max-width: 760px) {
-  section { padding: 44px 0; }
-  .hero { grid-template-columns: 1fr; gap: 36px; padding-top: 24px; }
-  .hero::before { display: none; }
-  /* one column: the width of "written down." on a phone sets the size */
-  h1 { font-size: clamp(2.2rem, 11vw, 4.4rem); }
-  .wide-shot, .wipe { margin: 0 -24px; padding: 0 24px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .wide-shot img, .wipe-box, .wipe-handle { width: 760px; max-width: none; }
-  .wipe-before { font-size: 0.58rem; }
-  .wide-shot figcaption, .wipe figcaption { padding-right: 24px; }
-  .stage { grid-template-columns: 1fr; gap: 20px; padding-left: 44px; }
-  .stage::before { width: 26px; height: 26px; font-size: 0.75rem; }
-  .stage-text h3 { min-height: 26px; }
-  .stages::before { left: 12px; }
-  .stage-heads { display: none; }
-  .panel code span[style] { padding-left: min(var(--hang, 0px), 8ch); text-indent: calc(-1 * min(var(--hang, 0px), 8ch)); }
-  .tip { min-width: 12em; white-space: normal; }
-}
 
 /* download */
 .download { padding: 96px 0 40px; }
@@ -720,6 +710,76 @@ a.btn { cursor: pointer; }
 .tools .st.partial { color: var(--amber); }
 .tools .st.planned { color: var(--blue); }
 .tools .st.detected, .tools .st.wontdo { color: var(--muted); }
-@media (max-width: 720px) {
-  .tools th:nth-child(3), .tools td:nth-child(3) { display: none; }
+
+/* phones: after every base rule above so each override wins by order */
+@media (max-width: 760px) {
+  main { padding: 0 20px; }
+  .top { padding: 16px 20px; }
+  section { padding: 40px 0; }
+  .showcase { padding-top: 40px; }
+  .showcase + .showcase { padding-top: 16px; }
+  .showcase-head { margin-bottom: 20px; }
+  .demo { padding-bottom: 24px; }
+  .download { padding: 56px 0 24px; }
+  .build { padding-top: 24px; }
+
+  .hero { grid-template-columns: 1fr; gap: 32px; padding-top: 20px; padding-bottom: 24px; }
+  .hero::before { display: none; }
+  /* one column: the width of "written down." on a phone sets the size */
+  h1 { font-size: clamp(2.2rem, 11vw, 4.4rem); }
+  .lede { font-size: 1.05rem; margin-bottom: 22px; }
+  .nos li { font-size: 0.76rem; padding: 5px 10px 5px 9px; }
+  .pulse-counts { flex-direction: column; align-items: flex-start; }
+
+  /* the band: a track a thumb can hit, and every tip spans the track so none leaves the screen;
+     the arrow still sits under its block (the track is 100vw less the gutters) */
+  .band-section { padding: 12px 0 44px; }
+  .track { height: 36px; }
+  .tip, .blk.r .tip {
+    left: calc(var(--l, 0) * (40px - 100vw) / 100);
+    right: auto;
+    width: calc(100vw - 40px);
+    min-width: 0;
+    white-space: normal;
+  }
+  .tip::after, .blk.r .tip::after { left: calc(var(--l, 0) * (100vw - 40px) / 100 + 2px); right: auto; }
+
+  /* the phone captures are the corner window at its own size, portrait */
+  .wipe-box { aspect-ratio: 678 / 1062; }
+  .wipe-before { font-size: 0.56rem; line-height: 1.7; padding: 3% 3.5%; }
+
+  /* stages: the counter sits beside the heading instead of on a rail, and a panel
+     keeps its columns and scrolls sideways rather than wrapping them */
+  .stage-heads, .stages::before { display: none; }
+  .stage { grid-template-columns: 24px minmax(0, 1fr); gap: 14px 10px; padding: 0 0 36px; }
+  .stage:last-child { padding-bottom: 0; }
+  .stage::before { position: static; width: 24px; height: 24px; font-size: 0.72rem; }
+  .stage-text, .stage .panel { grid-column: 2; }
+  .stage-text h3 { min-height: 24px; }
+  .stage .panel:not(.shot) { position: relative; }
+  .stage .panel:not(.shot)::after {
+    content: "";
+    position: absolute;
+    top: 34px;
+    right: 0;
+    bottom: 0;
+    width: 28px;
+    background: linear-gradient(to right, transparent, var(--panel));
+    pointer-events: none;
+  }
+  .panel pre { padding: 12px 14px; font-size: 0.72rem; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .panel code span[style] { white-space: pre; padding-left: 0; text-indent: 0; }
+
+  .cmd code { white-space: pre-wrap; word-break: break-all; }
+
+  /* tools: one block per row, the name and state on a line, platforms under it in mono */
+  .tools-page { padding-left: 0; padding-right: 0; }
+  .tools, .tools tbody, .tools tr, .tools td { display: block; }
+  .tools tr:first-child { display: none; }
+  .tools tr { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .tools td { padding: 0; border: 0; }
+  .tools td:first-child { display: inline; color: var(--text); font-weight: 600; }
+  .tools td.st { display: inline; margin-left: 8px; font-size: 0.8rem; }
+  .tools td:nth-child(3) { display: block; margin-top: 2px; font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+  .tools td:nth-child(4) { margin-top: 4px; color: var(--soft); }
 }
