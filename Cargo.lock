@@ -859,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chronicle-capture",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chronicle-core",
  "crossbeam-channel",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-derive"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chronicle-core",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "jiff",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "chronicle-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
