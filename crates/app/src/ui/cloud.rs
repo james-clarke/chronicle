@@ -78,7 +78,9 @@ pub(super) fn route_kind_label(kind: &str) -> &'static str {
 
 /// Add/edit form. Renaming a backend is not offered: `ModelsConfig` has no
 /// rename primitive that also repoints `routes`, so the name field is
-/// locked once a backend exists and edits go through remove + re-add.
+/// locked once a backend exists and edits go through remove + re-add. The
+/// kind is locked the same way: a stored key, model id and base URL belong
+/// to one provider, and a kind change would carry them to another.
 struct BackendForm {
     original: Option<String>,
     name: String,
@@ -147,11 +149,17 @@ fn backend_form_ui(ui: &mut egui::Ui, form: &mut BackendForm) -> FormAct {
         );
         ui.label("kind");
         ui.horizontal(|ui| {
-            if form.kind == BackendKind::ClaudeCode {
+            if form.original.is_some() {
                 ui.label(egui::RichText::new(kind_label(form.kind)).color(palette::TEXT));
             } else {
+                let before = form.kind;
                 for kind in [BackendKind::Anthropic, BackendKind::OpenAiCompat] {
                     ui.selectable_value(&mut form.kind, kind, kind_label(kind));
+                }
+                if form.kind != before {
+                    // A model id and base URL name one provider's server.
+                    form.model.clear();
+                    form.base_url.clear();
                 }
             }
         });
