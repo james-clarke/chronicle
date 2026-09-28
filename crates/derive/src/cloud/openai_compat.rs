@@ -4,23 +4,17 @@
 //! in the struct and the `authorization` header, nowhere else; errors carry
 //! the provider's message only.
 
-use std::io::BufReader;
+use std::io::BufRead;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::anthropic::{api_message, classify_status, transport_brief};
 use super::sse::SseReader;
+use super::transport::{api_message, post_stream};
 use super::{CloudError, max_output_for};
 use crate::text::{Completion, JobKind, Request, TextBackend};
 
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const MAX_TRIES: u32 = 3;
-/// Retries stop once this much wall time has gone; the daemon reaps a
-/// worker after `DERIVE_TIMEOUT` (300 s) and the job must fail before that.
-const RETRY_BUDGET: Duration = Duration::from_secs(120);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Prompt budget when the model id says nothing about its window. Every
 /// current frontier model on OpenRouter takes at least 128k; older or
 /// self-hosted ones may not, and the base URL is the only hint we have.
@@ -48,8 +42,24 @@ impl OpenAiCompatBackend {
         }
     }
 
+    /// The base URL's host, lowercased: what decides the vendor extras.
+    fn host(&self) -> String {
+        let rest = self
+            .base_url
+            .split_once("://")
+            .map_or(self.base_url.as_str(), |(_, r)| r);
+        rest.split(['/', ':'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    }
+
     fn is_openrouter(&self) -> bool {
-        self.base_url.contains("://openrouter.ai/")
+        self.host() == "openrouter.ai"
+    }
+
+    fn is_openai(&self) -> bool {
+        self.host() == "api.openai.com"
     }
 
     /// One tiny request, for the Settings test button: `Ok(latency)` or the
@@ -80,11 +90,24 @@ impl OpenAiCompatBackend {
         messages.push(json!({"role": "user", "content": req.user}));
         let mut body = json!({
             "model": self.model,
-            "max_tokens": if req.max_output == 0 { max_output_for(req.job) } else { req.max_output },
             "stream": true,
             "stream_options": { "include_usage": true },
             "messages": messages,
         });
+        // OpenAI itself rejects `max_tokens` for its reasoning models and
+        // takes the newer name for all of them; every other server still
+        // reads the classic field, and some reject the new one.
+        let max_field = if self.is_openai() {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        let max_output = if req.max_output == 0 {
+            max_output_for(req.job)
+        } else {
+            req.max_output
+        };
+        body[max_field] = json!(max_output);
         if let Some(schema) = req.schema {
             body["response_format"] = json!({
                 "type": "json_schema",
@@ -107,69 +130,21 @@ impl OpenAiCompatBackend {
     ) -> Result<Completion, CloudError> {
         let body = self.body(req);
         let url = format!("{}/chat/completions", self.base_url);
-        let started = Instant::now();
-        let mut last = CloudError::Transport("no attempt made".into());
-        for attempt in 0..MAX_TRIES {
-            let t0 = Instant::now();
-            match self.once(&url, &body, on_token) {
-                Ok(mut c) => {
-                    c.wall_ms = t0.elapsed().as_millis() as u64;
-                    return Ok(c);
-                }
-                Err((e, retry_after)) => {
-                    if !e.is_transient() {
-                        return Err(e);
-                    }
-                    tracing::warn!(attempt, "chat completions call failed: {}", e.brief());
-                    last = e;
-                    let wait = retry_after
-                        .unwrap_or_else(|| Duration::from_secs(1 << attempt))
-                        .min(Duration::from_secs(30));
-                    if started.elapsed() + wait > RETRY_BUDGET || attempt + 1 == MAX_TRIES {
-                        break;
-                    }
-                    std::thread::sleep(wait);
-                }
-            }
-        }
-        Err(last)
-    }
-
-    /// One HTTP exchange. `Err` carries the `retry-after` hint when the
-    /// server sent one.
-    fn once(
-        &self,
-        url: &str,
-        body: &str,
-        on_token: &mut dyn FnMut(&str),
-    ) -> Result<Completion, (CloudError, Option<Duration>)> {
-        let resp = ureq::post(url)
-            .config()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .timeout_recv_response(Some(RESPONSE_TIMEOUT))
-            .build()
-            .header("authorization", &format!("Bearer {}", self.api_key))
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            // OpenRouter's app attribution headers; other servers ignore them.
-            .header("http-referer", "https://github.com/james-clarke/chronicle")
-            .header("x-title", "Chronicle")
-            .send(body)
-            .map_err(|e| (CloudError::Transport(transport_brief(&e)), None))?;
-        let status = resp.status().as_u16();
-        if status != 200 {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let text = resp.into_body().read_to_string().unwrap_or_default();
-            return Err((classify_status(status, &text), retry_after));
-        }
-        let reader = BufReader::new(resp.into_body().into_reader());
-        parse_stream(reader, on_token).map_err(|e| (e, None))
+        let auth = format!("Bearer {}", self.api_key);
+        post_stream(
+            "chat completions",
+            &url,
+            &[
+                ("authorization", auth.as_str()),
+                // OpenRouter's app attribution headers; other servers
+                // ignore them.
+                ("http-referer", "https://github.com/james-clarke/chronicle"),
+                ("x-title", "Chronicle"),
+            ],
+            &body,
+            on_token,
+            parse_stream,
+        )
     }
 }
 
@@ -198,8 +173,8 @@ impl TextBackend for OpenAiCompatBackend {
 /// Walk the chunk stream: `choices[0].delta.content` to `on_token`, the
 /// usage object from whichever chunk carries it (the last, with
 /// `include_usage`), `finish_reason` decides success, `[DONE]` ends it.
-fn parse_stream<R: std::io::BufRead>(
-    reader: R,
+fn parse_stream(
+    reader: &mut dyn BufRead,
     on_token: &mut dyn FnMut(&str),
 ) -> Result<Completion, CloudError> {
     let mut c = Completion::default();
@@ -256,6 +231,17 @@ mod tests {
     use super::*;
 
     const STREAM: &str = ": OPENROUTER PROCESSING\n\ndata: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"gen-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"gen-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":100},\"cost\":0.00042}}\n\ndata: [DONE]\n\n";
+
+    fn plain(job: JobKind) -> Request<'static> {
+        Request {
+            job,
+            system: None,
+            user: "x",
+            history: &[],
+            schema: None,
+            max_output: 0,
+        }
+    }
 
     #[test]
     fn streams_text_usage_and_cost() {
@@ -314,18 +300,26 @@ mod tests {
     fn openrouter_asks_for_its_cost_figure() {
         let b = OpenAiCompatBackend::new("or", "openai/gpt-5", "k", None);
         assert_eq!(b.base_url, DEFAULT_BASE_URL);
-        let req = Request {
-            job: JobKind::Chat,
-            system: None,
-            user: "x",
-            history: &[],
-            schema: None,
-            max_output: 0,
-        };
+        let req = plain(JobKind::Chat);
         let body: Value = serde_json::from_str(&b.body(&req)).unwrap();
         assert_eq!(body["usage"]["include"], true);
         assert!(body.get("response_format").is_none());
         assert_eq!(body["max_tokens"], 4096);
+        // The host decides, however it was typed.
+        let b = OpenAiCompatBackend::new("or", "m", "k", Some("HTTPS://OpenRouter.ai/api/v1/"));
+        assert!(b.is_openrouter());
+        assert!(!b.is_openai());
+    }
+
+    #[test]
+    fn openai_takes_the_newer_output_field() {
+        let b = OpenAiCompatBackend::new("oa", "gpt-5", "k", Some("https://api.openai.com/v1"));
+        assert!(b.is_openai());
+        let req = plain(JobKind::Chat);
+        let body: Value = serde_json::from_str(&b.body(&req)).unwrap();
+        assert_eq!(body["max_completion_tokens"], 4096);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("usage").is_none());
     }
 
     #[test]
@@ -370,14 +364,14 @@ mod tests {
     #[test]
     fn non_stop_finish_and_stream_errors_fail() {
         let cut = STREAM.replace("\"stop\"", "\"length\"");
-        let err = parse_stream(cut.as_bytes(), &mut |_| {}).unwrap_err();
+        let err = parse_stream(&mut cut.as_bytes(), &mut |_| {}).unwrap_err();
         assert_eq!(err, CloudError::Stopped("length".into()));
         let mid = "data: {\"error\":{\"message\":\"Provider returned error\",\"code\":502}}\n\n";
-        let err = parse_stream(mid.as_bytes(), &mut |_| {}).unwrap_err();
+        let err = parse_stream(&mut mid.as_bytes(), &mut |_| {}).unwrap_err();
         assert_eq!(err, CloudError::Stopped("Provider returned error".into()));
         let early = &STREAM[..STREAM.len() - 14];
         assert!(matches!(
-            parse_stream(early.as_bytes(), &mut |_| {}).unwrap_err(),
+            parse_stream(&mut early.as_bytes(), &mut |_| {}).unwrap_err(),
             CloudError::Transport(_)
         ));
     }

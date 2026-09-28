@@ -8,6 +8,7 @@ pub mod claude_code;
 mod mock;
 pub mod openai_compat;
 pub mod sse;
+mod transport;
 
 use chronicle_core::models_config::{BackendCfg, BackendKind};
 

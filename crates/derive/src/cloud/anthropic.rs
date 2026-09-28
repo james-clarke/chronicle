@@ -3,23 +3,21 @@
 //! API. The key lives in the struct and the `x-api-key` header, nowhere
 //! else; errors carry the provider's message only.
 
-use std::io::BufReader;
+use std::io::BufRead;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use super::sse::SseReader;
+use super::transport::{
+    CONNECT_TIMEOUT, RESPONSE_TIMEOUT, api_message, classify_status, post_stream,
+    transport_brief,
+};
 use super::{CloudError, effort_for, max_output_for};
 use crate::text::{Completion, JobKind, Request, TextBackend};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
-const MAX_TRIES: u32 = 3;
-/// Retries stop once this much wall time has gone; the daemon reaps a
-/// worker after `DERIVE_TIMEOUT` (300 s) and the job must fail before that.
-const RETRY_BUDGET: Duration = Duration::from_secs(120);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the night pass asks whether its batch has ended.
 const BATCH_POLL: Duration = Duration::from_secs(30);
 /// Most batches end within the hour; the API allows a day. The nightly
@@ -229,67 +227,17 @@ impl AnthropicBackend {
     ) -> Result<Completion, CloudError> {
         let body = self.body(req);
         let url = format!("{}/v1/messages", self.base_url);
-        let started = Instant::now();
-        let mut last = CloudError::Transport("no attempt made".into());
-        for attempt in 0..MAX_TRIES {
-            let t0 = Instant::now();
-            match self.once(&url, &body, on_token) {
-                Ok(mut c) => {
-                    c.wall_ms = t0.elapsed().as_millis() as u64;
-                    return Ok(c);
-                }
-                Err((e, retry_after)) => {
-                    if !e.is_transient() {
-                        return Err(e);
-                    }
-                    tracing::warn!(attempt, "anthropic call failed: {}", e.brief());
-                    last = e;
-                    let wait = retry_after
-                        .unwrap_or_else(|| Duration::from_secs(1 << attempt))
-                        .min(Duration::from_secs(30));
-                    if started.elapsed() + wait > RETRY_BUDGET || attempt + 1 == MAX_TRIES {
-                        break;
-                    }
-                    std::thread::sleep(wait);
-                }
-            }
-        }
-        Err(last)
-    }
-
-    /// One HTTP exchange. `Err` carries the `retry-after` hint when the
-    /// server sent one.
-    fn once(
-        &self,
-        url: &str,
-        body: &str,
-        on_token: &mut dyn FnMut(&str),
-    ) -> Result<Completion, (CloudError, Option<Duration>)> {
-        let resp = ureq::post(url)
-            .config()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .timeout_recv_response(Some(RESPONSE_TIMEOUT))
-            .build()
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .send(body)
-            .map_err(|e| (CloudError::Transport(transport_brief(&e)), None))?;
-        let status = resp.status().as_u16();
-        if status != 200 {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
-            let text = resp.into_body().read_to_string().unwrap_or_default();
-            return Err((classify_status(status, &text), retry_after));
-        }
-        let reader = BufReader::new(resp.into_body().into_reader());
-        parse_stream(reader, on_token).map_err(|e| (e, None))
+        post_stream(
+            "anthropic",
+            &url,
+            &[
+                ("x-api-key", self.api_key.as_str()),
+                ("anthropic-version", API_VERSION),
+            ],
+            &body,
+            on_token,
+            parse_stream,
+        )
     }
 }
 
@@ -352,55 +300,10 @@ fn parse_message(msg: &Value) -> Result<Completion, CloudError> {
     }
 }
 
-/// A transport error's shape without any of its payload.
-pub(super) fn transport_brief(e: &ureq::Error) -> String {
-    match e {
-        ureq::Error::Timeout(t) => format!("timeout ({t:?})"),
-        ureq::Error::Io(io) => format!("io: {}", io.kind()),
-        ureq::Error::HostNotFound => "host not found".into(),
-        ureq::Error::ConnectionFailed => "connection failed".into(),
-        ureq::Error::Tls(_) => "tls".into(),
-        other => {
-            // Variant name only; ureq's Display for some variants echoes
-            // the URL, which is fine, but never a header.
-            let s = other.to_string();
-            s.split(':').next().unwrap_or("error").trim().to_owned()
-        }
-    }
-}
-
-/// The API's `{"error": {"type", "message"}}` body, or the raw text head.
-pub(super) fn api_message(text: &str) -> String {
-    let m = serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|v| {
-            let e = v.get("error")?;
-            let t = e.get("type").and_then(Value::as_str).unwrap_or("");
-            let m = e.get("message").and_then(Value::as_str).unwrap_or("");
-            Some(if t.is_empty() {
-                m.to_owned()
-            } else {
-                format!("{t}: {m}")
-            })
-        })
-        .unwrap_or_else(|| text.chars().take(160).collect());
-    m.trim().to_owned()
-}
-
-pub(super) fn classify_status(status: u16, text: &str) -> CloudError {
-    let m = api_message(text);
-    match status {
-        401 | 403 => CloudError::Auth(status, m),
-        429 => CloudError::RateLimited(m),
-        500..=599 => CloudError::Server(status, m),
-        _ => CloudError::BadRequest(status, m),
-    }
-}
-
 /// Walk the event stream: text deltas to `on_token`, usage from
 /// `message_start` and `message_delta`, `stop_reason` decides success.
-fn parse_stream<R: std::io::BufRead>(
-    reader: R,
+fn parse_stream(
+    reader: &mut dyn BufRead,
     on_token: &mut dyn FnMut(&str),
 ) -> Result<Completion, CloudError> {
     let mut c = Completion::default();
@@ -636,17 +539,17 @@ mod tests {
     #[test]
     fn non_end_turn_and_stream_errors_fail() {
         let cut = STREAM.replace("end_turn", "max_tokens");
-        let err = parse_stream(cut.as_bytes(), &mut |_| {}).unwrap_err();
+        let err = parse_stream(&mut cut.as_bytes(), &mut |_| {}).unwrap_err();
         assert_eq!(err, CloudError::Stopped("max_tokens".into()));
         let mid = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
-        let err = parse_stream(mid.as_bytes(), &mut |_| {}).unwrap_err();
+        let err = parse_stream(&mut mid.as_bytes(), &mut |_| {}).unwrap_err();
         assert_eq!(
             err,
             CloudError::Stopped("overloaded_error: Overloaded".into())
         );
         let early = &STREAM[..STREAM.len() - 40];
         assert!(matches!(
-            parse_stream(early.as_bytes(), &mut |_| {}).unwrap_err(),
+            parse_stream(&mut early.as_bytes(), &mut |_| {}).unwrap_err(),
             CloudError::Transport(_)
         ));
     }
