@@ -833,11 +833,7 @@ impl CloudPanel {
                 model,
                 api_key: key,
                 base_url,
-                command: self
-                    .cfg
-                    .backends
-                    .get(&name)
-                    .and_then(|c| c.command.clone()),
+                command: self.cfg.backends.get(&name).and_then(|c| c.command.clone()),
             },
         );
         self.commit(next, data_dir)?;

@@ -360,7 +360,10 @@ mod tests {
         )]);
         let b = OpenAiCompatBackend::new("or", "m", "sk-or-secret", Some(&base));
         let err = b.probe().unwrap_err();
-        assert_eq!(err, CloudError::Auth(401, "No auth credentials found".into()));
+        assert_eq!(
+            err,
+            CloudError::Auth(401, "No auth credentials found".into())
+        );
         assert!(!err.brief().contains("sk-or-secret"));
     }
 
@@ -371,10 +374,7 @@ mod tests {
         assert_eq!(err, CloudError::Stopped("length".into()));
         let mid = "data: {\"error\":{\"message\":\"Provider returned error\",\"code\":502}}\n\n";
         let err = parse_stream(mid.as_bytes(), &mut |_| {}).unwrap_err();
-        assert_eq!(
-            err,
-            CloudError::Stopped("Provider returned error".into())
-        );
+        assert_eq!(err, CloudError::Stopped("Provider returned error".into()));
         let early = &STREAM[..STREAM.len() - 14];
         assert!(matches!(
             parse_stream(early.as_bytes(), &mut |_| {}).unwrap_err(),
