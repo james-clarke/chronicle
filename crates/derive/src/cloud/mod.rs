@@ -4,6 +4,9 @@
 
 pub mod anthropic;
 pub mod claude_code;
+#[cfg(test)]
+mod mock;
+pub mod openai_compat;
 pub mod sse;
 
 use chronicle_core::models_config::{BackendCfg, BackendKind};
@@ -21,9 +24,12 @@ pub fn build(name: &str, cfg: &BackendCfg) -> anyhow::Result<Box<dyn TextBackend
             &cfg.api_key,
             cfg.base_url.as_deref(),
         )),
-        BackendKind::OpenAiCompat => {
-            anyhow::bail!("backend {name}: the openai_compat backend is not implemented yet")
-        }
+        BackendKind::OpenAiCompat => Box::new(openai_compat::OpenAiCompatBackend::new(
+            name,
+            &cfg.model,
+            &cfg.api_key,
+            cfg.base_url.as_deref(),
+        )),
         BackendKind::ClaudeCode => Box::new(claude_code::ClaudeCodeBackend::new(
             name,
             &cfg.model,
@@ -183,9 +189,12 @@ impl std::error::Error for CloudError {}
 
 /// List prices per million tokens, `(input, output)`, checked 2026-09-04.
 /// Cache reads bill at a tenth of input. Unknown models cost `None`, and
-/// the daily cap cannot apply to them (Settings says so).
+/// the daily cap cannot apply to them (Settings says so). An OpenRouter id
+/// carries the vendor first (`anthropic/claude-sonnet-5`); the price is
+/// the model's.
 pub fn price_per_mtok(model: &str) -> Option<(f64, f64)> {
     let m = model.trim().to_ascii_lowercase();
+    let m = m.rsplit('/').next().unwrap_or(&m);
     let table: &[(&str, (f64, f64))] = &[
         ("claude-fable-5", (10.0, 50.0)),
         ("claude-opus-5", (5.0, 25.0)),
@@ -244,6 +253,10 @@ mod tests {
         assert_eq!(price_per_mtok("claude-opus-5"), Some((5.0, 25.0)));
         assert_eq!(price_per_mtok("claude-haiku-4-5"), Some((1.0, 5.0)));
         assert_eq!(price_per_mtok("gpt-5"), None);
+        assert_eq!(
+            price_per_mtok("anthropic/claude-sonnet-5"),
+            Some((2.0, 10.0))
+        );
         let c = Completion {
             input_tokens: 1_000_000,
             cache_read_tokens: 500_000,

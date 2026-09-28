@@ -17,8 +17,8 @@ use rusqlite::Connection;
 
 use super::theme::{self, palette};
 
-/// Anthropic models offered in the add-backend picker (chunk 1: Anthropic
-/// only; OpenAI-compatible arrives in chunk 3).
+/// Anthropic models offered in the add-backend picker. An OpenAI-compatible
+/// backend takes a free model id: OpenRouter alone lists hundreds.
 const ANTHROPIC_MODELS: &[&str] = &["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
 
 fn probe_key(name: &str) -> String {
@@ -82,6 +82,7 @@ pub(super) fn route_kind_label(kind: &str) -> &'static str {
 struct BackendForm {
     original: Option<String>,
     name: String,
+    kind: BackendKind,
     model: String,
     /// Blank while adding (required) or editing (keep the stored key).
     api_key: String,
@@ -96,6 +97,7 @@ impl BackendForm {
         Self {
             original: None,
             name: "anthropic".to_owned(),
+            kind: BackendKind::Anthropic,
             model: String::new(),
             api_key: String::new(),
             key_hint: None,
@@ -108,6 +110,7 @@ impl BackendForm {
         Self {
             original: Some(name.to_owned()),
             name: name.to_owned(),
+            kind: cfg.kind,
             model: cfg.model.clone(),
             api_key: String::new(),
             key_hint: Some(cfg.masked_key()),
@@ -144,44 +147,75 @@ fn backend_form_ui(ui: &mut egui::Ui, form: &mut BackendForm) -> FormAct {
         );
         ui.label("kind");
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Anthropic").color(palette::TEXT));
-            ui.add_enabled(false, egui::Button::new("OpenAI-compatible"))
-                .on_disabled_hover_text("arrives in m31 chunk 3");
+            if form.kind == BackendKind::ClaudeCode {
+                ui.label(egui::RichText::new(kind_label(form.kind)).color(palette::TEXT));
+            } else {
+                for kind in [BackendKind::Anthropic, BackendKind::OpenAiCompat] {
+                    ui.selectable_value(&mut form.kind, kind, kind_label(kind));
+                }
+            }
         });
         ui.label("model");
-        egui::ComboBox::from_id_salt("cloud_backend_model")
-            .selected_text(if form.model.is_empty() {
-                "choose a model\u{2026}".to_owned()
-            } else {
-                form.model.clone()
-            })
-            .show_ui(ui, |ui| {
-                for m in ANTHROPIC_MODELS {
-                    let label = match chronicle_derive::cloud::price_per_mtok(m) {
-                        Some((inp, out)) => format!("{m}  (${inp:.0} / ${out:.0} per MTok)"),
-                        None => (*m).to_owned(),
-                    };
-                    ui.selectable_value(&mut form.model, (*m).to_owned(), label);
+        match form.kind {
+            BackendKind::OpenAiCompat => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut form.model)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("anthropic/claude-sonnet-5"),
+                );
+                ui.weak("the provider's model id, as OpenRouter or your server lists it");
+            }
+            _ => {
+                egui::ComboBox::from_id_salt("cloud_backend_model")
+                    .selected_text(if form.model.is_empty() {
+                        "choose a model\u{2026}".to_owned()
+                    } else {
+                        form.model.clone()
+                    })
+                    .show_ui(ui, |ui| {
+                        for m in ANTHROPIC_MODELS {
+                            let label = match chronicle_derive::cloud::price_per_mtok(m) {
+                                Some((inp, out)) => {
+                                    format!("{m}  (${inp:.0} / ${out:.0} per MTok)")
+                                }
+                                None => (*m).to_owned(),
+                            };
+                            ui.selectable_value(&mut form.model, (*m).to_owned(), label);
+                        }
+                    });
+            }
+        }
+        if form.kind != BackendKind::ClaudeCode {
+            ui.label("API key");
+            let hint_text = match (&form.key_hint, form.kind) {
+                (Some(h), _) => format!("leave blank to keep {h}"),
+                (None, BackendKind::OpenAiCompat) => "sk-or-\u{2026}".to_owned(),
+                (None, _) => "sk-ant-\u{2026}".to_owned(),
+            };
+            ui.add(
+                egui::TextEdit::singleline(&mut form.api_key)
+                    .password(true)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(hint_text),
+            );
+            ui.label("base URL (optional)");
+            let default_url = match form.kind {
+                BackendKind::OpenAiCompat => {
+                    chronicle_derive::cloud::openai_compat::DEFAULT_BASE_URL
                 }
-            });
-        ui.label("API key");
-        let hint_text = match &form.key_hint {
-            Some(h) => format!("leave blank to keep {h}"),
-            None => "sk-ant-\u{2026}".to_owned(),
-        };
-        ui.add(
-            egui::TextEdit::singleline(&mut form.api_key)
-                .password(true)
-                .desired_width(f32::INFINITY)
-                .hint_text(hint_text),
-        );
-        ui.label("base URL (optional)");
-        ui.add(
-            egui::TextEdit::singleline(&mut form.base_url)
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace)
-                .hint_text(chronicle_derive::cloud::anthropic::DEFAULT_BASE_URL),
-        );
+                _ => chronicle_derive::cloud::anthropic::DEFAULT_BASE_URL,
+            };
+            ui.add(
+                egui::TextEdit::singleline(&mut form.base_url)
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text(default_url),
+            );
+            if form.kind == BackendKind::OpenAiCompat {
+                ui.weak("OpenRouter by default; any /v1 chat completions server works");
+            }
+        }
         if let Some(e) = &form.error {
             ui.colored_label(palette::RED, e);
         }
@@ -380,7 +414,15 @@ impl CloudPanel {
                             .map_err(|e| e.brief())
                     }
                     BackendKind::OpenAiCompat => {
-                        Err("openai_compat arrives in m31 chunk 3".to_owned())
+                        chronicle_derive::cloud::openai_compat::OpenAiCompatBackend::new(
+                            &name,
+                            &cfg.model,
+                            &cfg.api_key,
+                            cfg.base_url.as_deref(),
+                        )
+                        .probe()
+                        .map(|d| d.as_millis() as u64)
+                        .map_err(|e| e.brief())
                     }
                     BackendKind::ClaudeCode => {
                         chronicle_derive::cloud::claude_code::ClaudeCodeBackend::new(
@@ -557,17 +599,27 @@ impl CloudPanel {
             }
             None => {}
         }
-        if self
-            .cfg
-            .backends
-            .values()
-            .any(|c| c.kind == BackendKind::Anthropic)
-        {
+        let kinds: Vec<BackendKind> = self.cfg.backends.values().map(|c| c.kind).collect();
+        if kinds.contains(&BackendKind::Anthropic) {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(
                         "Prompts routed here go to Anthropic under its commercial API terms: \
                          not used for training, retained up to 30 days (checked 2026-09-04).",
+                    )
+                    .text_style(theme::caption())
+                    .weak(),
+                )
+                .wrap(),
+            );
+        }
+        if kinds.contains(&BackendKind::OpenAiCompat) {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Prompts routed to an OpenAI-compatible backend go to that server under \
+                         its own terms. OpenRouter passes them on to the model's provider; its \
+                         privacy settings decide which providers may see them.",
                     )
                     .text_style(theme::caption())
                     .weak(),
@@ -748,14 +800,17 @@ impl CloudPanel {
         }
         let model = form.model.trim().to_owned();
         if model.is_empty() {
-            return Err("choose a model".into());
+            return Err(match form.kind {
+                BackendKind::OpenAiCompat => "enter a model id".into(),
+                _ => "choose a model".into(),
+            });
         }
         let is_new = form.original.is_none();
         if is_new && self.cfg.backends.contains_key(&name) {
             return Err(format!("a backend named {name} already exists"));
         }
         let key = if form.api_key.trim().is_empty() {
-            if is_new {
+            if is_new && form.kind != BackendKind::ClaudeCode {
                 return Err("API key is required".into());
             }
             self.cfg
@@ -774,11 +829,15 @@ impl CloudPanel {
         next.backends.insert(
             name.clone(),
             BackendCfg {
-                kind: BackendKind::Anthropic,
+                kind: form.kind,
                 model,
                 api_key: key,
                 base_url,
-                command: None,
+                command: self
+                    .cfg
+                    .backends
+                    .get(&name)
+                    .and_then(|c| c.command.clone()),
             },
         );
         self.commit(next, data_dir)?;
