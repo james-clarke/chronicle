@@ -10,8 +10,7 @@ use serde_json::{Value, json};
 
 use super::sse::SseReader;
 use super::transport::{
-    CONNECT_TIMEOUT, RESPONSE_TIMEOUT, api_message, classify_status, post_stream,
-    transport_brief,
+    CONNECT_TIMEOUT, RESPONSE_TIMEOUT, api_message, classify_status, post_stream, transport_brief,
 };
 use super::{CloudError, effort_for, max_output_for};
 use crate::text::{Completion, JobKind, Request, TextBackend};
