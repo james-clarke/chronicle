@@ -353,7 +353,7 @@ fn parse_message(msg: &Value) -> Result<Completion, CloudError> {
 }
 
 /// A transport error's shape without any of its payload.
-fn transport_brief(e: &ureq::Error) -> String {
+pub(super) fn transport_brief(e: &ureq::Error) -> String {
     match e {
         ureq::Error::Timeout(t) => format!("timeout ({t:?})"),
         ureq::Error::Io(io) => format!("io: {}", io.kind()),
@@ -370,7 +370,7 @@ fn transport_brief(e: &ureq::Error) -> String {
 }
 
 /// The API's `{"error": {"type", "message"}}` body, or the raw text head.
-fn api_message(text: &str) -> String {
+pub(super) fn api_message(text: &str) -> String {
     let m = serde_json::from_str::<Value>(text)
         .ok()
         .and_then(|v| {
@@ -387,7 +387,7 @@ fn api_message(text: &str) -> String {
     m.trim().to_owned()
 }
 
-fn classify_status(status: u16, text: &str) -> CloudError {
+pub(super) fn classify_status(status: u16, text: &str) -> CloudError {
     let m = api_message(text);
     match status {
         401 | 403 => CloudError::Auth(status, m),
@@ -468,59 +468,10 @@ fn parse_stream<R: std::io::BufRead>(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    use super::super::mock::{http, mock, serve};
     use super::*;
-
-    /// Serve `responses` in order on a loopback port, one connection each;
-    /// returns the base URL and the captured request bodies.
-    fn mock(responses: Vec<String>) -> (String, std::sync::mpsc::Receiver<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for resp in responses {
-                let (mut s, _) = listener.accept().unwrap();
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 4096];
-                let body_start;
-                loop {
-                    let n = s.read(&mut tmp).unwrap();
-                    buf.extend_from_slice(&tmp[..n]);
-                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        body_start = i + 4;
-                        break;
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
-                let len: usize = head
-                    .lines()
-                    .find_map(|l| {
-                        l.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|v| v.trim().parse().unwrap())
-                    })
-                    .unwrap_or(0);
-                while buf.len() < body_start + len {
-                    let n = s.read(&mut tmp).unwrap();
-                    buf.extend_from_slice(&tmp[..n]);
-                }
-                let body = String::from_utf8_lossy(&buf[body_start..]).to_string();
-                tx.send(format!("{head}\n{body}")).unwrap();
-                s.write_all(resp.as_bytes()).unwrap();
-                s.flush().unwrap();
-            }
-        });
-        (base, rx)
-    }
-
-    fn http(status: &str, extra: &str, body: &str) -> String {
-        format!(
-            "HTTP/1.1 {status}\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}",
-            body.len()
-        )
-    }
 
     const STREAM: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":100}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
@@ -639,40 +590,7 @@ mod tests {
             ),
             http("200 OK", "content-type: application/jsonl\r\n", results),
         ];
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for resp in responses {
-                let (mut s, _) = listener.accept().unwrap();
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 4096];
-                let body_start;
-                loop {
-                    let n = s.read(&mut tmp).unwrap();
-                    buf.extend_from_slice(&tmp[..n]);
-                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        body_start = i + 4;
-                        break;
-                    }
-                }
-                let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
-                let len: usize = head
-                    .lines()
-                    .find_map(|l| {
-                        l.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|v| v.trim().parse().unwrap())
-                    })
-                    .unwrap_or(0);
-                while buf.len() < body_start + len {
-                    let n = s.read(&mut tmp).unwrap();
-                    buf.extend_from_slice(&tmp[..n]);
-                }
-                let body = String::from_utf8_lossy(&buf[body_start..]).to_string();
-                let _ = tx.send(format!("{head}\n{body}"));
-                s.write_all(resp.as_bytes()).unwrap();
-                s.flush().unwrap();
-            }
-        });
+        let rx = serve(listener, responses);
         (base, rx)
     }
 

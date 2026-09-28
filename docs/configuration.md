@@ -136,14 +136,19 @@ kind = "anthropic"
 model = "claude-sonnet-5"
 api_key = "sk-ant-..."
 
+[backends.openrouter]
+kind = "open_ai_compat"
+model = "anthropic/claude-sonnet-5"
+api_key = "sk-or-..."
+
 [routes]
 chat = "anthropic"
-standup = "anthropic"
+standup = "openrouter"
 
 max_usd_per_day = 2.0
 ```
 
-`backends` names each cloud backend. The kind is `anthropic`, `open_ai_compat`, or `claude_code`, which uses your own Claude Code login and needs no key. `routes` maps a job kind (`chat`, `narrative`, `standup`, `derive`, `live` and the rest) to a backend name. A route naming a backend that no longer exists behaves as if unset, and the job runs locally. `max_usd_per_day` defaults to `2.0`; once the day's spend reaches it, every route falls back to the local model until midnight.
+`backends` names each cloud backend. The kind is `anthropic`, `open_ai_compat`, or `claude_code`, which uses your own Claude Code login and needs no key. An `open_ai_compat` backend speaks the chat completions shape at `base_url`, which defaults to OpenRouter (`https://openrouter.ai/api/v1`); set it to any other `/v1` server, such as OpenAI or a local one, and `model` is the id that server lists. OpenRouter reports the cost of each call, which counts against the daily cap; other servers only do when the model is in the price table. `routes` maps a job kind (`chat`, `narrative`, `standup`, `derive`, `live` and the rest) to a backend name. A route naming a backend that no longer exists behaves as if unset, and the job runs locally. `max_usd_per_day` defaults to `2.0`; once the day's spend reaches it, every route falls back to the local model until midnight.
 
 ### google.toml
 
