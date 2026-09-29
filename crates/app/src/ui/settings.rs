@@ -627,18 +627,26 @@ impl TimelineApp {
             return;
         };
         theme::page().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Settings")
-                        .text_style(egui::TextStyle::Heading)
-                        .color(theme::palette::TEXT),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("\u{d7}").clicked() {
-                        close = true;
-                    }
+            // The takeover hides the top bar, the window's only drag handle,
+            // so the header's empty space moves the window instead.
+            let drag = egui::UiBuilder::new().sense(egui::Sense::drag());
+            let header = ui.scope_builder(drag, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Settings")
+                            .text_style(egui::TextStyle::Heading)
+                            .color(theme::palette::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("\u{d7}").clicked() {
+                            close = true;
+                        }
+                    });
                 });
             });
+            if header.response.dragged() && ui.input(|i| i.pointer.is_decidedly_dragging()) {
+                super::hand_to_wm(ui.ctx(), egui::ViewportCommand::StartDrag);
+            }
             ui.add_space(8.0);
             // Center the form; cap width so it stays readable when wide. A
             // wide window also gets a section index beside it (sticky: it

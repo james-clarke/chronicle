@@ -219,26 +219,29 @@ impl ksni::Tray for ChronicleTray {
     }
 }
 
-/// Procedural icon (filled circle, UI accent blue) — no image asset/dep.
+/// The tray mark, `packaging/chronicle-tray.svg`, pre-rendered to raw RGBA8
+/// so no image decoder ships in the binary. After editing the SVG:
+///
+/// ```sh
+/// magick -background none -density 96 packaging/chronicle-tray.svg -depth 8 RGBA:packaging/chronicle-tray-22.rgba
+/// magick -background none -density 192 packaging/chronicle-tray.svg -depth 8 RGBA:packaging/chronicle-tray-44.rgba
+/// ```
+const TRAY_22: &[u8] = include_bytes!("../../../packaging/chronicle-tray-22.rgba");
+const TRAY_44: &[u8] = include_bytes!("../../../packaging/chronicle-tray-44.rgba");
+const _: () = assert!(TRAY_22.len() == 22 * 22 * 4 && TRAY_44.len() == 44 * 44 * 4);
+
 /// Platform-neutral RGBA8 pixels: ksni's [`tray_icon`] packs them to ARGB,
 /// tray-icon on macOS (`tray_macos.rs`) takes RGBA (and a black/alpha
 /// variant as its template icon) directly via `Icon::from_rgba`. `size` is
 /// the square's edge in pixels: ksni wants 22, tray-icon on macOS wants 44
 /// (it rescales its template icon to 18pt, so 44px stays crisp on Retina).
 pub(crate) fn tray_pixels(size: u32) -> (u32, u32, Vec<u8>) {
-    let (r, g, b) = (0x5e_u8, 0x87_u8, 0xea_u8);
-    let c = (size - 1) as f32 / 2.0;
-    let radius = c - 1.0;
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            // 1px soft edge.
-            let a = ((radius + 0.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
-            data.extend_from_slice(&[r, g, b, a]);
-        }
-    }
-    (size, size, data)
+    let (size, data) = if size <= 22 {
+        (22, TRAY_22)
+    } else {
+        (44, TRAY_44)
+    };
+    (size, size, data.to_vec())
 }
 
 #[cfg(target_os = "linux")]
@@ -327,10 +330,18 @@ pub(crate) fn own_exe() -> std::io::Result<PathBuf> {
 }
 
 pub(crate) fn spawn_ui_child() -> std::io::Result<Child> {
-    Command::new(own_exe()?)
-        .arg("ui")
-        .stdin(Stdio::piped())
-        .spawn()
+    let mut cmd = Command::new(own_exe()?);
+    cmd.arg("ui").stdin(Stdio::piped());
+    // The window is an X11 widget, and winit cannot hide a Wayland window:
+    // the close button and the tray toggle would do nothing. With XWayland
+    // up, the window alone runs as an X11 client; capture stays on Wayland.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+            cmd.env_remove("WAYLAND_DISPLAY");
+        }
+    }
+    cmd.spawn()
 }
 
 /// llama/ggml noise goes to the log file, not the UI's terminal.
